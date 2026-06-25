@@ -27,7 +27,13 @@ function invalidSession(reason: string): NextResponse {
 
 function extractRole(payload: JWTPayload): "LECTURER" | "STUDENT" {
   const roles = payload[ROLES_CLAIM];
-  if (Array.isArray(roles) && roles.some((role) => typeof role === "string" && role.includes("Instructor"))) {
+  if (
+    Array.isArray(roles) &&
+    roles.some(
+      (role) =>
+        typeof role === "string" && (role.includes("Instructor") || role.includes("Administrator")),
+    )
+  ) {
     return "LECTURER";
   }
   return "STUDENT";
