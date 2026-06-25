@@ -7,6 +7,9 @@ import {
   completionRatePct,
   scoreDistributionBands,
   reviewRecommendation,
+  summarizeIntegrityEvents,
+  buildInsights,
+  type ExamAnalytics,
 } from "./analytics";
 
 describe("average", () => {
@@ -123,5 +126,114 @@ describe("reviewRecommendation", () => {
     });
     expect(result.reviewRecommended).toBe(false);
     expect(result.reviewReason).toBeNull();
+  });
+});
+
+describe("summarizeIntegrityEvents", () => {
+  it("returns all-zero summary for no events", () => {
+    expect(summarizeIntegrityEvents([])).toEqual({
+      totalEvents: 0,
+      highSeverityEvents: 0,
+      mediumSeverityEvents: 0,
+      lowSeverityEvents: 0,
+      unresolvedEvents: 0,
+      studentsWithEvents: 0,
+    });
+  });
+
+  it("counts events by severity, resolution, and distinct students", () => {
+    const summary = summarizeIntegrityEvents([
+      { severity: "HIGH", studentId: "s1", resolvedAt: null },
+      { severity: "MEDIUM", studentId: "s1", resolvedAt: new Date() },
+      { severity: "LOW", studentId: "s2", resolvedAt: null },
+      { severity: "INFO", studentId: "s2", resolvedAt: new Date() },
+    ]);
+
+    expect(summary).toEqual({
+      totalEvents: 4,
+      highSeverityEvents: 1,
+      mediumSeverityEvents: 1,
+      lowSeverityEvents: 1,
+      unresolvedEvents: 2,
+      studentsWithEvents: 2,
+    });
+  });
+});
+
+describe("buildInsights — integrity rules", () => {
+  const baseSummary: ExamAnalytics["summary"] = {
+    totalStudentsStarted: 2,
+    totalSubmitted: 2,
+    totalGraded: 2,
+    averageScorePct: 80,
+    medianScorePct: 80,
+    highestScorePct: 90,
+    lowestScorePct: 70,
+    passRatePct: 100,
+    completionRatePct: 100,
+    pendingGradingCount: 0,
+  };
+
+  it("adds a HIGH insight when there are high-severity events", () => {
+    const insights = buildInsights(baseSummary, [], {
+      totalEvents: 1,
+      highSeverityEvents: 1,
+      mediumSeverityEvents: 0,
+      lowSeverityEvents: 0,
+      unresolvedEvents: 0,
+      studentsWithEvents: 1,
+    });
+
+    expect(insights.some((i) => i.severity === "HIGH" && /require review/.test(i.title))).toBe(
+      true,
+    );
+  });
+
+  it("adds a WARNING insight when there are unresolved events", () => {
+    const insights = buildInsights(baseSummary, [], {
+      totalEvents: 1,
+      highSeverityEvents: 0,
+      mediumSeverityEvents: 1,
+      lowSeverityEvents: 0,
+      unresolvedEvents: 1,
+      studentsWithEvents: 1,
+    });
+
+    expect(
+      insights.some((i) => i.severity === "WARNING" && /not yet been reviewed/.test(i.title)),
+    ).toBe(true);
+  });
+
+  it("adds an INFO insight when no integrity events were recorded but submissions exist", () => {
+    const insights = buildInsights(baseSummary, [], {
+      totalEvents: 0,
+      highSeverityEvents: 0,
+      mediumSeverityEvents: 0,
+      lowSeverityEvents: 0,
+      unresolvedEvents: 0,
+      studentsWithEvents: 0,
+    });
+
+    expect(
+      insights.some((i) => i.severity === "INFO" && /No integrity events were recorded/.test(i.title)),
+    ).toBe(true);
+  });
+
+  it("does not add integrity insights when there is no student data at all", () => {
+    const insights = buildInsights(
+      { ...baseSummary, totalStudentsStarted: 0 },
+      [],
+      {
+        totalEvents: 0,
+        highSeverityEvents: 0,
+        mediumSeverityEvents: 0,
+        lowSeverityEvents: 0,
+        unresolvedEvents: 0,
+        studentsWithEvents: 0,
+      },
+    );
+
+    expect(insights).toHaveLength(1);
+    expect(insights[0].title).toBe("No data yet");
   });
 });

@@ -115,6 +115,14 @@ export type ExamAnalytics = {
     submittedAt: string | null;
     gradedAt: string | null;
   }>;
+  integritySummary: {
+    totalEvents: number;
+    highSeverityEvents: number;
+    mediumSeverityEvents: number;
+    lowSeverityEvents: number;
+    unresolvedEvents: number;
+    studentsWithEvents: number;
+  };
   insights: Array<{
     severity: "INFO" | "WARNING" | "HIGH";
     title: string;
@@ -122,6 +130,21 @@ export type ExamAnalytics = {
     recommendedAction: string;
   }>;
 };
+
+export type IntegritySummary = ExamAnalytics["integritySummary"];
+
+export function summarizeIntegrityEvents(
+  events: Array<{ severity: "INFO" | "LOW" | "MEDIUM" | "HIGH"; studentId: string; resolvedAt: Date | null }>,
+): IntegritySummary {
+  return {
+    totalEvents: events.length,
+    highSeverityEvents: events.filter((e) => e.severity === "HIGH").length,
+    mediumSeverityEvents: events.filter((e) => e.severity === "MEDIUM").length,
+    lowSeverityEvents: events.filter((e) => e.severity === "LOW").length,
+    unresolvedEvents: events.filter((e) => e.resolvedAt == null).length,
+    studentsWithEvents: new Set(events.map((e) => e.studentId)).size,
+  };
+}
 
 export class ExamNotFoundError extends Error {}
 
@@ -235,14 +258,25 @@ export async function calculateExamAnalytics(examId: string): Promise<ExamAnalyt
     };
   });
 
-  const insights = buildInsights(summary, questionAnalytics);
+  const integrityEvents = await prisma.integrityEvent.findMany({ where: { examId } });
+  const integritySummary = summarizeIntegrityEvents(integrityEvents);
 
-  return { summary, scoreDistribution, questionAnalytics, studentResults, insights };
+  const insights = buildInsights(summary, questionAnalytics, integritySummary);
+
+  return {
+    summary,
+    scoreDistribution,
+    questionAnalytics,
+    studentResults,
+    integritySummary,
+    insights,
+  };
 }
 
-function buildInsights(
+export function buildInsights(
   summary: ExamAnalytics["summary"],
   questionAnalytics: ExamAnalytics["questionAnalytics"],
+  integritySummary: ExamAnalytics["integritySummary"],
 ): ExamAnalytics["insights"] {
   const insights: ExamAnalytics["insights"] = [];
 
@@ -304,6 +338,33 @@ function buildInsights(
       title: "Strong overall performance",
       description: `Average score is ${Math.round(summary.averageScorePct)}% with ${Math.round(summary.completionRatePct)}% completion.`,
       recommendedAction: "No action needed — this exam is performing well.",
+    });
+  }
+
+  if (integritySummary.highSeverityEvents > 0) {
+    insights.push({
+      severity: "HIGH",
+      title: "High-severity integrity events require review.",
+      description: `${integritySummary.highSeverityEvents} high-severity exam behaviour signal(s) were recorded.`,
+      recommendedAction: "Open the integrity review page to check the flagged sessions.",
+    });
+  }
+
+  if (integritySummary.unresolvedEvents > 0) {
+    insights.push({
+      severity: "WARNING",
+      title: "Some integrity events have not yet been reviewed.",
+      description: `${integritySummary.unresolvedEvents} integrity event(s) are awaiting review.`,
+      recommendedAction: "Review and resolve outstanding events on the integrity review page.",
+    });
+  }
+
+  if (integritySummary.totalEvents === 0 && summary.totalStudentsStarted > 0) {
+    insights.push({
+      severity: "INFO",
+      title: "No integrity events were recorded for this exam.",
+      description: "No exam behaviour signals were logged during this exam.",
+      recommendedAction: "No action needed.",
     });
   }
 

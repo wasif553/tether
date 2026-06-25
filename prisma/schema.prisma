@@ -24,30 +24,56 @@ enum SubmissionStatus {
   GRADED
 }
 
+enum IntegrityEventType {
+  FULLSCREEN_EXIT
+  WINDOW_BLUR
+  WINDOW_FOCUS_RETURN
+  COPY_ATTEMPT
+  PASTE_ATTEMPT
+  RIGHT_CLICK_ATTEMPT
+  DEVTOOLS_SUSPECTED
+  NETWORK_OFFLINE
+  NETWORK_ONLINE
+  AUTOSAVE_FAILED
+  TIMER_EXPIRED
+  SUBMIT_AFTER_DEADLINE
+  MANUAL_WARNING
+}
+
+enum IntegritySeverity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+}
+
 model User {
-  id            String       @id @default(cuid())
-  name          String
-  email         String       @unique
-  passwordHash  String
-  role          Role
-  createdAt     DateTime     @default(now())
-  examsCreated  Exam[]       @relation("ExamCreator")
-  submissions   Submission[]
+  id                String           @id @default(cuid())
+  name              String
+  email             String           @unique
+  passwordHash      String
+  role              Role
+  createdAt         DateTime         @default(now())
+  examsCreated      Exam[]           @relation("ExamCreator")
+  submissions       Submission[]
+  integrityEvents   IntegrityEvent[] @relation("IntegrityEventStudent")
+  resolvedEvents     IntegrityEvent[] @relation("IntegrityEventResolver")
 }
 
 model Exam {
-  id           String       @id @default(cuid())
-  title        String
-  description  String?
-  durationMins Int
-  published    Boolean      @default(false)
-  startsAt     DateTime?
-  endsAt       DateTime?
-  createdById  String
-  createdBy    User         @relation("ExamCreator", fields: [createdById], references: [id])
-  questions    Question[]
-  submissions  Submission[]
-  createdAt    DateTime     @default(now())
+  id              String           @id @default(cuid())
+  title           String
+  description     String?
+  durationMins    Int
+  published       Boolean          @default(false)
+  startsAt        DateTime?
+  endsAt          DateTime?
+  createdById     String
+  createdBy       User             @relation("ExamCreator", fields: [createdById], references: [id])
+  questions       Question[]
+  submissions     Submission[]
+  integrityEvents IntegrityEvent[]
+  createdAt       DateTime         @default(now())
 }
 
 model Question {
@@ -75,6 +101,7 @@ model Submission {
   gradedAt    DateTime?
   totalScore  Int?
   answers     Answer[]
+  integrityEvents IntegrityEvent[]
 
   @@unique([examId, studentId])
 }
@@ -92,4 +119,31 @@ model Answer {
   timeSpentSeconds  Int?
 
   @@unique([submissionId, questionId])
+}
+
+model IntegrityEvent {
+  id             String             @id @default(cuid())
+  submissionId   String
+  submission     Submission         @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  examId         String
+  exam           Exam               @relation(fields: [examId], references: [id], onDelete: Cascade)
+  studentId      String
+  student        User               @relation("IntegrityEventStudent", fields: [studentId], references: [id])
+  eventType      IntegrityEventType
+  severity       IntegritySeverity
+  message        String
+  metadataJson   Json?
+  occurredAt     DateTime
+  createdAt      DateTime           @default(now())
+  resolvedAt     DateTime?
+  resolvedById   String?
+  resolvedBy     User?              @relation("IntegrityEventResolver", fields: [resolvedById], references: [id])
+  resolutionNote String?
+
+  @@index([submissionId])
+  @@index([examId])
+  @@index([studentId])
+  @@index([eventType])
+  @@index([severity])
+  @@index([occurredAt])
 }

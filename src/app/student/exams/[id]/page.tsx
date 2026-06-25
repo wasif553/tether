@@ -27,6 +27,46 @@ type SubmissionData = {
   answers: Answer[];
 };
 
+type IntegrityEventType =
+  | "FULLSCREEN_EXIT"
+  | "WINDOW_BLUR"
+  | "WINDOW_FOCUS_RETURN"
+  | "COPY_ATTEMPT"
+  | "PASTE_ATTEMPT"
+  | "RIGHT_CLICK_ATTEMPT"
+  | "NETWORK_OFFLINE"
+  | "NETWORK_ONLINE"
+  | "TIMER_EXPIRED";
+
+type IntegritySeverity = "INFO" | "LOW" | "MEDIUM" | "HIGH";
+
+const EVENT_DETAILS: Record<
+  IntegrityEventType,
+  { severity: IntegritySeverity; message: string; debounceMs?: number }
+> = {
+  FULLSCREEN_EXIT: { severity: "MEDIUM", message: "You exited fullscreen mode." },
+  WINDOW_BLUR: {
+    severity: "LOW",
+    message: "You switched away from the exam window.",
+    debounceMs: 10_000,
+  },
+  WINDOW_FOCUS_RETURN: { severity: "INFO", message: "You returned to the exam window." },
+  COPY_ATTEMPT: {
+    severity: "MEDIUM",
+    message: "A copy action was attempted.",
+    debounceMs: 5_000,
+  },
+  PASTE_ATTEMPT: {
+    severity: "MEDIUM",
+    message: "A paste action was attempted.",
+    debounceMs: 5_000,
+  },
+  RIGHT_CLICK_ATTEMPT: { severity: "LOW", message: "A right-click was attempted." },
+  NETWORK_OFFLINE: { severity: "MEDIUM", message: "Your connection appears to be offline." },
+  NETWORK_ONLINE: { severity: "INFO", message: "Your connection is back online." },
+  TIMER_EXPIRED: { severity: "HIGH", message: "The exam timer has expired." },
+};
+
 export default function TakeExamPage({
   params,
 }: {
@@ -39,7 +79,11 @@ export default function TakeExamPage({
   const [responses, setResponses] = useState<Record<string, string>>({});
   const [remainingSecs, setRemainingSecs] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [banner, setBanner] = useState<string | null>(null);
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const lastEventAt = useRef<Partial<Record<IntegrityEventType, number>>>({});
+  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     fetch(`/api/submissions/${id}`)
@@ -62,13 +106,97 @@ export default function TakeExamPage({
         Math.floor((new Date(data.deadline).getTime() - Date.now()) / 1000),
       );
       setRemainingSecs(secs);
-      if (secs === 0) handleSubmit();
+      if (secs === 0) {
+        reportIntegrityEvent("TIMER_EXPIRED");
+        handleSubmit();
+      }
     };
     tick();
     const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
+
+  const reportIntegrityEvent = useCallback(
+    (eventType: IntegrityEventType) => {
+      if (!data || data.status !== "IN_PROGRESS") return;
+
+      const details = EVENT_DETAILS[eventType];
+      const now = Date.now();
+      const last = lastEventAt.current[eventType];
+      if (details.debounceMs && last && now - last < details.debounceMs) {
+        return;
+      }
+      lastEventAt.current[eventType] = now;
+
+      fetch(`/api/submissions/${id}/integrity-events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eventType,
+          severity: details.severity,
+          message: details.message,
+          occurredAt: new Date().toISOString(),
+        }),
+      }).catch(() => {
+        // Reporting failures should never interrupt the exam session.
+      });
+
+      if (details.severity === "MEDIUM" || details.severity === "HIGH") {
+        setBanner(
+          `Exam integrity event recorded: ${details.message} Please remain in the exam window.`,
+        );
+        if (bannerTimer.current) clearTimeout(bannerTimer.current);
+        bannerTimer.current = setTimeout(() => setBanner(null), 8000);
+      }
+    },
+    [data, id],
+  );
+
+  useEffect(() => {
+    if (!data || data.status !== "IN_PROGRESS") return;
+
+    const onFullscreenChange = () => {
+      const active = Boolean(document.fullscreenElement);
+      setIsFullscreen(active);
+      if (!active) reportIntegrityEvent("FULLSCREEN_EXIT");
+    };
+    const onBlur = () => reportIntegrityEvent("WINDOW_BLUR");
+    const onFocus = () => reportIntegrityEvent("WINDOW_FOCUS_RETURN");
+    const onCopy = () => reportIntegrityEvent("COPY_ATTEMPT");
+    const onPaste = () => reportIntegrityEvent("PASTE_ATTEMPT");
+    const onContextMenu = () => reportIntegrityEvent("RIGHT_CLICK_ATTEMPT");
+    const onOffline = () => reportIntegrityEvent("NETWORK_OFFLINE");
+    const onOnline = () => reportIntegrityEvent("NETWORK_ONLINE");
+
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("paste", onPaste);
+    document.addEventListener("contextmenu", onContextMenu);
+    window.addEventListener("offline", onOffline);
+    window.addEventListener("online", onOnline);
+
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("paste", onPaste);
+      document.removeEventListener("contextmenu", onContextMenu);
+      window.removeEventListener("offline", onOffline);
+      window.removeEventListener("online", onOnline);
+    };
+  }, [data, reportIntegrityEvent]);
+
+  async function enterFullscreen() {
+    try {
+      await document.documentElement.requestFullscreen();
+    } catch {
+      // Fullscreen may be unavailable in this browser/context; exam continues either way.
+    }
+  }
 
   const saveAnswer = useCallback(
     (questionId: string, response: string) => {
@@ -155,6 +283,30 @@ export default function TakeExamPage({
           </span>
         )}
       </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2 rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-600">
+        <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">
+          Secure exam mode active
+        </span>
+        <span>Integrity events are logged for review.</span>
+        {!isFullscreen && (
+          <>
+            <span className="text-gray-500">Fullscreen recommended.</span>
+            <button
+              onClick={enterFullscreen}
+              className="rounded border border-gray-300 bg-white px-2 py-1 text-xs"
+            >
+              Enter fullscreen
+            </button>
+          </>
+        )}
+      </div>
+
+      {banner && (
+        <div className="mt-3 rounded border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
+          {banner}
+        </div>
+      )}
 
       <div className="mt-6 space-y-4">
         {data.exam.questions.map((q, i) => (

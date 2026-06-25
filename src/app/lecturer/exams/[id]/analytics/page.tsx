@@ -50,11 +50,21 @@ type Insight = {
   recommendedAction: string;
 };
 
+type IntegritySummary = {
+  totalEvents: number;
+  highSeverityEvents: number;
+  mediumSeverityEvents: number;
+  lowSeverityEvents: number;
+  unresolvedEvents: number;
+  studentsWithEvents: number;
+};
+
 type Analytics = {
   summary: Summary;
   scoreDistribution: ScoreBand[];
   questionAnalytics: QuestionAnalytics[];
   studentResults: StudentResult[];
+  integritySummary: IntegritySummary;
   insights: Insight[];
 };
 
@@ -267,6 +277,28 @@ export default function ExamAnalyticsPage({
             ))}
           </tbody>
         </table>
+      </div>
+
+      <h2 className="mt-8 text-lg font-medium">Integrity summary</h2>
+      <div className="mt-3 rounded border border-gray-200 p-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <SummaryCard label="Total events" value={String(data.integritySummary.totalEvents)} />
+          <SummaryCard
+            label="High severity"
+            value={String(data.integritySummary.highSeverityEvents)}
+          />
+          <SummaryCard label="Unresolved" value={String(data.integritySummary.unresolvedEvents)} />
+          <SummaryCard
+            label="Students with events"
+            value={String(data.integritySummary.studentsWithEvents)}
+          />
+        </div>
+        <Link
+          href={`/lecturer/exams/${id}/integrity`}
+          className="mt-3 inline-block text-sm underline"
+        >
+          Open full integrity review page
+        </Link>
       </div>
 
       <h2 className="mt-8 text-lg font-medium">Insights</h2>

@@ -121,6 +121,12 @@ export default function LecturerExamPage({
           >
             View analytics
           </Link>
+          <Link
+            href={`/lecturer/exams/${id}/integrity`}
+            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+          >
+            Review integrity events
+          </Link>
           <button
             onClick={togglePublish}
             className={

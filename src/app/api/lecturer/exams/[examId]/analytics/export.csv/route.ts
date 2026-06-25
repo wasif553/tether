@@ -98,6 +98,20 @@ export async function GET(
     );
   }
 
+  lines.push("");
+  lines.push("Integrity Summary");
+  lines.push(toCsvRow(["Total Events", "High Severity", "Medium Severity", "Low Severity", "Unresolved", "Students With Events"]));
+  lines.push(
+    toCsvRow([
+      analytics.integritySummary.totalEvents,
+      analytics.integritySummary.highSeverityEvents,
+      analytics.integritySummary.mediumSeverityEvents,
+      analytics.integritySummary.lowSeverityEvents,
+      analytics.integritySummary.unresolvedEvents,
+      analytics.integritySummary.studentsWithEvents,
+    ]),
+  );
+
   const csv = lines.join("\n");
   const filename = `exam-${examId}-analytics.csv`;
 
