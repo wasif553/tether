@@ -119,6 +119,9 @@ model Answer {
   feedback          String?
   isCorrect         Boolean?
   timeSpentSeconds  Int?
+  aiDraftScore      Float?
+  aiReasoning       String?
+  aiGradedAt        DateTime?
 
   @@unique([submissionId, questionId])
 }

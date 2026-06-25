@@ -54,6 +54,8 @@ export async function GET(
       response: a.response,
       score: isOwner && submission.status !== "GRADED" ? undefined : a.score,
       feedback: isOwner && submission.status !== "GRADED" ? undefined : a.feedback,
+      aiDraftScore: isExamOwner ? a.aiDraftScore : undefined,
+      aiReasoning: isExamOwner ? a.aiReasoning : undefined,
     })),
   });
 }

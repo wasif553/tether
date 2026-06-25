@@ -72,6 +72,10 @@ export default function LecturerExamPage({
   const [expandedExplanation, setExpandedExplanation] = useState<number | null>(null);
   const [importing, setImporting] = useState(false);
 
+  const [hasUngradedSubmissions, setHasUngradedSubmissions] = useState(false);
+  const [markingEssays, setMarkingEssays] = useState(false);
+  const [markEssaysMessage, setMarkEssaysMessage] = useState<string | null>(null);
+
   const difficultySum = easyPct + mediumPct + hardPct;
 
   async function loadExam() {
@@ -81,9 +85,17 @@ export default function LecturerExamPage({
     setLoading(false);
   }
 
+  async function loadSubmissionStatus() {
+    const res = await fetch(`/api/exams/${id}/submissions`);
+    if (!res.ok) return;
+    const submissions: Array<{ status: string }> = await res.json();
+    setHasUngradedSubmissions(submissions.some((s) => s.status === "SUBMITTED"));
+  }
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadExam();
+    loadSubmissionStatus();
   }, [id]);
 
   useEffect(() => {
@@ -140,6 +152,33 @@ export default function LecturerExamPage({
       body: JSON.stringify({ published: !exam.published }),
     });
     if (res.ok) await loadExam();
+  }
+
+  async function handleMarkEssays() {
+    setMarkingEssays(true);
+    setMarkEssaysMessage(null);
+
+    const res = await fetch(`/api/lecturer/exams/${id}/ai-mark-essays`, { method: "POST" });
+
+    setMarkingEssays(false);
+
+    if (res.status === 502) {
+      setMarkEssaysMessage("Anthropic API key not configured");
+      return;
+    }
+
+    if (!res.ok) {
+      setMarkEssaysMessage("Failed to mark essays with AI");
+      return;
+    }
+
+    const result: { marked: number; skipped: number } = await res.json();
+    setMarkEssaysMessage(
+      result.marked > 0
+        ? `${result.marked} essay(s) marked — review drafts below`
+        : `No essays were marked (${result.skipped} skipped)`,
+    );
+    await loadSubmissionStatus();
   }
 
   function toggleType(type: GeneratedQuestion["type"]) {
@@ -246,6 +285,18 @@ export default function LecturerExamPage({
           >
             Review integrity events
           </Link>
+          {exam.questions.some((q) => q.type === "ESSAY") && hasUngradedSubmissions && (
+            <button
+              onClick={handleMarkEssays}
+              disabled={markingEssays}
+              className="flex items-center gap-2 rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+            >
+              {markingEssays && (
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-gray-400 border-t-transparent" />
+              )}
+              {markingEssays ? "Marking..." : "Mark essays with AI"}
+            </button>
+          )}
           <button
             onClick={togglePublish}
             className={
@@ -259,6 +310,7 @@ export default function LecturerExamPage({
         </div>
       </div>
       <p className="text-sm text-gray-500">{exam.durationMins} minutes</p>
+      {markEssaysMessage && <p className="mt-2 text-sm text-gray-600">{markEssaysMessage}</p>}
 
       <h2 className="mt-8 text-lg font-medium">Questions</h2>
       <div className="mt-3 space-y-3">
