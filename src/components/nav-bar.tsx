@@ -13,7 +13,10 @@ export function NavBar() {
       </Link>
       <nav className="flex items-center gap-4 text-sm">
         {status === "authenticated" && session.user.role === "LECTURER" && (
-          <Link href="/lecturer">Dashboard</Link>
+          <>
+            <Link href="/lecturer">Dashboard</Link>
+            <Link href="/lecturer/question-banks">Question Banks</Link>
+          </>
         )}
         {status === "authenticated" && session.user.role === "STUDENT" && (
           <Link href="/student">My Exams</Link>

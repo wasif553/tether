@@ -285,6 +285,12 @@ export default function LecturerExamPage({
           >
             Review integrity events
           </Link>
+          <Link
+            href={`/lecturer/exams/${id}/import-questions`}
+            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+          >
+            Import from question bank
+          </Link>
           {exam.questions.some((q) => q.type === "ESSAY") && hasUngradedSubmissions && (
             <button
               onClick={handleMarkEssays}

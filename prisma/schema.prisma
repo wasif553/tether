@@ -68,6 +68,7 @@ model User {
   resolvedEvents     IntegrityEvent[] @relation("IntegrityEventResolver")
   canvasUserId      String?          @unique
   canvasCourseIds   String[]         @default([])
+  questionBanks     QuestionBank[]
 }
 
 model Exam {
@@ -227,4 +228,40 @@ model CanvasGradePassback {
   updatedAt          DateTime             @updatedAt
 
   @@index([status])
+}
+
+model QuestionBank {
+  id          String         @id @default(cuid())
+  lecturerId  String
+  title       String
+  description String?
+  subject     String?
+  courseCode  String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  lecturer    User           @relation(fields: [lecturerId], references: [id])
+  questions   BankQuestion[]
+
+  @@index([lecturerId])
+}
+
+model BankQuestion {
+  id            String       @id @default(cuid())
+  bankId        String
+  type          String
+  text          String
+  optionsJson   String?
+  correctAnswer String?
+  sampleAnswer  String?
+  points        Int          @default(1)
+  difficulty    String?
+  topic         String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  bank          QuestionBank @relation(fields: [bankId], references: [id], onDelete: Cascade)
+
+  @@index([bankId])
+  @@index([type])
+  @@index([topic])
+  @@index([difficulty])
 }
