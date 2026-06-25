@@ -58,6 +58,8 @@ model User {
   submissions       Submission[]
   integrityEvents   IntegrityEvent[] @relation("IntegrityEventStudent")
   resolvedEvents     IntegrityEvent[] @relation("IntegrityEventResolver")
+  canvasUserId      String?          @unique
+  canvasCourseIds   String[]         @default([])
 }
 
 model Exam {
@@ -146,4 +148,40 @@ model IntegrityEvent {
   @@index([eventType])
   @@index([severity])
   @@index([occurredAt])
+}
+
+model LtiPlatform {
+  id            String       @id @default(cuid())
+  issuer        String       @unique
+  clientId      String
+  authEndpoint  String
+  tokenEndpoint String
+  jwksUrl       String
+  deploymentId  String
+  createdAt     DateTime     @default(now())
+  sessions      LtiSession[]
+}
+
+model LtiSession {
+  id         String      @id @default(cuid())
+  platform   LtiPlatform @relation(fields: [platformId], references: [id])
+  platformId String
+  nonce      String      @unique
+  state      String      @unique
+  expiresAt  DateTime
+  consumed   Boolean     @default(false)
+  createdAt  DateTime    @default(now())
+}
+
+model LtiLaunch {
+  id                 String   @id @default(cuid())
+  platformId         String
+  canvasUserId       String
+  canvasCourseId     String
+  canvasAssignmentId String?
+  lineitems          String?
+  sourcedid          String?
+  examId             String?
+  submissionId       String?
+  createdAt          DateTime @default(now())
 }
