@@ -22,6 +22,21 @@ type Exam = {
   questions: Question[];
 };
 
+type GeneratedQuestion = {
+  type: "MCQ" | "SHORT_ANSWER" | "ESSAY";
+  body: string;
+  options?: string[];
+  correctAnswer?: string;
+  difficulty: "easy" | "medium" | "hard";
+  explanation: string;
+};
+
+const QUESTION_TYPE_LABELS: Record<GeneratedQuestion["type"], string> = {
+  MCQ: "Multiple choice",
+  SHORT_ANSWER: "Short answer",
+  ESSAY: "Essay",
+};
+
 export default function LecturerExamPage({
   params,
 }: {
@@ -40,6 +55,25 @@ export default function LecturerExamPage({
   const [qPoints, setQPoints] = useState(1);
   const [adding, setAdding] = useState(false);
 
+  const [sourceMaterial, setSourceMaterial] = useState("");
+  const [subject, setSubject] = useState("");
+  const [totalCount, setTotalCount] = useState(10);
+  const [easyPct, setEasyPct] = useState(34);
+  const [mediumPct, setMediumPct] = useState(33);
+  const [hardPct, setHardPct] = useState(33);
+  const [selectedTypes, setSelectedTypes] = useState<GeneratedQuestion["type"][]>([
+    "MCQ",
+    "SHORT_ANSWER",
+  ]);
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [generated, setGenerated] = useState<GeneratedQuestion[]>([]);
+  const [included, setIncluded] = useState<boolean[]>([]);
+  const [expandedExplanation, setExpandedExplanation] = useState<number | null>(null);
+  const [importing, setImporting] = useState(false);
+
+  const difficultySum = easyPct + mediumPct + hardPct;
+
   async function loadExam() {
     setLoading(true);
     const res = await fetch(`/api/exams/${id}`);
@@ -51,6 +85,13 @@ export default function LecturerExamPage({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadExam();
   }, [id]);
+
+  useEffect(() => {
+    if (exam && !subject) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSubject(exam.title);
+    }
+  }, [exam, subject]);
 
   async function handleAddQuestion(e: React.FormEvent) {
     e.preventDefault();
@@ -99,6 +140,84 @@ export default function LecturerExamPage({
       body: JSON.stringify({ published: !exam.published }),
     });
     if (res.ok) await loadExam();
+  }
+
+  function toggleType(type: GeneratedQuestion["type"]) {
+    setSelectedTypes((prev) =>
+      prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type],
+    );
+  }
+
+  async function handleGenerate() {
+    setGenerateError(null);
+
+    if (difficultySum !== 100) {
+      setGenerateError("Difficulty percentages must sum to 100%");
+      return;
+    }
+    if (selectedTypes.length === 0) {
+      setGenerateError("Select at least one question type");
+      return;
+    }
+    if (!sourceMaterial.trim()) {
+      setGenerateError("Paste some source material or a topic to generate from");
+      return;
+    }
+
+    setGenerating(true);
+    setGenerated([]);
+    setIncluded([]);
+
+    const res = await fetch(`/api/lecturer/exams/${id}/generate-questions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sourceMaterial,
+        subject: subject || exam?.title || "General",
+        totalCount,
+        difficulty: { easy: easyPct, medium: mediumPct, hard: hardPct },
+        types: selectedTypes,
+        existingQuestions: exam?.questions.map((q) => q.text) ?? [],
+      }),
+    });
+
+    setGenerating(false);
+
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      setGenerateError(
+        typeof data.error === "string" ? data.error : "Failed to generate questions",
+      );
+      return;
+    }
+
+    setGenerated(data.questions ?? []);
+    setIncluded(new Array((data.questions ?? []).length).fill(true));
+  }
+
+  async function handleAddSelected() {
+    const selected = generated.filter((_, i) => included[i]);
+    if (selected.length === 0) return;
+
+    setImporting(true);
+
+    const res = await fetch(`/api/lecturer/exams/${id}/questions/bulk-import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ questions: selected }),
+    });
+
+    setImporting(false);
+
+    if (!res.ok) {
+      setGenerateError("Failed to add selected questions to the exam");
+      return;
+    }
+
+    setGenerated([]);
+    setIncluded([]);
+    await loadExam();
   }
 
   if (loading) return <p className="text-gray-500">Loading...</p>;
@@ -176,6 +295,197 @@ export default function LecturerExamPage({
             </div>
           </div>
         ))}
+      </div>
+
+      <h2 className="mt-8 text-lg font-medium">Generate questions with AI</h2>
+      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+        <div>
+          <label className="block text-sm font-medium">Source material or topic</label>
+          <textarea
+            rows={5}
+            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+            placeholder="Paste lecture notes, a textbook excerpt, or just describe a topic..."
+            value={sourceMaterial}
+            onChange={(e) => setSourceMaterial(e.target.value)}
+          />
+        </div>
+        <div className="flex gap-3">
+          <div className="flex-1">
+            <label className="block text-sm font-medium">Subject</label>
+            <input
+              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+            />
+          </div>
+          <div className="w-32">
+            <label className="block text-sm font-medium">Count</label>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              value={totalCount}
+              onChange={(e) => setTotalCount(Number(e.target.value))}
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium">
+            Difficulty mix{" "}
+            <span className={difficultySum === 100 ? "text-gray-500" : "text-red-600"}>
+              ({difficultySum}% total)
+            </span>
+          </label>
+          <div className="mt-2 space-y-2">
+            <div className="flex items-center gap-3">
+              <span className="w-16 text-sm">Easy</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                className="flex-1"
+                value={easyPct}
+                onChange={(e) => setEasyPct(Number(e.target.value))}
+              />
+              <span className="w-10 text-right text-sm">{easyPct}%</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="w-16 text-sm">Medium</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                className="flex-1"
+                value={mediumPct}
+                onChange={(e) => setMediumPct(Number(e.target.value))}
+              />
+              <span className="w-10 text-right text-sm">{mediumPct}%</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="w-16 text-sm">Hard</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                className="flex-1"
+                value={hardPct}
+                onChange={(e) => setHardPct(Number(e.target.value))}
+              />
+              <span className="w-10 text-right text-sm">{hardPct}%</span>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium">Question types</label>
+          <div className="mt-1 flex gap-4">
+            {(["MCQ", "SHORT_ANSWER", "ESSAY"] as const).map((type) => (
+              <label key={type} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={selectedTypes.includes(type)}
+                  onChange={() => toggleType(type)}
+                />
+                {QUESTION_TYPE_LABELS[type]}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {generateError && <p className="text-sm text-red-600">{generateError}</p>}
+
+        <button
+          onClick={handleGenerate}
+          disabled={generating}
+          className="flex items-center gap-2 rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+        >
+          {generating && (
+            <span className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
+          )}
+          {generating ? "Generating..." : "Generate"}
+        </button>
+
+        {generated.length > 0 && (
+          <div className="mt-4 space-y-3 border-t border-gray-200 pt-4">
+            <p className="text-sm text-gray-500">
+              {generated.length} question(s) generated — review and select which to add.
+            </p>
+            {generated.map((q, i) => (
+              <div key={i} className="rounded border border-gray-200 p-3">
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={included[i] ?? false}
+                    onChange={(e) =>
+                      setIncluded((prev) => {
+                        const next = [...prev];
+                        next[i] = e.target.checked;
+                        return next;
+                      })
+                    }
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                        {QUESTION_TYPE_LABELS[q.type]}
+                      </span>
+                      <span
+                        className={
+                          q.difficulty === "hard"
+                            ? "rounded bg-red-100 px-2 py-0.5 text-xs text-red-700"
+                            : q.difficulty === "medium"
+                              ? "rounded bg-yellow-100 px-2 py-0.5 text-xs text-yellow-700"
+                              : "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
+                        }
+                      >
+                        {q.difficulty}
+                      </span>
+                    </div>
+                    <p className="mt-1">{q.body}</p>
+                    {q.options && (
+                      <ul className="mt-1 space-y-0.5 text-sm">
+                        {q.options.map((opt, optIndex) => {
+                          const label = String.fromCharCode(65 + optIndex);
+                          const isCorrect = q.correctAnswer === label;
+                          return (
+                            <li
+                              key={label}
+                              className={isCorrect ? "font-medium text-green-700" : "text-gray-600"}
+                            >
+                              {label}. {opt} {isCorrect && "✓"}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    {!q.options && q.correctAnswer && (
+                      <p className="mt-1 text-sm text-green-700">Model answer: {q.correctAnswer}</p>
+                    )}
+                    <button
+                      onClick={() => setExpandedExplanation(expandedExplanation === i ? null : i)}
+                      className="mt-2 text-xs underline"
+                    >
+                      {expandedExplanation === i ? "Hide explanation" : "Show explanation"}
+                    </button>
+                    {expandedExplanation === i && (
+                      <p className="mt-1 text-sm text-gray-500">{q.explanation}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+            <button
+              onClick={handleAddSelected}
+              disabled={importing || included.every((v) => !v)}
+              className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+            >
+              {importing ? "Adding..." : "Add selected to exam"}
+            </button>
+          </div>
+        )}
       </div>
 
       <h2 className="mt-8 text-lg font-medium">Add question</h2>
