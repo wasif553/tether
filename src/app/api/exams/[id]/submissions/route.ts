@@ -17,11 +17,20 @@ export async function GET(
 
   const submissions = await prisma.submission.findMany({
     where: { examId: id },
-    include: { student: { select: { id: true, name: true, email: true } } },
+    include: {
+      student: { select: { id: true, name: true, email: true } },
+      gradePassback: { select: { status: true } },
+    },
     orderBy: { startedAt: "desc" },
   });
 
-  return NextResponse.json(submissions);
+  return NextResponse.json(
+    submissions.map((s) => ({
+      ...s,
+      canvasStatus: s.gradePassback?.status ?? null,
+      gradePassback: undefined,
+    })),
+  );
 }
 
 export const dynamic = "force-dynamic";

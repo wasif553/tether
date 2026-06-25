@@ -15,6 +15,7 @@ export async function GET(
     include: {
       exam: { include: { questions: { orderBy: { order: "asc" } } } },
       answers: true,
+      gradePassback: true,
     },
   });
 
@@ -41,6 +42,18 @@ export async function GET(
     correctAnswer: isExamOwner ? q.correctAnswer : undefined,
   }));
 
+  const canvasPassback =
+    isExamOwner && submission.gradePassback
+      ? {
+          status: submission.gradePassback.status,
+          scoreGiven: submission.gradePassback.scoreGiven,
+          scoreMaximum: submission.gradePassback.scoreMaximum,
+          sentAt: submission.gradePassback.sentAt,
+          attemptedAt: submission.gradePassback.attemptedAt,
+          errorMessage: submission.gradePassback.errorMessage,
+        }
+      : null;
+
   return NextResponse.json({
     id: submission.id,
     status: submission.status,
@@ -48,6 +61,7 @@ export async function GET(
     submittedAt: submission.submittedAt,
     totalScore: submission.totalScore,
     deadline,
+    canvasPassback,
     exam: { id: submission.exam.id, title: submission.exam.title, questions },
     answers: submission.answers.map((a) => ({
       questionId: a.questionId,

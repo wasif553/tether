@@ -20,12 +20,30 @@ type Answer = {
   aiReasoning?: string | null;
 };
 
+type CanvasPassback = {
+  status: "NOT_READY" | "PENDING" | "SENT" | "FAILED" | "SKIPPED";
+  scoreGiven: number | null;
+  scoreMaximum: number | null;
+  sentAt: string | null;
+  attemptedAt: string | null;
+  errorMessage: string | null;
+};
+
 type SubmissionData = {
   id: string;
   status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
   totalScore: number | null;
   exam: { title: string; questions: Question[] };
   answers: Answer[];
+  canvasPassback: CanvasPassback | null;
+};
+
+const CANVAS_STATUS_LABELS: Record<CanvasPassback["status"], string> = {
+  NOT_READY: "Not ready to send",
+  PENDING: "Sending...",
+  SENT: "Sent",
+  FAILED: "Failed — retry",
+  SKIPPED: "Not linked to Canvas",
 };
 
 type CriterionScore = {
@@ -124,6 +142,9 @@ export default function GradeSubmissionPage({
 
     setPushingGrade(false);
     setPushGradeMessage(result.message ?? (result.success ? "Done." : "Failed to push grade."));
+    if (result.status) {
+      setData((prev) => (prev ? { ...prev, canvasPassback: result.status } : prev));
+    }
   }
 
   function handleAcceptAiDraft(questionId: string, aiDraftScore: number) {
@@ -256,7 +277,7 @@ export default function GradeSubmissionPage({
         })}
       </div>
 
-      <div className="mt-6 flex items-center gap-3">
+      <div className="mt-6">
         <button
           onClick={handleFinalize}
           disabled={saving}
@@ -264,17 +285,50 @@ export default function GradeSubmissionPage({
         >
           {saving ? "Saving..." : "Finalize grade"}
         </button>
-        {data.status === "GRADED" && (
-          <button
-            onClick={handlePushGrade}
-            disabled={pushingGrade}
-            className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-50"
-          >
-            {pushingGrade ? "Pushing..." : "Push to Canvas"}
-          </button>
-        )}
       </div>
-      {pushGradeMessage && <p className="mt-2 text-sm text-gray-600">{pushGradeMessage}</p>}
+
+      {data.status === "GRADED" && (
+        <div className="mt-4 rounded border border-gray-200 p-4">
+          <p className="text-sm font-medium">
+            Canvas passback:{" "}
+            {data.canvasPassback ? CANVAS_STATUS_LABELS[data.canvasPassback.status] : "Not checked yet"}
+          </p>
+          {data.canvasPassback?.scoreGiven != null && (
+            <p className="mt-1 text-sm text-gray-600">
+              Score sent: {data.canvasPassback.scoreGiven} / {data.canvasPassback.scoreMaximum}
+            </p>
+          )}
+          {data.canvasPassback?.sentAt && (
+            <p className="text-sm text-gray-500">
+              Sent at: {new Date(data.canvasPassback.sentAt).toLocaleString()}
+            </p>
+          )}
+          {data.canvasPassback?.attemptedAt && (
+            <p className="text-sm text-gray-500">
+              Last attempted: {new Date(data.canvasPassback.attemptedAt).toLocaleString()}
+            </p>
+          )}
+          {data.canvasPassback?.status === "FAILED" && data.canvasPassback.errorMessage && (
+            <p className="mt-1 text-sm text-red-600">{data.canvasPassback.errorMessage}</p>
+          )}
+          {data.canvasPassback?.status !== "SKIPPED" && (
+            <button
+              onClick={handlePushGrade}
+              disabled={pushingGrade}
+              className="mt-3 rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-50"
+            >
+              {pushingGrade
+                ? "Sending..."
+                : data.canvasPassback?.status === "SENT"
+                  ? "Resend grade to Canvas"
+                  : data.canvasPassback?.status === "FAILED"
+                    ? "Retry Canvas passback"
+                    : "Send grade to Canvas"}
+            </button>
+          )}
+          {pushGradeMessage && <p className="mt-2 text-sm text-gray-600">{pushGradeMessage}</p>}
+        </div>
+      )}
     </div>
   );
 }

@@ -5,15 +5,17 @@ import { decodeProtectedHeader, importJWK, jwtVerify, type JWTPayload } from "jo
 import { prisma } from "@/lib/prisma";
 import { findPlatformJwk } from "@/lib/lti/jwks-cache";
 import { createSessionCookie } from "@/lib/lti/session";
+import type { Prisma } from "@/generated/prisma/client";
 
 const CONTEXT_CLAIM = "https://purl.imsglobal.org/spec/lti/claim/context";
 const RESOURCE_LINK_CLAIM = "https://purl.imsglobal.org/spec/lti/claim/resource_link";
 const AGS_ENDPOINT_CLAIM = "https://purl.imsglobal.org/spec/lti-ags/claim/endpoint";
 const ROLES_CLAIM = "https://purl.imsglobal.org/spec/lti/claim/roles";
+const DEPLOYMENT_ID_CLAIM = "https://purl.imsglobal.org/spec/lti/claim/deployment_id";
 
 type LtiContextClaim = { id?: string; title?: string };
 type LtiResourceLinkClaim = { id?: string };
-type LtiAgsEndpointClaim = { lineitems?: string };
+type LtiAgsEndpointClaim = { lineitem?: string; lineitems?: string; scope?: string[] };
 
 function authFailed(reason: string): NextResponse {
   console.error(`LTI launch: authentication failed — ${reason}`);
@@ -126,10 +128,16 @@ export async function POST(req: Request) {
   const context = payload[CONTEXT_CLAIM] as LtiContextClaim | undefined;
   const resourceLink = payload[RESOURCE_LINK_CLAIM] as LtiResourceLinkClaim | undefined;
   const agsEndpoint = payload[AGS_ENDPOINT_CLAIM] as LtiAgsEndpointClaim | undefined;
+  const deploymentId = typeof payload[DEPLOYMENT_ID_CLAIM] === "string"
+    ? (payload[DEPLOYMENT_ID_CLAIM] as string)
+    : undefined;
 
   const canvasCourseId = context?.id;
   const canvasAssignmentId = resourceLink?.id;
+  const resourceLinkId = resourceLink?.id;
   const lineitems = agsEndpoint?.lineitems;
+  const lineitemUrl = agsEndpoint?.lineitem;
+  const agsScope = agsEndpoint?.scope;
   const role = extractRole(payload);
 
   let user = await prisma.user.findUnique({ where: { canvasUserId } });
@@ -166,6 +174,12 @@ export async function POST(req: Request) {
       canvasCourseId: canvasCourseId ?? "",
       canvasAssignmentId,
       lineitems,
+      deploymentId,
+      resourceLinkId,
+      lineitemUrl,
+      lineitemsUrl: lineitems,
+      agsScopeJson: agsScope as Prisma.InputJsonValue | undefined,
+      launchClaimsJson: JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue,
     },
   });
 

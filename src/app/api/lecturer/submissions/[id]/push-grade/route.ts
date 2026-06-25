@@ -22,19 +22,32 @@ export async function POST(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const result = await pushGradeToCanvas(id);
+  const result = await pushGradeToCanvas(id, { force: true });
+
+  const passback = await prisma.canvasGradePassback.findUnique({ where: { submissionId: id } });
+  const status = passback
+    ? {
+        status: passback.status,
+        scoreGiven: passback.scoreGiven,
+        scoreMaximum: passback.scoreMaximum,
+        sentAt: passback.sentAt,
+        attemptedAt: passback.attemptedAt,
+        errorMessage: passback.errorMessage,
+      }
+    : null;
 
   if ("skipped" in result && result.skipped) {
-    return NextResponse.json({ success: false, message: result.reason });
+    return NextResponse.json({ success: false, message: result.reason, status });
   }
 
   if (result.success) {
-    return NextResponse.json({ success: true, message: "Grade pushed to Canvas." });
+    return NextResponse.json({ success: true, message: "Grade pushed to Canvas.", status });
   }
 
   return NextResponse.json({
     success: false,
     message: `Failed to push grade to Canvas: ${result.error}`,
+    status,
   });
 }
 

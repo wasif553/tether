@@ -3,6 +3,8 @@
 import { useEffect, useState, use as usePromise } from "react";
 import Link from "next/link";
 
+type CanvasStatus = "NOT_READY" | "PENDING" | "SENT" | "FAILED" | "SKIPPED" | null;
+
 type SubmissionRow = {
   id: string;
   status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
@@ -10,7 +12,33 @@ type SubmissionRow = {
   startedAt: string;
   submittedAt: string | null;
   student: { id: string; name: string; email: string };
+  canvasStatus: CanvasStatus;
 };
+
+const CANVAS_STATUS_LABELS: Record<NonNullable<CanvasStatus>, string> = {
+  NOT_READY: "Not ready to send",
+  PENDING: "Sending...",
+  SENT: "Sent",
+  FAILED: "Failed — retry",
+  SKIPPED: "Not linked to Canvas",
+};
+
+const CANVAS_STATUS_STYLES: Record<NonNullable<CanvasStatus>, string> = {
+  NOT_READY: "bg-gray-100 text-gray-600",
+  PENDING: "bg-blue-100 text-blue-700",
+  SENT: "bg-green-100 text-green-700",
+  FAILED: "bg-red-100 text-red-700",
+  SKIPPED: "bg-gray-100 text-gray-500",
+};
+
+function CanvasBadge({ status }: { status: CanvasStatus }) {
+  if (!status) return null;
+  return (
+    <span className={`rounded px-2 py-0.5 text-xs ${CANVAS_STATUS_STYLES[status]}`}>
+      {CANVAS_STATUS_LABELS[status]}
+    </span>
+  );
+}
 
 export default function SubmissionsListPage({
   params,
@@ -50,6 +78,7 @@ export default function SubmissionsListPage({
               <span className="text-sm text-gray-500">
                 {s.status === "GRADED" ? `Score: ${s.totalScore}` : s.status}
               </span>
+              <CanvasBadge status={s.canvasStatus} />
               {s.status !== "IN_PROGRESS" && (
                 <Link
                   href={`/lecturer/exams/${id}/submissions/${s.id}`}
