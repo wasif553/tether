@@ -1,0 +1,57 @@
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { auth } from "@/auth";
+import { prisma } from "@/lib/prisma";
+
+const createQuestionSchema = z.object({
+  type: z.enum(["MULTIPLE_CHOICE", "SHORT_ANSWER", "ESSAY"]),
+  text: z.string().min(1),
+  options: z.array(z.string()).optional(),
+  correctAnswer: z.string().optional(),
+  points: z.number().int().positive().default(1),
+});
+
+export async function POST(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const session = await auth();
+  if (!session || session.user.role !== "LECTURER") {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { id } = await params;
+  const exam = await prisma.exam.findFirst({
+    where: { id, createdById: session.user.id },
+  });
+  if (!exam) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  const body = await req.json();
+  const parsed = createQuestionSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  }
+
+  const { type, text, options, correctAnswer, points } = parsed.data;
+
+  const lastQuestion = await prisma.question.findFirst({
+    where: { examId: id },
+    orderBy: { order: "desc" },
+  });
+
+  const question = await prisma.question.create({
+    data: {
+      examId: id,
+      type,
+      text,
+      options: options ?? undefined,
+      correctAnswer,
+      points,
+      order: (lastQuestion?.order ?? -1) + 1,
+    },
+  });
+
+  return NextResponse.json(question, { status: 201 });
+}
+
+export const dynamic = "force-dynamic";

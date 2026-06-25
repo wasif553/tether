@@ -1,0 +1,95 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  LECTURER
+  STUDENT
+}
+
+enum QuestionType {
+  MULTIPLE_CHOICE
+  SHORT_ANSWER
+  ESSAY
+}
+
+enum SubmissionStatus {
+  IN_PROGRESS
+  SUBMITTED
+  GRADED
+}
+
+model User {
+  id            String       @id @default(cuid())
+  name          String
+  email         String       @unique
+  passwordHash  String
+  role          Role
+  createdAt     DateTime     @default(now())
+  examsCreated  Exam[]       @relation("ExamCreator")
+  submissions   Submission[]
+}
+
+model Exam {
+  id           String       @id @default(cuid())
+  title        String
+  description  String?
+  durationMins Int
+  published    Boolean      @default(false)
+  startsAt     DateTime?
+  endsAt       DateTime?
+  createdById  String
+  createdBy    User         @relation("ExamCreator", fields: [createdById], references: [id])
+  questions    Question[]
+  submissions  Submission[]
+  createdAt    DateTime     @default(now())
+}
+
+model Question {
+  id            String       @id @default(cuid())
+  examId        String
+  exam          Exam         @relation(fields: [examId], references: [id], onDelete: Cascade)
+  type          QuestionType
+  text          String
+  options       Json?
+  correctAnswer String?
+  points        Int          @default(1)
+  order         Int          @default(0)
+  answers       Answer[]
+}
+
+model Submission {
+  id          String           @id @default(cuid())
+  examId      String
+  exam        Exam             @relation(fields: [examId], references: [id], onDelete: Cascade)
+  studentId   String
+  student     User             @relation(fields: [studentId], references: [id])
+  status      SubmissionStatus @default(IN_PROGRESS)
+  startedAt   DateTime         @default(now())
+  submittedAt DateTime?
+  gradedAt    DateTime?
+  totalScore  Int?
+  answers     Answer[]
+
+  @@unique([examId, studentId])
+}
+
+model Answer {
+  id           String     @id @default(cuid())
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  questionId   String
+  question     Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  response          String?
+  score             Int?
+  feedback          String?
+  isCorrect         Boolean?
+  timeSpentSeconds  Int?
+
+  @@unique([submissionId, questionId])
+}
