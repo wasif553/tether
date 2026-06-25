@@ -38,6 +38,8 @@ export default function GradeSubmissionPage({
   const [scores, setScores] = useState<Record<string, number>>({});
   const [feedback, setFeedback] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  const [pushingGrade, setPushingGrade] = useState(false);
+  const [pushGradeMessage, setPushGradeMessage] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`/api/submissions/${submissionId}`)
@@ -74,6 +76,19 @@ export default function GradeSubmissionPage({
 
     setSaving(false);
     router.push(`/lecturer/exams`);
+  }
+
+  async function handlePushGrade() {
+    setPushingGrade(true);
+    setPushGradeMessage(null);
+
+    const res = await fetch(`/api/lecturer/submissions/${submissionId}/push-grade`, {
+      method: "POST",
+    });
+    const result = await res.json();
+
+    setPushingGrade(false);
+    setPushGradeMessage(result.message ?? (result.success ? "Done." : "Failed to push grade."));
   }
 
   if (!data) return <p className="text-gray-500">Loading...</p>;
@@ -126,13 +141,25 @@ export default function GradeSubmissionPage({
         })}
       </div>
 
-      <button
-        onClick={handleFinalize}
-        disabled={saving}
-        className="mt-6 rounded bg-black px-4 py-2 text-white disabled:opacity-50"
-      >
-        {saving ? "Saving..." : "Finalize grade"}
-      </button>
+      <div className="mt-6 flex items-center gap-3">
+        <button
+          onClick={handleFinalize}
+          disabled={saving}
+          className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+        >
+          {saving ? "Saving..." : "Finalize grade"}
+        </button>
+        {data.status === "GRADED" && (
+          <button
+            onClick={handlePushGrade}
+            disabled={pushingGrade}
+            className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-50"
+          >
+            {pushingGrade ? "Pushing..." : "Push to Canvas"}
+          </button>
+        )}
+      </div>
+      {pushGradeMessage && <p className="mt-2 text-sm text-gray-600">{pushGradeMessage}</p>}
     </div>
   );
 }

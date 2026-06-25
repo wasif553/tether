@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
 
 const gradeSchema = z.object({
   answers: z.array(
@@ -67,6 +68,8 @@ export async function PATCH(
       data: { status: "GRADED", totalScore, gradedAt: new Date() },
       include: { exam: { include: { questions: true } } },
     });
+
+    pushGradeToCanvas(id).catch(console.error);
   }
 
   return NextResponse.json(updated);

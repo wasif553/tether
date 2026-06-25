@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
 
 export async function POST(
   _req: Request,
@@ -66,6 +67,10 @@ export async function POST(
       totalScore: hasEssay ? null : autoScore,
     },
   });
+
+  if (!hasEssay) {
+    pushGradeToCanvas(id).catch(console.error);
+  }
 
   return NextResponse.json(updated);
 }
