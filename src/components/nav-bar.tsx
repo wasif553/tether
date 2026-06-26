@@ -16,6 +16,7 @@ export function NavBar() {
           <>
             <Link href="/lecturer">Dashboard</Link>
             <Link href="/lecturer/question-banks">Question Banks</Link>
+            <Link href="/lecturer/pilot-readiness">Pilot Readiness</Link>
           </>
         )}
         {status === "authenticated" && session.user.role === "STUDENT" && (

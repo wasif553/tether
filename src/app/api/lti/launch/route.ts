@@ -167,6 +167,16 @@ export async function POST(req: Request) {
     }
   }
 
+  // Route this launch to a linked SES exam, if the lecturer has set one up
+  // for this Canvas resource link. Unmatched launches never auto-link to a
+  // random exam — they fall back to a friendly "not linked" page (students)
+  // or the dashboard (lecturers, who can link it themselves).
+  const examLink = resourceLinkId
+    ? await prisma.ltiExamLink.findUnique({
+        where: { platformId_resourceLinkId: { platformId: platform.id, resourceLinkId } },
+      })
+    : null;
+
   await prisma.ltiLaunch.create({
     data: {
       platformId: platform.id,
@@ -180,6 +190,7 @@ export async function POST(req: Request) {
       lineitemsUrl: lineitems,
       agsScopeJson: agsScope as Prisma.InputJsonValue | undefined,
       launchClaimsJson: JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue,
+      examId: examLink?.examId,
     },
   });
 
@@ -196,7 +207,29 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Server configuration error" }, { status: 500 });
   }
 
-  const redirectPath = user.role === "LECTURER" ? "/lecturer/dashboard" : "/student/exams";
+  let redirectPath: string;
+
+  if (user.role === "LECTURER") {
+    redirectPath = examLink ? `/lecturer/exams/${examLink.examId}` : "/lecturer";
+  } else if (examLink) {
+    const exam = await prisma.exam.findUnique({ where: { id: examLink.examId } });
+    if (!exam || !exam.published) {
+      redirectPath = "/lti/not-linked";
+    } else {
+      const submission = await prisma.submission.upsert({
+        where: { examId_studentId: { examId: exam.id, studentId: user.id } },
+        update: {},
+        create: { examId: exam.id, studentId: user.id },
+      });
+      redirectPath = `/student/exams/${submission.id}`;
+    }
+  } else if (resourceLinkId) {
+    // This looks like an assignment launch, but no exam has been linked yet.
+    redirectPath = "/lti/not-linked";
+  } else {
+    redirectPath = "/student";
+  }
+
   const response = NextResponse.redirect(new URL(redirectPath, appUrl), 302);
   response.cookies.set(cookie.name, cookie.value, cookie.options);
   return response;

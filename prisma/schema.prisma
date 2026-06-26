@@ -84,6 +84,7 @@ model Exam {
   questions       Question[]
   submissions     Submission[]
   integrityEvents IntegrityEvent[]
+  ltiExamLinks    LtiExamLink[]
   createdAt       DateTime         @default(now())
 }
 
@@ -173,6 +174,7 @@ model LtiPlatform {
   deploymentId  String
   createdAt     DateTime     @default(now())
   sessions      LtiSession[]
+  examLinks     LtiExamLink[]
 }
 
 model LtiSession {
@@ -184,6 +186,22 @@ model LtiSession {
   expiresAt  DateTime
   consumed   Boolean     @default(false)
   createdAt  DateTime    @default(now())
+}
+
+model LtiExamLink {
+  id                 String   @id @default(cuid())
+  examId             String
+  exam               Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  platformId         String
+  platform           LtiPlatform @relation(fields: [platformId], references: [id])
+  resourceLinkId     String
+  canvasCourseId     String?
+  canvasAssignmentId String?
+  label              String?
+  createdAt          DateTime @default(now())
+
+  @@unique([platformId, resourceLinkId])
+  @@index([examId])
 }
 
 model LtiLaunch {

@@ -37,6 +37,21 @@ const QUESTION_TYPE_LABELS: Record<GeneratedQuestion["type"], string> = {
   ESSAY: "Essay",
 };
 
+type LtiExamLink = {
+  id: string;
+  resourceLinkId: string;
+  canvasCourseId: string | null;
+  canvasAssignmentId: string | null;
+  label: string | null;
+  createdAt: string;
+  platform: { issuer: string };
+};
+
+type LtiPlatformOption = {
+  id: string;
+  issuer: string;
+};
+
 export default function LecturerExamPage({
   params,
 }: {
@@ -76,6 +91,18 @@ export default function LecturerExamPage({
   const [markingEssays, setMarkingEssays] = useState(false);
   const [markEssaysMessage, setMarkEssaysMessage] = useState<string | null>(null);
 
+  const [ltiLinks, setLtiLinks] = useState<LtiExamLink[]>([]);
+  const [platforms, setPlatforms] = useState<LtiPlatformOption[]>([]);
+  const [linkForm, setLinkForm] = useState({
+    platformId: "",
+    resourceLinkId: "",
+    canvasCourseId: "",
+    canvasAssignmentId: "",
+    label: "",
+  });
+  const [creatingLink, setCreatingLink] = useState(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
+
   const difficultySum = easyPct + mediumPct + hardPct;
 
   async function loadExam() {
@@ -92,11 +119,58 @@ export default function LecturerExamPage({
     setHasUngradedSubmissions(submissions.some((s) => s.status === "SUBMITTED"));
   }
 
+  async function loadLtiLinks() {
+    const res = await fetch(`/api/lecturer/exams/${id}/lti-links`);
+    if (res.ok) setLtiLinks(await res.json());
+  }
+
+  async function loadPlatforms() {
+    const res = await fetch("/api/lecturer/lti-platforms");
+    if (res.ok) setPlatforms(await res.json());
+  }
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadExam();
     loadSubmissionStatus();
+    loadLtiLinks();
+    loadPlatforms();
   }, [id]);
+
+  async function handleCreateLink(e: React.FormEvent) {
+    e.preventDefault();
+    setLinkError(null);
+    setCreatingLink(true);
+
+    const res = await fetch(`/api/lecturer/exams/${id}/lti-links`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        platformId: linkForm.platformId,
+        resourceLinkId: linkForm.resourceLinkId,
+        canvasCourseId: linkForm.canvasCourseId || undefined,
+        canvasAssignmentId: linkForm.canvasAssignmentId || undefined,
+        label: linkForm.label || undefined,
+      }),
+    });
+
+    setCreatingLink(false);
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      setLinkError(typeof data.error === "string" ? data.error : "Failed to create Canvas link");
+      return;
+    }
+
+    setLinkForm({ platformId: "", resourceLinkId: "", canvasCourseId: "", canvasAssignmentId: "", label: "" });
+    await loadLtiLinks();
+  }
+
+  async function handleDeleteLink(linkId: string) {
+    if (!confirm("Remove this Canvas link?")) return;
+    await fetch(`/api/lecturer/exams/${id}/lti-links/${linkId}`, { method: "DELETE" });
+    await loadLtiLinks();
+  }
 
   useEffect(() => {
     if (exam && !subject) {
@@ -606,6 +680,102 @@ export default function LecturerExamPage({
           className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
         >
           {adding ? "Adding..." : "Add question"}
+        </button>
+      </form>
+
+      <h2 className="mt-8 text-lg font-medium">Canvas / LTI linking</h2>
+      <p className="mt-1 text-sm text-gray-500">
+        Link a Canvas assignment&apos;s resource link to this exam so students launching from
+        Canvas land directly on it. Unlinked Canvas launches never connect to a random exam.
+      </p>
+
+      <div className="mt-3 space-y-3">
+        {ltiLinks.length === 0 && (
+          <p className="text-sm text-gray-500">No Canvas links yet.</p>
+        )}
+        {ltiLinks.map((link) => (
+          <div key={link.id} className="rounded border border-gray-200 p-3 text-sm">
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="font-medium">{link.label || "Canvas link"}</p>
+                <p className="text-gray-500">Platform: {link.platform.issuer}</p>
+                <p className="text-gray-500">Resource link ID: {link.resourceLinkId}</p>
+                {link.canvasCourseId && <p className="text-gray-500">Course ID: {link.canvasCourseId}</p>}
+                {link.canvasAssignmentId && (
+                  <p className="text-gray-500">Assignment ID: {link.canvasAssignmentId}</p>
+                )}
+                <p className="text-gray-400">Created {new Date(link.createdAt).toLocaleDateString()}</p>
+              </div>
+              <button
+                onClick={() => handleDeleteLink(link.id)}
+                className="text-sm text-red-600 underline"
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <form onSubmit={handleCreateLink} className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+        <div>
+          <label className="block text-sm font-medium">Canvas platform</label>
+          <select
+            required
+            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+            value={linkForm.platformId}
+            onChange={(e) => setLinkForm({ ...linkForm, platformId: e.target.value })}
+          >
+            <option value="">Select a platform...</option>
+            {platforms.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.issuer}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium">Canvas resource link ID</label>
+          <input
+            required
+            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+            value={linkForm.resourceLinkId}
+            onChange={(e) => setLinkForm({ ...linkForm, resourceLinkId: e.target.value })}
+          />
+        </div>
+        <div className="flex gap-3">
+          <div className="flex-1">
+            <label className="block text-sm font-medium">Canvas course ID (optional)</label>
+            <input
+              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              value={linkForm.canvasCourseId}
+              onChange={(e) => setLinkForm({ ...linkForm, canvasCourseId: e.target.value })}
+            />
+          </div>
+          <div className="flex-1">
+            <label className="block text-sm font-medium">Canvas assignment ID (optional)</label>
+            <input
+              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              value={linkForm.canvasAssignmentId}
+              onChange={(e) => setLinkForm({ ...linkForm, canvasAssignmentId: e.target.value })}
+            />
+          </div>
+        </div>
+        <div>
+          <label className="block text-sm font-medium">Label (optional)</label>
+          <input
+            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+            value={linkForm.label}
+            onChange={(e) => setLinkForm({ ...linkForm, label: e.target.value })}
+          />
+        </div>
+        {linkError && <p className="text-sm text-red-600">{linkError}</p>}
+        <button
+          type="submit"
+          disabled={creatingLink}
+          className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+        >
+          {creatingLink ? "Linking..." : "Link Canvas resource"}
         </button>
       </form>
     </div>

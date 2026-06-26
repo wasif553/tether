@@ -8,7 +8,8 @@ export default async function Home() {
     <div className="mx-auto max-w-2xl py-16 text-center">
       <h1 className="text-3xl font-semibold">Safe Exam System</h1>
       <p className="mt-4 text-gray-600">
-        A cheat-proof online assessment platform for academic and certification exams.
+        A secure online assessment platform with integrity event logging, AI-assisted
+        question creation and draft grading, and Canvas LTI integration.
       </p>
 
       {!session && (

@@ -300,6 +300,9 @@ export default function TakeExamPage({
             </button>
           </>
         )}
+        <a href="/privacy/student-exam-notice" target="_blank" rel="noreferrer" className="text-xs underline">
+          What does this record?
+        </a>
       </div>
 
       {banner && (
