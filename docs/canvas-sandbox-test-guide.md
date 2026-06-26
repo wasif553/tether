@@ -4,7 +4,16 @@ This guide walks through registering Safe Exam System (SES) as an LTI 1.3
 tool in a Canvas sandbox course and running a full launch → exam → grade
 passback cycle. It matches the routes that actually exist in this codebase
 today — there is no Moodle/Blackboard support and no deep linking UI yet,
-so assignments are linked to exams manually (see step 6).
+so assignments are linked to exams manually via the **Unmatched Canvas
+Launches** inbox (see steps 5–6).
+
+**What counts as successful pilot proof**: a second launch routes
+directly to the correct exam (no "not linked yet"), and after grading,
+the submission's Canvas passback status reaches **SENT** — visible both
+on the grading page's Canvas passback panel and as a real score in
+Canvas's Gradebook. A `FAILED` or `SKIPPED` status, or one that never
+moves past `NOT_READY`/`PENDING`, means the Canvas validation isn't
+complete yet, even if everything else in SES works.
 
 Throughout this guide, `{APP_URL}` means the value of the `APP_URL`
 environment variable the app is deployed with (e.g. `https://ses.example.com`,
@@ -89,41 +98,51 @@ informationally today — launches aren't rejected based on it — but the
 seeded `LtiPlatform.deploymentId` field should still reflect the real
 deployment for future use).
 
-## 5. Get the resource_link_id
+## 5. First launch — expect "not linked yet"
 
-The easiest way: do one launch first (open the assignment as the
-instructor) and check the SES database — the `LtiLaunch` row created by
-that launch has a `resourceLinkId` column with the exact value Canvas
-sent. (There's no admin UI to read this directly yet; ask whoever has
-database access, or temporarily add a `console.log` in
-`src/app/api/lti/launch/route.ts` if you don't have DB access.)
+Before any exam is linked, **this is expected, not a bug**: launch the
+assignment once, as the lecturer/instructor (Canvas's "Student View" also
+works, but a real instructor launch is easiest the first time).
+
+You should land on SES's "Exam not linked yet" page. If you're logged in
+as a lecturer, that page itself links to **Unmatched Canvas Launches** —
+follow it to step 6. This first launch is what actually creates the
+`LtiLaunch` row containing the real `resource_link_id`, so you don't need
+database access or to read Canvas's UI/API to find it.
 
 ## 6. Link the Canvas assignment to an SES exam
 
 1. Log into SES as the lecturer, create (or pick) an exam, add questions,
-   and publish it.
-2. Open the exam's detail page → **Canvas / LTI linking** section.
-3. Fill in:
-   - **Canvas platform**: select from the dropdown (populated from
-     `GET /api/lecturer/lti-platforms`)
-   - **Canvas resource link ID**: the value from step 5
-   - **Canvas course ID** / **Canvas assignment ID**: optional, for your
-     own reference
-   - **Label**: optional, e.g. "Midterm — Section A"
-4. Click **Link Canvas resource**.
+   and publish it (if you haven't already).
+2. Go to **Canvas/LTI → Unmatched Canvas Launches** (or follow the link
+   from the not-linked page in step 5).
+3. Find the launch from step 5 in the list — it shows the launch time,
+   platform, resource link ID, deployment ID, Canvas course/assignment
+   ID (if Canvas sent them), and the launching user's role.
+4. Pick your exam from the dropdown next to that launch and click
+   **Link to exam**.
 
-Until this step is done, any Canvas launch into this assignment will land
-on a friendly "Exam not linked yet" page instead of guessing — SES never
-auto-links an unknown launch to a random exam.
+This creates an `LtiExamLink` for that platform + `resource_link_id`, and
+immediately backfills any other unmatched launches that share the same
+resource link. SES never auto-links an unknown launch to a random exam —
+linking is always an explicit lecturer action.
 
-## 7. Run a student launch test
+(You can also create a link directly from the exam detail page's
+**Canvas / LTI linking** section if you already know the
+`resource_link_id` — the Unmatched Launches inbox is just the easier path
+when you don't.)
 
-1. Use Canvas's "Student View" (or a real test-student enrollment) and
-   open the assignment.
-2. SES should redirect straight to the linked exam's take-exam page and
-   create a `Submission` row tied to that Canvas user automatically.
-3. If you instead see "Exam not linked yet", double check step 6 — the
-   `resourceLinkId` must match exactly.
+## 7. Relaunch and confirm routing
+
+1. Launch the same Canvas assignment again (lecturer or student).
+2. This second launch should route straight to the linked exam — the
+   lecturer lands on the exam detail page; a student lands directly on
+   their exam submission, with a `Submission` row created automatically.
+3. If you still see "Exam not linked yet", the `resource_link_id` Canvas
+   sent on this launch doesn't match what you linked in step 6 — check
+   Unmatched Canvas Launches again; a second unmatched entry would
+   indicate a mismatch (e.g. a different assignment, or Canvas issuing a
+   new resource link after an edit).
 
 ## 8. Submit and grade
 
@@ -151,7 +170,8 @@ auto-links an unknown launch to a random exam.
 |---|---|
 | `{"error":"Unknown platform"}` on login | The `iss` Canvas sent doesn't match any seeded `LtiPlatform.issuer`. Re-check `LTI_PLATFORM_ISSUER` and re-run `npm run seed`. |
 | `{"error":"Invalid session"}` on launch | The `state` is missing, expired (60s window), or already used. Usually means too much time passed between login and launch, or the launch was retried/refreshed. |
-| Stuck on "Exam not linked yet" | No `LtiExamLink` row matches this platform + `resource_link_id`. Re-check step 6, and that you're linking the *resource link ID*, not the assignment ID. |
+| Stuck on "Exam not linked yet" after linking | The launch that's failing has a *different* `resource_link_id` than the one you linked — check Unmatched Canvas Launches for a second, still-unmatched entry, and link that one too. |
+| Nothing shows up in Unmatched Canvas Launches | The launch never reached `/api/lti/launch` at all (check for an earlier `Authentication failed`/`Invalid session` error), or it had no `resource_link_id` in its claims (a non-assignment launch). |
 | `{"error":"Authentication failed"}` on launch | JWT signature verification failed — usually a JWKS/key mismatch. Confirm `{APP_URL}/api/lti/jwks` is reachable from Canvas and matches `LTI_PUBLIC_KEY`. |
 | Missing AGS scope warning on the pilot readiness page | The Developer Key doesn't have the `score` scope enabled, or the course's deployment hasn't re-synced permissions. Re-check step 1's scopes and reinstall in the course. |
 | Canvas token request fails (passback `FAILED`, error mentions the token endpoint) | `LTI_TOKEN_ENDPOINT` is wrong for your Canvas instance, or the Developer Key's scopes don't include `score`. |

@@ -21,7 +21,8 @@ already done, or is being done alongside this checklist.
 - [ ] Required AGS scopes enabled on the Developer Key
 - [ ] Tool installed in the pilot course
 - [ ] One assignment created using SES as the external tool
-- [ ] `resource_link_id` captured and ready to link
+- [ ] First launch (lecturer or student) intentionally lands on
+      "Exam not linked yet" — this is expected before any linking happens
 
 ## Lecturer setup
 
@@ -30,15 +31,21 @@ already done, or is being done alongside this checklist.
 - [ ] Lecturer adds a representative mix of MCQ, short-answer, and essay
       questions (manually and/or via AI generation/question bank import)
 - [ ] Lecturer publishes the exam
-- [ ] Lecturer links the Canvas assignment's resource link to this exam
-      (exam detail page → Canvas / LTI linking)
+- [ ] Lecturer opens **Unmatched Canvas Launches**
+      (`/lecturer/lti/unmatched-launches`, also linked from
+      `/lecturer/settings/lti`) and finds the launch from the previous step
+- [ ] Lecturer links that launch to the pilot exam
+- [ ] `/lecturer/pilot-readiness` section B (Canvas/LTI) shows "Ready" for
+      "At least one exam linked" and "Unmatched Canvas launches" drops to 0
 - [ ] `/lecturer/pilot-readiness` section A (core exam flow) shows "Ready"
       for exam creation, questions, and published
 
 ## Student test launch
 
 - [ ] One test student (or Canvas "Student View") launches the assignment
-- [ ] SES routes directly to the linked exam, not a generic dashboard
+      a second time, now that it's linked
+- [ ] SES routes directly to the linked exam, not a generic dashboard and
+      not the not-linked page
 - [ ] A `Submission` row exists for that student (visible on the
       submissions list)
 - [ ] Re-launching the same assignment resumes the same submission rather
@@ -114,7 +121,11 @@ Pilot is **go** only if all of the following are true:
 - [ ] Core exam flow (create → publish → take → submit → grade) works
       with zero unhandled errors
 - [ ] At least one full Canvas launch → exam → grade passback to `SENT`
-      cycle completed successfully
+      cycle completed successfully against a **real** Canvas sandbox (not
+      just a simulated/self-signed launch) — check
+      `/lecturer/pilot-readiness` section B for "Live Canvas passback
+      verified (SENT)"; if it still says "Real Canvas validation still
+      required", treat this item as not met
 - [ ] Integrity events are visible and reviewable by the lecturer
 - [ ] No UI text claims SES is "cheat-proof" or that AI makes final
       grading decisions

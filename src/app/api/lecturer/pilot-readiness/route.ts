@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { getRequiredEnvStatus, getLtiEnvStatus, getAiEnvStatus } from "@/lib/env/readiness";
+import { countUnmatchedLaunches } from "@/lib/lti/unmatchedLaunches";
 
 type Status = "READY" | "NEEDS_SETUP" | "NOT_CONFIGURED" | "WARNING";
 
@@ -52,6 +53,15 @@ export async function GET() {
     orderBy: { createdAt: "desc" },
   });
   const passbackCount = await prisma.canvasGradePassback.count();
+  const totalLinkedResources = await prisma.ltiExamLink.count();
+  const unmatchedCount = await countUnmatchedLaunches();
+  const mostRecentSent = await prisma.canvasGradePassback.findFirst({
+    where: { status: "SENT" },
+    orderBy: { sentAt: "desc" },
+  });
+  const mostRecentPassback = await prisma.canvasGradePassback.findFirst({
+    orderBy: { updatedAt: "desc" },
+  });
 
   const canvasLti: ReadinessItem[] = [
     {
@@ -66,6 +76,19 @@ export async function GET() {
       status: examLinkCount > 0 ? "READY" : "NEEDS_SETUP",
     },
     {
+      label: "Linked Canvas resources",
+      status: totalLinkedResources > 0 ? "READY" : "NEEDS_SETUP",
+      detail: `${totalLinkedResources} resource(s) linked`,
+    },
+    {
+      label: "Unmatched Canvas launches",
+      status: unmatchedCount > 0 ? "WARNING" : "READY",
+      detail:
+        unmatchedCount > 0
+          ? `${unmatchedCount} launch(es) waiting to be linked — open Unmatched Canvas Launches`
+          : "No unmatched launches waiting",
+    },
+    {
       label: "Recent LTI launch captured",
       status: recentLaunch ? "READY" : "NEEDS_SETUP",
       detail: recentLaunch ? new Date(recentLaunch.createdAt).toLocaleString() : undefined,
@@ -77,6 +100,16 @@ export async function GET() {
     {
       label: "Grade passback status available",
       status: passbackCount > 0 ? "READY" : "NEEDS_SETUP",
+      detail: mostRecentPassback
+        ? `Most recent: ${mostRecentPassback.status}`
+        : undefined,
+    },
+    {
+      label: "Live Canvas passback verified (SENT)",
+      status: mostRecentSent ? "READY" : "WARNING",
+      detail: mostRecentSent
+        ? `Last SENT: ${new Date(mostRecentSent.sentAt ?? mostRecentSent.updatedAt).toLocaleString()}`
+        : "Real Canvas validation still required — no passback has reached SENT yet",
     },
   ];
 

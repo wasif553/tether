@@ -223,6 +223,7 @@ model LtiLaunch {
   // Raw verified launch claims, kept server-side only for debugging.
   // Never returned to students or in any client-facing API response.
   launchClaimsJson   Json?
+  launchRole         String?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
   gradePassbacks     CanvasGradePassback[]

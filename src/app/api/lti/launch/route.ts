@@ -177,7 +177,7 @@ export async function POST(req: Request) {
       })
     : null;
 
-  await prisma.ltiLaunch.create({
+  const launch = await prisma.ltiLaunch.create({
     data: {
       platformId: platform.id,
       canvasUserId,
@@ -190,6 +190,7 @@ export async function POST(req: Request) {
       lineitemsUrl: lineitems,
       agsScopeJson: agsScope as Prisma.InputJsonValue | undefined,
       launchClaimsJson: JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue,
+      launchRole: role,
       examId: examLink?.examId,
     },
   });
@@ -207,14 +208,21 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Server configuration error" }, { status: 500 });
   }
 
+  const notLinkedPath = `/lti/not-linked?ref=${launch.id}&role=${user.role}`;
   let redirectPath: string;
 
   if (user.role === "LECTURER") {
-    redirectPath = examLink ? `/lecturer/exams/${examLink.examId}` : "/lecturer";
+    if (examLink) {
+      redirectPath = `/lecturer/exams/${examLink.examId}`;
+    } else if (resourceLinkId) {
+      redirectPath = notLinkedPath;
+    } else {
+      redirectPath = "/lecturer";
+    }
   } else if (examLink) {
     const exam = await prisma.exam.findUnique({ where: { id: examLink.examId } });
     if (!exam || !exam.published) {
-      redirectPath = "/lti/not-linked";
+      redirectPath = notLinkedPath;
     } else {
       const submission = await prisma.submission.upsert({
         where: { examId_studentId: { examId: exam.id, studentId: user.id } },
@@ -225,7 +233,7 @@ export async function POST(req: Request) {
     }
   } else if (resourceLinkId) {
     // This looks like an assignment launch, but no exam has been linked yet.
-    redirectPath = "/lti/not-linked";
+    redirectPath = notLinkedPath;
   } else {
     redirectPath = "/student";
   }
