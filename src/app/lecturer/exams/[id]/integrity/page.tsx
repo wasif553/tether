@@ -17,6 +17,8 @@ type IntegrityEventRow = {
   submissionStatus: string;
 };
 
+type RiskLevel = "CLEAN" | "LOW" | "MEDIUM" | "HIGH";
+
 type StudentGroup = {
   studentId: string;
   studentName: string;
@@ -25,13 +27,40 @@ type StudentGroup = {
   submissionStatus: string;
   eventCount: number;
   severityCounts: Record<string, number>;
+  riskScore: number;
+  riskLevel: RiskLevel;
+  unresolvedHighCount: number;
+  reviewRecommended: boolean;
 };
 
 type IntegrityData = {
   events: IntegrityEventRow[];
   studentGroups: StudentGroup[];
   severityCounts: Record<string, number>;
+  unresolvedHighSeverityCount: number;
 };
+
+const RISK_LEVEL_STYLES: Record<RiskLevel, string> = {
+  CLEAN: "bg-gray-100 text-gray-600",
+  LOW: "bg-blue-100 text-blue-700",
+  MEDIUM: "bg-yellow-100 text-yellow-700",
+  HIGH: "bg-red-100 text-red-700",
+};
+
+const RISK_LEVEL_LABELS: Record<RiskLevel, string> = {
+  CLEAN: "Clean",
+  LOW: "Low integrity risk",
+  MEDIUM: "Medium integrity risk",
+  HIGH: "High integrity risk",
+};
+
+function riskBadge(level: RiskLevel) {
+  return (
+    <span className={`rounded px-2 py-0.5 text-xs ${RISK_LEVEL_STYLES[level]}`}>
+      {RISK_LEVEL_LABELS[level]}
+    </span>
+  );
+}
 
 function severityBadge(severity: string) {
   const styles: Record<string, string> = {
@@ -152,8 +181,17 @@ export default function ExamIntegrityPage({
         <SummaryCard label="Students with events" value={String(studentsWithEvents)} />
         <SummaryCard label="Unresolved events" value={String(unresolvedEvents)} />
       </div>
+      {data.unresolvedHighSeverityCount > 0 && (
+        <p className="mt-3 text-sm text-red-600">
+          {data.unresolvedHighSeverityCount} unresolved high-severity event(s) — review recommended.
+        </p>
+      )}
 
-      <h2 className="mt-8 text-lg font-medium">Students with the most events</h2>
+      <h2 className="mt-8 text-lg font-medium">Students by integrity risk</h2>
+      <p className="mt-1 text-sm text-gray-500">
+        A deterministic point score (not AI) to help prioritize review. It is evidence for human
+        review, not a misconduct determination.
+      </p>
       <div className="mt-3 space-y-2">
         {data.studentGroups.length === 0 && (
           <p className="text-sm text-gray-500">No integrity events recorded</p>
@@ -167,7 +205,19 @@ export default function ExamIntegrityPage({
               <p className="font-medium">{g.studentName}</p>
               <p className="text-gray-500">{g.studentEmail}</p>
             </div>
-            <span className="text-gray-600">{g.eventCount} event(s)</span>
+            <div className="flex items-center gap-2">
+              <span className="text-gray-600">{g.eventCount} event(s)</span>
+              {riskBadge(g.riskLevel)}
+              {g.reviewRecommended && (
+                <span className="text-xs text-red-600">Review recommended</span>
+              )}
+              <Link
+                href={`/lecturer/submissions/${g.submissionId}/evidence`}
+                className="text-xs underline"
+              >
+                Evidence report
+              </Link>
+            </div>
           </div>
         ))}
       </div>

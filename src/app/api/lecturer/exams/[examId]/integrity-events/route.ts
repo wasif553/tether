@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { computeRiskScore, riskLevelForScore, type Severity } from "@/lib/integrityRisk";
 
 export async function GET(
   _req: Request,
@@ -39,6 +40,7 @@ export async function GET(
       submissionStatus: string;
       eventCount: number;
       severityCounts: Record<string, number>;
+      events: Array<{ severity: Severity; resolvedAt: Date | null }>;
     }
   >();
 
@@ -47,6 +49,7 @@ export async function GET(
     if (existing) {
       existing.eventCount += 1;
       existing.severityCounts[event.severity] = (existing.severityCounts[event.severity] ?? 0) + 1;
+      existing.events.push({ severity: event.severity, resolvedAt: event.resolvedAt });
     } else {
       eventsByStudent.set(event.studentId, {
         studentId: event.studentId,
@@ -56,6 +59,7 @@ export async function GET(
         submissionStatus: event.submission.status,
         eventCount: 1,
         severityCounts: { [event.severity]: 1 },
+        events: [{ severity: event.severity, resolvedAt: event.resolvedAt }],
       });
     }
   }
@@ -64,6 +68,10 @@ export async function GET(
   for (const event of events) {
     severityCounts[event.severity] = (severityCounts[event.severity] ?? 0) + 1;
   }
+
+  const unresolvedHighSeverityCount = events.filter(
+    (e) => e.severity === "HIGH" && !e.resolvedAt,
+  ).length;
 
   return NextResponse.json({
     events: events.map((e) => ({
@@ -79,10 +87,29 @@ export async function GET(
       student: { id: e.student.id, name: e.student.name, email: e.student.email },
       submissionStatus: e.submission.status,
     })),
-    studentGroups: Array.from(eventsByStudent.values()).sort(
-      (a, b) => b.eventCount - a.eventCount,
-    ),
+    studentGroups: Array.from(eventsByStudent.values())
+      .map((group) => {
+        const riskScore = computeRiskScore(group.events);
+        const unresolvedHighCount = group.events.filter(
+          (e) => e.severity === "HIGH" && !e.resolvedAt,
+        ).length;
+        return {
+          studentId: group.studentId,
+          studentName: group.studentName,
+          studentEmail: group.studentEmail,
+          submissionId: group.submissionId,
+          submissionStatus: group.submissionStatus,
+          eventCount: group.eventCount,
+          severityCounts: group.severityCounts,
+          riskScore,
+          riskLevel: riskLevelForScore(riskScore),
+          unresolvedHighCount,
+          reviewRecommended: unresolvedHighCount > 0 || riskScore >= 5,
+        };
+      })
+      .sort((a, b) => b.riskScore - a.riskScore),
     severityCounts,
+    unresolvedHighSeverityCount,
   });
 }
 

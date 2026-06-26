@@ -16,6 +16,7 @@ type Readiness = {
   integrityAndAnalytics: ReadinessItem[];
   aiFeatures: ReadinessItem[];
   deployment: ReadinessItem[];
+  coreReady: boolean;
 };
 
 const STATUS_LABELS: Record<Status, string> = {
@@ -82,11 +83,23 @@ export default function PilotReadinessPage() {
         values — only whether something is configured.
       </p>
 
+      <p
+        className={`mt-4 rounded p-3 text-sm ${
+          data.coreReady ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"
+        }`}
+      >
+        Core secure exam readiness: {data.coreReady ? "Ready" : "Needs setup"}. This never
+        depends on Canvas/LTI or AI configuration — both are optional modules.
+      </p>
+
       <div className="mt-6 space-y-4">
-        <Section title="A. Core exam flow" items={data.coreExamFlow} />
-        <Section title="B. Canvas / LTI" items={data.canvasLti} />
-        <Section title="C. Integrity and analytics" items={data.integrityAndAnalytics} />
-        <Section title="D. AI features" items={data.aiFeatures} />
+        <Section title="A. Core exam flow (required)" items={data.coreExamFlow} />
+        <Section
+          title="B. Integrity and analytics (required, part of core)"
+          items={data.integrityAndAnalytics}
+        />
+        <Section title="C. Canvas / LTI (optional module)" items={data.canvasLti} />
+        <Section title="D. AI features (optional module)" items={data.aiFeatures} />
         <Section title="E. Deployment readiness" items={data.deployment} />
       </div>
     </div>

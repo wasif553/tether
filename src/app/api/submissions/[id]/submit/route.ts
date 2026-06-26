@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
+import { parseSecureSettings, severityFor } from "@/lib/secureExam";
 
 export async function POST(
   _req: Request,
@@ -24,6 +25,28 @@ export async function POST(
 
   if (submission.status !== "IN_PROGRESS") {
     return NextResponse.json(submission);
+  }
+
+  const settings = parseSecureSettings(submission.exam.secureSettings);
+  const deadline = new Date(
+    submission.startedAt.getTime() + submission.exam.durationMins * 60_000,
+  );
+  if (new Date() > deadline && !settings.allowLateSubmit) {
+    await prisma.integrityEvent.create({
+      data: {
+        submissionId: id,
+        examId: submission.examId,
+        studentId: submission.studentId,
+        eventType: "SUBMIT_AFTER_DEADLINE",
+        severity: severityFor("SUBMIT_AFTER_DEADLINE", settings),
+        message: "A submission attempt was made after the exam deadline.",
+        occurredAt: new Date(),
+      },
+    });
+    return NextResponse.json(
+      { error: "The deadline for this exam has passed and late submission is not allowed" },
+      { status: 409 },
+    );
   }
 
   const answersByQuestion = new Map(submission.answers.map((a) => [a.questionId, a]));

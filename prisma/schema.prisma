@@ -85,6 +85,10 @@ model Exam {
   submissions     Submission[]
   integrityEvents IntegrityEvent[]
   ltiExamLinks    LtiExamLink[]
+  // Secure Exam Mode v1 settings (see src/lib/secureExam.ts for shape/defaults).
+  // A single JSON column rather than ~10 booleans/ints, since this app has no
+  // other multi-flag settings model and these are read/written together.
+  secureSettings  Json?
   createdAt       DateTime         @default(now())
 }
 

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { computeRiskScore, riskLevelForScore } from "@/lib/integrityRisk";
 
 export const PASS_THRESHOLD_PCT = 50;
 export const REVIEW_THRESHOLD_PCT = 40;
@@ -122,6 +123,13 @@ export type ExamAnalytics = {
     lowSeverityEvents: number;
     unresolvedEvents: number;
     studentsWithEvents: number;
+  };
+  integrityRiskSummary: {
+    cleanSessions: number;
+    lowRiskSessions: number;
+    mediumRiskSessions: number;
+    highRiskSessions: number;
+    highRiskStudentCount: number;
   };
   insights: Array<{
     severity: "INFO" | "WARNING" | "HIGH";
@@ -261,6 +269,39 @@ export async function calculateExamAnalytics(examId: string): Promise<ExamAnalyt
   const integrityEvents = await prisma.integrityEvent.findMany({ where: { examId } });
   const integritySummary = summarizeIntegrityEvents(integrityEvents);
 
+  const eventsBySubmission = new Map<string, typeof integrityEvents>();
+  for (const event of integrityEvents) {
+    const list = eventsBySubmission.get(event.submissionId) ?? [];
+    list.push(event);
+    eventsBySubmission.set(event.submissionId, list);
+  }
+
+  let cleanSessions = 0;
+  let lowRiskSessions = 0;
+  let mediumRiskSessions = 0;
+  let highRiskSessions = 0;
+  const highRiskStudentIds = new Set<string>();
+
+  for (const submission of exam.submissions) {
+    const events = eventsBySubmission.get(submission.id) ?? [];
+    const riskLevel = riskLevelForScore(computeRiskScore(events));
+    if (riskLevel === "CLEAN") cleanSessions++;
+    else if (riskLevel === "LOW") lowRiskSessions++;
+    else if (riskLevel === "MEDIUM") mediumRiskSessions++;
+    else {
+      highRiskSessions++;
+      highRiskStudentIds.add(submission.studentId);
+    }
+  }
+
+  const integrityRiskSummary: ExamAnalytics["integrityRiskSummary"] = {
+    cleanSessions,
+    lowRiskSessions,
+    mediumRiskSessions,
+    highRiskSessions,
+    highRiskStudentCount: highRiskStudentIds.size,
+  };
+
   const insights = buildInsights(summary, questionAnalytics, integritySummary);
 
   return {
@@ -269,6 +310,7 @@ export async function calculateExamAnalytics(examId: string): Promise<ExamAnalyt
     questionAnalytics,
     studentResults,
     integritySummary,
+    integrityRiskSummary,
     insights,
   };
 }

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { parseSecureSettings, secureSettingsInputSchema } from "@/lib/secureExam";
+import type { Prisma } from "@/generated/prisma/client";
 
 const updateExamSchema = z.object({
   title: z.string().min(1).optional(),
@@ -10,6 +12,7 @@ const updateExamSchema = z.object({
   published: z.boolean().optional(),
   startsAt: z.string().datetime().optional().nullable(),
   endsAt: z.string().datetime().optional().nullable(),
+  secureSettings: secureSettingsInputSchema.optional(),
 });
 
 async function getOwnedExam(examId: string, lecturerId: string) {
@@ -35,18 +38,23 @@ export async function GET(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  // Secure Exam Mode settings are not sensitive — students need them to
+  // know whether fullscreen is required, copy/paste is blocked, etc.
+  const secureSettings = parseSecureSettings(exam.secureSettings);
+
   if (session.user.role === "STUDENT") {
     if (!exam.published) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
     const sanitized = {
       ...exam,
+      secureSettings,
       questions: exam.questions.map((q) => ({ ...q, correctAnswer: undefined })),
     };
     return NextResponse.json(sanitized);
   }
 
-  return NextResponse.json(exam);
+  return NextResponse.json({ ...exam, secureSettings });
 }
 
 export async function PATCH(
@@ -68,7 +76,11 @@ export async function PATCH(
     return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
 
-  const { startsAt, endsAt, ...rest } = parsed.data;
+  const { startsAt, endsAt, secureSettings, ...rest } = parsed.data;
+
+  const mergedSecureSettings = secureSettings
+    ? parseSecureSettings({ ...parseSecureSettings(exam.secureSettings), ...secureSettings })
+    : undefined;
 
   const updated = await prisma.exam.update({
     where: { id },
@@ -76,10 +88,13 @@ export async function PATCH(
       ...rest,
       ...(startsAt !== undefined ? { startsAt: startsAt ? new Date(startsAt) : null } : {}),
       ...(endsAt !== undefined ? { endsAt: endsAt ? new Date(endsAt) : null } : {}),
+      ...(mergedSecureSettings
+        ? { secureSettings: mergedSecureSettings as Prisma.InputJsonValue }
+        : {}),
     },
   });
 
-  return NextResponse.json(updated);
+  return NextResponse.json({ ...updated, secureSettings: parseSecureSettings(updated.secureSettings) });
 }
 
 export async function DELETE(

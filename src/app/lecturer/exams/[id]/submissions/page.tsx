@@ -79,6 +79,12 @@ export default function SubmissionsListPage({
                 {s.status === "GRADED" ? `Score: ${s.totalScore}` : s.status}
               </span>
               <CanvasBadge status={s.canvasStatus} />
+              <Link
+                href={`/lecturer/submissions/${s.id}/evidence`}
+                className="text-sm underline"
+              >
+                Evidence
+              </Link>
               {s.status !== "IN_PROGRESS" && (
                 <Link
                   href={`/lecturer/exams/${id}/submissions/${s.id}`}

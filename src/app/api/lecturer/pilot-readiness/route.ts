@@ -33,13 +33,27 @@ export async function GET() {
   const hasPublished = exams.some((e) => e.published);
   const hasSubmission = exams.some((e) => e.submissions.length > 0);
   const hasGraded = exams.some((e) => e.submissions.some((s) => s.status === "GRADED"));
+  const hasSecureModeConfigured = exams.some((e) => {
+    const settings = e.secureSettings as { secureModeEnabled?: boolean } | null;
+    return Boolean(settings?.secureModeEnabled);
+  });
 
+  // Core readiness must never depend on Canvas/LTI or AI configuration —
+  // SES is a standalone secure exam platform first (see
+  // docs/secure-exam-threat-model.md).
   const coreExamFlow: ReadinessItem[] = [
     { label: "Exam creation available", status: hasExam ? "READY" : "NEEDS_SETUP" },
     { label: "Questions available", status: hasQuestions ? "READY" : "NEEDS_SETUP" },
     { label: "Exam published", status: hasPublished ? "READY" : "NEEDS_SETUP" },
     { label: "Student submission tested", status: hasSubmission ? "READY" : "NEEDS_SETUP" },
     { label: "Grading tested", status: hasGraded ? "READY" : "NEEDS_SETUP" },
+    {
+      label: "Secure Exam Mode configured on at least one exam",
+      status: hasSecureModeConfigured ? "READY" : "NEEDS_SETUP",
+      detail: hasSecureModeConfigured
+        ? undefined
+        : "Optional, but recommended before a graded pilot — enable on an exam's settings page",
+    },
   ];
 
   const ltiEnv = getLtiEnvStatus();
@@ -168,10 +182,13 @@ export async function GET() {
 
   return NextResponse.json({
     coreExamFlow,
-    canvasLti,
     integrityAndAnalytics,
+    canvasLti,
     aiFeatures,
     deployment,
+    // Explicit core/optional split: Canvas and AI are optional convenience
+    // modules and never gate "core" pilot readiness.
+    coreReady: [...coreExamFlow, ...integrityAndAnalytics].every((i) => i.status === "READY"),
   });
 }
 

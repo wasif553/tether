@@ -13,6 +13,18 @@ type Question = {
   order: number;
 };
 
+type SecureSettings = {
+  secureModeEnabled: boolean;
+  requireFullscreen: boolean;
+  blockCopyPaste: boolean;
+  blockRightClick: boolean;
+  trackWindowBlur: boolean;
+  autoSubmitOnTimerEnd: boolean;
+  allowLateSubmit: boolean;
+  maxAttempts: number;
+  showIntegrityWarningToStudent: boolean;
+};
+
 type Exam = {
   id: string;
   title: string;
@@ -20,6 +32,7 @@ type Exam = {
   durationMins: number;
   published: boolean;
   questions: Question[];
+  secureSettings: SecureSettings;
 };
 
 type GeneratedQuestion = {
@@ -62,6 +75,15 @@ export default function LecturerExamPage({
   const [exam, setExam] = useState<Exam | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const [secureForm, setSecureForm] = useState<SecureSettings | null>(null);
+  const [savingSecure, setSavingSecure] = useState(false);
+  const [submissionCounts, setSubmissionCounts] = useState<{
+    total: number;
+    submitted: number;
+    graded: number;
+  } | null>(null);
+  const [unresolvedHighRisk, setUnresolvedHighRisk] = useState<number | null>(null);
 
   const [qType, setQType] = useState<Question["type"]>("MULTIPLE_CHOICE");
   const [qText, setQText] = useState("");
@@ -108,7 +130,11 @@ export default function LecturerExamPage({
   async function loadExam() {
     setLoading(true);
     const res = await fetch(`/api/exams/${id}`);
-    if (res.ok) setExam(await res.json());
+    if (res.ok) {
+      const data: Exam = await res.json();
+      setExam(data);
+      setSecureForm(data.secureSettings);
+    }
     setLoading(false);
   }
 
@@ -117,6 +143,18 @@ export default function LecturerExamPage({
     if (!res.ok) return;
     const submissions: Array<{ status: string }> = await res.json();
     setHasUngradedSubmissions(submissions.some((s) => s.status === "SUBMITTED"));
+    setSubmissionCounts({
+      total: submissions.length,
+      submitted: submissions.filter((s) => s.status === "SUBMITTED").length,
+      graded: submissions.filter((s) => s.status === "GRADED").length,
+    });
+  }
+
+  async function loadIntegrityOverview() {
+    const res = await fetch(`/api/lecturer/exams/${id}/integrity-events`);
+    if (!res.ok) return;
+    const data: { unresolvedHighSeverityCount: number } = await res.json();
+    setUnresolvedHighRisk(data.unresolvedHighSeverityCount);
   }
 
   async function loadLtiLinks() {
@@ -133,6 +171,7 @@ export default function LecturerExamPage({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadExam();
     loadSubmissionStatus();
+    loadIntegrityOverview();
     loadLtiLinks();
     loadPlatforms();
   }, [id]);
@@ -225,6 +264,18 @@ export default function LecturerExamPage({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ published: !exam.published }),
     });
+    if (res.ok) await loadExam();
+  }
+
+  async function handleSaveSecureSettings() {
+    if (!secureForm) return;
+    setSavingSecure(true);
+    const res = await fetch(`/api/exams/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secureSettings: secureForm }),
+    });
+    setSavingSecure(false);
     if (res.ok) await loadExam();
   }
 
@@ -391,6 +442,130 @@ export default function LecturerExamPage({
       </div>
       <p className="text-sm text-gray-500">{exam.durationMins} minutes</p>
       {markEssaysMessage && <p className="mt-2 text-sm text-gray-600">{markEssaysMessage}</p>}
+
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="rounded border border-gray-200 p-3">
+          <p className="text-xs uppercase text-gray-500">Secure Exam Mode</p>
+          <p className="mt-1 text-sm">
+            {exam.secureSettings.secureModeEnabled ? "Enabled" : "Disabled"}
+          </p>
+        </div>
+        <div className="rounded border border-gray-200 p-3">
+          <p className="text-xs uppercase text-gray-500">Submissions</p>
+          <p className="mt-1 text-sm">
+            {submissionCounts ? `${submissionCounts.total} total` : "—"}
+          </p>
+        </div>
+        <div className="rounded border border-gray-200 p-3">
+          <p className="text-xs uppercase text-gray-500">Pending grading</p>
+          <p className="mt-1 text-sm">{submissionCounts ? submissionCounts.submitted : "—"}</p>
+        </div>
+        <div className="rounded border border-gray-200 p-3">
+          <p className="text-xs uppercase text-gray-500">Unresolved high-risk events</p>
+          <p className={`mt-1 text-sm ${unresolvedHighRisk ? "text-red-600" : ""}`}>
+            {unresolvedHighRisk != null ? unresolvedHighRisk : "—"}
+          </p>
+        </div>
+      </div>
+
+      <h2 className="mt-8 text-lg font-medium">Secure Exam Mode</h2>
+      <p className="mt-1 text-sm text-gray-500">
+        Secure Exam Mode records exam integrity signals for lecturer review. It does not
+        automatically accuse students of misconduct.
+      </p>
+      {secureForm && (
+        <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+          <label className="flex items-center gap-2 text-sm font-medium">
+            <input
+              type="checkbox"
+              checked={secureForm.secureModeEnabled}
+              onChange={(e) => setSecureForm({ ...secureForm, secureModeEnabled: e.target.checked })}
+            />
+            Enable Secure Exam Mode
+          </label>
+
+          <div className="grid grid-cols-2 gap-2 pl-1 text-sm text-gray-700">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                disabled={!secureForm.secureModeEnabled}
+                checked={secureForm.requireFullscreen}
+                onChange={(e) => setSecureForm({ ...secureForm, requireFullscreen: e.target.checked })}
+              />
+              Require fullscreen
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                disabled={!secureForm.secureModeEnabled}
+                checked={secureForm.trackWindowBlur}
+                onChange={(e) => setSecureForm({ ...secureForm, trackWindowBlur: e.target.checked })}
+              />
+              Record tab/window switching
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                disabled={!secureForm.secureModeEnabled}
+                checked={secureForm.blockCopyPaste}
+                onChange={(e) => setSecureForm({ ...secureForm, blockCopyPaste: e.target.checked })}
+              />
+              Block copy/paste
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                disabled={!secureForm.secureModeEnabled}
+                checked={secureForm.blockRightClick}
+                onChange={(e) => setSecureForm({ ...secureForm, blockRightClick: e.target.checked })}
+              />
+              Block right click
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                disabled={!secureForm.secureModeEnabled}
+                checked={secureForm.autoSubmitOnTimerEnd}
+                onChange={(e) => setSecureForm({ ...secureForm, autoSubmitOnTimerEnd: e.target.checked })}
+              />
+              Auto-submit when time expires
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                disabled={!secureForm.secureModeEnabled}
+                checked={secureForm.showIntegrityWarningToStudent}
+                onChange={(e) =>
+                  setSecureForm({ ...secureForm, showIntegrityWarningToStudent: e.target.checked })
+                }
+              />
+              Student warning messages enabled
+            </label>
+          </div>
+
+          <div className="flex items-center gap-3 pl-1">
+            <label className="text-sm text-gray-700">Maximum attempts</label>
+            <input
+              type="number"
+              min={1}
+              max={1}
+              disabled={!secureForm.secureModeEnabled}
+              value={secureForm.maxAttempts}
+              onChange={(e) => setSecureForm({ ...secureForm, maxAttempts: Number(e.target.value) })}
+              className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+            />
+            <span className="text-xs text-gray-400">(v1 supports 1 attempt only)</span>
+          </div>
+
+          <button
+            onClick={handleSaveSecureSettings}
+            disabled={savingSecure}
+            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+          >
+            {savingSecure ? "Saving..." : "Save Secure Exam Mode settings"}
+          </button>
+        </div>
+      )}
 
       <h2 className="mt-8 text-lg font-medium">Questions</h2>
       <div className="mt-3 space-y-3">

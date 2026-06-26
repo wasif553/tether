@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { parseSecureSettings } from "@/lib/secureExam";
 
 const answerSchema = z.object({
   questionId: z.string(),
@@ -34,7 +35,8 @@ export async function PATCH(
   const deadline = new Date(
     submission.startedAt.getTime() + submission.exam.durationMins * 60_000,
   );
-  if (new Date() > deadline) {
+  const settings = parseSecureSettings(submission.exam.secureSettings);
+  if (new Date() > deadline && !settings.allowLateSubmit) {
     return NextResponse.json({ error: "Time is up" }, { status: 409 });
   }
 

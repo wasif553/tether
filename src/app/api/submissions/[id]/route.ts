@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { parseSecureSettings } from "@/lib/secureExam";
 
 export async function GET(
   _req: Request,
@@ -62,7 +63,12 @@ export async function GET(
     totalScore: submission.totalScore,
     deadline,
     canvasPassback,
-    exam: { id: submission.exam.id, title: submission.exam.title, questions },
+    exam: {
+      id: submission.exam.id,
+      title: submission.exam.title,
+      questions,
+      secureSettings: parseSecureSettings(submission.exam.secureSettings),
+    },
     answers: submission.answers.map((a) => ({
       questionId: a.questionId,
       response: a.response,

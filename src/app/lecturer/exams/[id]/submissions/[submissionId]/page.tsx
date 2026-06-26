@@ -2,6 +2,7 @@
 
 import { useEffect, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 type Question = {
   id: string;
@@ -155,7 +156,15 @@ export default function GradeSubmissionPage({
 
   return (
     <div className="mx-auto max-w-2xl">
-      <h1 className="text-2xl font-semibold">{data.exam.title}</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">{data.exam.title}</h1>
+        <Link
+          href={`/lecturer/submissions/${submissionId}/evidence`}
+          className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+        >
+          Evidence report
+        </Link>
+      </div>
       <p className="text-sm text-gray-500">Status: {data.status}</p>
 
       <div className="mt-6 space-y-4">

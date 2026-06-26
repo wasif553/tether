@@ -59,12 +59,21 @@ type IntegritySummary = {
   studentsWithEvents: number;
 };
 
+type IntegrityRiskSummary = {
+  cleanSessions: number;
+  lowRiskSessions: number;
+  mediumRiskSessions: number;
+  highRiskSessions: number;
+  highRiskStudentCount: number;
+};
+
 type Analytics = {
   summary: Summary;
   scoreDistribution: ScoreBand[];
   questionAnalytics: QuestionAnalytics[];
   studentResults: StudentResult[];
   integritySummary: IntegritySummary;
+  integrityRiskSummary: IntegrityRiskSummary;
   insights: Insight[];
 };
 
@@ -293,6 +302,29 @@ export default function ExamAnalyticsPage({
             value={String(data.integritySummary.studentsWithEvents)}
           />
         </div>
+
+        <h3 className="mt-4 text-sm font-medium text-gray-700">Integrity risk by session</h3>
+        <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <SummaryCard label="Clean" value={String(data.integrityRiskSummary.cleanSessions)} />
+          <SummaryCard
+            label="Low risk"
+            value={String(data.integrityRiskSummary.lowRiskSessions)}
+          />
+          <SummaryCard
+            label="Medium risk"
+            value={String(data.integrityRiskSummary.mediumRiskSessions)}
+          />
+          <SummaryCard
+            label="High risk"
+            value={String(data.integrityRiskSummary.highRiskSessions)}
+          />
+        </div>
+        <p className="mt-2 text-xs text-gray-500">
+          {data.integrityRiskSummary.highRiskStudentCount} student(s) have at least one high
+          integrity risk session. Risk scores are signals for review, not misconduct
+          determinations.
+        </p>
+
         <Link
           href={`/lecturer/exams/${id}/integrity`}
           className="mt-3 inline-block text-sm underline"
