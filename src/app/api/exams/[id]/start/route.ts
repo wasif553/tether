@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma/client";
 
 export async function POST(
   _req: Request,
@@ -30,11 +31,25 @@ export async function POST(
   });
   if (existing) return NextResponse.json(existing);
 
-  const submission = await prisma.submission.create({
-    data: { examId: id, studentId: session.user.id },
-  });
-
-  return NextResponse.json(submission, { status: 201 });
+  // Two near-simultaneous "start exam" requests from the same student (e.g.
+  // a double-click, or a flaky network retry) can both pass the check above
+  // before either has created a row. The @@unique([examId, studentId])
+  // constraint then rejects the loser — recover by returning the winner's
+  // submission instead of a 500, so starting is idempotent under races.
+  try {
+    const submission = await prisma.submission.create({
+      data: { examId: id, studentId: session.user.id },
+    });
+    return NextResponse.json(submission, { status: 201 });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      const winner = await prisma.submission.findUnique({
+        where: { examId_studentId: { examId: id, studentId: session.user.id } },
+      });
+      if (winner) return NextResponse.json(winner);
+    }
+    throw err;
+  }
 }
 
 export const dynamic = "force-dynamic";
