@@ -12,6 +12,14 @@ type ReadinessItem = {
   detail?: string;
 };
 
+/**
+ * Core secure exam readiness (Part A) must never depend on Canvas/LTI or AI
+ * configuration — SES is a standalone secure exam platform first (see
+ * docs/secure-exam-threat-model.md and docs/deployment-vercel-supabase.md).
+ * Canvas and AI are always reported as separate optional modules (Parts B/C)
+ * so a missing API key or platform link never marks the whole app "not
+ * ready".
+ */
 export async function GET() {
   const session = await auth();
   if (!session || session.user.role !== "LECTURER") {
@@ -28,6 +36,20 @@ export async function GET() {
     },
   });
 
+  const requiredEnv = getRequiredEnvStatus();
+  const ltiEnv = getLtiEnvStatus();
+  const aiEnv = getAiEnvStatus();
+
+  let databaseConnected = true;
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+  } catch {
+    databaseConnected = false;
+  }
+
+  const authSecretConfigured = requiredEnv.checks.find((c) => c.key === "AUTH_SECRET")?.present ?? false;
+  const appUrlConfigured = requiredEnv.checks.find((c) => c.key === "APP_URL")?.present ?? false;
+
   const hasExam = exams.length > 0;
   const hasQuestions = exams.some((e) => e.questions.length > 0);
   const hasPublished = exams.some((e) => e.published);
@@ -37,62 +59,78 @@ export async function GET() {
     const settings = e.secureSettings as { secureModeEnabled?: boolean } | null;
     return Boolean(settings?.secureModeEnabled);
   });
+  const integrityCount = await prisma.integrityEvent.count({
+    where: { exam: { createdById: lecturerId } },
+  });
 
-  // Core readiness must never depend on Canvas/LTI or AI configuration —
-  // SES is a standalone secure exam platform first (see
-  // docs/secure-exam-threat-model.md).
-  const coreExamFlow: ReadinessItem[] = [
-    { label: "Exam creation available", status: hasExam ? "READY" : "NEEDS_SETUP" },
-    { label: "Questions available", status: hasQuestions ? "READY" : "NEEDS_SETUP" },
-    { label: "Exam published", status: hasPublished ? "READY" : "NEEDS_SETUP" },
-    { label: "Student submission tested", status: hasSubmission ? "READY" : "NEEDS_SETUP" },
-    { label: "Grading tested", status: hasGraded ? "READY" : "NEEDS_SETUP" },
+  // --- A. Core secure exam readiness (required) ---
+  const core: ReadinessItem[] = [
+    { label: "Database connected", status: databaseConnected ? "READY" : "NEEDS_SETUP" },
+    { label: "Auth secret configured", status: authSecretConfigured ? "READY" : "NEEDS_SETUP" },
+    { label: "App URL configured", status: appUrlConfigured ? "READY" : "NEEDS_SETUP" },
     {
-      label: "Secure Exam Mode configured on at least one exam",
-      status: hasSecureModeConfigured ? "READY" : "NEEDS_SETUP",
+      label: "Secure exam flow available",
+      status: hasExam && hasQuestions && hasPublished && hasSubmission && hasGraded ? "READY" : "NEEDS_SETUP",
       detail: hasSecureModeConfigured
-        ? undefined
-        : "Optional, but recommended before a graded pilot — enable on an exam's settings page",
+        ? "Secure Exam Mode configured on at least one exam"
+        : "Secure Exam Mode available but not yet enabled on any exam",
     },
+    {
+      label: "Integrity events available",
+      status: "READY",
+      detail: `${integrityCount} event(s) recorded for your exams`,
+    },
+    { label: "Analytics available", status: "READY" },
+    { label: "Evidence report available", status: "READY" },
   ];
+  const coreReady = core.every((i) => i.status === "READY");
 
-  const ltiEnv = getLtiEnvStatus();
+  // --- B. Optional Canvas readiness ---
   const platform = await prisma.ltiPlatform.findFirst();
+  const totalLinkedResources = await prisma.ltiExamLink.count();
   const examLinkCount = await prisma.ltiExamLink.count({
     where: { exam: { createdById: lecturerId } },
   });
   const recentLaunch = await prisma.ltiLaunch.findFirst({ orderBy: { createdAt: "desc" } });
-  const launchWithAgs = await prisma.ltiLaunch.findFirst({
-    where: { agsScopeJson: { not: "JsonNull" } },
-    orderBy: { createdAt: "desc" },
-  });
-  const passbackCount = await prisma.canvasGradePassback.count();
-  const totalLinkedResources = await prisma.ltiExamLink.count();
   const unmatchedCount = await countUnmatchedLaunches();
   const mostRecentSent = await prisma.canvasGradePassback.findFirst({
     where: { status: "SENT" },
     orderBy: { sentAt: "desc" },
   });
-  const mostRecentPassback = await prisma.canvasGradePassback.findFirst({
-    orderBy: { updatedAt: "desc" },
-  });
 
-  const canvasLti: ReadinessItem[] = [
+  const canvasConfigured = ltiEnv.allPresent;
+  const canvasOptional: ReadinessItem[] = [
     {
-      label: "LTI platform configured",
-      status: platform ? "READY" : "NOT_CONFIGURED",
-      detail: platform ? platform.issuer : "Run the seed script or register a Canvas platform",
+      label: "LTI keys configured",
+      status: canvasConfigured ? "READY" : "NOT_CONFIGURED",
+      detail: canvasConfigured ? undefined : "Optional Canvas module not configured",
     },
-    { label: "JWKS available", status: ltiEnv.checks.find((c) => c.key === "LTI_PUBLIC_KEY")?.present ? "READY" : "NOT_CONFIGURED" },
-    { label: "Config URL available", status: ltiEnv.checks.find((c) => c.key === "LTI_PRIVATE_KEY")?.present ? "READY" : "NOT_CONFIGURED" },
     {
-      label: "At least one exam linked to a Canvas resource link",
-      status: examLinkCount > 0 ? "READY" : "NEEDS_SETUP",
+      label: "Canvas platform configured",
+      status: platform ? "READY" : "NOT_CONFIGURED",
+      detail: platform ? platform.issuer : "Optional Canvas module not configured",
     },
     {
       label: "Linked Canvas resources",
-      status: totalLinkedResources > 0 ? "READY" : "NEEDS_SETUP",
-      detail: `${totalLinkedResources} resource(s) linked`,
+      status: totalLinkedResources > 0 ? "READY" : "NOT_CONFIGURED",
+      detail:
+        totalLinkedResources > 0
+          ? `${examLinkCount} of your exam(s) linked, ${totalLinkedResources} total`
+          : "Optional Canvas module not configured",
+    },
+    {
+      label: "LTI launch captured",
+      status: recentLaunch ? "READY" : "NOT_CONFIGURED",
+      detail: recentLaunch
+        ? new Date(recentLaunch.createdAt).toLocaleString()
+        : "Optional Canvas module not configured",
+    },
+    {
+      label: "Canvas passback SENT",
+      status: mostRecentSent ? "READY" : "WARNING",
+      detail: mostRecentSent
+        ? `Last SENT: ${new Date(mostRecentSent.sentAt ?? mostRecentSent.updatedAt).toLocaleString()}`
+        : "Canvas validation pending — no passback has reached SENT yet",
     },
     {
       label: "Unmatched Canvas launches",
@@ -102,78 +140,30 @@ export async function GET() {
           ? `${unmatchedCount} launch(es) waiting to be linked — open Unmatched Canvas Launches`
           : "No unmatched launches waiting",
     },
-    {
-      label: "Recent LTI launch captured",
-      status: recentLaunch ? "READY" : "NEEDS_SETUP",
-      detail: recentLaunch ? new Date(recentLaunch.createdAt).toLocaleString() : undefined,
-    },
-    {
-      label: "Canvas AGS claims captured",
-      status: launchWithAgs ? "READY" : "NEEDS_SETUP",
-    },
-    {
-      label: "Grade passback status available",
-      status: passbackCount > 0 ? "READY" : "NEEDS_SETUP",
-      detail: mostRecentPassback
-        ? `Most recent: ${mostRecentPassback.status}`
-        : undefined,
-    },
-    {
-      label: "Live Canvas passback verified (SENT)",
-      status: mostRecentSent ? "READY" : "WARNING",
-      detail: mostRecentSent
-        ? `Last SENT: ${new Date(mostRecentSent.sentAt ?? mostRecentSent.updatedAt).toLocaleString()}`
-        : "Real Canvas validation still required — no passback has reached SENT yet",
-    },
   ];
 
-  const integrityCount = await prisma.integrityEvent.count({
-    where: { exam: { createdById: lecturerId } },
-  });
-
-  const integrityAndAnalytics: ReadinessItem[] = [
+  // --- C. Optional AI readiness ---
+  const aiOptional: ReadinessItem[] = [
     {
-      label: "Integrity events enabled",
-      status: "READY",
-      detail: `${integrityCount} event(s) recorded for your exams`,
+      label: "Anthropic key configured",
+      status: aiEnv.allPresent ? "READY" : "NOT_CONFIGURED",
+      detail: aiEnv.allPresent
+        ? undefined
+        : "AI assistance unavailable until API key is configured",
     },
-    { label: "Analytics page available", status: "READY" },
-    { label: "CSV export available", status: "READY" },
+    { label: "AI question generation available", status: "READY" },
+    { label: "AI draft marking available", status: "READY" },
   ];
 
-  const aiEnv = getAiEnvStatus();
-  const aiFeatures: ReadinessItem[] = [
-    {
-      label: "ANTHROPIC_API_KEY configured",
-      status: aiEnv.allPresent ? "READY" : "WARNING",
-      detail: aiEnv.allPresent ? undefined : "AI question generation and essay marking will return a safe error until this is set",
-    },
-    { label: "AI question generation route available", status: "READY" },
-    { label: "AI essay marking route available", status: "READY" },
-  ];
-
-  const requiredEnv = getRequiredEnvStatus();
-  let databaseConnected = true;
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-  } catch {
-    databaseConnected = false;
-  }
-
+  // --- D. Deployment readiness (required) ---
   const deployment: ReadinessItem[] = [
+    { label: "Production database configured", status: databaseConnected ? "READY" : "NEEDS_SETUP" },
+    { label: "Public app URL configured", status: appUrlConfigured ? "READY" : "NEEDS_SETUP" },
+    { label: "Auth secret configured", status: authSecretConfigured ? "READY" : "NEEDS_SETUP" },
+    { label: "Health check available", status: "READY" },
     {
-      label: "AUTH_SECRET configured",
-      status: requiredEnv.checks.find((c) => c.key === "AUTH_SECRET")?.present ? "READY" : "NOT_CONFIGURED",
-    },
-    {
-      label: "APP_URL configured",
-      status: requiredEnv.checks.find((c) => c.key === "APP_URL")?.present ? "READY" : "NOT_CONFIGURED",
-    },
-    { label: "LTI keys configured", status: ltiEnv.allPresent ? "READY" : "NOT_CONFIGURED" },
-    { label: "Database connected", status: databaseConnected ? "READY" : "WARNING" },
-    {
-      label: "No obvious missing required environment variables",
-      status: requiredEnv.allPresent ? "READY" : "NOT_CONFIGURED",
+      label: "No required secret missing for standalone mode",
+      status: requiredEnv.allPresent ? "READY" : "NEEDS_SETUP",
       detail: requiredEnv.allPresent
         ? undefined
         : `Missing: ${requiredEnv.checks.filter((c) => !c.present).map((c) => c.key).join(", ")}`,
@@ -181,14 +171,16 @@ export async function GET() {
   ];
 
   return NextResponse.json({
-    coreExamFlow,
-    integrityAndAnalytics,
-    canvasLti,
-    aiFeatures,
+    core,
+    canvasOptional,
+    aiOptional,
     deployment,
-    // Explicit core/optional split: Canvas and AI are optional convenience
-    // modules and never gate "core" pilot readiness.
-    coreReady: [...coreExamFlow, ...integrityAndAnalytics].every((i) => i.status === "READY"),
+    coreReady,
+    summary: {
+      corePlatform: coreReady ? "Core platform ready" : "Core platform needs setup",
+      canvas: canvasConfigured ? "Canvas module configured" : "Optional Canvas module not configured",
+      ai: aiEnv.allPresent ? "AI module configured" : "Optional AI module not configured",
+    },
   });
 }
 

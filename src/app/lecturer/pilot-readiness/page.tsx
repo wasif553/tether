@@ -11,12 +11,12 @@ type ReadinessItem = {
 };
 
 type Readiness = {
-  coreExamFlow: ReadinessItem[];
-  canvasLti: ReadinessItem[];
-  integrityAndAnalytics: ReadinessItem[];
-  aiFeatures: ReadinessItem[];
+  core: ReadinessItem[];
+  canvasOptional: ReadinessItem[];
+  aiOptional: ReadinessItem[];
   deployment: ReadinessItem[];
   coreReady: boolean;
+  summary: { corePlatform: string; canvas: string; ai: string };
 };
 
 const STATUS_LABELS: Record<Status, string> = {
@@ -78,9 +78,9 @@ export default function PilotReadinessPage() {
     <div className="mx-auto max-w-3xl">
       <h1 className="text-2xl font-semibold">Pilot Readiness</h1>
       <p className="mt-1 text-sm text-gray-500">
-        A checklist of whether Safe Exam System is ready for a controlled pilot with a real
-        Canvas course, one lecturer, and a small group of students. This page never shows secret
-        values — only whether something is configured.
+        A checklist of whether Safe Exam System is ready for a controlled pilot. This page never
+        shows secret values — only whether something is configured. Canvas and AI are optional
+        modules; missing configuration there never blocks core readiness.
       </p>
 
       <p
@@ -88,19 +88,14 @@ export default function PilotReadinessPage() {
           data.coreReady ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"
         }`}
       >
-        Core secure exam readiness: {data.coreReady ? "Ready" : "Needs setup"}. This never
-        depends on Canvas/LTI or AI configuration — both are optional modules.
+        {data.summary.corePlatform}. This never depends on Canvas/LTI or AI configuration.
       </p>
 
       <div className="mt-6 space-y-4">
-        <Section title="A. Core exam flow (required)" items={data.coreExamFlow} />
-        <Section
-          title="B. Integrity and analytics (required, part of core)"
-          items={data.integrityAndAnalytics}
-        />
-        <Section title="C. Canvas / LTI (optional module)" items={data.canvasLti} />
-        <Section title="D. AI features (optional module)" items={data.aiFeatures} />
-        <Section title="E. Deployment readiness" items={data.deployment} />
+        <Section title="A. Core secure exam readiness (required)" items={data.core} />
+        <Section title="B. Optional Canvas readiness" items={data.canvasOptional} />
+        <Section title="C. Optional AI readiness" items={data.aiOptional} />
+        <Section title="D. Deployment readiness (required)" items={data.deployment} />
       </div>
     </div>
   );

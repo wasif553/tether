@@ -129,10 +129,10 @@ describe("pilot readiness privacy boundary", () => {
     const res = await pilotReadinessRoute.GET();
     expect(res.status).toBe(200);
     const data = await res.json();
-    expect(data).toHaveProperty("coreExamFlow");
-    expect(data).toHaveProperty("canvasLti");
-    expect(data).toHaveProperty("integrityAndAnalytics");
-    expect(data).toHaveProperty("aiFeatures");
+    expect(data).toHaveProperty("core");
+    expect(data).toHaveProperty("canvasOptional");
+    expect(data).toHaveProperty("aiOptional");
     expect(data).toHaveProperty("deployment");
+    expect(data).toHaveProperty("coreReady");
   });
 });

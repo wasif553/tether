@@ -12,6 +12,10 @@ const ENV_KEYS = [
   "APP_URL",
   "LTI_PRIVATE_KEY",
   "LTI_PUBLIC_KEY",
+  "LTI_PRIVATE_KEY_B64",
+  "LTI_PUBLIC_KEY_B64",
+  "LTI_PRIVATE_KEY_PATH",
+  "LTI_PUBLIC_KEY_PATH",
   "LTI_CLIENT_ID",
   "LTI_DEPLOYMENT_ID",
   "LTI_PLATFORM_ISSUER",
@@ -69,8 +73,8 @@ describe("getLtiEnvStatus", () => {
     process.env.LTI_PRIVATE_KEY = "pem-data";
     const status = getLtiEnvStatus();
     expect(status.allPresent).toBe(false);
-    const privateKeyCheck = status.checks.find((c) => c.key === "LTI_PRIVATE_KEY");
-    const publicKeyCheck = status.checks.find((c) => c.key === "LTI_PUBLIC_KEY");
+    const privateKeyCheck = status.checks.find((c) => c.key === "LTI_PRIVATE_KEY_B64");
+    const publicKeyCheck = status.checks.find((c) => c.key === "LTI_PUBLIC_KEY_B64");
     expect(privateKeyCheck?.present).toBe(true);
     expect(publicKeyCheck?.present).toBe(false);
   });

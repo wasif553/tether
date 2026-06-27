@@ -50,8 +50,9 @@ export async function GET() {
   const targetLinkUri = `${appUrl}/api/lti/launch`;
 
   const config: LtiToolConfig = {
-    title: "Safe Exam System",
-    description: "Cheat-proof online examination platform",
+    title: process.env.LTI_TOOL_NAME || "Safe Exam System",
+    description:
+      process.env.LTI_TOOL_DESCRIPTION || "Secure online examination platform with integrity review",
     oidc_initiation_url: `${appUrl}/api/lti/login`,
     target_link_uri: targetLinkUri,
     scopes: [

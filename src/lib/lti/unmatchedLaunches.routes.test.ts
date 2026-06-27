@@ -162,7 +162,7 @@ describe("pilot readiness unmatched-launch warning", () => {
     const res = await pilotReadinessRoute.GET();
     expect(res.status).toBe(200);
     const data = await res.json();
-    const item = data.canvasLti.find((i: { label: string }) => i.label === "Unmatched Canvas launches");
+    const item = data.canvasOptional.find((i: { label: string }) => i.label === "Unmatched Canvas launches");
     expect(item).toBeDefined();
     expect(["READY", "WARNING"]).toContain(item.status);
   });

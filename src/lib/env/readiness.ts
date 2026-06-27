@@ -21,6 +21,15 @@ function check(key: string, label: string): EnvCheck {
   return { key, label, present: typeof value === "string" && value.length > 0 };
 }
 
+/** True if any of the given env vars is set — used for keys that can be supplied via multiple sources (raw PEM, base64, or a local file path). */
+function checkAny(keys: string[], label: string): EnvCheck {
+  const present = keys.some((k) => {
+    const value = process.env[k];
+    return typeof value === "string" && value.length > 0;
+  });
+  return { key: keys[0], label, present };
+}
+
 function group(checks: EnvCheck[]): EnvGroupStatus {
   return { checks, allPresent: checks.every((c) => c.present) };
 }
@@ -37,8 +46,14 @@ export function getRequiredEnvStatus(): EnvGroupStatus {
 /** Variables needed for the Canvas LTI 1.3 / AGS integration. */
 export function getLtiEnvStatus(): EnvGroupStatus {
   return group([
-    check("LTI_PRIVATE_KEY", "LTI signing private key"),
-    check("LTI_PUBLIC_KEY", "LTI signing public key"),
+    checkAny(
+      ["LTI_PRIVATE_KEY_B64", "LTI_PRIVATE_KEY_PATH", "LTI_PRIVATE_KEY"],
+      "LTI signing private key",
+    ),
+    checkAny(
+      ["LTI_PUBLIC_KEY_B64", "LTI_PUBLIC_KEY_PATH", "LTI_PUBLIC_KEY"],
+      "LTI signing public key",
+    ),
     check("LTI_CLIENT_ID", "Canvas Developer Key client ID"),
     check("LTI_DEPLOYMENT_ID", "Canvas deployment ID"),
     check("LTI_PLATFORM_ISSUER", "Canvas platform issuer"),
