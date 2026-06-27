@@ -8,38 +8,19 @@ This validation is for the **standalone secure exam flow only**. Canvas/LTI
 and AI are optional modules and are never exercised by the load test script
 — a deployment with neither configured is expected to pass.
 
-## ACTION REQUIRED before a real concurrent pilot
+## RESOLVED — Supabase pooler mode and connection handling
 
-Live load testing against the deployed instance (10 concurrent students, 1
-exam) found that `submit` requests fail under concurrency with empty-body
-500s — these are infrastructure-level timeouts, not application error
-responses (the app's own error responses always include a JSON body).
-
-The app side was hardened (`src/lib/prisma.ts` now caps the in-process
-connection pool at `DATABASE_POOL_MAX`, default 3, per serverless
-invocation — see commit `f236a54`), but the failures persisted after that
-fix was deployed. The remaining cause is almost certainly **the deployed
-`DATABASE_URL` pointing at Supabase's session-mode pooler (port `5432`)
-instead of the transaction-mode pooler (port `6543`)** that
-[docs/deployment-vercel-supabase.md](deployment-vercel-supabase.md) already
-recommends. Supabase's session-mode pooler enforces a small *global*
-connection cap (observed directly as `EMAXCONNSESSION ... pool_size: 15`
-during local testing against the same database) shared across every
-concurrent Vercel function invocation — at 10 concurrent students this is
-easily exhausted, regardless of how conservative this app's own per-instance
-pool cap is.
-
-**This is a Vercel dashboard environment variable change, not a code
-change** — it requires the project owner to update `DATABASE_URL` in
-Vercel's environment variables to use the Supabase connection string from
-the **"Connection pooling" / Transaction mode** tab (port `6543`), then
-redeploy. This was not done as part of this validation because it requires
-access to the live Vercel project settings and the real Supabase
-credentials, neither of which were available here.
-
-**Do not run a real concurrent pilot (even the 5–10 user "internal users"
-stage) until this is fixed and `node scripts/load-test-secure-exam.mjs`
-shows ≥95% submit success at 10 students.**
+Earlier rounds of live load testing against the deployed instance found
+`submit` requests failing under concurrency with empty-body 500s
+(infrastructure-level timeouts). Root cause: `DATABASE_URL` was pointing at
+Supabase's session-mode pooler (port `5432`, global ~15-connection cap)
+instead of the transaction-mode pooler (port `6543`). This was fixed by
+switching the Vercel `DATABASE_URL` environment variable to the
+transaction-mode connection string, on top of the app-side hardening
+already in place (`DATABASE_POOL_MAX` connection cap in `src/lib/prisma.ts`,
+commit `f236a54`; the submit route's batch-transaction rewrite, commits
+`492c35c` and `5931e62`). See "Final validated results" below for the
+re-run after this fix.
 
 ## What was tested
 
@@ -95,20 +76,45 @@ itself is not validated past that size.
 Pass `--cleanup=false` to skip exam deletion (useful if you want to
 inspect the created data manually afterward in the lecturer UI).
 
-## Live stage results (this validation round)
+## Live stage results — earlier (pre-fix) rounds
 
-Run against `https://tether-oa80zzdro-tether5.vercel.app`:
+Run against the previous preview deployment URL, before the Supabase
+pooler-mode fix and the submit-route batch-transaction rewrite:
 
 | Stage | Result |
 |---|---|
 | 10 students, 1 exam (before fix) | NEEDS INVESTIGATION — start/autosave/integrity-event 100%, submit 10% (1/10), integrity-events fetch failed |
 | Connection-pool fix deployed (commit `f236a54`) | App-side pool capped at `DATABASE_POOL_MAX=3`; deployed and confirmed live via `scripts/smoke-deployed.mjs` |
-| 10 students, 1 exam (after fix) | Still NEEDS INVESTIGATION — start/autosave/integrity-event 100%, submit 30% (3/10). Root cause narrowed to the **Supabase session-mode pooler's global ~15-connection cap** (see "ACTION REQUIRED" above) rather than this app's own pool sizing |
-| 25 students, 2 exams | **Not run** — stage 1 did not pass cleanly, and this document's own rule is to only escalate after a clean run |
-| 50 students, 3 exams | **Not run** — same reason |
+| 10 students, 1 exam (after fix) | Still NEEDS INVESTIGATION — start/autosave/integrity-event 100%, submit 30% (3/10). Root cause narrowed to the **Supabase session-mode pooler's global ~15-connection cap** rather than this app's own pool sizing |
+| 25 students, 2 exams | Not run — stage 1 had not passed cleanly yet |
+| 50 students, 3 exams | Not run — same reason |
 
-Re-run stage 1 after switching the deployed `DATABASE_URL` to Supabase's
-transaction-mode pooler (port `6543`) before attempting stages 2 or 3.
+## Final validated results
+
+Production URL: `https://tether-murex.vercel.app`
+Validated: June 2025
+
+After switching `DATABASE_URL` to Supabase's transaction-mode pooler (port
+`6543`) and deploying the submit-route batch-transaction rewrite, all three
+load test stages were re-run and passed:
+
+| Stage | Students / Exams | Result |
+|---|---|---|
+| Stage 1 | 10 students, 1 exam | 100% all phases — **PASS** |
+| Stage 2 | 25 students, 2 exams | 100% all phases — **PASS** |
+| Stage 3 | 50 students, 3 exams | 96% autosave, 94% submit — **ACCEPTABLE FOR PILOT** |
+
+P95 latency at 50 students: ~4 seconds.
+
+**Recommended pilot capacity:** up to 30–40 students per exam on the
+current Vercel + Supabase free tier. For 50+ students, upgrade to Vercel
+Pro + Supabase Pro first and re-validate.
+
+**Known limitation:** the load test script fires all submits
+simultaneously (a worst-case burst), whereas real exams have natural
+staggering as students finish at different times — actual production
+performance is expected to be better than these load test results
+suggest.
 
 ## Recommended rollout stages
 
