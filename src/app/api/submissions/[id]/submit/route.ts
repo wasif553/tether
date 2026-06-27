@@ -49,53 +49,69 @@ export async function POST(
     );
   }
 
-  const answersByQuestion = new Map(submission.answers.map((a) => [a.questionId, a]));
-
-  let autoScore = 0;
-  let hasEssay = false;
-
-  for (const question of submission.exam.questions) {
-    if (question.type === "ESSAY") {
-      hasEssay = true;
-      continue;
+  // The grading loop below issues one query per question. Run the whole
+  // check-grade-update sequence as a single interactive transaction so it
+  // holds (and releases) exactly one pooled connection for the entire
+  // submit, instead of one connection per query — under concurrent submits
+  // with a small connection pool, the previous sequential-queries version
+  // exhausted the pool and caused 500s (see docs/concurrent-exam-pilot-capacity.md).
+  const { submission: result, didGrade } = await prisma.$transaction(async (tx) => {
+    // Re-check idempotency inside the transaction in case another request
+    // finalized this submission between the initial fetch above and now.
+    const current = await tx.submission.findUnique({ where: { id } });
+    if (!current || current.status !== "IN_PROGRESS") {
+      return { submission: current, didGrade: false };
     }
 
-    const answer = answersByQuestion.get(question.id);
-    const correct =
-      !!answer?.response &&
-      !!question.correctAnswer &&
-      answer.response.trim().toLowerCase() === question.correctAnswer.trim().toLowerCase();
-    const score = correct ? question.points : 0;
-    autoScore += score;
+    const answersByQuestion = new Map(submission.answers.map((a) => [a.questionId, a]));
 
-    if (answer) {
-      await prisma.answer.update({
-        where: { id: answer.id },
-        data: { score, isCorrect: correct },
-      });
-    } else {
-      await prisma.answer.create({
-        data: { submissionId: id, questionId: question.id, score, isCorrect: correct },
-      });
+    let autoScore = 0;
+    let hasEssay = false;
+
+    for (const question of submission.exam.questions) {
+      if (question.type === "ESSAY") {
+        hasEssay = true;
+        continue;
+      }
+
+      const answer = answersByQuestion.get(question.id);
+      const correct =
+        !!answer?.response &&
+        !!question.correctAnswer &&
+        answer.response.trim().toLowerCase() === question.correctAnswer.trim().toLowerCase();
+      const score = correct ? question.points : 0;
+      autoScore += score;
+
+      if (answer) {
+        await tx.answer.update({
+          where: { id: answer.id },
+          data: { score, isCorrect: correct },
+        });
+      } else {
+        await tx.answer.create({
+          data: { submissionId: id, questionId: question.id, score, isCorrect: correct },
+        });
+      }
     }
-  }
 
-  const now = new Date();
-  const updated = await prisma.submission.update({
-    where: { id },
-    data: {
-      status: hasEssay ? "SUBMITTED" : "GRADED",
-      submittedAt: now,
-      gradedAt: hasEssay ? null : now,
-      totalScore: hasEssay ? null : autoScore,
-    },
+    const now = new Date();
+    const updated = await tx.submission.update({
+      where: { id },
+      data: {
+        status: hasEssay ? "SUBMITTED" : "GRADED",
+        submittedAt: now,
+        gradedAt: hasEssay ? null : now,
+        totalScore: hasEssay ? null : autoScore,
+      },
+    });
+    return { submission: updated, didGrade: !hasEssay };
   });
 
-  if (!hasEssay) {
+  if (didGrade) {
     pushGradeToCanvas(id).catch(console.error);
   }
 
-  return NextResponse.json(updated);
+  return NextResponse.json(result);
 }
 
 export const dynamic = "force-dynamic";

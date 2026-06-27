@@ -48,16 +48,23 @@ export async function PATCH(
 
   const { questionId, response } = parsed.data;
 
-  const question = await prisma.question.findFirst({
-    where: { id: questionId, examId: submission.examId },
-  });
-  if (!question) return NextResponse.json({ error: "Invalid question" }, { status: 400 });
+  // One transaction instead of two sequential queries — holds a single
+  // pooled connection for the whole autosave instead of two checkouts,
+  // which matters under concurrent autosave traffic with a small pool.
+  const answer = await prisma.$transaction(async (tx) => {
+    const question = await tx.question.findFirst({
+      where: { id: questionId, examId: submission.examId },
+    });
+    if (!question) return null;
 
-  const answer = await prisma.answer.upsert({
-    where: { submissionId_questionId: { submissionId: id, questionId } },
-    update: { response },
-    create: { submissionId: id, questionId, response },
+    return tx.answer.upsert({
+      where: { submissionId_questionId: { submissionId: id, questionId } },
+      update: { response },
+      create: { submissionId: id, questionId, response },
+    });
   });
+
+  if (!answer) return NextResponse.json({ error: "Invalid question" }, { status: 400 });
 
   return NextResponse.json({ questionId: answer.questionId, response: answer.response });
 }
