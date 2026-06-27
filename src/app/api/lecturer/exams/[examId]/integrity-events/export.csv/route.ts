@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { labelForEventType } from "@/lib/integrityEventLabels";
 
 function csvEscape(value: string | number | null): string {
   if (value == null) return "";
@@ -60,7 +61,7 @@ export async function GET(
         e.occurredAt.toISOString(),
         e.student.name,
         e.student.email,
-        e.eventType,
+        labelForEventType(e.eventType),
         e.severity,
         e.message,
         e.resolvedAt?.toISOString() ?? null,

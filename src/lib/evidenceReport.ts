@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { computeRiskScore, riskLevelForScore, type RiskLevel } from "@/lib/integrityRisk";
+import { labelForEventType } from "@/lib/integrityEventLabels";
 
 export const EVIDENCE_DISCLAIMER =
   "Integrity events are signals for human review and are not automatic misconduct determinations.";
@@ -20,6 +21,7 @@ export type EvidenceReport = {
   riskLevel: RiskLevel;
   events: Array<{
     eventType: string;
+    eventLabel: string;
     severity: string;
     message: string;
     occurredAt: string;
@@ -87,6 +89,7 @@ export async function buildEvidenceReport(
     riskLevel,
     events: submission.integrityEvents.map((e) => ({
       eventType: e.eventType,
+      eventLabel: labelForEventType(e.eventType),
       severity: e.severity,
       message: e.message,
       occurredAt: e.occurredAt.toISOString(),
@@ -126,7 +129,7 @@ export function evidenceReportToCsv(report: EvidenceReport): string {
   for (const e of report.events) {
     lines.push(
       [
-        esc(e.eventType),
+        esc(e.eventLabel),
         esc(e.severity),
         esc(e.message),
         esc(e.occurredAt),

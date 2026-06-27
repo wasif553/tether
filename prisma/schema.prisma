@@ -38,6 +38,17 @@ enum IntegrityEventType {
   TIMER_EXPIRED
   SUBMIT_AFTER_DEADLINE
   MANUAL_WARNING
+  // Camera Monitoring v1 (additive — see docs/secure-exam-threat-model.md)
+  CAMERA_PERMISSION_GRANTED
+  CAMERA_PERMISSION_DENIED
+  CAMERA_STARTED
+  CAMERA_STOPPED
+  CAMERA_UNAVAILABLE
+  CAMERA_HEARTBEAT_MISSED
+  CAMERA_PRECHECK_FAILED
+  // Browser-Level Friction v1 (additive)
+  KEYBOARD_SHORTCUT_BLOCKED
+  FULLSCREEN_FORCED_RETURN
 }
 
 enum IntegritySeverity {

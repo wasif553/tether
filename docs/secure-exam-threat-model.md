@@ -80,7 +80,10 @@ not guarantee academic integrity on its own.
 ## Future controls (explicitly out of scope for v1)
 
 - Electron-based lockdown browser (blocks OS-level app switching).
-- Camera/microphone-based proctoring and face/gaze detection.
+- Microphone monitoring.
+- AI face recognition, gaze tracking, or phone/object detection.
+- Camera Monitoring v1 (see below) checks camera *availability* only — it
+  does not perform any of the above.
 - Certification-grade identity verification.
 - AI-assisted anomaly detection across integrity signals (v1's risk score
   is a fixed, transparent point system — not a model).
@@ -125,7 +128,10 @@ academic consequence by themselves.
   a future multi-staff model — not implemented in v1) can see a
   student's integrity events, AI draft grading, or Canvas passback
   status.
-- No camera, microphone, or biometric data is collected in v1.
+- No microphone or biometric data is collected in v1. If a lecturer enables
+  Camera Monitoring v1 for an exam, only camera *status* events (permission
+  granted/denied, started/stopped, heartbeat missed) are recorded — never
+  video or images. See "Camera Monitoring v1" below.
 
 ## Lecturer review principles
 
@@ -149,3 +155,100 @@ supports `maxAttempts = 1`; the setting exists in the schema for
 forward-compatibility, but values greater than 1 are not yet enforced and
 should not be exposed as a working feature to lecturers until a future
 release extends the data model to support multiple attempts per exam.
+
+## Browser-Level Friction v1
+
+Secure Exam Mode v1 adds **best-effort browser-level friction** inside the
+exam page itself. This makes casual attempts to copy exam content or leave
+the exam window harder, and produces a stronger integrity signal — it is
+not a guarantee.
+
+**What can be best-effort blocked inside the exam page:**
+
+- Copy, cut, and paste
+- Right-click / context menu
+- Selected keyboard shortcuts where the browser allows `preventDefault()`
+  (e.g. Ctrl/Cmd+C/V/X, Ctrl/Cmd+S, Ctrl/Cmd+P, Ctrl+U, Ctrl+Shift+I/J/C,
+  F12 where preventable)
+- Text selection on question content and answer options (not on essay or
+  short-answer input fields, so students can still select their own typed
+  text for editing)
+
+**What can be recorded as integrity events:**
+
+- Tab/window focus loss
+- Fullscreen exit (and forced return to fullscreen, if configured)
+- Blocked keyboard shortcut attempts
+- Right-click attempts
+- Copy/paste attempts
+
+**What cannot be guaranteed in a normal browser:**
+
+- Closing other browser tabs or windows
+- Preventing windows opened *before* the exam started
+- Blocking all browser or OS-reserved shortcuts (e.g. Ctrl+Tab, Alt+Tab)
+- Blocking OS-level application switching
+- Fully preventing browser DevTools across all browsers and versions
+
+Full lockdown — preventing alt-tab, other applications, virtual machines,
+or secondary monitors — requires a dedicated lockdown browser (Electron or
+similar), which is explicitly out of scope for this release. SES never
+claims that a standard web browser can achieve this; browser-level
+friction raises the effort required for casual misconduct and creates a
+reviewable record, nothing more.
+
+## Camera Monitoring v1
+
+**What it adds:** an optional per-exam check of whether the student's
+camera is available before and during a secure exam, recorded as
+integrity events for lecturer review — not a proctoring or identity
+verification system.
+
+**What it detects:**
+
+- Camera permission granted or denied
+- Camera started or stopped
+- Camera unavailable
+- Camera heartbeat missed (the camera stream stopped responding during
+  the exam)
+
+**What it does not detect:**
+
+- Identity verification (it does not confirm who is in front of the
+  camera)
+- Face recognition or face presence detection
+- Gaze tracking
+- Phone or object detection
+- Any form of video recording or frame capture
+
+**Privacy principles:**
+
+- No video is stored, in v1 or planned for any future release of this
+  specific feature, beyond what a future dedicated proctoring module
+  would introduce separately.
+- No images or frames are stored, uploaded, or transmitted anywhere. The
+  camera stream stays in the student's own browser; SES only reads
+  `MediaStreamTrack` status (`readyState`, `muted`) to decide whether to
+  log a status event.
+- Only camera *status* events are recorded — never camera content.
+
+**False-positive handling:** a missed heartbeat or a stopped camera can
+happen for harmless reasons (camera claimed by another app, USB webcam
+disconnected, browser permission revoked accidentally, laptop lid
+closed/reopened). Camera events are signals for human review, exactly like
+every other integrity event — SES never auto-fails, auto-flags, or treats
+a camera event as proof of misconduct.
+
+**Lecturer review process:** camera events appear in the same integrity
+event timeline, risk score, and evidence report as every other event type,
+with friendly labels (e.g. "Camera permission denied", "Camera heartbeat
+missed"). A lecturer can mark any camera event reviewed with a note, the
+same as any other integrity event.
+
+**Future options (explicitly out of scope for this release):**
+
+- Dedicated lockdown browser
+- Identity verification (e.g. photo ID matching)
+- AI-based face presence detection
+- Full AI proctoring (gaze tracking, multi-person detection, audio
+  analysis)

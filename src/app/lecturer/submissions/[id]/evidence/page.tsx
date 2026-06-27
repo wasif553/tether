@@ -16,6 +16,7 @@ type EvidenceReport = {
   riskLevel: "CLEAN" | "LOW" | "MEDIUM" | "HIGH";
   events: Array<{
     eventType: string;
+    eventLabel: string;
     severity: string;
     message: string;
     occurredAt: string;
@@ -199,7 +200,7 @@ export default function EvidenceReportPage({
             {data.events.map((e, i) => (
               <tr key={i} className="border-b border-gray-100 align-top">
                 <td className="whitespace-nowrap p-2">{new Date(e.occurredAt).toLocaleString()}</td>
-                <td className="p-2">{e.eventType}</td>
+                <td className="p-2">{e.eventLabel}</td>
                 <td className="p-2">{severityBadge(e.severity)}</td>
                 <td className="max-w-xs p-2">{e.message}</td>
                 <td className="p-2">

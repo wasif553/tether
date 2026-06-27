@@ -48,4 +48,86 @@ describe("severityFor", () => {
     expect(severityFor("TIMER_EXPIRED", DEFAULT_SECURE_SETTINGS)).toBe("HIGH");
     expect(severityFor("SUBMIT_AFTER_DEADLINE", DEFAULT_SECURE_SETTINGS)).toBe("HIGH");
   });
+
+  it("raises CAMERA_PERMISSION_DENIED/STOPPED/PRECHECK_FAILED/UNAVAILABLE to HIGH when requireCamera is true", () => {
+    const settings = { ...DEFAULT_SECURE_SETTINGS, requireCamera: true };
+    expect(severityFor("CAMERA_PERMISSION_DENIED", settings)).toBe("HIGH");
+    expect(severityFor("CAMERA_STOPPED", settings)).toBe("HIGH");
+    expect(severityFor("CAMERA_PRECHECK_FAILED", settings)).toBe("HIGH");
+    expect(severityFor("CAMERA_UNAVAILABLE", settings)).toBe("HIGH");
+  });
+
+  it("lowers CAMERA_PERMISSION_DENIED to MEDIUM when requireCamera is false", () => {
+    expect(severityFor("CAMERA_PERMISSION_DENIED", DEFAULT_SECURE_SETTINGS)).toBe("MEDIUM");
+    expect(DEFAULT_SECURE_SETTINGS.requireCamera).toBe(false);
+  });
+
+  it("treats CAMERA_PERMISSION_GRANTED and CAMERA_STARTED as INFO", () => {
+    expect(severityFor("CAMERA_PERMISSION_GRANTED", DEFAULT_SECURE_SETTINGS)).toBe("INFO");
+    expect(severityFor("CAMERA_STARTED", DEFAULT_SECURE_SETTINGS)).toBe("INFO");
+  });
+
+  it("treats CAMERA_HEARTBEAT_MISSED as MEDIUM regardless of requireCamera", () => {
+    expect(severityFor("CAMERA_HEARTBEAT_MISSED", DEFAULT_SECURE_SETTINGS)).toBe("MEDIUM");
+    expect(
+      severityFor("CAMERA_HEARTBEAT_MISSED", { ...DEFAULT_SECURE_SETTINGS, requireCamera: true }),
+    ).toBe("MEDIUM");
+  });
+
+  it("treats KEYBOARD_SHORTCUT_BLOCKED as INFO and FULLSCREEN_FORCED_RETURN as LOW", () => {
+    expect(severityFor("KEYBOARD_SHORTCUT_BLOCKED", DEFAULT_SECURE_SETTINGS)).toBe("INFO");
+    expect(severityFor("FULLSCREEN_FORCED_RETURN", DEFAULT_SECURE_SETTINGS)).toBe("LOW");
+  });
+});
+
+describe("secure settings additions (camera + browser-friction)", () => {
+  it("includes camera setting fields with the documented defaults", () => {
+    expect(DEFAULT_SECURE_SETTINGS.requireCamera).toBe(false);
+    expect(DEFAULT_SECURE_SETTINGS.showCameraPreview).toBe(true);
+    expect(DEFAULT_SECURE_SETTINGS.cameraHeartbeatEnabled).toBe(false);
+    expect(DEFAULT_SECURE_SETTINGS.cameraHeartbeatIntervalSeconds).toBe(30);
+    expect(DEFAULT_SECURE_SETTINGS.recordCameraUnavailableEvents).toBe(true);
+  });
+
+  it("includes browser-friction setting fields with the documented defaults", () => {
+    expect(DEFAULT_SECURE_SETTINGS.blockKeyboardShortcuts).toBe(true);
+    expect(DEFAULT_SECURE_SETTINGS.disableQuestionTextSelection).toBe(true);
+    expect(DEFAULT_SECURE_SETTINGS.enforceFullscreenReturn).toBe(false);
+  });
+
+  it("parses camera settings supplied by a lecturer", () => {
+    const result = parseSecureSettings({
+      requireCamera: true,
+      cameraHeartbeatEnabled: true,
+      cameraHeartbeatIntervalSeconds: 45,
+    });
+    expect(result.requireCamera).toBe(true);
+    expect(result.cameraHeartbeatEnabled).toBe(true);
+    expect(result.cameraHeartbeatIntervalSeconds).toBe(45);
+  });
+
+  it("parses browser-friction settings supplied by a lecturer", () => {
+    const result = parseSecureSettings({
+      blockKeyboardShortcuts: false,
+      disableQuestionTextSelection: false,
+      enforceFullscreenReturn: true,
+    });
+    expect(result.blockKeyboardShortcuts).toBe(false);
+    expect(result.disableQuestionTextSelection).toBe(false);
+    expect(result.enforceFullscreenReturn).toBe(true);
+  });
+
+  it("rejects an out-of-range camera heartbeat interval and falls back to defaults", () => {
+    expect(parseSecureSettings({ cameraHeartbeatIntervalSeconds: 5 })).toEqual(
+      DEFAULT_SECURE_SETTINGS,
+    );
+    expect(parseSecureSettings({ cameraHeartbeatIntervalSeconds: 1000 })).toEqual(
+      DEFAULT_SECURE_SETTINGS,
+    );
+  });
+
+  it("does not require Canvas or AI configuration for any secure setting default", () => {
+    const keys = Object.keys(DEFAULT_SECURE_SETTINGS);
+    expect(keys.some((k) => /canvas|lti|anthropic|^ai/i.test(k))).toBe(false);
+  });
 });

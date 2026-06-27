@@ -23,6 +23,14 @@ type SecureSettings = {
   allowLateSubmit: boolean;
   maxAttempts: number;
   showIntegrityWarningToStudent: boolean;
+  requireCamera: boolean;
+  showCameraPreview: boolean;
+  cameraHeartbeatEnabled: boolean;
+  cameraHeartbeatIntervalSeconds: number;
+  recordCameraUnavailableEvents: boolean;
+  blockKeyboardShortcuts: boolean;
+  disableQuestionTextSelection: boolean;
+  enforceFullscreenReturn: boolean;
 };
 
 type Exam = {
@@ -507,24 +515,6 @@ export default function LecturerExamPage({
               <input
                 type="checkbox"
                 disabled={!secureForm.secureModeEnabled}
-                checked={secureForm.blockCopyPaste}
-                onChange={(e) => setSecureForm({ ...secureForm, blockCopyPaste: e.target.checked })}
-              />
-              Block copy/paste
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                disabled={!secureForm.secureModeEnabled}
-                checked={secureForm.blockRightClick}
-                onChange={(e) => setSecureForm({ ...secureForm, blockRightClick: e.target.checked })}
-              />
-              Block right click
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                disabled={!secureForm.secureModeEnabled}
                 checked={secureForm.autoSubmitOnTimerEnd}
                 onChange={(e) => setSecureForm({ ...secureForm, autoSubmitOnTimerEnd: e.target.checked })}
               />
@@ -555,6 +545,139 @@ export default function LecturerExamPage({
               className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
             />
             <span className="text-xs text-gray-400">(v1 supports 1 attempt only)</span>
+          </div>
+
+          <div className="border-t border-gray-200 pt-3">
+            <h3 className="text-sm font-medium">Browser-level friction</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Browser-level friction makes casual attempts to leave or copy exam content harder
+              and records integrity signals for lecturer review. A normal browser cannot fully
+              lock the student&apos;s device or close other tabs. Full lockdown requires a
+              dedicated lockdown browser.
+            </p>
+            <div className="mt-2 grid grid-cols-2 gap-2 pl-1 text-sm text-gray-700">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.blockCopyPaste}
+                  onChange={(e) => setSecureForm({ ...secureForm, blockCopyPaste: e.target.checked })}
+                />
+                Block copy, cut, and paste
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.blockRightClick}
+                  onChange={(e) => setSecureForm({ ...secureForm, blockRightClick: e.target.checked })}
+                />
+                Block right-click/context menu
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.blockKeyboardShortcuts}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, blockKeyboardShortcuts: e.target.checked })
+                  }
+                />
+                Block selected keyboard shortcuts where supported
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.disableQuestionTextSelection}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, disableQuestionTextSelection: e.target.checked })
+                  }
+                />
+                Disable text selection on question content
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.enforceFullscreenReturn}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, enforceFullscreenReturn: e.target.checked })
+                  }
+                />
+                Re-enforce fullscreen after exit
+              </label>
+            </div>
+          </div>
+
+          <div className="border-t border-gray-200 pt-3">
+            <h3 className="text-sm font-medium">Camera monitoring</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Camera Monitoring v1 checks whether the student&apos;s camera is available during a
+              secure exam. It records camera availability signals for lecturer review. It does not
+              store video recordings or automatically decide misconduct.
+            </p>
+            <div className="mt-2 grid grid-cols-2 gap-2 pl-1 text-sm text-gray-700">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.requireCamera}
+                  onChange={(e) => setSecureForm({ ...secureForm, requireCamera: e.target.checked })}
+                />
+                Require camera before exam starts
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.showCameraPreview}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, showCameraPreview: e.target.checked })
+                  }
+                />
+                Show camera preview to student
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.cameraHeartbeatEnabled}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, cameraHeartbeatEnabled: e.target.checked })
+                  }
+                />
+                Enable camera heartbeat during exam
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.recordCameraUnavailableEvents}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, recordCameraUnavailableEvents: e.target.checked })
+                  }
+                />
+                Record camera unavailable events
+              </label>
+            </div>
+            <div className="mt-2 flex items-center gap-3 pl-1">
+              <label className="text-sm text-gray-700">Camera check interval (seconds)</label>
+              <input
+                type="number"
+                min={10}
+                max={300}
+                disabled={!secureForm.secureModeEnabled || !secureForm.cameraHeartbeatEnabled}
+                value={secureForm.cameraHeartbeatIntervalSeconds}
+                onChange={(e) =>
+                  setSecureForm({
+                    ...secureForm,
+                    cameraHeartbeatIntervalSeconds: Number(e.target.value),
+                  })
+                }
+                className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+              />
+            </div>
           </div>
 
           <button

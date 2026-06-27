@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { computeRiskScore, riskLevelForScore, type Severity } from "@/lib/integrityRisk";
+import { labelForEventType } from "@/lib/integrityEventLabels";
 
 export async function GET(
   _req: Request,
@@ -78,6 +79,7 @@ export async function GET(
       id: e.id,
       submissionId: e.submissionId,
       eventType: e.eventType,
+      eventLabel: labelForEventType(e.eventType),
       severity: e.severity,
       message: e.message,
       occurredAt: e.occurredAt.toISOString(),

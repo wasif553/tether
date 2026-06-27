@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { computeRiskScore, riskLevelForScore } from "./integrityRisk";
+import { computeRiskScore, riskLevelForScore, SEVERITY_WEIGHTS } from "./integrityRisk";
+import { DEFAULT_SECURE_SETTINGS, severityFor } from "./secureExam";
 
 describe("computeRiskScore", () => {
   it("sums severity weights", () => {
@@ -36,5 +37,35 @@ describe("riskLevelForScore", () => {
   it("classifies HIGH at 13+", () => {
     expect(riskLevelForScore(13)).toBe("HIGH");
     expect(riskLevelForScore(100)).toBe("HIGH");
+  });
+});
+
+describe("camera and browser-friction event risk contributions", () => {
+  it("CAMERA_HEARTBEAT_MISSED contributes the MEDIUM weight to the risk score", () => {
+    const severity = severityFor("CAMERA_HEARTBEAT_MISSED", DEFAULT_SECURE_SETTINGS);
+    expect(severity).toBe("MEDIUM");
+    expect(computeRiskScore([{ severity }])).toBe(SEVERITY_WEIGHTS.MEDIUM);
+    expect(computeRiskScore([{ severity }])).toBe(3);
+  });
+
+  it("KEYBOARD_SHORTCUT_BLOCKED has a risk weight of 0 so it never dominates the score", () => {
+    const severity = severityFor("KEYBOARD_SHORTCUT_BLOCKED", DEFAULT_SECURE_SETTINGS);
+    expect(severity).toBe("INFO");
+    expect(computeRiskScore([{ severity }])).toBe(0);
+    // Even many repeated keyboard-shortcut events contribute nothing.
+    expect(computeRiskScore(Array(50).fill({ severity }))).toBe(0);
+  });
+
+  it("FULLSCREEN_FORCED_RETURN contributes the LOW weight (1) to the risk score", () => {
+    const severity = severityFor("FULLSCREEN_FORCED_RETURN", DEFAULT_SECURE_SETTINGS);
+    expect(severity).toBe("LOW");
+    expect(computeRiskScore([{ severity }])).toBe(1);
+  });
+
+  it("a HIGH-severity camera event uses the normal HIGH weight (7)", () => {
+    const settings = { ...DEFAULT_SECURE_SETTINGS, requireCamera: true };
+    const severity = severityFor("CAMERA_UNAVAILABLE", settings);
+    expect(severity).toBe("HIGH");
+    expect(computeRiskScore([{ severity }])).toBe(7);
   });
 });

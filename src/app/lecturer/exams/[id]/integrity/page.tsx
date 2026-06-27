@@ -7,6 +7,7 @@ type IntegrityEventRow = {
   id: string;
   submissionId: string;
   eventType: string;
+  eventLabel: string;
   severity: "INFO" | "LOW" | "MEDIUM" | "HIGH";
   message: string;
   occurredAt: string;
@@ -253,7 +254,7 @@ export default function ExamIntegrityPage({
                   <div>{e.student.name}</div>
                   <div className="text-xs text-gray-500">{e.student.email}</div>
                 </td>
-                <td className="p-2">{e.eventType}</td>
+                <td className="p-2">{e.eventLabel}</td>
                 <td className="p-2">{severityBadge(e.severity)}</td>
                 <td className="max-w-xs p-2">{e.message}</td>
                 <td className="p-2">

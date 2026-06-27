@@ -43,6 +43,49 @@ export default function StudentExamNoticePage() {
         </section>
 
         <section>
+          <h2 className="font-medium text-gray-900">Camera monitoring</h2>
+          <p className="mt-1">
+            If your lecturer has enabled camera monitoring for this exam, SES will request access
+            to your camera.
+          </p>
+          <p className="mt-1">Camera Monitoring v1:</p>
+          <ul className="mt-1 list-disc space-y-1 pl-5">
+            <li>checks that your camera is available when the exam starts</li>
+            <li>monitors camera availability during the exam</li>
+            <li>records camera status events for lecturer review</li>
+          </ul>
+          <p className="mt-2">Camera Monitoring v1 does <strong>not</strong>:</p>
+          <ul className="mt-1 list-disc space-y-1 pl-5">
+            <li>store video recordings</li>
+            <li>store images</li>
+            <li>use facial recognition</li>
+            <li>automatically determine misconduct</li>
+            <li>share your camera feed with other students</li>
+          </ul>
+          <p className="mt-2">
+            Camera integrity events are reviewed by authorised teaching staff. Final academic
+            decisions remain with your institution and lecturer.
+          </p>
+        </section>
+
+        <section>
+          <h2 className="font-medium text-gray-900">Browser secure mode</h2>
+          <p className="mt-1">When Secure Exam Mode is active, SES may:</p>
+          <ul className="mt-1 list-disc space-y-1 pl-5">
+            <li>block copy, cut, and paste inside the exam page</li>
+            <li>block right-click/context menu inside the exam page</li>
+            <li>block selected keyboard shortcuts where supported by the browser</li>
+            <li>request or re-enforce fullscreen mode</li>
+            <li>record attempts to leave the exam window</li>
+          </ul>
+          <p className="mt-2">
+            SES cannot close other browser tabs or control other applications on your device.
+            Higher-security lockdown mode requires a dedicated lockdown browser and is planned as
+            a future option.
+          </p>
+        </section>
+
+        <section>
           <h2 className="font-medium text-gray-900">AI features, if enabled by your lecturer</h2>
           <p className="mt-1">
             Some lecturers use an AI assistant to draft a suggested score and feedback for essay

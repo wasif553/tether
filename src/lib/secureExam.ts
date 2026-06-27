@@ -15,6 +15,21 @@ export const secureExamSettingsSchema = z.object({
   // schema/UI are forward-compatible with multi-attempt support later.
   maxAttempts: z.number().int().positive().default(1),
   showIntegrityWarningToStudent: z.boolean().default(true),
+
+  // --- Camera Monitoring v1 (additive, see docs/secure-exam-threat-model.md) ---
+  requireCamera: z.boolean().default(false),
+  showCameraPreview: z.boolean().default(true),
+  cameraHeartbeatEnabled: z.boolean().default(false),
+  cameraHeartbeatIntervalSeconds: z.number().int().min(10).max(300).default(30),
+  recordCameraUnavailableEvents: z.boolean().default(true),
+
+  // --- Browser-Level Friction v1 (additive) ---
+  // blockCopyPaste/blockRightClick above are reused for friction blocking
+  // (not just logging severity) — see severityFor() and the student exam
+  // page's event handlers.
+  blockKeyboardShortcuts: z.boolean().default(true),
+  disableQuestionTextSelection: z.boolean().default(true),
+  enforceFullscreenReturn: z.boolean().default(false),
 });
 
 export type SecureExamSettings = z.infer<typeof secureExamSettingsSchema>;
@@ -37,19 +52,30 @@ export type IntegritySeverityLevel = "INFO" | "LOW" | "MEDIUM" | "HIGH";
  * Settings-driven severity defaults (Part 4 of Secure Exam Mode v1).
  * Mirrors the event types already defined on IntegrityEventType.
  */
+export type IntegrityEventTypeName =
+  | "FULLSCREEN_EXIT"
+  | "WINDOW_BLUR"
+  | "WINDOW_FOCUS_RETURN"
+  | "COPY_ATTEMPT"
+  | "PASTE_ATTEMPT"
+  | "RIGHT_CLICK_ATTEMPT"
+  | "NETWORK_OFFLINE"
+  | "NETWORK_ONLINE"
+  | "AUTOSAVE_FAILED"
+  | "TIMER_EXPIRED"
+  | "SUBMIT_AFTER_DEADLINE"
+  | "CAMERA_PERMISSION_GRANTED"
+  | "CAMERA_PERMISSION_DENIED"
+  | "CAMERA_STARTED"
+  | "CAMERA_STOPPED"
+  | "CAMERA_UNAVAILABLE"
+  | "CAMERA_HEARTBEAT_MISSED"
+  | "CAMERA_PRECHECK_FAILED"
+  | "KEYBOARD_SHORTCUT_BLOCKED"
+  | "FULLSCREEN_FORCED_RETURN";
+
 export function severityFor(
-  eventType:
-    | "FULLSCREEN_EXIT"
-    | "WINDOW_BLUR"
-    | "WINDOW_FOCUS_RETURN"
-    | "COPY_ATTEMPT"
-    | "PASTE_ATTEMPT"
-    | "RIGHT_CLICK_ATTEMPT"
-    | "NETWORK_OFFLINE"
-    | "NETWORK_ONLINE"
-    | "AUTOSAVE_FAILED"
-    | "TIMER_EXPIRED"
-    | "SUBMIT_AFTER_DEADLINE",
+  eventType: IntegrityEventTypeName,
   settings: SecureExamSettings,
 ): IntegritySeverityLevel {
   switch (eventType) {
@@ -73,5 +99,25 @@ export function severityFor(
     case "TIMER_EXPIRED":
     case "SUBMIT_AFTER_DEADLINE":
       return "HIGH";
+    // --- Camera Monitoring v1 ---
+    case "CAMERA_PERMISSION_GRANTED":
+    case "CAMERA_STARTED":
+      return "INFO";
+    case "CAMERA_PERMISSION_DENIED":
+    case "CAMERA_STOPPED":
+    case "CAMERA_PRECHECK_FAILED":
+      return settings.requireCamera ? "HIGH" : "MEDIUM";
+    case "CAMERA_UNAVAILABLE":
+      return settings.requireCamera ? "HIGH" : "MEDIUM";
+    case "CAMERA_HEARTBEAT_MISSED":
+      return "MEDIUM";
+    // --- Browser-Level Friction v1 ---
+    case "KEYBOARD_SHORTCUT_BLOCKED":
+      // INFO so the risk-weight table (src/lib/integrityRisk.ts) gives it
+      // a weight of 0 — these can fire often and must never dominate risk.
+      return "INFO";
+    case "FULLSCREEN_FORCED_RETURN":
+      // LOW so it contributes the minimum non-zero weight (1).
+      return "LOW";
   }
 }

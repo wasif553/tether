@@ -28,6 +28,14 @@ type SecureSettings = {
   allowLateSubmit: boolean;
   maxAttempts: number;
   showIntegrityWarningToStudent: boolean;
+  requireCamera: boolean;
+  showCameraPreview: boolean;
+  cameraHeartbeatEnabled: boolean;
+  cameraHeartbeatIntervalSeconds: number;
+  recordCameraUnavailableEvents: boolean;
+  blockKeyboardShortcuts: boolean;
+  disableQuestionTextSelection: boolean;
+  enforceFullscreenReturn: boolean;
 };
 
 type SubmissionData = {
@@ -49,7 +57,16 @@ type IntegrityEventType =
   | "NETWORK_OFFLINE"
   | "NETWORK_ONLINE"
   | "AUTOSAVE_FAILED"
-  | "TIMER_EXPIRED";
+  | "TIMER_EXPIRED"
+  | "CAMERA_PERMISSION_GRANTED"
+  | "CAMERA_PERMISSION_DENIED"
+  | "CAMERA_STARTED"
+  | "CAMERA_STOPPED"
+  | "CAMERA_UNAVAILABLE"
+  | "CAMERA_HEARTBEAT_MISSED"
+  | "CAMERA_PRECHECK_FAILED"
+  | "KEYBOARD_SHORTCUT_BLOCKED"
+  | "FULLSCREEN_FORCED_RETURN";
 
 type IntegritySeverity = "INFO" | "LOW" | "MEDIUM" | "HIGH";
 
@@ -58,6 +75,9 @@ const DEBOUNCE_MS: Partial<Record<IntegrityEventType, number>> = {
   COPY_ATTEMPT: 5_000,
   PASTE_ATTEMPT: 5_000,
   AUTOSAVE_FAILED: 10_000,
+  KEYBOARD_SHORTCUT_BLOCKED: 5_000,
+  CAMERA_HEARTBEAT_MISSED: 5_000,
+  CAMERA_UNAVAILABLE: 5_000,
 };
 
 const MESSAGES: Record<IntegrityEventType, string> = {
@@ -71,6 +91,15 @@ const MESSAGES: Record<IntegrityEventType, string> = {
   NETWORK_ONLINE: "Your connection is back online.",
   AUTOSAVE_FAILED: "A save attempt failed and was retried.",
   TIMER_EXPIRED: "The exam timer has expired.",
+  CAMERA_PERMISSION_GRANTED: "Camera permission was granted.",
+  CAMERA_PERMISSION_DENIED: "Camera permission was denied.",
+  CAMERA_STARTED: "Camera monitoring started.",
+  CAMERA_STOPPED: "Camera monitoring stopped.",
+  CAMERA_UNAVAILABLE: "Your camera became unavailable.",
+  CAMERA_HEARTBEAT_MISSED: "A camera check did not receive a response.",
+  CAMERA_PRECHECK_FAILED: "The camera pre-check failed.",
+  KEYBOARD_SHORTCUT_BLOCKED: "A keyboard shortcut was blocked.",
+  FULLSCREEN_FORCED_RETURN: "Fullscreen mode was restored.",
 };
 
 function severityFor(eventType: IntegrityEventType, settings: SecureSettings): IntegritySeverity {
@@ -94,7 +123,36 @@ function severityFor(eventType: IntegrityEventType, settings: SecureSettings): I
       return "MEDIUM";
     case "TIMER_EXPIRED":
       return "HIGH";
+    case "CAMERA_PERMISSION_GRANTED":
+    case "CAMERA_STARTED":
+      return "INFO";
+    case "CAMERA_PERMISSION_DENIED":
+    case "CAMERA_STOPPED":
+    case "CAMERA_UNAVAILABLE":
+    case "CAMERA_PRECHECK_FAILED":
+      return settings.requireCamera ? "HIGH" : "MEDIUM";
+    case "CAMERA_HEARTBEAT_MISSED":
+      return "MEDIUM";
+    case "KEYBOARD_SHORTCUT_BLOCKED":
+      return "INFO";
+    case "FULLSCREEN_FORCED_RETURN":
+      return "LOW";
   }
+}
+
+// Best-effort keyboard shortcut blocking. This cannot guarantee blocking of
+// browser- or OS-reserved shortcuts (e.g. Ctrl+Tab) — see
+// docs/secure-exam-threat-model.md ("Browser-Level Friction v1").
+function isBlockableShortcut(e: KeyboardEvent): boolean {
+  const ctrlOrCmd = e.ctrlKey || e.metaKey;
+  const key = e.key.toLowerCase();
+
+  if (e.key === "F12") return true;
+  if (ctrlOrCmd && e.shiftKey && ["i", "j", "c"].includes(key)) return true;
+  if (ctrlOrCmd && !e.shiftKey && ["c", "v", "x", "a", "s", "p"].includes(key)) return true;
+  if (ctrlOrCmd && key === "u") return true;
+
+  return false;
 }
 
 export default function TakeExamPage({
@@ -114,9 +172,22 @@ export default function TakeExamPage({
   const [banner, setBanner] = useState<string | null>(null);
   const [gateAcknowledged, setGateAcknowledged] = useState(false);
   const [fullscreenDenied, setFullscreenDenied] = useState(false);
+  const [fullscreenReturnNeeded, setFullscreenReturnNeeded] = useState(false);
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const lastEventAt = useRef<Partial<Record<IntegrityEventType, number>>>({});
   const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // --- Camera Monitoring v1 state ---
+  // Camera Monitoring v1 records only camera availability status (see
+  // docs/secure-exam-threat-model.md, "Camera Monitoring v1"). The stream
+  // never leaves the browser — no video/images are uploaded or stored.
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [cameraStatus, setCameraStatus] = useState<"idle" | "requesting" | "granted" | "denied">(
+    "idle",
+  );
+  const [cameraWarning, setCameraWarning] = useState<string | null>(null);
+  const heartbeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     fetch(`/api/submissions/${id}`)
@@ -181,6 +252,7 @@ export default function TakeExamPage({
     }
 
     if (res.ok) {
+      stopCamera();
       const updated = await res.json();
       setData((prev) => (prev ? { ...prev, status: updated.status, totalScore: updated.totalScore } : prev));
       router.refresh();
@@ -203,28 +275,73 @@ export default function TakeExamPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
+  // --- Browser-level friction: copy/cut/paste, right-click, keyboard shortcuts ---
   useEffect(() => {
     if (!data || data.status !== "IN_PROGRESS" || !secureModeEnabled || !secureSettings) return;
 
     const onFullscreenChange = () => {
       const active = Boolean(document.fullscreenElement);
       setIsFullscreen(active);
-      if (!active) reportIntegrityEvent("FULLSCREEN_EXIT");
+      if (!active) {
+        reportIntegrityEvent("FULLSCREEN_EXIT");
+        if (secureSettings.requireFullscreen && secureSettings.enforceFullscreenReturn) {
+          setFullscreenReturnNeeded(true);
+          // Best-effort automatic attempt — browsers commonly require a
+          // user gesture for requestFullscreen(), so this often fails
+          // silently; the "Return to fullscreen" button is the fallback.
+          document.documentElement.requestFullscreen().then(
+            () => {
+              setFullscreenReturnNeeded(false);
+              reportIntegrityEvent("FULLSCREEN_FORCED_RETURN");
+            },
+            () => {
+              // Expected when the browser requires a user gesture.
+            },
+          );
+        }
+      } else if (fullscreenReturnNeeded) {
+        setFullscreenReturnNeeded(false);
+      }
     };
     const onBlur = () => secureSettings.trackWindowBlur && reportIntegrityEvent("WINDOW_BLUR");
     const onFocus = () => secureSettings.trackWindowBlur && reportIntegrityEvent("WINDOW_FOCUS_RETURN");
-    const onCopy = () => reportIntegrityEvent("COPY_ATTEMPT");
-    const onPaste = () => reportIntegrityEvent("PASTE_ATTEMPT");
-    const onContextMenu = () => reportIntegrityEvent("RIGHT_CLICK_ATTEMPT");
+
+    const onCopy = (e: ClipboardEvent) => {
+      if (secureSettings.blockCopyPaste) e.preventDefault();
+      reportIntegrityEvent("COPY_ATTEMPT");
+    };
+    const onCut = (e: ClipboardEvent) => {
+      if (secureSettings.blockCopyPaste) e.preventDefault();
+      // No dedicated CUT_ATTEMPT event type exists — cut is logged as a
+      // copy-style exfiltration attempt.
+      reportIntegrityEvent("COPY_ATTEMPT");
+    };
+    const onPaste = (e: ClipboardEvent) => {
+      if (secureSettings.blockCopyPaste) e.preventDefault();
+      reportIntegrityEvent("PASTE_ATTEMPT");
+    };
+    const onContextMenu = (e: MouseEvent) => {
+      if (secureSettings.blockRightClick) e.preventDefault();
+      reportIntegrityEvent("RIGHT_CLICK_ATTEMPT");
+    };
     const onOffline = () => reportIntegrityEvent("NETWORK_OFFLINE");
     const onOnline = () => reportIntegrityEvent("NETWORK_ONLINE");
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!secureSettings.blockKeyboardShortcuts) return;
+      if (!isBlockableShortcut(e)) return;
+      e.preventDefault();
+      reportIntegrityEvent("KEYBOARD_SHORTCUT_BLOCKED");
+    };
 
     document.addEventListener("fullscreenchange", onFullscreenChange);
     window.addEventListener("blur", onBlur);
     window.addEventListener("focus", onFocus);
     document.addEventListener("copy", onCopy);
+    document.addEventListener("cut", onCut);
     document.addEventListener("paste", onPaste);
     document.addEventListener("contextmenu", onContextMenu);
+    document.addEventListener("keydown", onKeyDown);
     window.addEventListener("offline", onOffline);
     window.addEventListener("online", onOnline);
 
@@ -233,23 +350,106 @@ export default function TakeExamPage({
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("copy", onCopy);
+      document.removeEventListener("cut", onCut);
       document.removeEventListener("paste", onPaste);
       document.removeEventListener("contextmenu", onContextMenu);
+      document.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("offline", onOffline);
       window.removeEventListener("online", onOnline);
     };
-  }, [data, secureModeEnabled, secureSettings, reportIntegrityEvent]);
+  }, [data, secureModeEnabled, secureSettings, reportIntegrityEvent, fullscreenReturnNeeded]);
 
   async function enterFullscreen(): Promise<boolean> {
     try {
       await document.documentElement.requestFullscreen();
       setFullscreenDenied(false);
+      if (fullscreenReturnNeeded) {
+        setFullscreenReturnNeeded(false);
+        reportIntegrityEvent("FULLSCREEN_FORCED_RETURN");
+      }
       return true;
     } catch {
       setFullscreenDenied(true);
       return false;
     }
   }
+
+  // --- Camera Monitoring v1: start/stop, preview, heartbeat ---
+  function stopCamera() {
+    if (heartbeatTimer.current) {
+      clearInterval(heartbeatTimer.current);
+      heartbeatTimer.current = null;
+    }
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+      cameraStreamRef.current = null;
+    }
+  }
+
+  async function startCamera(): Promise<boolean> {
+    setCameraStatus("requesting");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      cameraStreamRef.current = stream;
+      if (videoRef.current) videoRef.current.srcObject = stream;
+      setCameraStatus("granted");
+      reportIntegrityEvent("CAMERA_PERMISSION_GRANTED");
+      reportIntegrityEvent("CAMERA_STARTED");
+      return true;
+    } catch {
+      setCameraStatus("denied");
+      if (gateAcknowledged) {
+        reportIntegrityEvent("CAMERA_PRECHECK_FAILED");
+      } else {
+        reportIntegrityEvent("CAMERA_PERMISSION_DENIED");
+      }
+      return false;
+    }
+  }
+
+  // Camera heartbeat: checks the existing stream's track state on an
+  // interval. Never auto-submits or blocks saving/submission on failure.
+  useEffect(() => {
+    if (!data || data.status !== "IN_PROGRESS" || !gateAcknowledged) return;
+    if (!secureSettings?.cameraHeartbeatEnabled || cameraStatus !== "granted") return;
+
+    const intervalMs = Math.max(10, secureSettings.cameraHeartbeatIntervalSeconds) * 1000;
+    heartbeatTimer.current = setInterval(() => {
+      const stream = cameraStreamRef.current;
+      const track = stream?.getVideoTracks()[0];
+      const healthy = track && track.readyState === "live" && !track.muted;
+
+      if (!healthy) {
+        reportIntegrityEvent("CAMERA_HEARTBEAT_MISSED");
+        if (secureSettings.requireCamera) {
+          setCameraWarning(
+            "Camera monitoring has stopped. Please restore camera access to continue your secure exam.",
+          );
+        }
+      } else if (cameraWarning) {
+        setCameraWarning(null);
+      }
+    }, intervalMs);
+
+    return () => {
+      if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, gateAcknowledged, secureSettings, cameraStatus]);
+
+  async function handleRestoreCamera() {
+    const ok = await startCamera();
+    if (ok) {
+      setCameraWarning(null);
+    } else if (secureSettings?.recordCameraUnavailableEvents) {
+      reportIntegrityEvent("CAMERA_UNAVAILABLE");
+    }
+  }
+
+  // Clean up the camera stream on unmount, regardless of how the page is left.
+  useEffect(() => {
+    return () => stopCamera();
+  }, []);
 
   async function handleStartSecureExam() {
     if (secureSettings?.requireFullscreen) {
@@ -326,6 +526,9 @@ export default function TakeExamPage({
     );
   }
 
+  const requireCamera = secureSettings?.requireCamera ?? false;
+  const cameraGateSatisfied = !requireCamera || cameraStatus === "granted";
+
   if (secureModeEnabled && !gateAcknowledged) {
     return (
       <div className="mx-auto max-w-lg">
@@ -342,6 +545,10 @@ export default function TakeExamPage({
             {(secureSettings?.blockCopyPaste || secureSettings?.blockRightClick) && (
               <li>Copy/paste and right-click may be restricted during this exam.</li>
             )}
+            {secureSettings?.blockKeyboardShortcuts && (
+              <li>Selected keyboard shortcuts may be blocked where the browser allows it.</li>
+            )}
+            {requireCamera && <li>This exam requires camera access.</li>}
             <li>Exam integrity signals (such as switching windows) may be recorded for lecturer review.</li>
             <li>Network interruptions during the exam may be logged.</li>
             <li>
@@ -357,9 +564,50 @@ export default function TakeExamPage({
             </p>
           )}
 
+          {requireCamera && (
+            <div className="mt-4 rounded border border-gray-200 bg-gray-50 p-3">
+              <p className="text-sm font-medium">This exam requires camera access.</p>
+              {cameraStatus !== "granted" && (
+                <>
+                  <button
+                    onClick={startCamera}
+                    disabled={cameraStatus === "requesting"}
+                    className="mt-2 rounded border border-gray-300 bg-white px-3 py-1.5 text-sm disabled:opacity-50"
+                  >
+                    {cameraStatus === "requesting" ? "Requesting..." : "Enable camera"}
+                  </button>
+                  {cameraStatus === "denied" && (
+                    <p className="mt-2 text-sm text-red-600">
+                      Camera access is required for this exam. Please allow camera access in your
+                      browser settings and try again.
+                    </p>
+                  )}
+                </>
+              )}
+              {cameraStatus === "granted" && secureSettings?.showCameraPreview && (
+                <div className="mt-2">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    muted
+                    playsInline
+                    className="w-48 rounded border border-gray-300"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Your camera preview — only you can see this
+                  </p>
+                </div>
+              )}
+              {cameraStatus === "granted" && !secureSettings?.showCameraPreview && (
+                <p className="mt-2 text-sm text-green-700">Camera enabled.</p>
+              )}
+            </div>
+          )}
+
           <button
             onClick={handleStartSecureExam}
-            className="mt-4 rounded bg-black px-4 py-2 text-sm text-white"
+            disabled={!cameraGateSatisfied}
+            className="mt-4 rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
           >
             Start secure exam
           </button>
@@ -398,14 +646,21 @@ export default function TakeExamPage({
           <span>Integrity events are logged for review.</span>
           {secureSettings?.requireFullscreen && !isFullscreen && (
             <>
-              <span className="text-gray-500">Fullscreen required.</span>
+              <span className="text-gray-500">
+                {fullscreenReturnNeeded ? "Please return to fullscreen." : "Fullscreen required."}
+              </span>
               <button
                 onClick={enterFullscreen}
                 className="rounded border border-gray-300 bg-white px-2 py-1 text-xs"
               >
-                Enter fullscreen
+                {fullscreenReturnNeeded ? "Return to fullscreen" : "Enter fullscreen"}
               </button>
             </>
+          )}
+          {requireCamera && cameraStatus === "granted" && (
+            <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">
+              Camera monitoring active
+            </span>
           )}
           <a href="/privacy/student-exam-notice" target="_blank" rel="noreferrer" className="text-xs underline">
             What does this record?
@@ -419,18 +674,44 @@ export default function TakeExamPage({
         </div>
       )}
 
+      {cameraWarning && (
+        <div className="mt-3 rounded border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
+          {cameraWarning}
+          <button
+            onClick={handleRestoreCamera}
+            className="ml-3 rounded border border-yellow-400 bg-white px-2 py-1 text-xs"
+          >
+            Restore camera
+          </button>
+        </div>
+      )}
+
       <div className="mt-6 space-y-4">
         {data.exam.questions.map((q, i) => (
           <div key={q.id} className="rounded border border-gray-200 p-4">
-            <p className="text-sm text-gray-500">
+            <p
+              className="text-sm text-gray-500"
+              style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
+            >
               Q{i + 1} · {q.points} pt(s)
             </p>
-            <p className="mt-1">{q.text}</p>
+            <p
+              className="mt-1"
+              style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
+            >
+              {q.text}
+            </p>
 
             {q.type === "MULTIPLE_CHOICE" && q.options && (
               <div className="mt-2 space-y-1">
                 {q.options.map((opt) => (
-                  <label key={opt} className="flex items-center gap-2 text-sm">
+                  <label
+                    key={opt}
+                    className="flex items-center gap-2 text-sm"
+                    style={
+                      secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined
+                    }
+                  >
                     <input
                       type="radio"
                       name={q.id}
