@@ -5,11 +5,14 @@ const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
 
 const { prisma } = await import("./prisma");
+const { getOrCreateTestInstitution } = await import("./testInstitution");
 const evidenceRoute = await import("../app/api/lecturer/submissions/[id]/evidence/route");
 const integrityEventsRoute = await import("../app/api/submissions/[id]/integrity-events/route");
 
+let testInstitution: { id: string };
+
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT") {
-  return { user: { id: userId, role, email: `${userId}@test.local`, name: userId } };
+  return { user: { id: userId, role, email: `${userId}@test.local`, name: userId, institutionId: testInstitution.id } };
 }
 
 function jsonRequest(method: string, body?: unknown) {
@@ -24,13 +27,14 @@ let lecturer: { id: string };
 let student: { id: string };
 
 beforeAll(async () => {
+  testInstitution = await getOrCreateTestInstitution("camera-monitoring-test");
   const passwordHash = await bcrypt.hash("test-password", 4);
   const stamp = Date.now();
   lecturer = await prisma.user.create({
-    data: { name: "Camera Lecturer", email: `cam-lect-${stamp}@test.local`, passwordHash, role: "LECTURER" },
+    data: { name: "Camera Lecturer", email: `cam-lect-${stamp}@test.local`, passwordHash, role: "LECTURER", institutionId: testInstitution.id },
   });
   student = await prisma.user.create({
-    data: { name: "Camera Student", email: `cam-stud-${stamp}@test.local`, passwordHash, role: "STUDENT" },
+    data: { name: "Camera Student", email: `cam-stud-${stamp}@test.local`, passwordHash, role: "STUDENT", institutionId: testInstitution.id },
   });
 });
 
@@ -51,7 +55,7 @@ describe("camera and keyboard/fullscreen events accepted by the integrity-events
         title: "Camera Gate Exam",
         durationMins: 30,
         published: true,
-        createdById: lecturer.id,
+        createdById: lecturer.id, institutionId: testInstitution.id,
         secureSettings: { secureModeEnabled: true, requireCamera: true },
       },
     });
@@ -84,7 +88,7 @@ describe("evidence report includes camera and browser-friction event types", () 
         title: "Evidence Camera Exam",
         durationMins: 30,
         published: true,
-        createdById: lecturer.id,
+        createdById: lecturer.id, institutionId: testInstitution.id,
         secureSettings: { secureModeEnabled: true, requireCamera: true },
       },
     });
@@ -154,7 +158,7 @@ describe("non-camera secure exam settings are unaffected by the camera additions
         title: "No Camera Exam",
         durationMins: 30,
         published: true,
-        createdById: lecturer.id,
+        createdById: lecturer.id, institutionId: testInstitution.id,
         secureSettings: { secureModeEnabled: true },
       },
     });

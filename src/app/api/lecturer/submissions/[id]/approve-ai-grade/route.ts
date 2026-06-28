@@ -3,6 +3,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
+import { isPlatformAdmin, assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 
 const approveSchema = z.object({
   finalScore: z.number().min(0),
@@ -24,8 +25,18 @@ export async function POST(
     include: { exam: { include: { questions: true } }, answers: true, student: true },
   });
 
-  if (!submission || submission.exam.createdById !== session.user.id) {
+  if (!submission) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  if (!isPlatformAdmin(session) && submission.exam.createdById !== session.user.id) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  try {
+    assertSameInstitution(session, submission.exam.institutionId);
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
   }
 
   const body = await req.json();

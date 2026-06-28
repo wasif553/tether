@@ -6,20 +6,21 @@ import {
   EvidenceForbiddenError,
   EvidenceNotFoundError,
 } from "@/lib/evidenceReport";
+import { institutionErrorResponse } from "@/lib/institutionScope";
 
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const session = await auth();
-  if (!session || session.user.role !== "LECTURER") {
+  if (!session || (session.user.role !== "LECTURER" && session.user.role !== "PLATFORM_ADMIN")) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const { id } = await params;
 
   try {
-    const report = await buildEvidenceReport(id, session.user.id);
+    const report = await buildEvidenceReport(id, session);
     const csv = evidenceReportToCsv(report);
     return new NextResponse(csv, {
       headers: {
@@ -34,6 +35,8 @@ export async function GET(
     if (err instanceof EvidenceForbiddenError) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
+    const res = institutionErrorResponse(err);
+    if (res) return res;
     throw err;
   }
 }

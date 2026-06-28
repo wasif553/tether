@@ -5,13 +5,16 @@ const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
 
 const { prisma } = await import("../prisma");
+const { getOrCreateTestInstitution } = await import("../testInstitution");
 const unmatchedRoute = await import("../../app/api/lecturer/lti/unmatched-launches/route");
 const linkRoute = await import("../../app/api/lecturer/lti/unmatched-launches/[id]/link/route");
 const pilotReadinessRoute = await import("../../app/api/lecturer/pilot-readiness/route");
 const { maskSubject } = await import("./unmatchedLaunches");
 
+let testInstitution: { id: string };
+
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT") {
-  return { user: { id: userId, role, email: `${userId}@test.local`, name: userId } };
+  return { user: { id: userId, role, email: `${userId}@test.local`, name: userId, institutionId: testInstitution.id } };
 }
 
 function jsonRequest(method: string, body?: unknown) {
@@ -31,18 +34,19 @@ const canvasSubject = "canvas-sub-1234567890abcdef";
 let launchId: string;
 
 beforeAll(async () => {
+  testInstitution = await getOrCreateTestInstitution("unmatched-launches-test");
   const passwordHash = await bcrypt.hash("test-password", 4);
   lecturer = await prisma.user.create({
-    data: { name: "Unmatched Lecturer", email: `unmatched-lect-${Date.now()}@test.local`, passwordHash, role: "LECTURER" },
+    data: { name: "Unmatched Lecturer", email: `unmatched-lect-${Date.now()}@test.local`, passwordHash, role: "LECTURER", institutionId: testInstitution.id },
   });
   student = await prisma.user.create({
-    data: { name: "Unmatched Student", email: `unmatched-stud-${Date.now()}@test.local`, passwordHash, role: "STUDENT" },
+    data: { name: "Unmatched Student", email: `unmatched-stud-${Date.now()}@test.local`, passwordHash, role: "STUDENT", institutionId: testInstitution.id },
   });
   exam = await prisma.exam.create({
-    data: { title: "Unmatched Test Exam", durationMins: 30, createdById: lecturer.id },
+    data: { title: "Unmatched Test Exam", durationMins: 30, createdById: lecturer.id, institutionId: testInstitution.id },
   });
   platform =
-    (await prisma.ltiPlatform.findFirst()) ??
+    (await prisma.ltiPlatform.findFirst({ where: { institutionId: testInstitution.id } })) ??
     (await prisma.ltiPlatform.create({
       data: {
         issuer: `https://unmatched-test-platform-${Date.now()}.example.com`,
@@ -51,6 +55,7 @@ beforeAll(async () => {
         tokenEndpoint: "https://example.com/token",
         jwksUrl: "https://example.com/jwks",
         deploymentId: "test-deployment",
+        institutionId: testInstitution.id,
       },
     }));
 
@@ -143,7 +148,7 @@ describe("POST /api/lecturer/lti/unmatched-launches/[id]/link", () => {
   it("returns a safe 409 when the resource is already linked to a different exam", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const otherExam = await prisma.exam.create({
-      data: { title: "Other Exam", durationMins: 30, createdById: lecturer.id },
+      data: { title: "Other Exam", durationMins: 30, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     const res = await linkRoute.POST(jsonRequest("POST", { examId: otherExam.id }), {

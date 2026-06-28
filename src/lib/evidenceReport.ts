@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { computeRiskScore, riskLevelForScore, type RiskLevel } from "@/lib/integrityRisk";
 import { labelForEventType } from "@/lib/integrityEventLabels";
+import { isPlatformAdmin, requireInstitutionId } from "@/lib/institutionScope";
+import type { Session } from "next-auth";
 
 export const EVIDENCE_DISCLAIMER =
   "Integrity events are signals for human review and are not automatic misconduct determinations.";
@@ -44,13 +46,14 @@ export type EvidenceReport = {
 
 export async function buildEvidenceReport(
   submissionId: string,
-  lecturerId: string,
+  session: Session,
 ): Promise<EvidenceReport> {
+  const lecturerId = session.user.id;
   const submission = await prisma.submission.findUnique({
     where: { id: submissionId },
     include: {
       student: { select: { name: true, email: true } },
-      exam: { select: { id: true, title: true, createdById: true } },
+      exam: { select: { id: true, title: true, createdById: true, institutionId: true } },
       integrityEvents: {
         include: { resolvedBy: { select: { name: true } } },
         orderBy: { occurredAt: "asc" },
@@ -61,8 +64,14 @@ export async function buildEvidenceReport(
   });
 
   if (!submission) throw new EvidenceNotFoundError(`Submission ${submissionId} not found`);
-  if (submission.exam.createdById !== lecturerId) {
+  // This is the single choke point for evidence access — both the JSON and
+  // CSV evidence routes call this function, so fixing institution scoping
+  // here covers both (see docs/multi-tenant-migration.md).
+  if (!isPlatformAdmin(session) && submission.exam.createdById !== lecturerId) {
     throw new EvidenceForbiddenError("Not the owner of this exam");
+  }
+  if (!isPlatformAdmin(session) && requireInstitutionId(session) !== submission.exam.institutionId) {
+    throw new EvidenceForbiddenError("Submission belongs to a different institution");
   }
 
   const riskScore = computeRiskScore(submission.integrityEvents);

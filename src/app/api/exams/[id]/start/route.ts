@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
+import { assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 
 export async function POST(
   _req: Request,
@@ -16,6 +17,14 @@ export async function POST(
   const exam = await prisma.exam.findUnique({ where: { id } });
   if (!exam || !exam.published) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  try {
+    assertSameInstitution(session, exam.institutionId);
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
   }
 
   const now = new Date();

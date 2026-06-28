@@ -10,6 +10,7 @@ datasource db {
 enum Role {
   LECTURER
   STUDENT
+  PLATFORM_ADMIN
 }
 
 enum QuestionType {
@@ -66,6 +67,21 @@ enum CanvasPassbackStatus {
   SKIPPED
 }
 
+// Multi-Tenant Architecture v1 — see docs/multi-tenant-migration.md.
+model Institution {
+  id           String        @id @default(cuid())
+  name         String
+  slug         String        @unique
+  domain       String?
+  plan         String        @default("pilot")
+  active       Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  users        User[]
+  exams        Exam[]
+  ltiPlatforms LtiPlatform[]
+}
+
 model User {
   id                String           @id @default(cuid())
   name              String
@@ -77,9 +93,20 @@ model User {
   submissions       Submission[]
   integrityEvents   IntegrityEvent[] @relation("IntegrityEventStudent")
   resolvedEvents     IntegrityEvent[] @relation("IntegrityEventResolver")
-  canvasUserId      String?          @unique
+  // canvasUserId is unique per institution, not globally — a self-hosted
+  // Canvas instance at a different institution could otherwise collide
+  // with another institution's user id. See docs/multi-tenant-migration.md.
+  canvasUserId      String?
   canvasCourseIds   String[]         @default([])
   questionBanks     QuestionBank[]
+  // Multi-Tenant Architecture v1 (additive, nullable — see
+  // docs/multi-tenant-migration.md). Nullable at the DB level; application
+  // code treats it as required via src/lib/institutionScope.ts.
+  institutionId     String?
+  institution       Institution?     @relation(fields: [institutionId], references: [id])
+
+  @@unique([institutionId, canvasUserId])
+  @@index([institutionId])
 }
 
 model Exam {
@@ -101,6 +128,12 @@ model Exam {
   // other multi-flag settings model and these are read/written together.
   secureSettings  Json?
   createdAt       DateTime         @default(now())
+  // Multi-Tenant Architecture v1 (additive, nullable) — see
+  // docs/multi-tenant-migration.md.
+  institutionId   String?
+  institution     Institution?     @relation(fields: [institutionId], references: [id])
+
+  @@index([institutionId])
 }
 
 model Question {
@@ -190,6 +223,11 @@ model LtiPlatform {
   createdAt     DateTime     @default(now())
   sessions      LtiSession[]
   examLinks     LtiExamLink[]
+  launches      LtiLaunch[]
+  // Multi-Tenant Architecture v1 (additive, nullable) — one platform
+  // (Canvas instance) belongs to exactly one institution.
+  institutionId String?
+  institution   Institution? @relation(fields: [institutionId], references: [id])
 }
 
 model LtiSession {
@@ -222,6 +260,11 @@ model LtiExamLink {
 model LtiLaunch {
   id                 String   @id @default(cuid())
   platformId         String
+  // Relation field added so launches can be scoped to their platform's
+  // institution (see docs/multi-tenant-migration.md). This does not add a
+  // database column — platformId already existed; this only adds the
+  // Prisma-level join, matching the existing pattern on LtiSession/LtiExamLink.
+  platform           LtiPlatform @relation(fields: [platformId], references: [id])
   canvasUserId       String
   canvasCourseId     String
   canvasAssignmentId String?

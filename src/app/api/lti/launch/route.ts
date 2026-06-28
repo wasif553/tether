@@ -140,7 +140,16 @@ export async function POST(req: Request) {
   const agsScope = agsEndpoint?.scope;
   const role = extractRole(payload);
 
-  let user = await prisma.user.findUnique({ where: { canvasUserId } });
+  // canvasUserId is unique per institution, not globally (see
+  // prisma/schema.prisma) — look up scoped to this platform's institution
+  // first. If the platform hasn't been backfilled with an institutionId
+  // yet, fall back to a best-effort global search rather than failing the
+  // launch outright.
+  let user = platform.institutionId
+    ? await prisma.user.findUnique({
+        where: { institutionId_canvasUserId: { institutionId: platform.institutionId, canvasUserId } },
+      })
+    : await prisma.user.findFirst({ where: { canvasUserId } });
 
   if (!user) {
     const randomPassword = randomBytes(32).toString("hex");
@@ -153,9 +162,19 @@ export async function POST(req: Request) {
         role,
         canvasUserId,
         canvasCourseIds: canvasCourseId ? [canvasCourseId] : [],
+        institutionId: platform.institutionId,
       },
     });
   } else {
+    if (platform.institutionId && user.institutionId && user.institutionId !== platform.institutionId) {
+      // Cross-tenant identity mismatch — never silently reassign a user's
+      // institution. Flag it and proceed with the user's existing
+      // institution; this is a data/config issue to investigate, not
+      // something the launch flow should "fix" automatically.
+      console.error(
+        `LTI launch: user ${user.id} institutionId (${user.institutionId}) differs from platform ${platform.id} institutionId (${platform.institutionId}) — not reassigning`,
+      );
+    }
     const updates: { name?: string; email?: string; canvasCourseIds?: string[] } = {};
     if (user.name !== name) updates.name = name;
     if (user.email !== email) updates.email = email;
@@ -200,6 +219,7 @@ export async function POST(req: Request) {
     name: user.name,
     email: user.email,
     role: user.role,
+    institutionId: user.institutionId,
   });
 
   const appUrl = process.env.APP_URL;

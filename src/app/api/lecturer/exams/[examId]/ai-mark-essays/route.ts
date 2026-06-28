@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { markEssay, type RubricCriterion } from "@/lib/ai/essayMarker";
+import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 
 function buildDefaultRubric(points: number): RubricCriterion[] {
   return [
@@ -28,9 +29,16 @@ export async function POST(
   }
 
   const { examId } = await params;
-  const exam = await prisma.exam.findFirst({
-    where: { id: examId, createdById: session.user.id },
-  });
+  let exam;
+  try {
+    exam = await prisma.exam.findFirst({
+      where: { id: examId, createdById: session.user.id, ...institutionWhere(session) },
+    });
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
+  }
   if (!exam) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }

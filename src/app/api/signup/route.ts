@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { DEFAULT_INSTITUTION_SLUG } from "@/lib/institutionScope";
 
 const signupSchema = z.object({
   name: z.string().min(1),
@@ -25,8 +26,14 @@ export async function POST(req: Request) {
   }
 
   const passwordHash = await bcrypt.hash(password, 12);
+  // For v1 pilot: every self-signup lands in the default institution.
+  // Do not add a complex invite/institution-code flow now (see
+  // docs/multi-tenant-migration.md).
+  const defaultInstitution = await prisma.institution.findUnique({
+    where: { slug: DEFAULT_INSTITUTION_SLUG },
+  });
   const user = await prisma.user.create({
-    data: { name, email, passwordHash, role },
+    data: { name, email, passwordHash, role, institutionId: defaultInstitution?.id ?? null },
   });
 
   return NextResponse.json({ id: user.id, email: user.email });

@@ -5,12 +5,15 @@ const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
 
 const { prisma } = await import("./prisma");
+const { getOrCreateTestInstitution } = await import("./testInstitution");
 const linksRoute = await import("../app/api/lecturer/exams/[examId]/lti-links/route");
 const linkRoute = await import("../app/api/lecturer/exams/[examId]/lti-links/[linkId]/route");
 const pilotReadinessRoute = await import("../app/api/lecturer/pilot-readiness/route");
 
+let testInstitution: { id: string };
+
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT") {
-  return { user: { id: userId, role, email: `${userId}@test.local`, name: userId } };
+  return { user: { id: userId, role, email: `${userId}@test.local`, name: userId, institutionId: testInstitution.id } };
 }
 
 function jsonRequest(method: string, body?: unknown) {
@@ -27,18 +30,19 @@ let exam: { id: string };
 let platform: { id: string };
 
 beforeAll(async () => {
+  testInstitution = await getOrCreateTestInstitution("lti-exam-link-test");
   const passwordHash = await bcrypt.hash("test-password", 4);
   lecturer = await prisma.user.create({
-    data: { name: "Link Lecturer", email: `link-lect-${Date.now()}@test.local`, passwordHash, role: "LECTURER" },
+    data: { name: "Link Lecturer", email: `link-lect-${Date.now()}@test.local`, passwordHash, role: "LECTURER", institutionId: testInstitution.id },
   });
   student = await prisma.user.create({
-    data: { name: "Link Student", email: `link-stud-${Date.now()}@test.local`, passwordHash, role: "STUDENT" },
+    data: { name: "Link Student", email: `link-stud-${Date.now()}@test.local`, passwordHash, role: "STUDENT", institutionId: testInstitution.id },
   });
   exam = await prisma.exam.create({
-    data: { title: "Link Test Exam", durationMins: 30, createdById: lecturer.id },
+    data: { title: "Link Test Exam", durationMins: 30, createdById: lecturer.id, institutionId: testInstitution.id },
   });
   platform =
-    (await prisma.ltiPlatform.findFirst()) ??
+    (await prisma.ltiPlatform.findFirst({ where: { institutionId: testInstitution.id } })) ??
     (await prisma.ltiPlatform.create({
       data: {
         issuer: `https://test-platform-${Date.now()}.example.com`,
@@ -47,6 +51,7 @@ beforeAll(async () => {
         tokenEndpoint: "https://example.com/token",
         jwksUrl: "https://example.com/jwks",
         deploymentId: "test-deployment",
+        institutionId: testInstitution.id,
       },
     }));
 });

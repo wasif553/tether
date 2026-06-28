@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { institutionWhere, requireInstitutionId, institutionErrorResponse } from "@/lib/institutionScope";
 
 const createExamSchema = z.object({
   title: z.string().min(1),
@@ -17,13 +18,19 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const exams = await prisma.exam.findMany({
-    where: { createdById: session.user.id },
-    orderBy: { createdAt: "desc" },
-    include: { _count: { select: { questions: true, submissions: true } } },
-  });
+  try {
+    const exams = await prisma.exam.findMany({
+      where: { createdById: session.user.id, ...institutionWhere(session) },
+      orderBy: { createdAt: "desc" },
+      include: { _count: { select: { questions: true, submissions: true } } },
+    });
 
-  return NextResponse.json(exams);
+    return NextResponse.json(exams);
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
+  }
 }
 
 export async function POST(req: Request) {
@@ -40,18 +47,25 @@ export async function POST(req: Request) {
 
   const { title, description, durationMins, startsAt, endsAt } = parsed.data;
 
-  const exam = await prisma.exam.create({
-    data: {
-      title,
-      description,
-      durationMins,
-      startsAt: startsAt ? new Date(startsAt) : undefined,
-      endsAt: endsAt ? new Date(endsAt) : undefined,
-      createdById: session.user.id,
-    },
-  });
+  try {
+    const exam = await prisma.exam.create({
+      data: {
+        title,
+        description,
+        durationMins,
+        startsAt: startsAt ? new Date(startsAt) : undefined,
+        endsAt: endsAt ? new Date(endsAt) : undefined,
+        createdById: session.user.id,
+        institutionId: requireInstitutionId(session),
+      },
+    });
 
-  return NextResponse.json(exam, { status: 201 });
+    return NextResponse.json(exam, { status: 201 });
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
+  }
 }
 
 export const dynamic = "force-dynamic";

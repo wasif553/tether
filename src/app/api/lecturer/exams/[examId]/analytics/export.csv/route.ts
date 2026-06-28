@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { calculateExamAnalytics, ExamNotFoundError } from "@/lib/analytics";
+import { isPlatformAdmin, assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 
 function csvEscape(value: string | number | null): string {
   if (value == null) return "";
@@ -31,8 +32,15 @@ export async function GET(
   if (!exam) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  if (exam.createdById !== session.user.id) {
+  if (!isPlatformAdmin(session) && exam.createdById !== session.user.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  try {
+    assertSameInstitution(session, exam.institutionId);
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
   }
 
   let analytics;

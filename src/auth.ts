@@ -5,14 +5,16 @@ import { prisma } from "@/lib/prisma";
 
 declare module "next-auth" {
   interface User {
-    role?: "LECTURER" | "STUDENT";
+    role?: "LECTURER" | "STUDENT" | "PLATFORM_ADMIN";
+    institutionId?: string | null;
   }
   interface Session {
     user: {
       id: string;
       name?: string | null;
       email?: string | null;
-      role: "LECTURER" | "STUDENT";
+      role: "LECTURER" | "STUDENT" | "PLATFORM_ADMIN";
+      institutionId: string | null;
     };
   }
 }
@@ -42,6 +44,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           name: user.name,
           email: user.email,
           role: user.role,
+          institutionId: user.institutionId,
         };
       },
     }),
@@ -51,6 +54,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       if (user) {
         (token as Record<string, unknown>).id = user.id;
         (token as Record<string, unknown>).role = user.role;
+        (token as Record<string, unknown>).institutionId = user.institutionId ?? null;
       }
       return token;
     },
@@ -59,7 +63,15 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         session.user.id = (token as Record<string, unknown>).id as string;
         session.user.role = (token as Record<string, unknown>).role as
           | "LECTURER"
-          | "STUDENT";
+          | "STUDENT"
+          | "PLATFORM_ADMIN";
+        // Old sessions minted before this field existed will have
+        // token.institutionId === undefined — normalize to null so
+        // requireInstitutionId() (src/lib/institutionScope.ts) can detect
+        // and reject them with a clear "log in again" message, rather
+        // than silently treating `undefined` as a valid falsy bypass.
+        session.user.institutionId =
+          ((token as Record<string, unknown>).institutionId as string | null | undefined) ?? null;
       }
       return session;
     },

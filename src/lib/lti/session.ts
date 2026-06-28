@@ -4,7 +4,8 @@ type SessionUser = {
   id: string;
   name: string;
   email: string;
-  role: "LECTURER" | "STUDENT";
+  role: "LECTURER" | "STUDENT" | "PLATFORM_ADMIN";
+  institutionId?: string | null;
 };
 
 function isSecureAppUrl(): boolean {
@@ -42,6 +43,7 @@ export async function createSessionCookie(user: SessionUser): Promise<{
       name: user.name,
       email: user.email,
       role: user.role,
+      institutionId: user.institutionId ?? null,
     },
   });
 

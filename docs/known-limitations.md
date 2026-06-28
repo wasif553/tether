@@ -43,10 +43,27 @@ results and methodology.
 
 ## Multi-tenancy
 
-- The current deployment is single-tenant
-- All lecturer data is isolated by account
-- Enterprise multi-institution isolation is not yet implemented
-- Suitable for single-institution pilots only
+Multi-Tenant Architecture v1 is implemented (see
+docs/multi-tenant-migration.md for the schema, scoping helpers, and routes
+involved):
+
+- `User`, `Exam`, and `LtiPlatform` carry a nullable `institutionId`;
+  application code (`src/lib/institutionScope.ts`) treats it as required
+  and fails loudly (re-login prompt) rather than silently scoping to
+  nothing when it's missing.
+- Lecturers and students only see exams, submissions, analytics, and
+  evidence reports within their own institution. A `PLATFORM_ADMIN` role
+  can bypass institution scoping for support/operations purposes.
+- Models without their own `institutionId` column (`Submission`,
+  `Answer`, `IntegrityEvent`, `CanvasGradePassback`, `LtiLaunch`,
+  `LtiExamLink`) are scoped by joining to their parent (`exam.institutionId`
+  or `platform.institutionId`) rather than duplicating the column.
+- v1 has no institution-onboarding UI or self-service lecturer invite
+  flow — new institutions are created manually (direct DB insert or the
+  seed script). This is deferred to "Multi-Tenant Admin v2".
+- All existing single-institution pilot deployments keep working
+  unchanged: a one-time seed backfills every existing row into a single
+  "default" institution, and self-signup defaults new users into it.
 
 ## Canvas/LTI
 

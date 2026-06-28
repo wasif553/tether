@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 
 export async function GET(
   _req: Request,
@@ -12,7 +13,17 @@ export async function GET(
   }
 
   const { id } = await params;
-  const exam = await prisma.exam.findFirst({ where: { id, createdById: session.user.id } });
+
+  let exam;
+  try {
+    exam = await prisma.exam.findFirst({
+      where: { id, createdById: session.user.id, ...institutionWhere(session) },
+    });
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
+  }
   if (!exam) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const submissions = await prisma.submission.findMany({

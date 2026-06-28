@@ -5,13 +5,16 @@ const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
 
 const { prisma } = await import("./prisma");
+const { getOrCreateTestInstitution } = await import("./testInstitution");
 const startRoute = await import("../app/api/exams/[id]/start/route");
 const submitRoute = await import("../app/api/submissions/[id]/submit/route");
 const integrityEventsRoute = await import("../app/api/submissions/[id]/integrity-events/route");
 const analyticsModule = await import("./analytics");
 
+let testInstitution: { id: string };
+
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT") {
-  return { user: { id: userId, role, email: `${userId}@test.local`, name: userId } };
+  return { user: { id: userId, role, email: `${userId}@test.local`, name: userId, institutionId: testInstitution.id } };
 }
 
 function jsonRequest(method: string, body?: unknown) {
@@ -27,16 +30,17 @@ let studentA: { id: string };
 let studentB: { id: string };
 
 beforeAll(async () => {
+  testInstitution = await getOrCreateTestInstitution("concurrency-test");
   const passwordHash = await bcrypt.hash("test-password", 4);
   const stamp = Date.now();
   lecturer = await prisma.user.create({
-    data: { name: "Concurrency Lecturer", email: `conc-lect-${stamp}@test.local`, passwordHash, role: "LECTURER" },
+    data: { name: "Concurrency Lecturer", email: `conc-lect-${stamp}@test.local`, passwordHash, role: "LECTURER", institutionId: testInstitution.id },
   });
   studentA = await prisma.user.create({
-    data: { name: "Concurrency Student A", email: `conc-stud-a-${stamp}@test.local`, passwordHash, role: "STUDENT" },
+    data: { name: "Concurrency Student A", email: `conc-stud-a-${stamp}@test.local`, passwordHash, role: "STUDENT", institutionId: testInstitution.id },
   });
   studentB = await prisma.user.create({
-    data: { name: "Concurrency Student B", email: `conc-stud-b-${stamp}@test.local`, passwordHash, role: "STUDENT" },
+    data: { name: "Concurrency Student B", email: `conc-stud-b-${stamp}@test.local`, passwordHash, role: "STUDENT", institutionId: testInstitution.id },
   });
 });
 
@@ -45,8 +49,8 @@ afterAll(async () => {
   await prisma.integrityEvent.deleteMany({ where: { studentId: { in: userIds } } });
   await prisma.answer.deleteMany({ where: { submission: { studentId: { in: userIds } } } });
   await prisma.submission.deleteMany({ where: { studentId: { in: userIds } } });
-  await prisma.question.deleteMany({ where: { exam: { createdById: lecturer.id } } });
-  await prisma.exam.deleteMany({ where: { createdById: lecturer.id } });
+  await prisma.question.deleteMany({ where: { exam: { createdById: lecturer.id, institutionId: testInstitution.id } } });
+  await prisma.exam.deleteMany({ where: { createdById: lecturer.id, institutionId: testInstitution.id } });
   await prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await prisma.$disconnect();
 });
@@ -55,7 +59,7 @@ describe("two students submitting the same exam independently", () => {
   it("both succeed without interfering with each other", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Concurrent Submitters Exam", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Concurrent Submitters Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT"));
@@ -80,7 +84,7 @@ describe("concurrent exam-start requests cannot create duplicate submissions", (
   it("returns the same submission for two simultaneous start calls", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Race Start Exam", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Race Start Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT"));
@@ -103,7 +107,7 @@ describe("integrity event debounce under rapid repeated events", () => {
   it("returns the existing event instead of creating a new one within the debounce window", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Debounce Exam", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Debounce Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT"));
@@ -146,7 +150,7 @@ describe("analytics with mixed IN_PROGRESS/SUBMITTED/GRADED submissions", () => 
   it("only counts finalized submissions in score-based stats, but counts all in totals", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Mixed State Analytics Exam", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Mixed State Analytics Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
     await prisma.question.create({
       data: { examId: exam.id, type: "SHORT_ANSWER", text: "Q1", points: 2, correctAnswer: "ok" },

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 
 export async function DELETE(
   _req: Request,
@@ -12,17 +13,23 @@ export async function DELETE(
   }
 
   const { examId, linkId } = await params;
-  const exam = await prisma.exam.findFirst({
-    where: { id: examId, createdById: session.user.id },
-  });
-  if (!exam) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  try {
+    const exam = await prisma.exam.findFirst({
+      where: { id: examId, createdById: session.user.id, ...institutionWhere(session) },
+    });
+    if (!exam) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const link = await prisma.ltiExamLink.findFirst({ where: { id: linkId, examId } });
-  if (!link) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    const link = await prisma.ltiExamLink.findFirst({ where: { id: linkId, examId } });
+    if (!link) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  await prisma.ltiExamLink.delete({ where: { id: linkId } });
+    await prisma.ltiExamLink.delete({ where: { id: linkId } });
 
-  return new NextResponse(null, { status: 204 });
+    return new NextResponse(null, { status: 204 });
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
+  }
 }
 
 export const dynamic = "force-dynamic";

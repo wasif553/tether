@@ -3,6 +3,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { generateQuestions, AIGenerationError } from "@/lib/ai/questionGenerator";
+import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 
 const generateQuestionsRequestSchema = z.object({
   sourceMaterial: z.string().min(1),
@@ -31,9 +32,16 @@ export async function POST(
   }
 
   const { examId } = await params;
-  const exam = await prisma.exam.findFirst({
-    where: { id: examId, createdById: session.user.id },
-  });
+  let exam;
+  try {
+    exam = await prisma.exam.findFirst({
+      where: { id: examId, createdById: session.user.id, ...institutionWhere(session) },
+    });
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
+  }
   if (!exam) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }

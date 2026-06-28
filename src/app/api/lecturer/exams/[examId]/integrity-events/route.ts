@@ -3,6 +3,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { computeRiskScore, riskLevelForScore, type Severity } from "@/lib/integrityRisk";
 import { labelForEventType } from "@/lib/integrityEventLabels";
+import { isPlatformAdmin, assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 
 export async function GET(
   _req: Request,
@@ -17,8 +18,15 @@ export async function GET(
 
   const exam = await prisma.exam.findUnique({ where: { id: examId } });
   if (!exam) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (exam.createdById !== session.user.id) {
+  if (!isPlatformAdmin(session) && exam.createdById !== session.user.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  try {
+    assertSameInstitution(session, exam.institutionId);
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
   }
 
   const events = await prisma.integrityEvent.findMany({

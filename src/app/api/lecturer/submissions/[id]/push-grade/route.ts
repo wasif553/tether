@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
+import { isPlatformAdmin, assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 
 export async function POST(
   _req: Request,
@@ -18,8 +19,18 @@ export async function POST(
     include: { exam: true },
   });
 
-  if (!submission || submission.exam.createdById !== session.user.id) {
+  if (!submission) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  if (!isPlatformAdmin(session) && submission.exam.createdById !== session.user.id) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  try {
+    assertSameInstitution(session, submission.exam.institutionId);
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
   }
 
   const result = await pushGradeToCanvas(id, { force: true });

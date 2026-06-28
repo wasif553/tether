@@ -3,6 +3,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { getRequiredEnvStatus, getLtiEnvStatus, getAiEnvStatus } from "@/lib/env/readiness";
 import { countUnmatchedLaunches } from "@/lib/lti/unmatchedLaunches";
+import { institutionWhere, requireInstitutionId, isPlatformAdmin, institutionErrorResponse } from "@/lib/institutionScope";
 
 type Status = "READY" | "NEEDS_SETUP" | "NOT_CONFIGURED" | "WARNING";
 
@@ -28,13 +29,20 @@ export async function GET() {
 
   const lecturerId = session.user.id;
 
-  const exams = await prisma.exam.findMany({
-    where: { createdById: lecturerId },
-    include: {
-      questions: { select: { id: true } },
-      submissions: { select: { id: true, status: true } },
-    },
-  });
+  let exams;
+  try {
+    exams = await prisma.exam.findMany({
+      where: { createdById: lecturerId, ...institutionWhere(session) },
+      include: {
+        questions: { select: { id: true } },
+        submissions: { select: { id: true, status: true } },
+      },
+    });
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
+  }
 
   const requiredEnv = getRequiredEnvStatus();
   const ltiEnv = getLtiEnvStatus();
@@ -60,7 +68,7 @@ export async function GET() {
     return Boolean(settings?.secureModeEnabled);
   });
   const integrityCount = await prisma.integrityEvent.count({
-    where: { exam: { createdById: lecturerId } },
+    where: { exam: { createdById: lecturerId, ...institutionWhere(session) } },
   });
 
   // --- A. Core secure exam readiness (required) ---
@@ -86,15 +94,27 @@ export async function GET() {
   const coreReady = core.every((i) => i.status === "READY");
 
   // --- B. Optional Canvas readiness ---
-  const platform = await prisma.ltiPlatform.findFirst();
-  const totalLinkedResources = await prisma.ltiExamLink.count();
-  const examLinkCount = await prisma.ltiExamLink.count({
-    where: { exam: { createdById: lecturerId } },
+  // All Canvas-related counts here are scoped to the caller's institution
+  // (PLATFORM_ADMIN sees platform-wide totals) — these were previously
+  // unscoped global counts, a cross-tenant leak (see
+  // docs/multi-tenant-migration.md).
+  const institutionFilter = isPlatformAdmin(session)
+    ? {}
+    : { institutionId: requireInstitutionId(session) };
+  const platform = await prisma.ltiPlatform.findFirst({ where: institutionFilter });
+  const totalLinkedResources = await prisma.ltiExamLink.count({
+    where: { platform: institutionFilter },
   });
-  const recentLaunch = await prisma.ltiLaunch.findFirst({ orderBy: { createdAt: "desc" } });
-  const unmatchedCount = await countUnmatchedLaunches();
+  const examLinkCount = await prisma.ltiExamLink.count({
+    where: { exam: { createdById: lecturerId, ...institutionWhere(session) } },
+  });
+  const recentLaunch = await prisma.ltiLaunch.findFirst({
+    where: { platform: institutionFilter },
+    orderBy: { createdAt: "desc" },
+  });
+  const unmatchedCount = await countUnmatchedLaunches(session);
   const mostRecentSent = await prisma.canvasGradePassback.findFirst({
-    where: { status: "SENT" },
+    where: { status: "SENT", submission: { exam: { ...institutionWhere(session) } } },
     orderBy: { sentAt: "desc" },
   });
 

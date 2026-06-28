@@ -5,6 +5,7 @@ const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
 
 const { prisma } = await import("./prisma");
+const { getOrCreateTestInstitution } = await import("./testInstitution");
 const examRoute = await import("../app/api/exams/[id]/route");
 const startRoute = await import("../app/api/exams/[id]/start/route");
 const answersRoute = await import("../app/api/submissions/[id]/answers/route");
@@ -12,8 +13,10 @@ const submitRoute = await import("../app/api/submissions/[id]/submit/route");
 const submissionRoute = await import("../app/api/submissions/[id]/route");
 const evidenceRoute = await import("../app/api/lecturer/submissions/[id]/evidence/route");
 
+let testInstitution: { id: string };
+
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT") {
-  return { user: { id: userId, role, email: `${userId}@test.local`, name: userId } };
+  return { user: { id: userId, role, email: `${userId}@test.local`, name: userId, institutionId: testInstitution.id } };
 }
 
 function jsonRequest(method: string, body?: unknown) {
@@ -30,19 +33,20 @@ let student: { id: string };
 let otherStudent: { id: string };
 
 beforeAll(async () => {
+  testInstitution = await getOrCreateTestInstitution("secure-exam-test");
   const passwordHash = await bcrypt.hash("test-password", 4);
   const stamp = Date.now();
   lecturer = await prisma.user.create({
-    data: { name: "SE Lecturer", email: `se-lect-${stamp}@test.local`, passwordHash, role: "LECTURER" },
+    data: { name: "SE Lecturer", email: `se-lect-${stamp}@test.local`, passwordHash, role: "LECTURER", institutionId: testInstitution.id },
   });
   otherLecturer = await prisma.user.create({
-    data: { name: "SE Other Lecturer", email: `se-lect2-${stamp}@test.local`, passwordHash, role: "LECTURER" },
+    data: { name: "SE Other Lecturer", email: `se-lect2-${stamp}@test.local`, passwordHash, role: "LECTURER", institutionId: testInstitution.id },
   });
   student = await prisma.user.create({
-    data: { name: "SE Student", email: `se-stud-${stamp}@test.local`, passwordHash, role: "STUDENT" },
+    data: { name: "SE Student", email: `se-stud-${stamp}@test.local`, passwordHash, role: "STUDENT", institutionId: testInstitution.id },
   });
   otherStudent = await prisma.user.create({
-    data: { name: "SE Other Student", email: `se-stud2-${stamp}@test.local`, passwordHash, role: "STUDENT" },
+    data: { name: "SE Other Student", email: `se-stud2-${stamp}@test.local`, passwordHash, role: "STUDENT", institutionId: testInstitution.id },
   });
 });
 
@@ -61,7 +65,7 @@ describe("Secure Exam Mode settings", () => {
   it("defaults secureModeEnabled to false for a new exam", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Default Settings Exam", durationMins: 30, createdById: lecturer.id },
+      data: { title: "Default Settings Exam", durationMins: 30, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     const res = await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
@@ -72,7 +76,7 @@ describe("Secure Exam Mode settings", () => {
   it("enables Secure Exam Mode and persists settings via PATCH", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Enable Secure Mode Exam", durationMins: 30, createdById: lecturer.id },
+      data: { title: "Enable Secure Mode Exam", durationMins: 30, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     const res = await examRoute.PATCH(
@@ -96,7 +100,7 @@ describe("Secure Exam Mode settings", () => {
       data: {
         title: "Disable Secure Mode Exam",
         durationMins: 30,
-        createdById: lecturer.id,
+        createdById: lecturer.id, institutionId: testInstitution.id,
         secureSettings: { secureModeEnabled: true },
       },
     });
@@ -114,7 +118,7 @@ describe("maxAttempts enforcement (v1: single attempt)", () => {
   it("returns the existing submission rather than creating a second one", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Attempts Exam", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Attempts Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
@@ -136,7 +140,7 @@ describe("save/submit blocked after final submission", () => {
   it("rejects answer saves once the submission is finalized", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Save Block Exam", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Save Block Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
     const question = await prisma.question.create({
       data: { examId: exam.id, type: "SHORT_ANSWER", text: "Q1", points: 1 },
@@ -157,7 +161,7 @@ describe("save/submit blocked after final submission", () => {
   it("submit is idempotent once already finalized", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Idempotent Submit Exam", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Idempotent Submit Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
@@ -181,7 +185,7 @@ describe("late submission handling driven by allowLateSubmit", () => {
         title: "No Late Submit Exam",
         durationMins: 1,
         published: true,
-        createdById: lecturer.id,
+        createdById: lecturer.id, institutionId: testInstitution.id,
         secureSettings: { secureModeEnabled: true, allowLateSubmit: false },
       },
     });
@@ -221,7 +225,7 @@ describe("late submission handling driven by allowLateSubmit", () => {
         title: "Late Submit Allowed Exam",
         durationMins: 1,
         published: true,
-        createdById: lecturer.id,
+        createdById: lecturer.id, institutionId: testInstitution.id,
         secureSettings: { secureModeEnabled: true, allowLateSubmit: true },
       },
     });
@@ -253,7 +257,7 @@ describe("non-secure exam flow is unaffected", () => {
   it("allows normal save/submit when Secure Exam Mode is disabled", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Plain Exam", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Plain Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
     const question = await prisma.question.create({
       data: { examId: exam.id, type: "SHORT_ANSWER", text: "Q1", points: 1, correctAnswer: "ok" },
@@ -281,7 +285,7 @@ describe("evidence report access control", () => {
   it("allows the owning lecturer to access the evidence report", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Evidence Exam", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Evidence Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
@@ -300,7 +304,7 @@ describe("evidence report access control", () => {
   it("blocks a student from accessing the evidence report", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Evidence Exam Student Block", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Evidence Exam Student Block", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
@@ -315,7 +319,7 @@ describe("evidence report access control", () => {
   it("blocks a non-owning lecturer from accessing the evidence report", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Evidence Exam Other Lecturer", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Evidence Exam Other Lecturer", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
@@ -333,7 +337,7 @@ describe("student cannot access another student's submission or lecturer-only in
   it("blocks cross-student submission access", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "Cross Student Exam", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "Cross Student Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
@@ -349,7 +353,7 @@ describe("student cannot access another student's submission or lecturer-only in
   it("never returns AI draft internals or Canvas passback internals to the owning student", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({
-      data: { title: "No Internals Exam", durationMins: 30, published: true, createdById: lecturer.id },
+      data: { title: "No Internals Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
     });
     const question = await prisma.question.create({
       data: { examId: exam.id, type: "ESSAY", text: "Essay Q", points: 5 },

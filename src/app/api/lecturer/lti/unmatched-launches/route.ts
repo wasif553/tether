@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { maskSubject, unmatchedLaunchWhere } from "@/lib/lti/unmatchedLaunches";
+import { isPlatformAdmin, requireInstitutionId, institutionErrorResponse } from "@/lib/institutionScope";
 
 export async function GET() {
   const session = await auth();
@@ -9,11 +10,25 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const launches = await prisma.ltiLaunch.findMany({
-    where: unmatchedLaunchWhere(),
-    orderBy: { createdAt: "desc" },
-    take: 50,
-  });
+  // LtiLaunch has no institutionId column of its own — scope through its
+  // platform relation (see docs/multi-tenant-migration.md).
+  let launches;
+  try {
+    launches = await prisma.ltiLaunch.findMany({
+      where: {
+        ...unmatchedLaunchWhere(),
+        ...(isPlatformAdmin(session)
+          ? {}
+          : { platform: { institutionId: requireInstitutionId(session) } }),
+      },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    });
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
+  }
 
   const platforms = await prisma.ltiPlatform.findMany({
     where: { id: { in: [...new Set(launches.map((l) => l.platformId))] } },

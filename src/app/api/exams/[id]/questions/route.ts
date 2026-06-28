@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 
 const createQuestionSchema = z.object({
   type: z.enum(["MULTIPLE_CHOICE", "SHORT_ANSWER", "ESSAY"]),
@@ -20,38 +21,44 @@ export async function POST(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { id } = await params;
-  const exam = await prisma.exam.findFirst({
-    where: { id, createdById: session.user.id },
-  });
-  if (!exam) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  try {
+    const { id } = await params;
+    const exam = await prisma.exam.findFirst({
+      where: { id, createdById: session.user.id, ...institutionWhere(session) },
+    });
+    if (!exam) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const body = await req.json();
-  const parsed = createQuestionSchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+    const body = await req.json();
+    const parsed = createQuestionSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+    }
+
+    const { type, text, options, correctAnswer, points } = parsed.data;
+
+    const lastQuestion = await prisma.question.findFirst({
+      where: { examId: id },
+      orderBy: { order: "desc" },
+    });
+
+    const question = await prisma.question.create({
+      data: {
+        examId: id,
+        type,
+        text,
+        options: options ?? undefined,
+        correctAnswer,
+        points,
+        order: (lastQuestion?.order ?? -1) + 1,
+      },
+    });
+
+    return NextResponse.json(question, { status: 201 });
+  } catch (err) {
+    const res = institutionErrorResponse(err);
+    if (res) return res;
+    throw err;
   }
-
-  const { type, text, options, correctAnswer, points } = parsed.data;
-
-  const lastQuestion = await prisma.question.findFirst({
-    where: { examId: id },
-    orderBy: { order: "desc" },
-  });
-
-  const question = await prisma.question.create({
-    data: {
-      examId: id,
-      type,
-      text,
-      options: options ?? undefined,
-      correctAnswer,
-      points,
-      order: (lastQuestion?.order ?? -1) + 1,
-    },
-  });
-
-  return NextResponse.json(question, { status: 201 });
 }
 
 export const dynamic = "force-dynamic";
