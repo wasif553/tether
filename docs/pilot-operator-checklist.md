@@ -5,6 +5,13 @@ with one real Canvas course, one lecturer, and a small group of students.
 It assumes the Canvas-side setup in `canvas-sandbox-test-guide.md` is
 already done, or is being done alongside this checklist.
 
+For the broader commercial pilot package (not Canvas-specific), see:
+`demo-script.md`, `pilot-proposal-template.md`,
+`lecturer-onboarding-guide.md`, `student-test-instructions.md`,
+`concurrent-exam-pilot-capacity.md`, and `known-limitations.md`. SES
+remains a standalone secure exam platform — Canvas is an optional module
+and this checklist's Canvas steps are not required for a pilot.
+
 ## Pre-pilot setup
 
 - [ ] SES is deployed and reachable at a stable `APP_URL`

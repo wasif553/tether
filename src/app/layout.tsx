@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Safe Exam System",
-  description: "Cheat-proof online assessment platform",
+  description: "Cheat-resistant online assessment platform with evidence-based lecturer review",
 };
 
 export default function RootLayout({
