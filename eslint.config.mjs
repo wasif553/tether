@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // apps/lockdown is a separate Electron+TypeScript project with its
+    // own build — not part of this Next.js app's lint scope.
+    "apps/**",
   ]),
 ]);
 

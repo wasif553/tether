@@ -1,0 +1,20 @@
+{
+  "name": "ses-lockdown",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Safe Exam System — Electron Lockdown Browser v1 (detection-and-logging native client)",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "npm run build && electron ."
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "electron": "^33.0.0",
+    "typescript": "^5.7.0"
+  }
+}

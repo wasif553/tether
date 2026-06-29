@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
+import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
 
 type Question = {
   id: string;
@@ -189,6 +190,13 @@ export default function TakeExamPage({
   const [cameraWarning, setCameraWarning] = useState<string | null>(null);
   const heartbeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const [inLockdownBrowser, setInLockdownBrowser] = useState(false);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setInLockdownBrowser(isRunningInLockdownBrowser());
+  }, []);
+
   useEffect(() => {
     fetch(`/api/submissions/${id}`)
       .then((res) => res.json())
@@ -201,6 +209,15 @@ export default function TakeExamPage({
         setResponses(initial);
       });
   }, [id]);
+
+  // Lets the Electron Lockdown Browser (if present) know which
+  // submission to attach queued OS-level integrity events to. This is a
+  // secondary layer only — the existing browser-level Secure Exam Mode
+  // handlers below stay active regardless of whether this call happens.
+  useEffect(() => {
+    if (!data) return;
+    window.sesLockdown?.setExamContext({ examId: data.exam.id, submissionId: data.id });
+  }, [data]);
 
   const secureSettings = data?.exam.secureSettings;
   const secureModeEnabled = secureSettings?.secureModeEnabled ?? false;
@@ -643,6 +660,11 @@ export default function TakeExamPage({
           <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">
             Secure Exam Mode active
           </span>
+          {inLockdownBrowser && (
+            <span className="rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700">
+              SES Lockdown Browser Active
+            </span>
+          )}
           <span>Integrity events are logged for review.</span>
           {secureSettings?.requireFullscreen && !isFullscreen && (
             <>
