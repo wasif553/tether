@@ -41,13 +41,22 @@ async function main() {
   });
 
   // --- Platform admin account ---
-  const adminEmail = "admin@ses-platform.com";
-  const existingAdmin = await prisma.user.findUnique({ where: { email: adminEmail } });
-  if (!existingAdmin) {
-    const adminPassword = process.env.PLATFORM_ADMIN_PASSWORD ?? "SESAdmin2025!";
+  // Requires both PLATFORM_ADMIN_EMAIL and PLATFORM_ADMIN_PASSWORD to be
+  // set explicitly — there is no fallback default password. See
+  // docs/platform-admin-onboarding.md.
+  const adminEmailRaw = process.env.PLATFORM_ADMIN_EMAIL;
+  const adminPassword = process.env.PLATFORM_ADMIN_PASSWORD;
+  if (adminEmailRaw && adminPassword) {
+    const adminEmail = adminEmailRaw.trim().toLowerCase();
     const passwordHash = await bcrypt.hash(adminPassword, 12);
-    await prisma.user.create({
-      data: {
+    await prisma.user.upsert({
+      where: { email: adminEmail },
+      update: {
+        passwordHash,
+        role: "PLATFORM_ADMIN",
+        institutionId: defaultInstitution.id,
+      },
+      create: {
         name: "Platform Admin",
         email: adminEmail,
         passwordHash,
@@ -55,8 +64,11 @@ async function main() {
         institutionId: defaultInstitution.id,
       },
     });
-    console.log("PLATFORM_ADMIN created:", adminEmail);
-    console.log("Password from PLATFORM_ADMIN_PASSWORD env var or default");
+    console.log("PLATFORM_ADMIN created/updated:", adminEmail);
+  } else {
+    console.log(
+      "PLATFORM_ADMIN not created because PLATFORM_ADMIN_EMAIL or PLATFORM_ADMIN_PASSWORD is missing",
+    );
   }
 
   const remainingNullUsers = await prisma.user.count({ where: { institutionId: null } });

@@ -7,11 +7,23 @@ helpers this relies on.
 
 ## Becoming a platform admin
 
-There is no self-service way to become a `PLATFORM_ADMIN` — the seed
-script (`prisma/seed.ts`) creates one `PLATFORM_ADMIN` account
-(`admin@ses-platform.com`) if none exists yet, with a password from the
-`PLATFORM_ADMIN_PASSWORD` env var or a documented default. Log in with
-that account, then use `/platform/institutions`.
+There is no self-service way to become a `PLATFORM_ADMIN`, and there is
+no fallback or default password — platform admin credentials must be
+created explicitly, by one of these two paths:
+
+1. **Seed script with explicit env vars.** Set both `PLATFORM_ADMIN_EMAIL`
+   and `PLATFORM_ADMIN_PASSWORD` before running `prisma/seed.ts`. If
+   both are present, the seed creates (or updates) a `PLATFORM_ADMIN`
+   user with that email/password, hashed the same way as every other
+   account (bcrypt, cost 12) — never logged or printed. If either var is
+   missing, the seed skips platform admin creation entirely and logs a
+   safe message; it does not fail the rest of the seed.
+2. **Promote a trusted existing user.** An operator with direct database
+   access can update an existing user's `role` to `PLATFORM_ADMIN` (e.g.
+   via a one-off SQL statement or Prisma Studio) rather than creating a
+   new account.
+
+Log in with that account, then use `/platform/institutions`.
 
 ## Creating an institution
 
