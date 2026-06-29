@@ -156,6 +156,12 @@ model Exam {
   // docs/multi-tenant-migration.md.
   institutionId   String?
   institution     Institution?     @relation(fields: [institutionId], references: [id])
+  // Student Onboarding and Exam Access v1 (additive) — see
+  // docs/student-onboarding-and-exam-access.md. Never store the plaintext
+  // code; accessCodeRequired is a separate flag (not just "hash is set")
+  // so clearing the code is an explicit, unambiguous action.
+  accessCodeHash     String?
+  accessCodeRequired Boolean       @default(false)
 
   @@index([institutionId])
 }

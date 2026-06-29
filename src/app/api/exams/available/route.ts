@@ -27,6 +27,7 @@ export async function GET() {
       startsAt: exam.startsAt,
       endsAt: exam.endsAt,
       questionCount: exam._count.questions,
+      accessCodeRequired: exam.accessCodeRequired,
       submission: exam.submissions[0]
         ? { id: exam.submissions[0].id, status: exam.submissions[0].status }
         : null,

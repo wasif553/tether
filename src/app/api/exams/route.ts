@@ -25,7 +25,14 @@ export async function GET() {
       include: { _count: { select: { questions: true, submissions: true } } },
     });
 
-    return NextResponse.json(exams);
+    // Never include accessCodeHash in any API response — see
+    // docs/student-onboarding-and-exam-access.md.
+    const sanitized = exams.map((exam) => {
+      const rest: Partial<typeof exam> = { ...exam };
+      delete rest.accessCodeHash;
+      return rest;
+    });
+    return NextResponse.json(sanitized);
   } catch (err) {
     const res = institutionErrorResponse(err);
     if (res) return res;

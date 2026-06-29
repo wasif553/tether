@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
+import bcrypt from "bcryptjs";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 
 export async function POST(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const session = await auth();
@@ -39,6 +40,26 @@ export async function POST(
     where: { examId_studentId: { examId: id, studentId: session.user.id } },
   });
   if (existing) return NextResponse.json(existing);
+
+  // Student Onboarding and Exam Access v1 — see
+  // docs/student-onboarding-and-exam-access.md. Checked after the
+  // existing-submission idempotency check above, so resuming an
+  // already-started exam never re-prompts for the code, but no new
+  // submission is ever created without a valid one.
+  if (exam.accessCodeRequired) {
+    const body = await req.json().catch(() => ({}));
+    const accessCode = typeof body?.accessCode === "string" ? body.accessCode : "";
+    const valid =
+      accessCode.length > 0 &&
+      exam.accessCodeHash != null &&
+      (await bcrypt.compare(accessCode, exam.accessCodeHash));
+    if (!valid) {
+      return NextResponse.json(
+        { error: "Valid access code required to start this exam." },
+        { status: 403 },
+      );
+    }
+  }
 
   // Two near-simultaneous "start exam" requests from the same student (e.g.
   // a double-click, or a flaky network retry) can both pass the check above

@@ -41,6 +41,7 @@ type Exam = {
   published: boolean;
   questions: Question[];
   secureSettings: SecureSettings;
+  accessCodeRequired: boolean;
 };
 
 type GeneratedQuestion = {
@@ -86,6 +87,9 @@ export default function LecturerExamPage({
 
   const [secureForm, setSecureForm] = useState<SecureSettings | null>(null);
   const [savingSecure, setSavingSecure] = useState(false);
+  const [accessCodeInput, setAccessCodeInput] = useState("");
+  const [savingAccessCode, setSavingAccessCode] = useState(false);
+  const [accessCodeMessage, setAccessCodeMessage] = useState<string | null>(null);
   const [submissionCounts, setSubmissionCounts] = useState<{
     total: number;
     submitted: number;
@@ -285,6 +289,42 @@ export default function LecturerExamPage({
     });
     setSavingSecure(false);
     if (res.ok) await loadExam();
+  }
+
+  async function handleSetAccessCode() {
+    if (!accessCodeInput.trim()) return;
+    setSavingAccessCode(true);
+    setAccessCodeMessage(null);
+    const res = await fetch(`/api/exams/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accessCode: accessCodeInput.trim() }),
+    });
+    setSavingAccessCode(false);
+    if (res.ok) {
+      setAccessCodeInput("");
+      setAccessCodeMessage("Access code enabled.");
+      await loadExam();
+    } else {
+      setAccessCodeMessage("Failed to set access code.");
+    }
+  }
+
+  async function handleClearAccessCode() {
+    setSavingAccessCode(true);
+    setAccessCodeMessage(null);
+    const res = await fetch(`/api/exams/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accessCode: null }),
+    });
+    setSavingAccessCode(false);
+    if (res.ok) {
+      setAccessCodeMessage("Access code removed.");
+      await loadExam();
+    } else {
+      setAccessCodeMessage("Failed to remove access code.");
+    }
   }
 
   async function handleMarkEssays() {
@@ -689,6 +729,57 @@ export default function LecturerExamPage({
           </button>
         </div>
       )}
+
+      <h2 className="mt-8 text-lg font-medium">Exam access code</h2>
+      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+        <p className="text-sm text-gray-600">
+          Students must enter this code before starting the exam.
+        </p>
+        <p className="text-sm">
+          Status:{" "}
+          <span
+            className={
+              exam.accessCodeRequired
+                ? "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
+                : "rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600"
+            }
+          >
+            {exam.accessCodeRequired ? "Access code enabled" : "No access code"}
+          </span>
+        </p>
+        <div className="flex items-end gap-3">
+          <div className="flex-1">
+            <label className="block text-sm font-medium">
+              {exam.accessCodeRequired ? "New access code" : "Exam access code"}
+            </label>
+            <input
+              type="text"
+              minLength={4}
+              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              value={accessCodeInput}
+              onChange={(e) => setAccessCodeInput(e.target.value)}
+              placeholder="e.g. ROOM-204"
+            />
+          </div>
+          <button
+            onClick={handleSetAccessCode}
+            disabled={savingAccessCode || !accessCodeInput.trim()}
+            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+          >
+            {savingAccessCode ? "Saving..." : "Set access code"}
+          </button>
+          {exam.accessCodeRequired && (
+            <button
+              onClick={handleClearAccessCode}
+              disabled={savingAccessCode}
+              className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-50"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+        {accessCodeMessage && <p className="text-sm text-gray-600">{accessCodeMessage}</p>}
+      </div>
 
       <h2 className="mt-8 text-lg font-medium">Questions</h2>
       <div className="mt-3 space-y-3">

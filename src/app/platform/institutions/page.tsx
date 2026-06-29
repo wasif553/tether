@@ -45,6 +45,14 @@ export default function PlatformInstitutionsPage() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
 
+  const [studentInstitutionId, setStudentInstitutionId] = useState("");
+  const [studentName, setStudentName] = useState("");
+  const [studentEmail, setStudentEmail] = useState("");
+  const [studentPassword, setStudentPassword] = useState("");
+  const [invitingStudent, setInvitingStudent] = useState(false);
+  const [studentError, setStudentError] = useState<string | null>(null);
+  const [studentSuccess, setStudentSuccess] = useState<string | null>(null);
+
   async function loadAll() {
     setLoading(true);
     const [instRes, logsRes] = await Promise.all([
@@ -120,6 +128,37 @@ export default function PlatformInstitutionsPage() {
     setInviteName("");
     setInviteEmail("");
     setInvitePassword("");
+    await loadAll();
+  }
+
+  async function handleInviteStudent(e: React.FormEvent) {
+    e.preventDefault();
+    setStudentError(null);
+    setStudentSuccess(null);
+    if (!studentInstitutionId) {
+      setStudentError("Select an institution");
+      return;
+    }
+    setInvitingStudent(true);
+
+    const res = await fetch(`/api/platform/institutions/${studentInstitutionId}/invite-student`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: studentName, email: studentEmail, password: studentPassword }),
+    });
+
+    setInvitingStudent(false);
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      setStudentError(typeof body?.error === "string" ? body.error : "Failed to invite student");
+      return;
+    }
+
+    setStudentSuccess(`Student ${studentEmail} created. Share the temporary password securely.`);
+    setStudentName("");
+    setStudentEmail("");
+    setStudentPassword("");
     await loadAll();
   }
 
@@ -300,6 +339,70 @@ export default function PlatformInstitutionsPage() {
             className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
           >
             {inviting ? "Inviting..." : "Invite lecturer"}
+          </button>
+        </form>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-medium">Invite student</h2>
+        <form onSubmit={handleInviteStudent} className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+          <div>
+            <label className="block text-sm font-medium">Institution</label>
+            <select
+              required
+              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              value={studentInstitutionId}
+              onChange={(e) => setStudentInstitutionId(e.target.value)}
+            >
+              <option value="">Select an institution</option>
+              {institutions.map((inst) => (
+                <option key={inst.id} value={inst.id}>
+                  {inst.name} ({inst.slug})
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium">Student name</label>
+            <input
+              required
+              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              value={studentName}
+              onChange={(e) => setStudentName(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium">Student email</label>
+            <input
+              required
+              type="email"
+              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              value={studentEmail}
+              onChange={(e) => setStudentEmail(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium">Temporary password</label>
+            <input
+              required
+              type="text"
+              minLength={8}
+              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              value={studentPassword}
+              onChange={(e) => setStudentPassword(e.target.value)}
+            />
+          </div>
+          <p className="text-sm text-amber-700">
+            Share temporary passwords securely. Email sending is not implemented yet.
+          </p>
+          {studentError && <p className="text-sm text-red-600">{studentError}</p>}
+          {studentSuccess && <p className="text-sm text-green-700">{studentSuccess}</p>}
+          <button
+            type="submit"
+            disabled={invitingStudent}
+            className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+          >
+            {invitingStudent ? "Inviting..." : "Invite student"}
           </button>
         </form>
       </section>

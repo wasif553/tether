@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import bcrypt from "bcryptjs";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { parseSecureSettings, secureSettingsInputSchema } from "@/lib/secureExam";
@@ -14,7 +15,20 @@ const updateExamSchema = z.object({
   startsAt: z.string().datetime().optional().nullable(),
   endsAt: z.string().datetime().optional().nullable(),
   secureSettings: secureSettingsInputSchema.optional(),
+  // Student Onboarding and Exam Access v1 — see
+  // docs/student-onboarding-and-exam-access.md. undefined = leave
+  // unchanged, null = clear the code, a string = set a new code.
+  accessCode: z.string().min(4).nullable().optional(),
 });
+
+/** Strips accessCodeHash from any exam object before it's ever sent in a response. */
+function omitAccessCodeHash<T extends { accessCodeHash?: string | null }>(
+  exam: T,
+): Omit<T, "accessCodeHash"> {
+  const rest: Partial<T> = { ...exam };
+  delete rest.accessCodeHash;
+  return rest as Omit<T, "accessCodeHash">;
+}
 
 async function getOwnedExam(examId: string, lecturerId: string, session: Parameters<typeof institutionWhere>[0]) {
   return prisma.exam.findFirst({
@@ -58,14 +72,14 @@ export async function GET(
         return NextResponse.json({ error: "Forbidden" }, { status: 403 });
       }
       const sanitized = {
-        ...exam,
+        ...omitAccessCodeHash(exam),
         secureSettings,
         questions: exam.questions.map((q) => ({ ...q, correctAnswer: undefined })),
       };
       return NextResponse.json(sanitized);
     }
 
-    return NextResponse.json({ ...exam, secureSettings });
+    return NextResponse.json({ ...omitAccessCodeHash(exam), secureSettings });
   } catch (err) {
     const res = institutionErrorResponse(err);
     if (res) return res;
@@ -93,16 +107,26 @@ export async function PATCH(
       return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
     }
 
-    const { startsAt, endsAt, secureSettings, ...rest } = parsed.data;
+    const { startsAt, endsAt, secureSettings, accessCode, ...rest } = parsed.data;
 
     const mergedSecureSettings = secureSettings
       ? parseSecureSettings({ ...parseSecureSettings(exam.secureSettings), ...secureSettings })
       : undefined;
 
+    // accessCode: undefined leaves it untouched, null clears it, a string
+    // sets a new one. The plaintext code is never stored — only its hash.
+    let accessCodeFields: { accessCodeHash: string | null; accessCodeRequired: boolean } | undefined;
+    if (accessCode === null) {
+      accessCodeFields = { accessCodeHash: null, accessCodeRequired: false };
+    } else if (typeof accessCode === "string") {
+      accessCodeFields = { accessCodeHash: await bcrypt.hash(accessCode, 12), accessCodeRequired: true };
+    }
+
     const updated = await prisma.exam.update({
       where: { id },
       data: {
         ...rest,
+        ...(accessCodeFields ?? {}),
         ...(startsAt !== undefined ? { startsAt: startsAt ? new Date(startsAt) : null } : {}),
         ...(endsAt !== undefined ? { endsAt: endsAt ? new Date(endsAt) : null } : {}),
         ...(mergedSecureSettings
@@ -111,7 +135,10 @@ export async function PATCH(
       },
     });
 
-    return NextResponse.json({ ...updated, secureSettings: parseSecureSettings(updated.secureSettings) });
+    return NextResponse.json({
+      ...omitAccessCodeHash(updated),
+      secureSettings: parseSecureSettings(updated.secureSettings),
+    });
   } catch (err) {
     const res = institutionErrorResponse(err);
     if (res) return res;

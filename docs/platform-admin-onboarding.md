@@ -63,6 +63,22 @@ Equivalent API: `POST /api/platform/institutions/[id]/invite-lecturer`
 If the target institution is inactive, this returns a 400 — reactivate
 it first.
 
+## Inviting a student
+
+Same flow as inviting a lecturer — use the "Invite student" form on
+`/platform/institutions` (institution, name, email, temporary password),
+or `POST /api/platform/institutions/[id]/invite-student`:
+```json
+{ "name": "Student Name", "email": "student@example.edu", "password": "temporary-password" }
+```
+Creates a `STUDENT` user stamped with the target institution's
+`institutionId`, writes a `student.invite` audit log, and never returns
+the password or its hash. Same caveats as lecturer invites apply: no
+email sending, share the temporary password securely, and the
+institution must be active. See
+docs/student-onboarding-and-exam-access.md for the full v1 scope
+(including the optional per-exam access code feature this unlocked).
+
 ## Activating / deactivating an institution
 
 Use the "Activate"/"Deactivate" button next to an institution on

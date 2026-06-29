@@ -70,11 +70,27 @@ docs/platform-admin-onboarding.md):
   specific institution from `/platform/institutions`.
 - There is still no email-sending flow — invited lecturers' temporary
   passwords must be shared with them out of band by the platform admin.
-- A minimal `PlatformAuditLog` records institution create/update and
-  lecturer-invite actions (actor, action, target, institution,
-  timestamp). It is not a full compliance audit trail.
+- A minimal `PlatformAuditLog` records institution create/update,
+  lecturer-invite, and student-invite actions (actor, action, target,
+  institution, timestamp). It is not a full compliance audit trail.
 - Still not implemented: billing, enterprise SSO, student bulk import,
   institution deletion.
+
+Student Onboarding and Exam Access v1 is implemented (see
+docs/student-onboarding-and-exam-access.md):
+
+- A `PLATFORM_ADMIN` can invite students directly into a selected
+  institution (`POST /api/platform/institutions/[id]/invite-student`),
+  the same way lecturers are invited — no email sending, temporary
+  password shared out of band.
+- A lecturer can optionally set a per-exam access code; only the hash is
+  stored (bcrypt), never the plaintext. A student must enter the correct
+  code before a submission is created for that exam.
+- This is not a course/class/cohort enrolment system — it does not
+  restrict *which* students within an institution can see a published
+  exam, only adds an optional extra step before starting it. Course/
+  class/cohort management, bulk CSV import, and email sending all
+  remain deferred.
 
 ## Canvas/LTI
 

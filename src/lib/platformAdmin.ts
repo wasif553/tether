@@ -143,3 +143,10 @@ export function validateInviteLecturerPayload(
     password,
   };
 }
+
+// Student Onboarding v1 — invite-student bodies have the exact same
+// shape (name/email/password) as invite-lecturer, so the validator is
+// reused under a student-facing name rather than duplicated.
+export type InviteStudentPayload = InviteLecturerPayload;
+export type InviteStudentPayloadError = InviteLecturerPayloadError;
+export const validateInviteStudentPayload = validateInviteLecturerPayload;

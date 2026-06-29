@@ -9,6 +9,7 @@ type AvailableExam = {
   description: string | null;
   durationMins: number;
   questionCount: number;
+  accessCodeRequired: boolean;
   submission: { id: string; status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" } | null;
 };
 
@@ -17,6 +18,8 @@ export default function StudentDashboard() {
   const [exams, setExams] = useState<AvailableExam[]>([]);
   const [loading, setLoading] = useState(true);
   const [startingId, setStartingId] = useState<string | null>(null);
+  const [accessCodeInputs, setAccessCodeInputs] = useState<Record<string, string>>({});
+  const [startErrors, setStartErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     fetch("/api/exams/available")
@@ -25,11 +28,23 @@ export default function StudentDashboard() {
       .finally(() => setLoading(false));
   }, []);
 
-  async function startExam(examId: string) {
+  async function startExam(examId: string, accessCode?: string) {
     setStartingId(examId);
-    const res = await fetch(`/api/exams/${examId}/start`, { method: "POST" });
+    setStartErrors((prev) => ({ ...prev, [examId]: "" }));
+    const res = await fetch(`/api/exams/${examId}/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(accessCode ? { accessCode } : {}),
+    });
     setStartingId(null);
-    if (!res.ok) return;
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      setStartErrors((prev) => ({
+        ...prev,
+        [examId]: typeof body?.error === "string" ? body.error : "Failed to start exam.",
+      }));
+      return;
+    }
     const submission = await res.json();
     router.push(`/student/exams/${submission.id}`);
   }
@@ -54,8 +69,33 @@ export default function StudentDashboard() {
             {exam.description && (
               <p className="mt-1 text-sm text-gray-600">{exam.description}</p>
             )}
+            {exam.accessCodeRequired && !exam.submission && (
+              <span className="mt-2 inline-block rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">
+                Access code required
+              </span>
+            )}
             <div className="mt-3">
-              {!exam.submission && (
+              {!exam.submission && exam.accessCodeRequired && (
+                <div className="flex items-end gap-2">
+                  <input
+                    type="text"
+                    placeholder="Enter access code"
+                    className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+                    value={accessCodeInputs[exam.id] ?? ""}
+                    onChange={(e) =>
+                      setAccessCodeInputs((prev) => ({ ...prev, [exam.id]: e.target.value }))
+                    }
+                  />
+                  <button
+                    onClick={() => startExam(exam.id, accessCodeInputs[exam.id] ?? "")}
+                    disabled={startingId === exam.id || !(accessCodeInputs[exam.id] ?? "").trim()}
+                    className="rounded bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                  >
+                    {startingId === exam.id ? "Starting..." : "Start exam"}
+                  </button>
+                </div>
+              )}
+              {!exam.submission && !exam.accessCodeRequired && (
                 <button
                   onClick={() => startExam(exam.id)}
                   disabled={startingId === exam.id}
@@ -63,6 +103,9 @@ export default function StudentDashboard() {
                 >
                   {startingId === exam.id ? "Starting..." : "Start exam"}
                 </button>
+              )}
+              {startErrors[exam.id] && (
+                <p className="mt-1 text-sm text-red-600">{startErrors[exam.id]}</p>
               )}
               {exam.submission?.status === "IN_PROGRESS" && (
                 <a
