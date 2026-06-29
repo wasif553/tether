@@ -23,6 +23,9 @@ export function NavBar() {
         {status === "authenticated" && session.user.role === "STUDENT" && (
           <Link href="/student">My Exams</Link>
         )}
+        {status === "authenticated" && session.user.role === "PLATFORM_ADMIN" && (
+          <Link href="/platform/institutions">Platform Institutions</Link>
+        )}
         {status === "authenticated" ? (
           <>
             <span className="text-gray-500">{session.user.email}</span>

@@ -179,10 +179,14 @@ describe("14. Evidence report choke point (buildEvidenceReport) enforces institu
 // Step 7 explicitly says not to build those routes in v1 — only the GET
 // list route. These tests cover the GET route's authorization instead.
 describe("15. GET /api/platform/institutions — PLATFORM_ADMIN only", () => {
-  it("rejects a non-admin lecturer with 401", async () => {
+  it("rejects an authenticated non-admin lecturer with 403", async () => {
+    // As of Platform Admin Onboarding v2's shared requirePlatformAdmin()
+    // helper, 401 is reserved for unauthenticated requests and 403 for
+    // an authenticated user with the wrong role — see
+    // docs/platform-admin-onboarding.md.
     mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA.id));
     const res = await platformInstitutionsRoute.GET();
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(403);
   });
 
   it("returns institutions with safe fields only (no passwords/secrets) for a PLATFORM_ADMIN", async () => {

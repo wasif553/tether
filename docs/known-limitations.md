@@ -58,12 +58,23 @@ involved):
   `Answer`, `IntegrityEvent`, `CanvasGradePassback`, `LtiLaunch`,
   `LtiExamLink`) are scoped by joining to their parent (`exam.institutionId`
   or `platform.institutionId`) rather than duplicating the column.
-- v1 has no institution-onboarding UI or self-service lecturer invite
-  flow — new institutions are created manually (direct DB insert or the
-  seed script). This is deferred to "Multi-Tenant Admin v2".
 - All existing single-institution pilot deployments keep working
   unchanged: a one-time seed backfills every existing row into a single
   "default" institution, and self-signup defaults new users into it.
+
+Platform Admin Onboarding v2 is implemented (see
+docs/platform-admin-onboarding.md):
+
+- A `PLATFORM_ADMIN` can create institutions, list them with counts,
+  activate/deactivate them, and invite lecturers directly into a
+  specific institution from `/platform/institutions`.
+- There is still no email-sending flow — invited lecturers' temporary
+  passwords must be shared with them out of band by the platform admin.
+- A minimal `PlatformAuditLog` records institution create/update and
+  lecturer-invite actions (actor, action, target, institution,
+  timestamp). It is not a full compliance audit trail.
+- Still not implemented: billing, enterprise SSO, student bulk import,
+  institution deletion.
 
 ## Canvas/LTI
 

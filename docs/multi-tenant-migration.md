@@ -109,10 +109,10 @@ a "please log in again" message.
 `id, name, slug, plan, active, createdAt, _count { users, exams }` for
 every institution. No passwords, secrets, or other sensitive user data.
 
-**Deferred to "Multi-Tenant Admin v2":** institution-onboarding UI,
-`POST /api/platform/institutions`, and an invite-lecturer route. For v1,
-new institutions are created manually via direct DB insert or by editing
-`prisma/seed.ts`.
+Institution onboarding (create/update institutions, invite lecturers, an
+audit log) was originally deferred here to "Multi-Tenant Admin v2" — see
+docs/platform-admin-onboarding.md, which documents that it has since
+shipped.
 
 ## Signup
 

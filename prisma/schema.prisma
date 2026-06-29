@@ -82,6 +82,28 @@ model Institution {
   ltiPlatforms LtiPlatform[]
 }
 
+// Platform Admin Onboarding v2 — minimal audit trail for platform-admin
+// actions (institution create/update, lecturer invite). See
+// docs/platform-admin-onboarding.md. actorId/institutionId are SetNull
+// on delete so a log entry survives the actor or institution being
+// removed, rather than cascading away the audit trail.
+model PlatformAuditLog {
+  id            String   @id @default(cuid())
+  actorId       String?
+  actor         User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action        String
+  targetType    String
+  targetId      String?
+  institutionId String?
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  @@index([actorId])
+  @@index([institutionId])
+  @@index([action])
+  @@index([createdAt])
+}
+
 model User {
   id                String           @id @default(cuid())
   name              String
@@ -104,6 +126,8 @@ model User {
   // code treats it as required via src/lib/institutionScope.ts.
   institutionId     String?
   institution       Institution?     @relation(fields: [institutionId], references: [id])
+  // Platform Admin Onboarding v2 — see docs/platform-admin-onboarding.md.
+  platformAuditLogs PlatformAuditLog[]
 
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
