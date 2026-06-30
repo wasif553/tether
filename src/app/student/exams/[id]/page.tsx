@@ -655,6 +655,14 @@ export default function TakeExamPage({
         )}
       </div>
 
+      {inLockdownBrowser && !secureModeEnabled && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
+          <span className="rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700">
+            SES Lockdown Browser Active
+          </span>
+        </div>
+      )}
+
       {secureModeEnabled && (
         <div className="mt-3 flex flex-wrap items-center gap-2 rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-600">
           <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">
