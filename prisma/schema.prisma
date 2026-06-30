@@ -114,7 +114,8 @@ model User {
   examsCreated      Exam[]           @relation("ExamCreator")
   submissions       Submission[]
   integrityEvents   IntegrityEvent[] @relation("IntegrityEventStudent")
-  resolvedEvents     IntegrityEvent[] @relation("IntegrityEventResolver")
+  resolvedEvents    IntegrityEvent[] @relation("IntegrityEventResolver")
+  networkEvidence   NetworkEvidence[] @relation("NetworkEvidenceStudent")
   // canvasUserId is unique per institution, not globally — a self-hosted
   // Canvas instance at a different institution could otherwise collide
   // with another institution's user id. See docs/multi-tenant-migration.md.
@@ -145,8 +146,9 @@ model Exam {
   createdBy       User             @relation("ExamCreator", fields: [createdById], references: [id])
   questions       Question[]
   submissions     Submission[]
-  integrityEvents IntegrityEvent[]
-  ltiExamLinks    LtiExamLink[]
+  integrityEvents  IntegrityEvent[]
+  ltiExamLinks     LtiExamLink[]
+  networkEvidence  NetworkEvidence[]
   // Secure Exam Mode v1 settings (see src/lib/secureExam.ts for shape/defaults).
   // A single JSON column rather than ~10 booleans/ints, since this app has no
   // other multi-flag settings model and these are read/written together.
@@ -193,6 +195,7 @@ model Submission {
   answers     Answer[]
   integrityEvents IntegrityEvent[]
   gradePassback   CanvasGradePassback?
+  networkEvidence NetworkEvidence[]
 
   @@unique([examId, studentId])
 }
@@ -335,6 +338,46 @@ model CanvasGradePassback {
   updatedAt          DateTime             @updatedAt
 
   @@index([status])
+}
+
+// Academic Integrity Network Evidence v1 — see
+// docs/network-evidence-and-ip-location.md. Records IP address,
+// approximate IP-based location, and browser/device metadata at exam
+// open and exam submit. Evidence-only: never blocks a student, never
+// auto-determines misconduct.
+model NetworkEvidence {
+  id               String   @id @default(cuid())
+  submissionId     String
+  submission       Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  examId           String
+  exam             Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  studentId        String
+  student          User     @relation("NetworkEvidenceStudent", fields: [studentId], references: [id])
+  institutionId    String
+  // source: EXAM_START captured at new submission creation;
+  // EXAM_SUBMIT captured on final submit.
+  source           String
+  ipAddress        String?
+  ipHash           String?
+  userAgent        String?
+  browserName      String?
+  osName           String?
+  deviceType       String?
+  country          String?
+  region           String?
+  city             String?
+  timezone         String?
+  locationAccuracy String   @default("UNAVAILABLE")
+  vpnOrProxySignal Boolean  @default(false)
+  networkChanged   Boolean  @default(false)
+  metadata         Json?
+  createdAt        DateTime @default(now())
+
+  @@index([submissionId])
+  @@index([examId])
+  @@index([studentId])
+  @@index([institutionId])
+  @@index([createdAt])
 }
 
 model QuestionBank {

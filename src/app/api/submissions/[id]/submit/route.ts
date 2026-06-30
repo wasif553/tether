@@ -4,9 +4,10 @@ import { prisma } from "@/lib/prisma";
 import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
 import { parseSecureSettings, severityFor } from "@/lib/secureExam";
 import { Prisma } from "@/generated/prisma/client";
+import { captureNetworkEvidence, getClientIpFromRequest } from "@/lib/networkEvidence";
 
 export async function POST(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const session = await auth();
@@ -113,6 +114,48 @@ export async function POST(
 
     if (!hasEssay) {
       pushGradeToCanvas(id).catch(console.error);
+    }
+
+    // Academic Integrity Network Evidence v1 — compare IP with EXAM_START
+    // to detect network change. Fire-and-forget; never blocks submission.
+    const startEvidence = await prisma.networkEvidence.findFirst({
+      where: { submissionId: id, source: "EXAM_START" },
+      orderBy: { createdAt: "asc" },
+      select: { ipAddress: true, country: true, institutionId: true },
+    });
+    captureNetworkEvidence({
+      req,
+      submissionId: id,
+      examId: submission.examId,
+      studentId: submission.studentId,
+      institutionId: startEvidence?.institutionId ?? submission.exam.institutionId ?? "",
+      source: "EXAM_SUBMIT",
+      priorIp: startEvidence?.ipAddress ?? null,
+      priorCountry: startEvidence?.country ?? null,
+    }).catch(() => {/* evidence capture is best-effort */});
+
+    // Optionally flag country change as a review-worthy integrity event.
+    const submitIp = getClientIpFromRequest(req);
+    if (
+      startEvidence?.country &&
+      startEvidence.country !== null &&
+      submitIp &&
+      startEvidence.ipAddress !== submitIp
+    ) {
+      // Only create a MANUAL_WARNING if country evidence will differ —
+      // we don't know country yet (geo is async), so we flag IP change only.
+      await prisma.integrityEvent.create({
+        data: {
+          submissionId: id,
+          examId: submission.examId,
+          studentId: submission.studentId,
+          eventType: "MANUAL_WARNING",
+          severity: "LOW",
+          message:
+            "Network address changed between exam open and submission. Review network evidence for context.",
+          occurredAt: new Date(),
+        },
+      }).catch(() => {/* never block submit */});
     }
 
     return NextResponse.json(result);

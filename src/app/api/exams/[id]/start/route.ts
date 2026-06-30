@@ -3,7 +3,8 @@ import bcrypt from "bcryptjs";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
-import { assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
+import { assertSameInstitution, institutionErrorResponse, requireInstitutionId } from "@/lib/institutionScope";
+import { captureNetworkEvidence } from "@/lib/networkEvidence";
 
 export async function POST(
   req: Request,
@@ -70,6 +71,19 @@ export async function POST(
     const submission = await prisma.submission.create({
       data: { examId: id, studentId: session.user.id },
     });
+
+    // Academic Integrity Network Evidence v1 — captured fire-and-forget
+    // after the submission row exists. Never blocks exam start.
+    const institutionId = requireInstitutionId(session);
+    captureNetworkEvidence({
+      req,
+      submissionId: submission.id,
+      examId: id,
+      studentId: session.user.id,
+      institutionId,
+      source: "EXAM_START",
+    }).catch(() => {/* evidence capture is best-effort */});
+
     return NextResponse.json(submission, { status: 201 });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {

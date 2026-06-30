@@ -2,10 +2,16 @@ import { prisma } from "@/lib/prisma";
 import { computeRiskScore, riskLevelForScore, type RiskLevel } from "@/lib/integrityRisk";
 import { labelForEventType } from "@/lib/integrityEventLabels";
 import { isPlatformAdmin, requireInstitutionId } from "@/lib/institutionScope";
+import { networkReviewSignal, type NetworkReviewSignal } from "@/lib/networkEvidence";
 import type { Session } from "next-auth";
 
 export const EVIDENCE_DISCLAIMER =
   "Integrity events are signals for human review and are not automatic misconduct determinations.";
+
+export const NETWORK_EVIDENCE_DISCLAIMER =
+  "IP-based location is approximate and may be affected by VPNs, mobile networks, campus networks, " +
+  "or ISP routing. Treat as an integrity signal, not proof of misconduct. SES does not use GPS " +
+  "location. Network evidence is for lecturer review only and is never an automatic determination.";
 
 export class EvidenceNotFoundError extends Error {}
 export class EvidenceForbiddenError extends Error {}
@@ -41,6 +47,37 @@ export type EvidenceReport = {
     answeredEssayCount: number;
     aiDraftedCount: number;
   } | null;
+  networkEvidence: {
+    start: {
+      ipAddress: string | null;
+      country: string | null;
+      region: string | null;
+      city: string | null;
+      timezone: string | null;
+      locationAccuracy: string;
+      userAgent: string | null;
+      browserName: string | null;
+      osName: string | null;
+      vpnOrProxySignal: boolean;
+      capturedAt: string;
+    } | null;
+    submit: {
+      ipAddress: string | null;
+      country: string | null;
+      region: string | null;
+      city: string | null;
+      timezone: string | null;
+      locationAccuracy: string;
+      userAgent: string | null;
+      browserName: string | null;
+      osName: string | null;
+      vpnOrProxySignal: boolean;
+      networkChanged: boolean;
+      capturedAt: string;
+    } | null;
+    reviewSignal: NetworkReviewSignal;
+    networkEvidenceDisclaimer: string;
+  };
   disclaimer: string;
 };
 
@@ -60,6 +97,7 @@ export async function buildEvidenceReport(
       },
       gradePassback: true,
       answers: { include: { question: { select: { type: true } } } },
+      networkEvidence: { orderBy: { createdAt: "asc" } },
     },
   });
 
@@ -84,6 +122,9 @@ export async function buildEvidenceReport(
         aiDraftedCount: essayAnswers.filter((a) => a.aiGradedAt != null).length,
       }
     : null;
+
+  const startNe = submission.networkEvidence.find((e) => e.source === "EXAM_START") ?? null;
+  const submitNe = submission.networkEvidence.find((e) => e.source === "EXAM_SUBMIT") ?? null;
 
   return {
     submissionId: submission.id,
@@ -115,6 +156,52 @@ export async function buildEvidenceReport(
         }
       : null,
     aiMarking,
+    networkEvidence: {
+      start: startNe
+        ? {
+            ipAddress: startNe.ipAddress,
+            country: startNe.country,
+            region: startNe.region,
+            city: startNe.city,
+            timezone: startNe.timezone,
+            locationAccuracy: startNe.locationAccuracy,
+            userAgent: startNe.userAgent,
+            browserName: startNe.browserName,
+            osName: startNe.osName,
+            vpnOrProxySignal: startNe.vpnOrProxySignal,
+            capturedAt: startNe.createdAt.toISOString(),
+          }
+        : null,
+      submit: submitNe
+        ? {
+            ipAddress: submitNe.ipAddress,
+            country: submitNe.country,
+            region: submitNe.region,
+            city: submitNe.city,
+            timezone: submitNe.timezone,
+            locationAccuracy: submitNe.locationAccuracy,
+            userAgent: submitNe.userAgent,
+            browserName: submitNe.browserName,
+            osName: submitNe.osName,
+            vpnOrProxySignal: submitNe.vpnOrProxySignal,
+            networkChanged: submitNe.networkChanged,
+            capturedAt: submitNe.createdAt.toISOString(),
+          }
+        : null,
+      reviewSignal: networkReviewSignal(
+        startNe
+          ? { country: startNe.country, ipAddress: startNe.ipAddress }
+          : null,
+        submitNe
+          ? {
+              country: submitNe.country,
+              ipAddress: submitNe.ipAddress,
+              networkChanged: submitNe.networkChanged,
+            }
+          : null,
+      ),
+      networkEvidenceDisclaimer: NETWORK_EVIDENCE_DISCLAIMER,
+    },
     disclaimer: EVIDENCE_DISCLAIMER,
   };
 }
@@ -148,6 +235,34 @@ export function evidenceReportToCsv(report: EvidenceReport): string {
       ].join(","),
     );
   }
+  lines.push("");
+  lines.push("Network Evidence");
+  const ne = report.networkEvidence;
+  const neRow = (label: string, value: string | null | boolean | undefined) =>
+    lines.push(`${esc(label)},${esc(value != null ? String(value) : "")}`);
+  neRow("Network review signal", ne.reviewSignal);
+  neRow("Exam opened — IP", ne.start?.ipAddress ?? null);
+  neRow("Exam opened — Country", ne.start?.country ?? null);
+  neRow("Exam opened — Region", ne.start?.region ?? null);
+  neRow("Exam opened — City", ne.start?.city ?? null);
+  neRow("Exam opened — Timezone", ne.start?.timezone ?? null);
+  neRow("Exam opened — Location accuracy", ne.start?.locationAccuracy ?? null);
+  neRow("Exam opened — Browser", ne.start?.browserName ?? null);
+  neRow("Exam opened — OS", ne.start?.osName ?? null);
+  neRow("Exam opened — VPN/proxy signal", ne.start?.vpnOrProxySignal ?? null);
+  neRow("Exam opened — Captured at", ne.start?.capturedAt ?? null);
+  neRow("Exam submitted — IP", ne.submit?.ipAddress ?? null);
+  neRow("Exam submitted — Country", ne.submit?.country ?? null);
+  neRow("Exam submitted — Region", ne.submit?.region ?? null);
+  neRow("Exam submitted — City", ne.submit?.city ?? null);
+  neRow("Exam submitted — Timezone", ne.submit?.timezone ?? null);
+  neRow("Exam submitted — Location accuracy", ne.submit?.locationAccuracy ?? null);
+  neRow("Exam submitted — Browser", ne.submit?.browserName ?? null);
+  neRow("Exam submitted — OS", ne.submit?.osName ?? null);
+  neRow("Exam submitted — VPN/proxy signal", ne.submit?.vpnOrProxySignal ?? null);
+  neRow("Exam submitted — Network changed", ne.submit?.networkChanged ?? null);
+  neRow("Exam submitted — Captured at", ne.submit?.capturedAt ?? null);
+  lines.push(esc(ne.networkEvidenceDisclaimer));
   lines.push("");
   lines.push(esc(report.disclaimer));
 

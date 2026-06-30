@@ -31,6 +31,37 @@ type EvidenceReport = {
     errorMessage: string | null;
   } | null;
   aiMarking: { answeredEssayCount: number; aiDraftedCount: number } | null;
+  networkEvidence: {
+    start: {
+      ipAddress: string | null;
+      country: string | null;
+      region: string | null;
+      city: string | null;
+      timezone: string | null;
+      locationAccuracy: string;
+      userAgent: string | null;
+      browserName: string | null;
+      osName: string | null;
+      vpnOrProxySignal: boolean;
+      capturedAt: string;
+    } | null;
+    submit: {
+      ipAddress: string | null;
+      country: string | null;
+      region: string | null;
+      city: string | null;
+      timezone: string | null;
+      locationAccuracy: string;
+      userAgent: string | null;
+      browserName: string | null;
+      osName: string | null;
+      vpnOrProxySignal: boolean;
+      networkChanged: boolean;
+      capturedAt: string;
+    } | null;
+    reviewSignal: "Normal" | "Needs review" | "High review signal";
+    networkEvidenceDisclaimer: string;
+  };
   disclaimer: string;
 };
 
@@ -176,6 +207,78 @@ export default function EvidenceReportPage({
           </p>
         </div>
       )}
+
+      <h2 className="mt-8 text-lg font-medium">Network evidence</h2>
+      {(() => {
+        const ne = data.networkEvidence;
+        const signalStyle: Record<string, string> = {
+          Normal: "bg-gray-100 text-gray-600",
+          "Needs review": "bg-yellow-100 text-yellow-700",
+          "High review signal": "bg-red-100 text-red-700",
+        };
+        const loc = (
+          e: { country: string | null; region: string | null; city: string | null; locationAccuracy: string } | null,
+        ) => {
+          if (!e) return "—";
+          if (e.locationAccuracy === "UNAVAILABLE") return "Not available (no geolocation provider configured)";
+          const parts = [e.city, e.region, e.country].filter(Boolean);
+          return parts.length ? `${parts.join(", ")} (approximate IP-based location)` : "—";
+        };
+        return (
+          <div className="mt-3 space-y-4">
+            <div className="flex items-center gap-2 rounded border border-gray-200 p-3">
+              <span className="text-xs text-gray-500">Network review signal:</span>
+              <span className={`rounded px-2 py-0.5 text-xs ${signalStyle[ne.reviewSignal] ?? signalStyle.Normal}`}>
+                {ne.reviewSignal}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 rounded border border-gray-200 p-4 text-sm">
+              <div>
+                <p className="text-xs font-medium uppercase text-gray-500">At exam open</p>
+                {ne.start ? (
+                  <>
+                    <p className="mt-1">IP: {ne.start.ipAddress ?? "—"}</p>
+                    <p>Approx. location: {loc(ne.start)}</p>
+                    <p>Browser: {ne.start.browserName ?? "—"} / {ne.start.osName ?? "—"}</p>
+                    {ne.start.vpnOrProxySignal && (
+                      <p className="text-yellow-700">VPN/proxy signal detected</p>
+                    )}
+                    <p className="mt-1 text-xs text-gray-400">
+                      Captured {new Date(ne.start.capturedAt).toLocaleString()}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-gray-400">Not recorded</p>
+                )}
+              </div>
+              <div>
+                <p className="text-xs font-medium uppercase text-gray-500">At submission</p>
+                {ne.submit ? (
+                  <>
+                    <p className="mt-1">IP: {ne.submit.ipAddress ?? "—"}</p>
+                    <p>Approx. location: {loc(ne.submit)}</p>
+                    <p>Browser: {ne.submit.browserName ?? "—"} / {ne.submit.osName ?? "—"}</p>
+                    {ne.submit.networkChanged && (
+                      <p className="text-yellow-700">Network address changed since exam open</p>
+                    )}
+                    {ne.submit.vpnOrProxySignal && (
+                      <p className="text-yellow-700">VPN/proxy signal detected</p>
+                    )}
+                    <p className="mt-1 text-xs text-gray-400">
+                      Captured {new Date(ne.submit.capturedAt).toLocaleString()}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-gray-400">Not recorded</p>
+                )}
+              </div>
+            </div>
+            <p className="rounded border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">
+              {ne.networkEvidenceDisclaimer}
+            </p>
+          </div>
+        );
+      })()}
 
       <h2 className="mt-8 text-lg font-medium">Integrity event timeline</h2>
       <div className="mt-3 overflow-x-auto rounded border border-gray-200">

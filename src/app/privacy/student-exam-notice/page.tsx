@@ -26,6 +26,33 @@ export default function StudentExamNoticePage() {
         </section>
 
         <section>
+          <h2 className="font-medium text-gray-900">Network evidence</h2>
+          <p className="mt-1">
+            When you open an exam and when you submit it, SES records:
+          </p>
+          <ul className="mt-1 list-disc space-y-1 pl-5">
+            <li>Your IP address at exam open</li>
+            <li>Approximate country, region, and city inferred from that IP address</li>
+            <li>Your IP address at final submission</li>
+            <li>Approximate country, region, and city inferred from that IP address</li>
+            <li>Browser and operating system information (user-agent string)</li>
+            <li>Whether the network address changed between exam open and submission</li>
+          </ul>
+          <p className="mt-2">
+            <strong>
+              Location is inferred from IP address and is approximate. VPNs, mobile networks,
+              campus networks, and ISP routing may affect accuracy. SES does not use GPS location.
+              Network evidence is an integrity signal for lecturer review, not proof of misconduct.
+            </strong>
+          </p>
+          <p className="mt-1">
+            Network evidence is visible only to the lecturer who owns the exam and to authorised
+            platform staff. It is not visible to other students. It is never used to automatically
+            determine misconduct or affect your grade.
+          </p>
+        </section>
+
+        <section>
           <h2 className="font-medium text-gray-900">Integrity events</h2>
           <p className="mt-1">
             While you&apos;re taking an exam, this platform may log a small number of browser
