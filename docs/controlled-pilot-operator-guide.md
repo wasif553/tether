@@ -384,6 +384,15 @@ there are no usage limits, payment flows, or automatic tier enforcement.
 **Recommended concurrency limit: 40 students.** Above this, upgrade
 the hosting tier before running the exam.
 
+**IP geolocation is disabled by default.** The network evidence feature
+records IP addresses and browser metadata at exam open and submit.
+Country, region, and city fields show `UNAVAILABLE` unless an operator
+explicitly configures a geolocation provider. Enabling a provider sends
+student IP addresses to a third-party service — this requires institutional
+privacy approval before activation. See
+`docs/network-evidence-and-ip-location.md` for the pre-activation
+checklist. For this pilot, leave `GEOLOCATION_PROVIDER=none`.
+
 ---
 
 *For technical reference, see `docs/platform-admin-onboarding.md`,
