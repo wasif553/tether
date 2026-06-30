@@ -92,6 +92,14 @@ docs/student-onboarding-and-exam-access.md):
   class/cohort management, bulk CSV import, and email sending all
   remain deferred.
 
+## Controlled pilot
+
+For operating a real-student pilot within the known limitations above,
+see `docs/controlled-pilot-operator-guide.md`. It covers pre-pilot
+setup, exam-day procedure, student and lecturer troubleshooting,
+post-pilot evidence collection, and the go/no-go capacity and policy
+conditions for scaling up.
+
 ## Canvas/LTI
 
 - Canvas integration is optional

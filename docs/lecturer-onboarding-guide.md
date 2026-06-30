@@ -31,6 +31,24 @@ These are browser-level friction controls, not an OS-level lockdown — see
 docs/known-limitations.md for the full picture of what SES can and
 cannot guarantee.
 
+## Setting an exam access code (optional)
+
+An access code adds a second gate in front of starting the exam —
+students must enter it before a submission is created. It is a single
+shared secret for the exam (not per-student).
+
+1. Open your exam detail page
+2. Find the "Exam access code" section
+3. Enter a code (4+ characters) and click "Set access code"
+4. The status badge changes to "Access code enabled"
+5. The code is never shown again after saving — keep it noted securely
+6. Share the code verbally with students only at exam start, not before
+7. To remove it, click "Clear" — students can then start without a code
+
+If a student enters the wrong code, they see an error and no submission
+is created. Students who have already started (existing submission)
+are never re-prompted for the code on resuming.
+
 ## Sharing the exam with students
 
 - Students log in at https://tether-murex.vercel.app

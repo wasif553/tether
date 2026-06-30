@@ -21,6 +21,7 @@ controlled pilot of Safe Exam System.
 - Webcam (if camera monitoring enabled)
 - Stable internet connection
 - No software installation required for browser mode
+- Electron Lockdown Browser optional (see `docs/lockdown-browser-known-limitations.md`)
 
 ## Roles and responsibilities
 
@@ -88,8 +89,13 @@ controlled pilot of Safe Exam System.
 ## Next steps
 
 - [ ] Confirm pilot scope and dates
-- [ ] SES operator creates lecturer accounts
-- [ ] Lecturers complete onboarding guide
-- [ ] Test exam run with pilot students
+- [ ] SES operator creates institution, lecturer accounts, and student
+      accounts (see `docs/platform-admin-onboarding.md`)
+- [ ] Lecturers complete onboarding guide (`docs/lecturer-onboarding-guide.md`)
+- [ ] Operator and lecturer complete pre-pilot checklist
+      (`docs/controlled-pilot-operator-guide.md` §3)
+- [ ] Test exam run with pilot students at least 24 hours before the
+      real exam
 - [ ] Pilot begins
 - [ ] Post-pilot review and feedback
+      (`docs/controlled-pilot-operator-guide.md` §8)

@@ -15,12 +15,18 @@ Simple instructions for taking an exam in Safe Exam System.
 
 1. Log in with your student account
 2. Click "My Exams" to see your available exams
-3. Click the exam you have been assigned
-4. Read the pre-exam checklist carefully
-5. If camera access is required, click "Enable camera" and allow access
+3. If the exam shows an "Access code required" badge, wait for your
+   lecturer to share the access code before proceeding
+4. Click the exam you have been assigned
+5. Read the pre-exam checklist carefully
+6. If camera access is required, click "Enable camera" and allow access
    when your browser asks
-6. Click "Start secure exam" to begin
-7. Your timer starts immediately
+7. Enter the access code when prompted and click "Start exam"
+8. Your timer starts immediately
+
+If you see an "SES Lockdown Browser Active" badge, it means your
+institution's Electron Lockdown Browser is running and OS-level
+integrity signals are being recorded in addition to browser signals.
 
 ## During the exam
 
@@ -68,5 +74,9 @@ the exam to see your score.
 - **Camera stopped** — follow the on-screen instructions to restore
   camera access
 - **Browser closed accidentally** — log back in and reopen the exam;
-  your progress is saved
+  your progress is saved; you will not need to re-enter the access code
+- **Access code rejected** — confirm you are entering the exact code
+  your lecturer shared; check for extra spaces and correct capitalisation
+- **Exam not visible** — confirm you are signed in with the correct
+  account; contact your exam coordinator if the exam does not appear
 - **Any other issue** — contact your lecturer or exam coordinator
