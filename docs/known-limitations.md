@@ -92,6 +92,21 @@ docs/student-onboarding-and-exam-access.md):
   class/cohort management, bulk CSV import, and email sending all
   remain deferred.
 
+## SES Secure Exam Browser (Electron lockdown client)
+
+Electron Packaging v1 produces pilot installers (Windows NSIS, macOS
+DMG) from `apps/lockdown` — see `apps/lockdown/PILOT-INSTALL.md`:
+
+- Unsigned, unnotarized — Windows SmartScreen and macOS Gatekeeper will
+  warn on install. Suitable for controlled pilot distribution only, not
+  public distribution.
+- Detection and soft enforcement only — the app itself performs no
+  hard OS-level blocking, no kiosk mode, and does not claim to prevent
+  cheating. See `docs/lockdown-browser-known-limitations.md`.
+- No auto-update — every pilot requires a freshly built installer.
+- No MDM/managed deployment path.
+- Placeholder app icons — production branding assets not yet created.
+
 ## Controlled pilot
 
 For operating a real-student pilot within the known limitations above,

@@ -38,8 +38,9 @@ desktop app built with Electron, separate from the main Next.js web app.
 - Does not require Electron for all exams — it's an additional, optional
   client; the existing browser-based Secure Exam Mode keeps working on
   its own.
-- Does not ship an installer, code signing, or MDM packaging in this
-  pass — see `npm start` below for local/dev use only.
+- Does not ship a code-signed, notarized, or MDM-managed installer.
+  Electron Packaging v1 (see below) produces unsigned pilot installers
+  only — controlled-pilot distribution, not public/broad distribution.
 
 See `docs/lockdown-browser-known-limitations.md` in the main repo for
 the full limitations list.
@@ -61,6 +62,40 @@ it. Set `SES_BASE_URL` to point at a different deployment (e.g. a local
 ```sh
 SES_BASE_URL=http://localhost:3001 npm start
 ```
+
+## Packaging (Electron Packaging v1)
+
+Pilot-installable desktop artifacts are built with `electron-builder`,
+configured in `electron-builder.yml`. **Unsigned pilot builds** — see
+`PILOT-INSTALL.md` for the exact SmartScreen/Gatekeeper warnings this
+produces and how operators/students should handle them.
+
+```sh
+cd apps/lockdown
+npm install
+npm run pack        # unpacked app in release/ — quick local inspection
+npm run dist:win     # NSIS installer, run on Windows
+npm run dist:mac     # DMG, run on macOS
+```
+
+- Output goes to `apps/lockdown/release/` (git-ignored — never commit
+  installer artifacts).
+- `asar: false` and `win.signAndEditExecutable: false` are set in
+  `electron-builder.yml`. Both are workarounds for a Windows-only
+  limitation: electron-builder's Windows asar-integrity and
+  icon/version-resource-embedding steps require extracting a macOS
+  cross-signing tool archive containing symlinks, which needs Windows
+  Developer Mode or an elevated shell. Neither setting affects app
+  behavior or security posture — `asar: false` just means app files
+  ship unpacked instead of bundled into one archive, and
+  `signAndEditExecutable: false` means the Windows .exe keeps
+  Electron's default icon instead of SES branding (cosmetic only).
+- No code signing, no notarization, no auto-update, and no kiosk mode
+  are configured in v1. See `PILOT-INSTALL.md` for what this means for
+  installation.
+- Placeholder icons (`assets/icon.png/.ico/.icns`) are generated
+  programmatically — plain dark background, "SES" text, no logos.
+  Replace with real branding assets before broader distribution.
 
 ## Launching with `ses://`
 

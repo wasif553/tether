@@ -105,13 +105,18 @@ Complete this at least 24 hours before the exam, not on exam day.
 - [ ] Lecturer visits `/lecturer/pilot-readiness` and confirms no
       unexpected red items in core section
 
-### Optional: Electron Lockdown Browser
-- [ ] If required, confirm the Electron app is built and distributed to
-      students before exam day
+### Optional: SES Secure Exam Browser (Electron Lockdown Browser)
+- [ ] If required, build the pilot installer (`apps/lockdown` —
+      `npm run dist:win` on Windows, `npm run dist:mac` on macOS; see
+      `apps/lockdown/PILOT-INSTALL.md`) and distribute it to students
+      through an approved channel before exam day
+- [ ] Test the installer yourself at least 24 hours before exam day —
+      it is unsigned and will trigger a SmartScreen/Gatekeeper warning
+      (expected; documented in `apps/lockdown/PILOT-INSTALL.md`)
 - [ ] Test that the "SES Lockdown Browser Active" badge appears on the
       exam page when the app is running
-- [ ] Communicate to students whether the app is required and how to
-      install it
+- [ ] Communicate to students whether the app is required, how to
+      install it, and the SmartScreen/Gatekeeper warning they'll see
 
 ### Final pre-flight
 - [ ] Confirm a direct support channel between operator and lecturer
@@ -368,12 +373,17 @@ institution who has the code can start the exam. It is not per-student.
 The code should be shared verbally in the exam room at the start time,
 not sent digitally in advance.
 
-**Electron Lockdown Browser is not yet signed or packaged for broad
-distribution.** On macOS, students may need to bypass Gatekeeper on
-first launch. The app is a v1 integration: it detects and logs
-significant OS-level signals (window switch, fullscreen exit) and
-queues them for upload, but does not hard-block every possible OS
-action. The "Lockdown Browser Active" badge is informational.
+**SES Secure Exam Browser pilot installers are unsigned.** Electron
+Packaging v1 (`apps/lockdown`) produces a Windows NSIS installer and
+macOS DMG for controlled pilot distribution — not signed, not
+notarized, not for public distribution. Windows SmartScreen and macOS
+Gatekeeper will warn on install; see `apps/lockdown/PILOT-INSTALL.md`
+for the exact steps students/operators need to proceed. The app itself
+is detection and soft enforcement: it detects and logs significant
+OS-level signals (window switch, fullscreen exit) and queues them for
+upload, but does not hard-block every possible OS action, has no kiosk
+mode, and has no auto-update. The "Lockdown Browser Active" badge is
+informational.
 
 **No SSO.** All users authenticate with email/password. SAML/OIDC
 is not implemented.

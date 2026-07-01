@@ -41,12 +41,23 @@ cheat-proof or guaranteed-prevention tool.
 - **Requires student installation.** This is a separate desktop app the
   student must download and run — it is not embedded in or bundled with
   the web app, and Electron is not required to take any exam.
-- **No installer, code signing, or notarization yet.** v1 ships as
-  source only, run via `npm start` in `apps/lockdown` — see
-  `apps/lockdown/README.md`. Packaging (electron-builder, signed/notarized
-  builds) is deferred.
+- **No code signing or notarization.** Electron Packaging v1 (see
+  `apps/lockdown/README.md` and `apps/lockdown/PILOT-INSTALL.md`)
+  produces a Windows NSIS installer and macOS DMG for **controlled
+  pilot distribution only**. These are unsigned/unnotarized — Windows
+  SmartScreen and macOS Gatekeeper will warn on install, which is
+  expected and documented for operators/students. This is not suitable
+  for public/broad distribution.
+- **No auto-update.** Every pilot needs a fresh installer from the
+  operator; there is no update-check or self-update mechanism.
+- **No kiosk mode.** The packaged app runs the same detection-and-log
+  soft-enforcement behavior as source — packaging does not add any new
+  OS-level blocking.
 - **No MDM deployment support yet.** There is no managed/silent
   install path for IT-managed fleets in v1.
+- **Placeholder branding.** App icons are plain programmatic placeholders
+  (dark background, "SES" text) — production-quality icons are required
+  before broader distribution.
 
 ## v2 candidates (after pilot validation)
 

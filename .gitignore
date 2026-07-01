@@ -4,6 +4,11 @@
 /node_modules
 apps/*/node_modules
 apps/*/dist
+apps/*/release
+apps/*/out
+apps/*/.env
+apps/*/.env.*
+!apps/*/.env.example
 /.pnp
 .pnp.*
 .yarn/*

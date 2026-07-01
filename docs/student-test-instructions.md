@@ -25,8 +25,12 @@ Simple instructions for taking an exam in Safe Exam System.
 8. Your timer starts immediately
 
 If you see an "SES Lockdown Browser Active" badge, it means your
-institution's Electron Lockdown Browser is running and OS-level
-integrity signals are being recorded in addition to browser signals.
+institution's SES Secure Exam Browser (the Electron lockdown client) is
+running and OS-level integrity signals are being recorded in addition
+to browser signals. If your institution requires this app, they will
+provide the installer directly — see `apps/lockdown/PILOT-INSTALL.md`
+for installation steps, including the SmartScreen/Gatekeeper warning
+you should expect on first install (this is normal for a pilot build).
 
 ## During the exam
 

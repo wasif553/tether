@@ -1,0 +1,72 @@
+# SES Secure Exam Browser — Electron Packaging v1
+#
+# Produces pilot-installable desktop artifacts for controlled pilot
+# distribution. NOT code-signed or notarized in this pass — unsigned
+# builds will trigger Windows SmartScreen and macOS Gatekeeper warnings.
+# See PILOT-INSTALL.md for what students/operators should expect.
+#
+# No auto-update, no kiosk mode, no hard OS-level enforcement is
+# configured here — packaging only.
+
+appId: com.safeexamsystem.lockdown
+productName: SES Secure Exam Browser
+copyright: Safe Exam System
+
+directories:
+  output: release
+  buildResources: assets
+
+files:
+  - dist/**/*
+  - package.json
+
+# Disabled because electron-builder's Windows asar-integrity step requires
+# extracting a macOS cross-signing tool archive (winCodeSign) that contains
+# symlinks — extracting those requires Windows Developer Mode or an
+# elevated shell, neither of which this pipeline assumes. Packaging still
+# works correctly with asar disabled; this only changes how app files are
+# archived (loose files vs. one .asar blob), not app behavior or security
+# posture, and this app doesn't rely on asar for tamper resistance.
+asar: false
+
+artifactName: "SES-Secure-Exam-Browser-${version}-${os}-${arch}.${ext}"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: assets/icon.ico
+  # Disabled because embedding the icon/version resources triggers
+  # electron-builder's Windows executable-signing step, which in turn
+  # requires the winCodeSign vendor archive. Extracting that archive
+  # needs Windows Developer Mode or an elevated shell (see comment on
+  # `asar: false` above for the same root cause). No signing identity is
+  # configured for this pilot build anyway, so this only means the .exe
+  # keeps Electron's default icon/version metadata instead of SES
+  # branding — cosmetic only, not a functional or security change.
+  signAndEditExecutable: false
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  icon: assets/icon.icns
+  # Unsigned pilot build — hardenedRuntime intentionally left off since no
+  # signing identity is configured. Enabling this without a valid Apple
+  # Developer ID would make the app impossible to launch at all. See
+  # PILOT-INSTALL.md for the "unidentified developer" workaround.
+  hardenedRuntime: false
+  identity: null
+
+dmg:
+  writeUpdateInfo: false
