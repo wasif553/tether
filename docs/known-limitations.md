@@ -92,7 +92,7 @@ docs/student-onboarding-and-exam-access.md):
   class/cohort management, bulk CSV import, and email sending all
   remain deferred.
 
-## SES Secure Exam Browser (Electron lockdown client)
+## Tether Secure Browser (Electron lockdown client)
 
 Electron Packaging v1 produces pilot installers (Windows NSIS, macOS
 DMG) from `apps/lockdown` — see `apps/lockdown/PILOT-INSTALL.md`:

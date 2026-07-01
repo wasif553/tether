@@ -1,4 +1,4 @@
-# SES Secure Exam Browser — Electron Packaging v1
+# Tether Secure Browser — Electron Packaging v1
 #
 # Produces pilot-installable desktop artifacts for controlled pilot
 # distribution. NOT code-signed or notarized in this pass — unsigned
@@ -8,8 +8,8 @@
 # No auto-update, no kiosk mode, no hard OS-level enforcement is
 # configured here — packaging only.
 
-appId: com.safeexamsystem.lockdown
-productName: SES Secure Exam Browser
+appId: com.tether.securebrowser
+productName: Tether Secure Browser
 copyright: Safe Exam System
 
 directories:
@@ -29,7 +29,7 @@ files:
 # posture, and this app doesn't rely on asar for tamper resistance.
 asar: false
 
-artifactName: "SES-Secure-Exam-Browser-${version}-${os}-${arch}.${ext}"
+artifactName: "Tether-Secure-Browser-${version}-${os}-${arch}.${ext}"
 
 win:
   target:
@@ -43,7 +43,7 @@ win:
   # needs Windows Developer Mode or an elevated shell (see comment on
   # `asar: false` above for the same root cause). No signing identity is
   # configured for this pilot build anyway, so this only means the .exe
-  # keeps Electron's default icon/version metadata instead of SES
+  # keeps Electron's default icon/version metadata instead of Tether
   # branding — cosmetic only, not a functional or security change.
   signAndEditExecutable: false
 

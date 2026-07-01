@@ -94,8 +94,8 @@ export function parseUserAgent(ua: string | null | undefined): ParsedUserAgent {
               ? "Firefox"
               : /Safari\//.test(ua) && !/Chrome/.test(ua)
                 ? "Safari"
-                : /SESLockdown/.test(ua)
-                  ? "SES Lockdown Browser"
+                : /TetherSecureBrowser|SESLockdown/.test(ua)
+                  ? "Tether Secure Browser"
                   : null;
 
   // iPhone/iPad must be checked before Mac OS X — iOS UA strings contain

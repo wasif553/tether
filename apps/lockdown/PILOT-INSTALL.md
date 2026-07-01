@@ -1,10 +1,10 @@
-# SES Secure Exam Browser — Pilot Install Guide
+# Tether Secure Browser — Pilot Install Guide
 
 This guide is for **controlled pilot** distribution only. The pilot
 installer is **not code-signed or notarized**. It will trigger OS
 security warnings — this is expected and covered below.
 
-**Product name:** SES Secure Exam Browser
+**Product name:** Tether Secure Browser
 **What it does:** Detection and soft enforcement of OS-level integrity
 signals during an exam, with evidence recorded for lecturer review.
 **What it does not do:** It is not a cheat-proof or guaranteed-lockdown
@@ -16,7 +16,7 @@ automatically. See `apps/lockdown/README.md` and
 day** — do not install for the first time on the morning of an exam.
 
 **Screen-sharing and remote support will not show this app's window.**
-SES Secure Exam Browser enables best-effort content protection
+Tether Secure Browser enables best-effort content protection
 (`setContentProtection(true)`), which deliberately excludes its window
 from screenshots, screen recording, and remote screen-sharing tools —
 this is intentional anti-recording behavior, not a bug. See "Remote
@@ -27,7 +27,7 @@ troubleshooting.
 
 ## Windows installation
 
-1. The operator provides `SES-Secure-Exam-Browser-<version>-win-x64.exe`.
+1. The operator provides `Tether-Secure-Browser-<version>-win-x64.exe`.
    This installer is not distributed publicly — it comes from your
    institution or pilot operator directly.
 2. Double-click the installer.
@@ -39,14 +39,14 @@ troubleshooting.
    instructs otherwise.
 5. Choose whether to create a desktop shortcut and Start Menu entry
    (both are offered by default).
-6. Finish the installer. Launch **SES Secure Exam Browser** from the
+6. Finish the installer. Launch **Tether Secure Browser** from the
    Start Menu or desktop shortcut.
 
 ## macOS installation
 
-1. The operator provides `SES-Secure-Exam-Browser-<version>-mac-<arch>.dmg`
+1. The operator provides `Tether-Secure-Browser-<version>-mac-<arch>.dmg`
    (choose `arm64` for Apple Silicon Macs, `x64` for Intel Macs).
-2. Double-click the `.dmg` to mount it, then drag **SES Secure Exam
+2. Double-click the `.dmg` to mount it, then drag **Tether Secure
    Browser** into the Applications folder.
 3. **The first launch will show "Apple could not verify... is free of
    malware" or "unidentified developer."** This is expected — the pilot
@@ -56,7 +56,7 @@ troubleshooting.
    - Go to **System Settings → Privacy & Security**, scroll to the
      Security section, and click **Open Anyway** next to the blocked-app
      notice, then confirm.
-4. Launch **SES Secure Exam Browser** from Applications or Launchpad.
+4. Launch **Tether Secure Browser** from Applications or Launchpad.
 
 ---
 
@@ -65,7 +65,7 @@ troubleshooting.
 - The app opens in a fullscreen window and loads the SES web app
   directly — sign in exactly as you would in a normal browser.
 - A thin status bar appears at the bottom of the window reading
-  **"SES Lockdown Browser Active"** with an events-recorded counter.
+  **"Tether Browser Active"** with an events-recorded counter.
 - This confirms the lockdown client is running and its OS-level signals
   will be recorded alongside the browser-based Secure Exam Mode signals
   the web app already tracks.
@@ -73,7 +73,7 @@ troubleshooting.
 ## What students should see
 
 - Fullscreen window showing the normal SES login/dashboard/exam pages
-- The **"SES Lockdown Browser Active"** status bar at the bottom
+- The **"Tether Browser Active"** status bar at the bottom
 - A brief yellow warning banner at the top if a signal is recorded
   (e.g. window lost focus, fullscreen exited) — this does not block
   typing or navigation
@@ -83,7 +83,7 @@ troubleshooting.
 
 ## Remote support limitation (content protection)
 
-SES Secure Exam Browser calls `setContentProtection(true)` on its
+Tether Secure Browser calls `setContentProtection(true)` on its
 window as a best-effort measure against screenshots and screen
 recording during an exam. A side effect is that **the app's window will
 not appear in screen-sharing tools, remote-support software, or
@@ -148,9 +148,9 @@ session.
 ### Camera permission issue
 If the exam requires camera monitoring, the OS may prompt for camera
 permission the first time. On Windows: **Settings → Privacy & Security
-→ Camera** → ensure desktop apps can access the camera and that SES
-Secure Exam Browser is allowed. On macOS: **System Settings → Privacy &
-Security → Camera** → enable for SES Secure Exam Browser.
+→ Camera** → ensure desktop apps can access the camera and that Tether
+Secure Browser is allowed. On macOS: **System Settings → Privacy &
+Security → Camera** → enable for Tether Secure Browser.
 
 ### Network issue during the exam
 The lockdown app queues integrity events locally and uploads them once
@@ -163,7 +163,7 @@ prolonged, follow the operator's contingency plan in
 
 ## Install/uninstall lifecycle
 
-SES Secure Exam Browser is **not** meant to be installed and removed
+Tether Secure Browser is **not** meant to be installed and removed
 around every single exam. The correct lifecycle for a pilot or exam
 period is:
 
@@ -211,7 +211,7 @@ auto-uninstall" below.
 
 ## Uninstall
 
-**Windows:** Settings → Apps → Installed apps → search "SES Secure Exam
+**Windows:** Settings → Apps → Installed apps → search "Tether Secure
 Browser" → Uninstall. Or use the uninstaller shortcut created alongside
 the Start Menu entry.
 
@@ -237,7 +237,7 @@ Before escalating to the development team, confirm:
       escalating
 
 If all the above are confirmed and the issue persists, escalate with:
-the OS and version, SES Secure Exam Browser version (Settings/About or
+the OS and version, Tether Secure Browser version (Settings/About or
 the version in the installer filename), and the exact point of failure.
 
 ---
@@ -252,7 +252,7 @@ physically sit at a real machine, look at the real screen, and confirm
 each item below with their own eyes:
 
 - [ ] The login page is visible after launching the app
-- [ ] The **"SES Lockdown Browser Active"** status bar is visible at
+- [ ] The **"Tether Browser Active"** status bar is visible at
       the bottom of the window
 - [ ] A warning banner appears when triggering a blur or fullscreen-exit
       event (e.g. Alt+Tab away, then back; or exit fullscreen)

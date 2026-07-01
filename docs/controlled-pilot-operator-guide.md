@@ -26,13 +26,13 @@ rate; above 40 is a known risk zone. If the pilot will have more
 students, upgrade to Vercel Pro + Supabase Pro before the exam and
 retest.
 
-**Electron Lockdown Browser** is optional for the first pilot. If the
-institution wants to require it, communicate this policy to students
-before exam day — the platform currently shows a "Lockdown Browser
-Active" badge when the app is in use but does not hard-block students
-who open the exam in a regular browser. Enforcement of the lockdown
-browser requirement is currently an institutional policy matter, not
-an automatic technical gate.
+**Tether Secure Browser** (the Electron lockdown client) is optional
+for the first pilot. If the institution wants to require it, communicate
+this policy to students before exam day — the platform currently shows
+a "Tether Browser Active" badge when the app is in use but does not
+hard-block students who open the exam in a regular browser. Enforcement
+of the Tether Secure Browser requirement is currently an institutional
+policy matter, not an automatic technical gate.
 
 ---
 
@@ -105,7 +105,7 @@ Complete this at least 24 hours before the exam, not on exam day.
 - [ ] Lecturer visits `/lecturer/pilot-readiness` and confirms no
       unexpected red items in core section
 
-### Optional: SES Secure Exam Browser (Electron Lockdown Browser)
+### Optional: Tether Secure Browser (Electron Lockdown Browser)
 - [ ] If required, build the pilot installer (`apps/lockdown` —
       `npm run dist:win` on Windows, `npm run dist:mac` on macOS; see
       `apps/lockdown/PILOT-INSTALL.md`) and distribute it to students
@@ -118,7 +118,7 @@ Complete this at least 24 hours before the exam, not on exam day.
       physically viewing a real screen — remote/automated testing
       cannot verify this app's on-screen behavior because content
       protection excludes its window from screenshots and screen-share
-- [ ] Test that the "SES Lockdown Browser Active" badge appears on the
+- [ ] Test that the "Tether Browser Active" badge appears on the
       exam page when the app is running
 - [ ] Communicate to students whether the app is required, how to
       install it, and the SmartScreen/Gatekeeper warning they'll see
@@ -217,7 +217,7 @@ Complete this at least 24 hours before the exam, not on exam day.
   regular browser; the lockdown badge will not appear but the exam
   will work normally
 
-**Remote support during an active exam in SES Secure Exam Browser**
+**Remote support during an active exam in Tether Secure Browser**
 - The app's window will not appear in screen-sharing or remote-support
   tools — this is caused by intentional content-protection behavior
   (`setContentProtection(true)`), not a crash or blank screen. See
@@ -296,7 +296,7 @@ Share this with students and the institution before the pilot.
 Browser-level controls reduce the ease of common cheating behaviours
 (tab switching, copy/paste, right-click) but cannot prevent a student
 who is determined to use a phone, a second device, or notes on paper.
-The Electron Lockdown Browser adds OS-level detection on top of the
+Tether Secure Browser adds OS-level detection on top of the
 browser layer but remains a v1 implementation — it detects and logs
 significant signals rather than hard-blocking every possible action.
 
@@ -361,7 +361,7 @@ Complete this within 48 hours of the last exam.
 - [ ] Lecturer assessment of the grading and integrity workflow
 - [ ] Student feedback on the exam experience (optional survey)
 
-### SES Secure Exam Browser uninstall (if used)
+### Tether Secure Browser uninstall (if used)
 - [ ] Confirm whether this pilot/institution has any further SES exams
       scheduled — if yes, instruct students to **keep the app
       installed** rather than uninstalling
@@ -409,7 +409,7 @@ institution who has the code can start the exam. It is not per-student.
 The code should be shared verbally in the exam room at the start time,
 not sent digitally in advance.
 
-**SES Secure Exam Browser pilot installers are unsigned.** Electron
+**Tether Secure Browser pilot installers are unsigned.** Electron
 Packaging v1 (`apps/lockdown`) produces a Windows NSIS installer and
 macOS DMG for controlled pilot distribution — not signed, not
 notarized, not for public distribution. Windows SmartScreen and macOS
@@ -418,7 +418,7 @@ for the exact steps students/operators need to proceed. The app itself
 is detection and soft enforcement: it detects and logs significant
 OS-level signals (window switch, fullscreen exit) and queues them for
 upload, but does not hard-block every possible OS action, has no kiosk
-mode, and has no auto-update. The "Lockdown Browser Active" badge is
+mode, and has no auto-update. The "Tether Browser Active" badge is
 informational.
 
 **No SSO.** All users authenticate with email/password. SAML/OIDC

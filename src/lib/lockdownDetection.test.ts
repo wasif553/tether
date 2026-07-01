@@ -22,7 +22,13 @@ describe("isRunningInLockdownBrowser", () => {
     expect(isRunningInLockdownBrowser()).toBe(true);
   });
 
-  it("returns true when the user agent contains the SESLockdown marker", () => {
+  it("returns true when the user agent contains the TetherSecureBrowser marker", () => {
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 TetherSecureBrowser/1.0.0" });
+    expect(isRunningInLockdownBrowser()).toBe(true);
+  });
+
+  it("returns true when the user agent contains the legacy SESLockdown marker", () => {
     vi.stubGlobal("window", {});
     vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 SESLockdown/1.0.0" });
     expect(isRunningInLockdownBrowser()).toBe(true);
@@ -40,7 +46,13 @@ describe("getLockdownVersion", () => {
     expect(getLockdownVersion()).toBe("1.2.3");
   });
 
-  it("falls back to parsing the user agent when no bridge is present", () => {
+  it("falls back to parsing TetherSecureBrowser from the user agent when no bridge is present", () => {
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 TetherSecureBrowser/1.0.0" });
+    expect(getLockdownVersion()).toBe("1.0.0");
+  });
+
+  it("falls back to parsing the legacy SESLockdown marker from the user agent", () => {
     vi.stubGlobal("window", {});
     vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 SESLockdown/1.0.0" });
     expect(getLockdownVersion()).toBe("1.0.0");

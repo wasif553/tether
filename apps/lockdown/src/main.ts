@@ -1,5 +1,5 @@
 /**
- * SES Lockdown Browser v1 — main process.
+ * Tether Secure Browser v1 — main process.
  *
  * This is a detection-and-logging client, not a hard-enforcement kiosk.
  * It does not kill processes, block Alt+Tab at the OS level, or trap the

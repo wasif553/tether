@@ -1,6 +1,6 @@
-# Lockdown Browser — Known Limitations (v1)
+# Tether Secure Browser — Known Limitations (v1)
 
-The Electron Lockdown Browser (`apps/lockdown`) is a **native lockdown
+Tether Secure Browser (`apps/lockdown`) is a **native lockdown
 client** that provides **detection and evidence logging** with **soft
 enforcement** — it is not, and should never be described as, a
 cheat-proof or guaranteed-prevention tool.
@@ -80,8 +80,9 @@ cheat-proof or guaranteed-prevention tool.
   exams, permission issues, partial-uninstall risk, managed-device
   policy, support risk).
 - **Placeholder branding.** App icons are plain programmatic placeholders
-  (dark background, "SES" text) — production-quality icons are required
-  before broader distribution.
+  (dark background, "T" text) — production-quality Tether-branded icons
+  are required before broader distribution. **TODO:** replace before
+  broad distribution.
 
 ## v2 candidates (after pilot validation)
 

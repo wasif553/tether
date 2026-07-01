@@ -1,4 +1,4 @@
-# SES Lockdown Browser v1
+# Tether Secure Browser v1
 
 A native lockdown client for Safe Exam System — a detection-and-logging
 desktop app built with Electron, separate from the main Next.js web app.
@@ -7,7 +7,10 @@ desktop app built with Electron, separate from the main Next.js web app.
 
 - Loads the SES web app (`https://tether-murex.vercel.app` by default,
   override with `SES_BASE_URL`) in a fullscreen window with a custom
-  user agent (`SESLockdown/1.0.0`) so the web app can detect it.
+  user agent (`TetherSecureBrowser/1.0.0`) so the web app can detect it.
+  Older packaged builds still send the legacy `SESLockdown/1.0.0`
+  marker — both are recognized by `src/lib/lockdownDetection.ts`, so
+  existing installs keep working without a reinstall.
 - Watches for OS-level integrity signals: window blur/focus, fullscreen
   exit (re-enters fullscreen after a short delay and shows a
   non-blocking warning), window minimize (auto-restores after 2s),
@@ -25,9 +28,10 @@ desktop app built with Electron, separate from the main Next.js web app.
   `PILOT-INSTALL.md` → "Remote support limitation" and
   "Pre-pilot sign-off" before relying on remote/automated checks of
   this app's behavior.
-- Exposes a minimal `window.sesLockdown` bridge (see Part 4 below) so
-  the SES web page can detect the lockdown browser and forward exam
-  context.
+- Exposes a minimal `window.sesLockdown` bridge (kept as-is for
+  backward compatibility with the detection contract — see Part 4
+  below) so the SES web page can detect Tether Secure Browser and
+  forward exam context.
 - Shows a small always-visible status bar and brief auto-dismissing
   warning banners — never blocks exam input.
 
@@ -103,13 +107,14 @@ npm run dist:mac     # DMG, run on macOS
   behavior or security posture — `asar: false` just means app files
   ship unpacked instead of bundled into one archive, and
   `signAndEditExecutable: false` means the Windows .exe keeps
-  Electron's default icon instead of SES branding (cosmetic only).
+  Electron's default icon instead of Tether branding (cosmetic only).
 - No code signing, no notarization, no auto-update, and no kiosk mode
   are configured in v1. See `PILOT-INSTALL.md` for what this means for
   installation.
 - Placeholder icons (`assets/icon.png/.ico/.icns`) are generated
-  programmatically — plain dark background, "SES" text, no logos.
-  Replace with real branding assets before broader distribution.
+  programmatically — plain dark background, "T" text, no logos.
+  **TODO:** replace with real Tether branding assets before broader
+  distribution.
 
 ## Launching with `ses://`
 

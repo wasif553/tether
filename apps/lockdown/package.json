@@ -2,7 +2,7 @@
   "name": "ses-lockdown",
   "version": "1.0.0",
   "private": true,
-  "description": "Safe Exam System — Electron Lockdown Browser v1 (detection-and-logging native client)",
+  "description": "Tether Secure Browser v1 (detection-and-logging native client for Safe Exam System)",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",

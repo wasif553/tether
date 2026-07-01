@@ -1,9 +1,13 @@
 /**
- * SES Lockdown Browser v1 — preload script.
+ * Tether Secure Browser v1 — preload script.
  *
  * Exposes a minimal `window.sesLockdown` bridge into the SES web page via
- * contextBridge. Never exposes ipcRenderer or any Node API directly to
- * the page — only the specific, validated functions below.
+ * contextBridge. The bridge property name is kept as `sesLockdown` for
+ * backward compatibility with the detection contract in
+ * src/lib/lockdownDetection.ts — only the product's display name and
+ * user-agent marker changed with the Tether Secure Browser rename, not
+ * this internal API. Never exposes ipcRenderer or any Node API directly
+ * to the page — only the specific, validated functions below.
  */
 import { contextBridge, ipcRenderer } from "electron";
 import { LOCKDOWN_VERSION, type ExamContext, type SessionInfo } from "./shared";
@@ -114,7 +118,7 @@ function injectOverlay() {
   ].join(";");
 
   const label = document.createElement("span");
-  label.textContent = "SES Lockdown Browser Active";
+  label.textContent = "Tether Secure Browser Active";
   label.style.fontWeight = "600";
 
   const countLabel = document.createElement("span");

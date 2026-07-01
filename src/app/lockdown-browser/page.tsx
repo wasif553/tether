@@ -1,7 +1,7 @@
 export default function LockdownBrowserPage() {
   return (
     <div className="mx-auto max-w-2xl py-12">
-      <h1 className="text-2xl font-semibold">SES Secure Exam Browser</h1>
+      <h1 className="text-2xl font-semibold">Tether Secure Browser</h1>
       <p className="mt-2 text-sm text-gray-500">
         A native desktop client that adds OS-level detection and evidence
         logging on top of the browser-based Secure Exam Mode already built
@@ -12,7 +12,7 @@ export default function LockdownBrowserPage() {
         <section>
           <h2 className="font-medium text-gray-900">What it does</h2>
           <p className="mt-1">
-            SES Secure Exam Browser runs the exam inside a dedicated
+            Tether Secure Browser runs the exam inside a dedicated
             fullscreen window and watches for OS-level integrity signals —
             window focus changes, fullscreen exits, window minimizing,
             multiple displays, and requests to non-SES domains. These
@@ -95,7 +95,7 @@ export default function LockdownBrowserPage() {
               install or remove it for you.
             </li>
             <li>
-              SES Secure Exam Browser does not silently uninstall itself.
+              Tether Secure Browser does not silently uninstall itself.
             </li>
           </ul>
         </section>

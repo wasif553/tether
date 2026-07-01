@@ -6,7 +6,11 @@
 
 export const LOCKDOWN_VERSION = "1.0.0";
 
-export const USER_AGENT_SUFFIX = `SESLockdown/${LOCKDOWN_VERSION}`;
+// Primary marker for new builds. Older packaged installs may still send
+// the legacy `SESLockdown/${version}` suffix — see
+// src/lib/lockdownDetection.ts and src/lib/networkEvidence.ts for the
+// backward-compatible detection logic that accepts both.
+export const USER_AGENT_SUFFIX = `TetherSecureBrowser/${LOCKDOWN_VERSION}`;
 
 export const DEFAULT_SES_BASE_URL = "https://tether-murex.vercel.app";
 

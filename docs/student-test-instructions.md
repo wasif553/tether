@@ -24,8 +24,8 @@ Simple instructions for taking an exam in Safe Exam System.
 7. Enter the access code when prompted and click "Start exam"
 8. Your timer starts immediately
 
-If you see an "SES Lockdown Browser Active" badge, it means your
-institution's SES Secure Exam Browser (the Electron lockdown client) is
+If you see a "Tether Browser Active" badge, it means your
+institution's Tether Secure Browser (the Electron lockdown client) is
 running and OS-level integrity signals are being recorded in addition
 to browser signals. If your institution requires this app, they will
 provide the installer directly — see `apps/lockdown/PILOT-INSTALL.md`
@@ -65,7 +65,7 @@ Read the full privacy notice at `/privacy/student-exam-notice`.
 - Click "Submit exam" when finished
 - You will see a confirmation message
 - You cannot change your answers after submission
-- If you took the exam in SES Secure Exam Browser, you'll see a message
+- If you took the exam in Tether Secure Browser, you'll see a message
   telling you it's safe to close the app. **Keep it installed if you
   have more SES exams scheduled** — only uninstall it after your final
   SES exam, or when your institution tells you to remove it. See
@@ -89,7 +89,7 @@ the exam to see your score.
 - **Exam not visible** — confirm you are signed in with the correct
   account; contact your exam coordinator if the exam does not appear
 - **Any other issue** — contact your lecturer or exam coordinator
-- **If you're using SES Secure Exam Browser and support asks you to
+- **If you're using Tether Secure Browser and support asks you to
   screen-share** — the app's window will not appear correctly in
   screen-sharing tools; this is expected. Describe what you see out
   loud instead (e.g. "I see the login page," "there's a yellow banner

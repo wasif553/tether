@@ -87,10 +87,16 @@ describe("parseUserAgent", () => {
     expect(result.browserName).toBe("Edge");
   });
 
-  it("detects SES Lockdown Browser", () => {
+  it("detects Tether Secure Browser via the new marker", () => {
+    const ua = "TetherSecureBrowser/1.0 Windows";
+    const result = parseUserAgent(ua);
+    expect(result.browserName).toBe("Tether Secure Browser");
+  });
+
+  it("detects Tether Secure Browser via the legacy SESLockdown marker", () => {
     const ua = "SESLockdown/1.0 Windows";
     const result = parseUserAgent(ua);
-    expect(result.browserName).toBe("SES Lockdown Browser");
+    expect(result.browserName).toBe("Tether Secure Browser");
   });
 
   it("returns nulls for empty UA", () => {

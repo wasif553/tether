@@ -509,12 +509,12 @@ export default function TakeExamPage({
         <h1 className="text-2xl font-semibold">{data.exam.title}</h1>
         <p className="mt-4 text-gray-700">
           {inLockdownBrowser
-            ? "Your exam has been submitted. You may now close SES Secure Exam Browser."
+            ? "Your exam has been submitted. You may now close Tether Secure Browser."
             : "Your exam has been submitted."}
         </p>
         {inLockdownBrowser && (
           <p className="mt-2 text-sm text-gray-500">
-            Keep SES Secure Exam Browser installed if you have more SES exams
+            Keep Tether Secure Browser installed if you have more SES exams
             scheduled. Uninstall it only after your final SES exam or when
             your institution/pilot operator instructs you to remove it.
           </p>
@@ -688,7 +688,7 @@ export default function TakeExamPage({
       {inLockdownBrowser && !secureModeEnabled && (
         <div className="mt-3 flex flex-wrap items-center gap-2 rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
           <span className="rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700">
-            SES Lockdown Browser Active
+            Tether Browser Active
           </span>
         </div>
       )}
@@ -700,7 +700,7 @@ export default function TakeExamPage({
           </span>
           {inLockdownBrowser && (
             <span className="rounded bg-blue-100 px-2 py-0.5 text-xs text-blue-700">
-              SES Lockdown Browser Active
+              Tether Browser Active
             </span>
           )}
           <span>Integrity events are logged for review.</span>
