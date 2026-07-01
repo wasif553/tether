@@ -65,6 +65,11 @@ Read the full privacy notice at `/privacy/student-exam-notice`.
 - Click "Submit exam" when finished
 - You will see a confirmation message
 - You cannot change your answers after submission
+- If you took the exam in SES Secure Exam Browser, you'll see a message
+  telling you it's safe to close the app. **Keep it installed if you
+  have more SES exams scheduled** — only uninstall it after your final
+  SES exam, or when your institution tells you to remove it. See
+  `/lockdown-browser` for full install/uninstall guidance.
 
 ## Viewing your result
 

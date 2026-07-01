@@ -48,6 +48,13 @@ desktop app built with Electron, separate from the main Next.js web app.
 - Does not ship a code-signed, notarized, or MDM-managed installer.
   Electron Packaging v1 (see below) produces unsigned pilot installers
   only — controlled-pilot distribution, not public/broad distribution.
+- Does not auto-uninstall. There is no self-triggered OS uninstall, no
+  file-deletion logic, and no scheduled removal — install/uninstall is
+  entirely the student's or institution IT's decision. See
+  `PILOT-INSTALL.md` → "Install/uninstall lifecycle" for the intended
+  timing (install before the exam window, keep installed across
+  multiple exams, uninstall only after the final exam or per
+  institution instruction) and why v1 does not automate this.
 
 See `docs/lockdown-browser-known-limitations.md` in the main repo for
 the full limitations list.

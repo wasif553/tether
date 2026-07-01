@@ -71,6 +71,34 @@ export default function LockdownBrowserPage() {
             uninstallation for both Windows and macOS.
           </p>
         </section>
+
+        <section>
+          <h2 className="font-medium text-gray-900">
+            When should I install or uninstall it?
+          </h2>
+          <ul className="mt-1 list-disc space-y-1 pl-5">
+            <li>Install before your exam or pilot test session.</li>
+            <li>
+              Keep it installed for the full exam period if you have more
+              SES exams.
+            </li>
+            <li>
+              After your final SES exam, follow your institution&apos;s
+              instructions.
+            </li>
+            <li>
+              On personal devices, uninstall using Windows Apps or macOS
+              Applications.
+            </li>
+            <li>
+              On managed devices, your institution&apos;s IT team may
+              install or remove it for you.
+            </li>
+            <li>
+              SES Secure Exam Browser does not silently uninstall itself.
+            </li>
+          </ul>
+        </section>
       </div>
     </div>
   );

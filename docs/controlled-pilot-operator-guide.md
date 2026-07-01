@@ -361,6 +361,20 @@ Complete this within 48 hours of the last exam.
 - [ ] Lecturer assessment of the grading and integrity workflow
 - [ ] Student feedback on the exam experience (optional survey)
 
+### SES Secure Exam Browser uninstall (if used)
+- [ ] Confirm whether this pilot/institution has any further SES exams
+      scheduled — if yes, instruct students to **keep the app
+      installed** rather than uninstalling
+- [ ] If this was the student's final SES exam for the pilot, notify
+      students it is now safe to uninstall (see
+      `apps/lockdown/PILOT-INSTALL.md` → "Install/uninstall lifecycle")
+- [ ] BYOD devices: students uninstall manually via their OS's normal
+      uninstall path
+- [ ] Managed/IT-fleet devices: institution IT/MDM handles removal —
+      do not expect students on managed devices to self-uninstall
+- [ ] The app does not auto-uninstall — do not tell students to expect
+      it to remove itself
+
 ### Fixes for next sprint
 - [ ] List any issues that would be blockers for the next pilot
 - [ ] List any issues that are high-priority polish

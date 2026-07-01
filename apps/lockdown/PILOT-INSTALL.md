@@ -161,6 +161,54 @@ prolonged, follow the operator's contingency plan in
 
 ---
 
+## Install/uninstall lifecycle
+
+SES Secure Exam Browser is **not** meant to be installed and removed
+around every single exam. The correct lifecycle for a pilot or exam
+period is:
+
+1. **Install** at least 24 hours before the first exam that requires it
+   (see "Windows installation" / "macOS installation" above).
+2. **Keep it installed** for the entire exam or pilot window — if a
+   student has more than one SES exam scheduled, they should leave the
+   app installed between exams rather than reinstalling each time.
+3. **Uninstall** only after the student's **final** SES exam for that
+   institution or pilot, or when the institution/pilot operator
+   explicitly instructs students to remove it.
+
+**The app does not uninstall itself.** There is no auto-uninstall,
+scheduled removal, or self-cleanup in v1 — see "Why there is no
+auto-uninstall" below.
+
+- **BYOD (student's own device):** the student uninstalls it manually
+  using the OS's normal uninstall path (Windows: Settings → Apps;
+  macOS: drag to Trash — see "Uninstall" below).
+- **Managed/institution device:** the institution's IT team or MDM
+  tooling handles install and removal; students on managed devices
+  should not need to do this themselves.
+
+### Why there is no auto-uninstall in v1
+
+- **Multiple exams.** A student may have several SES exams across a
+  term or pilot; auto-uninstalling after one exam would force a
+  reinstall (and a fresh SmartScreen/Gatekeeper warning) before the
+  next one.
+- **Permission issues.** Triggering an uninstall from inside the running
+  app would require elevated permissions on some systems and could fail
+  silently or partially depending on how the app was installed
+  (per-user vs. all-users).
+- **Partial uninstall risk.** An uninstall initiated while the app's own
+  process is still running risks leaving orphaned files, registry
+  entries, or shortcuts — safer to let the OS's own uninstaller run
+  standalone, as it does today.
+- **Managed-device policy.** On institution-managed devices, software
+  removal is usually an IT/MDM decision, not something an individual
+  app should decide for itself.
+- **Support risk.** An app that can uninstall itself (or trigger OS
+  uninstall commands) is a bigger support and security surface than one
+  that doesn't — v1 deliberately keeps install/uninstall entirely in
+  the hands of the student or their institution's IT team.
+
 ## Uninstall
 
 **Windows:** Settings → Apps → Installed apps → search "SES Secure Exam

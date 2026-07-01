@@ -507,6 +507,36 @@ export default function TakeExamPage({
     return (
       <div className="mx-auto max-w-2xl">
         <h1 className="text-2xl font-semibold">{data.exam.title}</h1>
+        <p className="mt-4 text-gray-700">
+          {inLockdownBrowser
+            ? "Your exam has been submitted. You may now close SES Secure Exam Browser."
+            : "Your exam has been submitted."}
+        </p>
+        {inLockdownBrowser && (
+          <p className="mt-2 text-sm text-gray-500">
+            Keep SES Secure Exam Browser installed if you have more SES exams
+            scheduled. Uninstall it only after your final SES exam or when
+            your institution/pilot operator instructs you to remove it.
+          </p>
+        )}
+        <div className="mt-4 flex gap-3">
+          <button
+            type="button"
+            onClick={() => router.push("/student")}
+            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+          >
+            Return to student dashboard
+          </button>
+          {inLockdownBrowser && (
+            <button
+              type="button"
+              onClick={() => router.push("/lockdown-browser")}
+              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+            >
+              View uninstall instructions
+            </button>
+          )}
+        </div>
         {data.status === "SUBMITTED" && (
           <p className="mt-4 text-gray-600">
             Submitted. Some answers require manual grading — check back later.

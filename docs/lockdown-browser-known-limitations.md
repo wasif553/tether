@@ -69,6 +69,16 @@ cheat-proof or guaranteed-prevention tool.
   OS-level blocking.
 - **No MDM deployment support yet.** There is no managed/silent
   install path for IT-managed fleets in v1.
+- **No auto-uninstall.** The app never triggers OS uninstall commands,
+  deletes its own files, or schedules its own removal. Install and
+  uninstall timing is entirely a student/institution decision — the
+  intended lifecycle is install before the exam/pilot window, keep
+  installed across multiple exams, and uninstall only after the
+  student's final SES exam or when instructed by the institution. See
+  `apps/lockdown/PILOT-INSTALL.md` → "Install/uninstall lifecycle" for
+  the full policy and the reasons auto-uninstall is deferred (multiple
+  exams, permission issues, partial-uninstall risk, managed-device
+  policy, support risk).
 - **Placeholder branding.** App icons are plain programmatic placeholders
   (dark background, "SES" text) — production-quality icons are required
   before broader distribution.
