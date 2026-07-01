@@ -75,14 +75,18 @@ code is even considered — even with the correct code.
 
 - **Not a substitute for enrolment or course management.** An access
   code is a single shared secret per exam, not a per-student
-  enrolment record. Any student in the same institution who has the
-  code can start the exam.
-- **No course/class/cohort model.** All published exams in an
-  institution remain visible to all students in that institution,
-  exactly as before — the access code only adds a gate in front of
-  *starting* it, not a visibility restriction.
-- **No bulk CSV import** for inviting many students at once — one
-  invite per API call / form submission in v1.
+  enrolment record. Any student who passes the visibility/assignment
+  checks and has the code can start the exam.
+- **Course, Enrolment, Exam Assignment, Scheduling v1** (see
+  `docs/course-enrolment-and-exam-assignment.md`) adds an *optional*
+  course/class model: a lecturer can assign an exam to a course or to
+  selected students. An exam with no course attached (`courseId: null`)
+  remains visible to every student in the institution exactly as
+  before — this is unchanged default behaviour, not a regression. The
+  access code check described in this document still runs after
+  course/assignment visibility, in exactly the same order.
+- **No bulk CSV import** for inviting many students, or for enrolling
+  students into a course — one invite/enrolment per API call in v1.
 - **No email sending** — same caveat as lecturer invites: temporary
   passwords and access codes must be shared with students securely,
   outside the app, by the platform admin or lecturer.

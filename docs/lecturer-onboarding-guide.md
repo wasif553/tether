@@ -14,7 +14,30 @@ A step-by-step guide for a lecturer joining a Safe Exam System pilot.
 2. Enter the exam title, subject, and duration
 3. Add questions (MCQ, short answer, essay)
 4. Configure Secure Exam Mode settings
-5. Publish the exam
+5. (Optional) Assign the exam to a course and set a schedule — see
+   "Courses and exam assignment" below
+6. Publish the exam
+
+## Courses and exam assignment (optional)
+
+If you want an exam visible only to a specific class rather than
+everyone in your institution:
+
+1. Go to `/lecturer/courses` and create a course, or open one you
+   already teach
+2. Enrol students into the course by email
+3. On the exam's edit page, under "Course, assignment & schedule",
+   select the course
+4. Choose **Whole course** (every enrolled student sees it) or
+   **Selected students** (pick specific students from that course)
+5. Optionally set **Available from** / **Available until** to control
+   exactly when the exam opens and closes
+
+If you don't assign a course, the exam remains visible to every student
+in your institution — this is the same behaviour SES has always had.
+See `docs/course-enrolment-and-exam-assignment.md` for the full
+visibility rules, including how this interacts with the access code
+below.
 
 ## Secure Exam Mode settings explained
 

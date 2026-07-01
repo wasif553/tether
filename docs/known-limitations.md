@@ -85,12 +85,24 @@ docs/student-onboarding-and-exam-access.md):
   password shared out of band.
 - A lecturer can optionally set a per-exam access code; only the hash is
   stored (bcrypt), never the plaintext. A student must enter the correct
-  code before a submission is created for that exam.
-- This is not a course/class/cohort enrolment system — it does not
-  restrict *which* students within an institution can see a published
-  exam, only adds an optional extra step before starting it. Course/
-  class/cohort management, bulk CSV import, and email sending all
-  remain deferred.
+  code before a submission is created for that exam. Access code is
+  independent of course/enrolment visibility — see
+  docs/course-enrolment-and-exam-assignment.md.
+
+Course, Enrolment, Exam Assignment, Scheduling v1 is implemented (see
+docs/course-enrolment-and-exam-assignment.md):
+
+- Lecturers can create courses, enrol students, and assign an exam to a
+  whole course or to selected students within it.
+- Exams support explicit `availableFrom`/`availableUntil` scheduling,
+  independent of the pre-existing exam-duration fields.
+- Exams with no course (`courseId: null`) remain visible institution-
+  wide exactly as before this feature — no existing published exam
+  became invisible when this shipped.
+- Not implemented: bulk/CSV student enrolment, course archival/term
+  rollover, per-course analytics, and Canvas course auto-mapping (the
+  Canvas mapping fields on Course exist but are not yet wired to any
+  LTI launch behavior).
 
 ## Tether Secure Browser (Electron lockdown client)
 

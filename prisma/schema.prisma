@@ -67,6 +67,18 @@ enum CanvasPassbackStatus {
   SKIPPED
 }
 
+// Course, Enrolment, Exam Assignment, Scheduling v1 — see
+// docs/course-enrolment-and-exam-assignment.md.
+enum CourseRole {
+  STUDENT
+  LECTURER
+}
+
+enum ExamAssignmentMode {
+  COURSE
+  SELECTED_STUDENTS
+}
+
 // Multi-Tenant Architecture v1 — see docs/multi-tenant-migration.md.
 model Institution {
   id           String        @id @default(cuid())
@@ -80,6 +92,7 @@ model Institution {
   users        User[]
   exams        Exam[]
   ltiPlatforms LtiPlatform[]
+  courses      Course[]
 }
 
 // Platform Admin Onboarding v2 — minimal audit trail for platform-admin
@@ -129,6 +142,10 @@ model User {
   institution       Institution?     @relation(fields: [institutionId], references: [id])
   // Platform Admin Onboarding v2 — see docs/platform-admin-onboarding.md.
   platformAuditLogs PlatformAuditLog[]
+  // Course, Enrolment, Exam Assignment, Scheduling v1 — see
+  // docs/course-enrolment-and-exam-assignment.md.
+  courseEnrollments CourseEnrollment[]
+  examAssignments   ExamAssignment[]
 
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
@@ -165,7 +182,26 @@ model Exam {
   accessCodeHash     String?
   accessCodeRequired Boolean       @default(false)
 
+  // Course, Enrolment, Exam Assignment, Scheduling v1 — see
+  // docs/course-enrolment-and-exam-assignment.md. courseId is nullable:
+  // a null value means this is a legacy institution-wide exam, which
+  // remains visible to every student in the institution exactly as
+  // before this feature — see that doc for the full legacy-visibility
+  // rule and its test coverage.
+  courseId       String?
+  course         Course?            @relation(fields: [courseId], references: [id])
+  assignmentMode ExamAssignmentMode @default(COURSE)
+  assignments    ExamAssignment[]
+  // Scheduled availability window — distinct from the pre-existing
+  // startsAt/endsAt (which historically doubled as both "exam metadata"
+  // and "availability window"). availableFrom/availableUntil are the new,
+  // explicit scheduling fields; both remain optional so unset exams have
+  // no window restriction (see docs/course-enrolment-and-exam-assignment.md).
+  availableFrom    DateTime?
+  availableUntil   DateTime?
+
   @@index([institutionId])
+  @@index([courseId])
 }
 
 model Question {
@@ -243,6 +279,65 @@ model IntegrityEvent {
   @@index([eventType])
   @@index([severity])
   @@index([occurredAt])
+}
+
+// Course, Enrolment, Exam Assignment, Scheduling v1 — see
+// docs/course-enrolment-and-exam-assignment.md. Course is the academic
+// grouping inside an Institution (the hard tenancy boundary). It does not
+// replace Institution-level isolation — every Course belongs to exactly
+// one Institution, and cross-institution access is still governed by
+// institutionScope.ts exactly as before.
+model Course {
+  id            String             @id @default(cuid())
+  institutionId String
+  institution   Institution        @relation(fields: [institutionId], references: [id])
+  name          String
+  code          String
+  description   String?
+  active        Boolean            @default(true)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  enrollments   CourseEnrollment[]
+  exams         Exam[]
+  // Canvas/LTI mapping hook (v1 foundation only) — see
+  // docs/course-enrolment-and-exam-assignment.md Part 7. Exam-level
+  // Canvas mapping already exists via LtiExamLink; these are the
+  // course-level equivalent, added additively and unused by existing
+  // LTI code paths so nothing breaks if left unset.
+  canvasCourseId String?
+  ltiPlatformId  String?
+
+  @@unique([institutionId, code])
+  @@index([institutionId])
+}
+
+model CourseEnrollment {
+  id        String     @id @default(cuid())
+  courseId  String
+  course    Course     @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      CourseRole
+  createdAt DateTime   @default(now())
+
+  @@unique([courseId, userId])
+  @@index([courseId])
+  @@index([userId])
+}
+
+// Selected-student exam assignment — only meaningful when the owning
+// Exam has assignmentMode: SELECTED_STUDENTS. Ignored otherwise.
+model ExamAssignment {
+  id        String   @id @default(cuid())
+  examId    String
+  exam      Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  studentId String
+  student   User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([examId, studentId])
+  @@index([examId])
+  @@index([studentId])
 }
 
 model LtiPlatform {

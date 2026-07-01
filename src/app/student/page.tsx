@@ -10,6 +10,10 @@ type AvailableExam = {
   durationMins: number;
   questionCount: number;
   accessCodeRequired: boolean;
+  availableFrom: string | null;
+  availableUntil: string | null;
+  course: { id: string; name: string; code: string } | null;
+  availability: "open" | "upcoming" | "closed";
   submission: { id: string; status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" } | null;
 };
 
@@ -66,6 +70,11 @@ export default function StudentDashboard() {
                 {exam.questionCount} questions · {exam.durationMins} min
               </span>
             </div>
+            {exam.course && (
+              <p className="mt-1 text-xs text-gray-500">
+                {exam.course.code} · {exam.course.name}
+              </p>
+            )}
             {exam.description && (
               <p className="mt-1 text-sm text-gray-600">{exam.description}</p>
             )}
@@ -74,8 +83,16 @@ export default function StudentDashboard() {
                 Access code required
               </span>
             )}
+            {exam.availability === "upcoming" && exam.availableFrom && (
+              <p className="mt-2 text-sm text-blue-700">
+                Opens at {new Date(exam.availableFrom).toLocaleString()}
+              </p>
+            )}
             <div className="mt-3">
-              {!exam.submission && exam.accessCodeRequired && (
+              {exam.availability === "upcoming" && !exam.submission && (
+                <span className="text-sm text-gray-500">Not yet open</span>
+              )}
+              {exam.availability === "open" && !exam.submission && exam.accessCodeRequired && (
                 <div className="flex items-end gap-2">
                   <input
                     type="text"
@@ -95,7 +112,7 @@ export default function StudentDashboard() {
                   </button>
                 </div>
               )}
-              {!exam.submission && !exam.accessCodeRequired && (
+              {exam.availability === "open" && !exam.submission && !exam.accessCodeRequired && (
                 <button
                   onClick={() => startExam(exam.id)}
                   disabled={startingId === exam.id}

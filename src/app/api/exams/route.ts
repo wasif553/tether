@@ -3,14 +3,28 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { institutionWhere, requireInstitutionId, institutionErrorResponse } from "@/lib/institutionScope";
+import { assertCanAssignExamToCourse, assertStudentsInCourse, CourseAssignmentError } from "@/lib/courseAssignment";
 
-const createExamSchema = z.object({
-  title: z.string().min(1),
-  description: z.string().optional(),
-  durationMins: z.number().int().positive(),
-  startsAt: z.string().datetime().optional(),
-  endsAt: z.string().datetime().optional(),
-});
+const createExamSchema = z
+  .object({
+    title: z.string().min(1),
+    description: z.string().optional(),
+    durationMins: z.number().int().positive(),
+    startsAt: z.string().datetime().optional(),
+    endsAt: z.string().datetime().optional(),
+    // Course, Enrolment, Exam Assignment, Scheduling v1 — see
+    // docs/course-enrolment-and-exam-assignment.md. courseId omitted or
+    // null means this is a legacy institution-wide exam.
+    courseId: z.string().min(1).optional(),
+    assignmentMode: z.enum(["COURSE", "SELECTED_STUDENTS"]).optional(),
+    selectedStudentIds: z.array(z.string().min(1)).optional(),
+    availableFrom: z.string().datetime().optional(),
+    availableUntil: z.string().datetime().optional(),
+  })
+  .refine(
+    (data) => !data.availableFrom || !data.availableUntil || data.availableUntil > data.availableFrom,
+    { message: "availableUntil must be after availableFrom", path: ["availableUntil"] },
+  );
 
 export async function GET() {
   const session = await auth();
@@ -22,7 +36,10 @@ export async function GET() {
     const exams = await prisma.exam.findMany({
       where: { createdById: session.user.id, ...institutionWhere(session) },
       orderBy: { createdAt: "desc" },
-      include: { _count: { select: { questions: true, submissions: true } } },
+      include: {
+        _count: { select: { questions: true, submissions: true } },
+        course: { select: { id: true, name: true, code: true } },
+      },
     });
 
     // Never include accessCodeHash in any API response — see
@@ -52,9 +69,27 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
 
-  const { title, description, durationMins, startsAt, endsAt } = parsed.data;
+  const {
+    title,
+    description,
+    durationMins,
+    startsAt,
+    endsAt,
+    courseId,
+    assignmentMode,
+    selectedStudentIds,
+    availableFrom,
+    availableUntil,
+  } = parsed.data;
 
   try {
+    if (courseId) {
+      await assertCanAssignExamToCourse(session, courseId);
+      if (assignmentMode === "SELECTED_STUDENTS" && selectedStudentIds?.length) {
+        await assertStudentsInCourse(courseId, selectedStudentIds);
+      }
+    }
+
     const exam = await prisma.exam.create({
       data: {
         title,
@@ -64,6 +99,13 @@ export async function POST(req: Request) {
         endsAt: endsAt ? new Date(endsAt) : undefined,
         createdById: session.user.id,
         institutionId: requireInstitutionId(session),
+        courseId: courseId ?? undefined,
+        assignmentMode: assignmentMode ?? undefined,
+        availableFrom: availableFrom ? new Date(availableFrom) : undefined,
+        availableUntil: availableUntil ? new Date(availableUntil) : undefined,
+        ...(courseId && assignmentMode === "SELECTED_STUDENTS" && selectedStudentIds?.length
+          ? { assignments: { create: selectedStudentIds.map((studentId) => ({ studentId })) } }
+          : {}),
       },
     });
 
@@ -71,6 +113,9 @@ export async function POST(req: Request) {
   } catch (err) {
     const res = institutionErrorResponse(err);
     if (res) return res;
+    if (err instanceof CourseAssignmentError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
     throw err;
   }
 }

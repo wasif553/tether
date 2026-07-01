@@ -29,11 +29,43 @@ export async function POST(
     throw err;
   }
 
+  // Course, Enrolment, Exam Assignment, Scheduling v1 — see
+  // docs/course-enrolment-and-exam-assignment.md. A courseId: null exam
+  // is a legacy institution-wide exam and needs no further check here —
+  // institution membership above is sufficient, exactly as before this
+  // feature. Otherwise the student must be enrolled in the exam's course
+  // (assignmentMode COURSE) or directly assigned (SELECTED_STUDENTS).
+  if (exam.courseId) {
+    const [enrolled, assigned] = await Promise.all([
+      exam.assignmentMode === "COURSE"
+        ? prisma.courseEnrollment.findUnique({
+            where: { courseId_userId: { courseId: exam.courseId, userId: session.user.id } },
+          })
+        : Promise.resolve(null),
+      exam.assignmentMode === "SELECTED_STUDENTS"
+        ? prisma.examAssignment.findUnique({
+            where: { examId_studentId: { examId: id, studentId: session.user.id } },
+          })
+        : Promise.resolve(null),
+    ]);
+    const hasAccess =
+      (exam.assignmentMode === "COURSE" && enrolled?.role === "STUDENT") ||
+      (exam.assignmentMode === "SELECTED_STUDENTS" && assigned != null);
+    if (!hasAccess) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+  }
+
   const now = new Date();
-  if (exam.startsAt && now < exam.startsAt) {
+  // availableFrom/availableUntil are the new explicit scheduling fields;
+  // startsAt/endsAt are the pre-existing ones. Both are honored — either
+  // set restricts the window, neither set means no restriction.
+  const opensAt = exam.availableFrom ?? exam.startsAt ?? null;
+  const closesAt = exam.availableUntil ?? exam.endsAt ?? null;
+  if (opensAt && now < opensAt) {
     return NextResponse.json({ error: "Exam has not started yet" }, { status: 403 });
   }
-  if (exam.endsAt && now > exam.endsAt) {
+  if (closesAt && now > closesAt) {
     return NextResponse.json({ error: "Exam window has closed" }, { status: 403 });
   }
 

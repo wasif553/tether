@@ -6,20 +6,37 @@ import { prisma } from "@/lib/prisma";
 import { parseSecureSettings, secureSettingsInputSchema } from "@/lib/secureExam";
 import type { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
+import { assertCanAssignExamToCourse, assertStudentsInCourse, CourseAssignmentError } from "@/lib/courseAssignment";
 
-const updateExamSchema = z.object({
-  title: z.string().min(1).optional(),
-  description: z.string().optional(),
-  durationMins: z.number().int().positive().optional(),
-  published: z.boolean().optional(),
-  startsAt: z.string().datetime().optional().nullable(),
-  endsAt: z.string().datetime().optional().nullable(),
-  secureSettings: secureSettingsInputSchema.optional(),
-  // Student Onboarding and Exam Access v1 — see
-  // docs/student-onboarding-and-exam-access.md. undefined = leave
-  // unchanged, null = clear the code, a string = set a new code.
-  accessCode: z.string().min(4).nullable().optional(),
-});
+const updateExamSchema = z
+  .object({
+    title: z.string().min(1).optional(),
+    description: z.string().optional(),
+    durationMins: z.number().int().positive().optional(),
+    published: z.boolean().optional(),
+    startsAt: z.string().datetime().optional().nullable(),
+    endsAt: z.string().datetime().optional().nullable(),
+    secureSettings: secureSettingsInputSchema.optional(),
+    // Student Onboarding and Exam Access v1 — see
+    // docs/student-onboarding-and-exam-access.md. undefined = leave
+    // unchanged, null = clear the code, a string = set a new code.
+    accessCode: z.string().min(4).nullable().optional(),
+    // Course, Enrolment, Exam Assignment, Scheduling v1 — see
+    // docs/course-enrolment-and-exam-assignment.md. courseId: null clears
+    // the course link (reverts to a legacy institution-wide exam).
+    courseId: z.string().min(1).nullable().optional(),
+    assignmentMode: z.enum(["COURSE", "SELECTED_STUDENTS"]).optional(),
+    // Replaces the full selected-student list when provided (and
+    // assignmentMode is SELECTED_STUDENTS) — not an incremental add.
+    selectedStudentIds: z.array(z.string().min(1)).optional(),
+    availableFrom: z.string().datetime().nullable().optional(),
+    availableUntil: z.string().datetime().nullable().optional(),
+  })
+  .refine(
+    (data) =>
+      !data.availableFrom || !data.availableUntil || data.availableUntil > data.availableFrom,
+    { message: "availableUntil must be after availableFrom", path: ["availableUntil"] },
+  );
 
 /** Strips accessCodeHash from any exam object before it's ever sent in a response. */
 function omitAccessCodeHash<T extends { accessCodeHash?: string | null }>(
@@ -107,7 +124,18 @@ export async function PATCH(
       return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
     }
 
-    const { startsAt, endsAt, secureSettings, accessCode, ...rest } = parsed.data;
+    const {
+      startsAt,
+      endsAt,
+      secureSettings,
+      accessCode,
+      courseId,
+      assignmentMode,
+      selectedStudentIds,
+      availableFrom,
+      availableUntil,
+      ...rest
+    } = parsed.data;
 
     const mergedSecureSettings = secureSettings
       ? parseSecureSettings({ ...parseSecureSettings(exam.secureSettings), ...secureSettings })
@@ -122,15 +150,49 @@ export async function PATCH(
       accessCodeFields = { accessCodeHash: await bcrypt.hash(accessCode, 12), accessCodeRequired: true };
     }
 
+    // Course/assignment: courseId undefined leaves it untouched, null
+    // clears it (reverts to legacy institution-wide exam), a string sets
+    // it — but only after verifying the lecturer teaches that course.
+    const effectiveCourseId = courseId !== undefined ? courseId : exam.courseId;
+    if (courseId) {
+      await assertCanAssignExamToCourse(session, courseId);
+    }
+    if (
+      effectiveCourseId &&
+      (assignmentMode === "SELECTED_STUDENTS" || (assignmentMode === undefined && exam.assignmentMode === "SELECTED_STUDENTS")) &&
+      selectedStudentIds
+    ) {
+      await assertStudentsInCourse(effectiveCourseId, selectedStudentIds);
+    }
+
     const updated = await prisma.exam.update({
       where: { id },
       data: {
         ...rest,
         ...(accessCodeFields ?? {}),
+        ...(courseId !== undefined ? { courseId } : {}),
+        ...(assignmentMode !== undefined ? { assignmentMode } : {}),
         ...(startsAt !== undefined ? { startsAt: startsAt ? new Date(startsAt) : null } : {}),
         ...(endsAt !== undefined ? { endsAt: endsAt ? new Date(endsAt) : null } : {}),
+        ...(availableFrom !== undefined
+          ? { availableFrom: availableFrom ? new Date(availableFrom) : null }
+          : {}),
+        ...(availableUntil !== undefined
+          ? { availableUntil: availableUntil ? new Date(availableUntil) : null }
+          : {}),
         ...(mergedSecureSettings
           ? { secureSettings: mergedSecureSettings as Prisma.InputJsonValue }
+          : {}),
+        // selectedStudentIds replaces the full ExamAssignment set for this
+        // exam — deleteMany + create in the same update call via nested
+        // writes so it's atomic with the rest of the PATCH.
+        ...(selectedStudentIds
+          ? {
+              assignments: {
+                deleteMany: {},
+                create: selectedStudentIds.map((studentId) => ({ studentId })),
+              },
+            }
           : {}),
       },
     });
@@ -142,6 +204,9 @@ export async function PATCH(
   } catch (err) {
     const res = institutionErrorResponse(err);
     if (res) return res;
+    if (err instanceof CourseAssignmentError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
     throw err;
   }
 }

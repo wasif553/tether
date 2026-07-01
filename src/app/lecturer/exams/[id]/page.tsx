@@ -42,6 +42,17 @@ type Exam = {
   questions: Question[];
   secureSettings: SecureSettings;
   accessCodeRequired: boolean;
+  courseId: string | null;
+  assignmentMode: "COURSE" | "SELECTED_STUDENTS";
+  availableFrom: string | null;
+  availableUntil: string | null;
+};
+
+type LecturerCourse = {
+  id: string;
+  name: string;
+  code: string;
+  enrollments?: { id: string; role: "STUDENT" | "LECTURER"; user: { id: string; name: string; email: string } }[];
 };
 
 type GeneratedQuestion = {
@@ -97,6 +108,18 @@ export default function LecturerExamPage({
   } | null>(null);
   const [unresolvedHighRisk, setUnresolvedHighRisk] = useState<number | null>(null);
 
+  // Course, Enrolment, Exam Assignment, Scheduling v1 — see
+  // docs/course-enrolment-and-exam-assignment.md.
+  const [courses, setCourses] = useState<LecturerCourse[]>([]);
+  const [courseStudents, setCourseStudents] = useState<{ id: string; name: string; email: string }[]>([]);
+  const [courseId, setCourseId] = useState<string>("");
+  const [assignmentMode, setAssignmentMode] = useState<"COURSE" | "SELECTED_STUDENTS">("COURSE");
+  const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
+  const [availableFrom, setAvailableFrom] = useState("");
+  const [availableUntil, setAvailableUntil] = useState("");
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [scheduleMessage, setScheduleMessage] = useState<string | null>(null);
+
   const [qType, setQType] = useState<Question["type"]>("MULTIPLE_CHOICE");
   const [qText, setQText] = useState("");
   const [qOptions, setQOptions] = useState("");
@@ -146,8 +169,57 @@ export default function LecturerExamPage({
       const data: Exam = await res.json();
       setExam(data);
       setSecureForm(data.secureSettings);
+      setCourseId(data.courseId ?? "");
+      setAssignmentMode(data.assignmentMode ?? "COURSE");
+      setAvailableFrom(data.availableFrom ? data.availableFrom.slice(0, 16) : "");
+      setAvailableUntil(data.availableUntil ? data.availableUntil.slice(0, 16) : "");
     }
     setLoading(false);
+  }
+
+  async function loadCourses() {
+    const res = await fetch("/api/courses");
+    if (res.ok) setCourses(await res.json());
+  }
+
+  async function loadCourseStudents(selectedCourseId: string) {
+    if (!selectedCourseId) {
+      setCourseStudents([]);
+      return;
+    }
+    const res = await fetch(`/api/courses/${selectedCourseId}`);
+    if (!res.ok) {
+      setCourseStudents([]);
+      return;
+    }
+    const data: LecturerCourse = await res.json();
+    setCourseStudents(
+      (data.enrollments ?? []).filter((e) => e.role === "STUDENT").map((e) => e.user),
+    );
+  }
+
+  async function saveSchedule() {
+    setSavingSchedule(true);
+    setScheduleMessage(null);
+    const res = await fetch(`/api/exams/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        courseId: courseId || null,
+        assignmentMode,
+        selectedStudentIds: assignmentMode === "SELECTED_STUDENTS" ? selectedStudentIds : undefined,
+        availableFrom: availableFrom ? new Date(availableFrom).toISOString() : null,
+        availableUntil: availableUntil ? new Date(availableUntil).toISOString() : null,
+      }),
+    });
+    setSavingSchedule(false);
+    if (res.ok) {
+      setScheduleMessage("Saved.");
+      loadExam();
+    } else {
+      const body = await res.json().catch(() => null);
+      setScheduleMessage(typeof body?.error === "string" ? body.error : "Failed to save.");
+    }
   }
 
   async function loadSubmissionStatus() {
@@ -186,7 +258,13 @@ export default function LecturerExamPage({
     loadIntegrityOverview();
     loadLtiLinks();
     loadPlatforms();
+    loadCourses();
   }, [id]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadCourseStudents(courseId);
+  }, [courseId]);
 
   async function handleCreateLink(e: React.FormEvent) {
     e.preventDefault();
@@ -729,6 +807,104 @@ export default function LecturerExamPage({
           </button>
         </div>
       )}
+
+      <h2 className="mt-8 text-lg font-medium">Course, assignment &amp; schedule</h2>
+      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+        <p className="text-sm text-gray-600">
+          Assign this exam to a course, or leave it unassigned to keep it
+          visible to the whole institution (legacy behaviour).
+        </p>
+        <div>
+          <label className="text-sm font-medium">Course</label>
+          <select
+            className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
+            value={courseId}
+            onChange={(e) => setCourseId(e.target.value)}
+          >
+            <option value="">No course (institution-wide)</option>
+            {courses.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.code} — {c.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        {courseId && (
+          <div>
+            <label className="text-sm font-medium">Assign to</label>
+            <div className="mt-1 flex gap-4 text-sm">
+              <label className="flex items-center gap-1">
+                <input
+                  type="radio"
+                  checked={assignmentMode === "COURSE"}
+                  onChange={() => setAssignmentMode("COURSE")}
+                />
+                Whole course
+              </label>
+              <label className="flex items-center gap-1">
+                <input
+                  type="radio"
+                  checked={assignmentMode === "SELECTED_STUDENTS"}
+                  onChange={() => setAssignmentMode("SELECTED_STUDENTS")}
+                />
+                Selected students
+              </label>
+            </div>
+          </div>
+        )}
+        {courseId && assignmentMode === "SELECTED_STUDENTS" && (
+          <div>
+            <label className="text-sm font-medium">Selected students</label>
+            <div className="mt-1 max-h-40 overflow-y-auto rounded border border-gray-200 p-2">
+              {courseStudents.length === 0 && (
+                <p className="text-sm text-gray-500">No students enrolled in this course yet.</p>
+              )}
+              {courseStudents.map((s) => (
+                <label key={s.id} className="flex items-center gap-2 py-0.5 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={selectedStudentIds.includes(s.id)}
+                    onChange={(e) =>
+                      setSelectedStudentIds((prev) =>
+                        e.target.checked ? [...prev, s.id] : prev.filter((id) => id !== s.id),
+                      )
+                    }
+                  />
+                  {s.name} — {s.email}
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div>
+            <label className="text-sm font-medium">Available from</label>
+            <input
+              type="datetime-local"
+              className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
+              value={availableFrom}
+              onChange={(e) => setAvailableFrom(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium">Available until</label>
+            <input
+              type="datetime-local"
+              className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
+              value={availableUntil}
+              onChange={(e) => setAvailableUntil(e.target.value)}
+            />
+          </div>
+        </div>
+        <button
+          onClick={saveSchedule}
+          disabled={savingSchedule}
+          className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+        >
+          {savingSchedule ? "Saving..." : "Save course & schedule"}
+        </button>
+        {scheduleMessage && <p className="text-sm text-gray-600">{scheduleMessage}</p>}
+      </div>
 
       <h2 className="mt-8 text-lg font-medium">Exam access code</h2>
       <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">

@@ -94,6 +94,18 @@ Complete this at least 24 hours before the exam, not on exam day.
       encrypted message, or in-person handover; never plain email or
       chat
 
+### Courses and exam assignment (optional)
+- [ ] If you want to target the exam at a specific class instead of the
+      whole institution, have the lecturer create a course
+      (`/lecturer/courses`) and enrol students into it before exam day
+- [ ] The lecturer can then assign the exam to the whole course or to
+      selected students, and set an availability window
+      (`availableFrom`/`availableUntil`) — see
+      `docs/course-enrolment-and-exam-assignment.md`
+- [ ] If no course is set, the exam remains visible to every student in
+      the institution — this is the same behaviour as before this
+      feature and requires no extra setup
+
 ### Exam setup (lecturer task — verify before exam day)
 - [ ] Lecturer signs in and creates the exam with the correct duration
 - [ ] All question types present (MCQ, short answer, essay as needed)

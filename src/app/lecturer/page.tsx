@@ -8,8 +8,20 @@ type ExamSummary = {
   title: string;
   published: boolean;
   durationMins: number;
+  availableFrom: string | null;
+  availableUntil: string | null;
+  course: { id: string; name: string; code: string } | null;
   _count: { questions: number; submissions: number };
 };
+
+/** Draft / Scheduled / Open / Closed — see docs/course-enrolment-and-exam-assignment.md. */
+function availabilityStatus(exam: ExamSummary): "Draft" | "Scheduled" | "Open" | "Closed" {
+  if (!exam.published) return "Draft";
+  const now = new Date();
+  if (exam.availableFrom && now < new Date(exam.availableFrom)) return "Scheduled";
+  if (exam.availableUntil && now > new Date(exam.availableUntil)) return "Closed";
+  return "Open";
+}
 
 export default function LecturerDashboard() {
   const [exams, setExams] = useState<ExamSummary[]>([]);
@@ -56,7 +68,12 @@ export default function LecturerDashboard() {
 
   return (
     <div className="mx-auto max-w-3xl">
-      <h1 className="text-2xl font-semibold">Lecturer Dashboard</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Lecturer Dashboard</h1>
+        <Link href="/lecturer/courses" className="text-sm underline">
+          Manage courses
+        </Link>
+      </div>
 
       <form onSubmit={handleCreate} className="mt-6 flex items-end gap-3 rounded border border-gray-200 p-4">
         <div className="flex-1">
@@ -115,7 +132,11 @@ export default function LecturerDashboard() {
             <p className="mt-1 text-sm text-gray-500">
               {exam._count.questions} questions · {exam.durationMins} min ·{" "}
               {exam._count.submissions} submissions
+              {exam.course && ` · ${exam.course.code} — ${exam.course.name}`}
             </p>
+            <span className="mt-1 inline-block rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
+              {availabilityStatus(exam)}
+            </span>
           </Link>
         ))}
       </div>

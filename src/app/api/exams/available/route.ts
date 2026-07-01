@@ -10,28 +10,74 @@ export async function GET() {
   }
 
   try {
+    // Course, Enrolment, Exam Assignment, Scheduling v1 — see
+    // docs/course-enrolment-and-exam-assignment.md. A student may see an
+    // exam via any of three independent paths:
+    //   1. courseId is null — a legacy institution-wide exam, visible to
+    //      every student in the institution exactly as before this
+    //      feature shipped (see the doc's "Legacy exam visibility" plan).
+    //   2. the exam's course uses assignmentMode COURSE and the student
+    //      is enrolled in that course as a STUDENT.
+    //   3. the student has a direct ExamAssignment row on the exam
+    //      (assignmentMode SELECTED_STUDENTS).
+    const studentCourseIds = (
+      await prisma.courseEnrollment.findMany({
+        where: { userId: session.user.id, role: "STUDENT" },
+        select: { courseId: true },
+      })
+    ).map((e) => e.courseId);
+
     const exams = await prisma.exam.findMany({
-      where: { published: true, ...institutionWhere(session) },
+      where: {
+        published: true,
+        ...institutionWhere(session),
+        OR: [
+          { courseId: null },
+          { courseId: { in: studentCourseIds }, assignmentMode: "COURSE" },
+          { assignments: { some: { studentId: session.user.id } } },
+        ],
+      },
       orderBy: { createdAt: "desc" },
       include: {
         submissions: { where: { studentId: session.user.id } },
         _count: { select: { questions: true } },
+        course: { select: { id: true, name: true, code: true } },
       },
     });
 
-    const result = exams.map((exam) => ({
-      id: exam.id,
-      title: exam.title,
-      description: exam.description,
-      durationMins: exam.durationMins,
-      startsAt: exam.startsAt,
-      endsAt: exam.endsAt,
-      questionCount: exam._count.questions,
-      accessCodeRequired: exam.accessCodeRequired,
-      submission: exam.submissions[0]
-        ? { id: exam.submissions[0].id, status: exam.submissions[0].status }
-        : null,
-    }));
+    const now = new Date();
+    const result = exams
+      .map((exam) => {
+        // Availability window: only enforced if set on the exam (legacy
+        // exams with neither field set have no window restriction).
+        const opensAt = exam.availableFrom ?? exam.startsAt ?? null;
+        const closesAt = exam.availableUntil ?? exam.endsAt ?? null;
+        const isUpcoming = opensAt != null && now < opensAt;
+        const isClosed = closesAt != null && now > closesAt;
+
+        return {
+          id: exam.id,
+          title: exam.title,
+          description: exam.description,
+          durationMins: exam.durationMins,
+          startsAt: exam.startsAt,
+          endsAt: exam.endsAt,
+          availableFrom: exam.availableFrom,
+          availableUntil: exam.availableUntil,
+          questionCount: exam._count.questions,
+          accessCodeRequired: exam.accessCodeRequired,
+          course: exam.course,
+          availability: isClosed ? "closed" : isUpcoming ? "upcoming" : "open",
+          submission: exam.submissions[0]
+            ? { id: exam.submissions[0].id, status: exam.submissions[0].status }
+            : null,
+        };
+      })
+      // Hide exams that are closed and never started by this student —
+      // nothing useful for the student to do with a closed exam they
+      // never attempted. A closed exam they already have a submission
+      // for remains visible so they can see their result.
+      .filter((exam) => exam.availability !== "closed" || exam.submission !== null);
 
     return NextResponse.json(result);
   } catch (err) {

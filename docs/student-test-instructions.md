@@ -14,7 +14,9 @@ Simple instructions for taking an exam in Safe Exam System.
 ## Starting your exam
 
 1. Log in with your student account
-2. Click "My Exams" to see your available exams
+2. Click "My Exams" to see your available exams — this may include
+   exams assigned to your whole class as well as ones assigned just to
+   you; exams that haven't opened yet show "Opens at ..."
 3. If the exam shows an "Access code required" badge, wait for your
    lecturer to share the access code before proceeding
 4. Click the exam you have been assigned
@@ -23,6 +25,10 @@ Simple instructions for taking an exam in Safe Exam System.
    when your browser asks
 7. Enter the access code when prompted and click "Start exam"
 8. Your timer starts immediately
+
+If an exam you expect to see is missing, it may not be open yet, may
+have already closed, or may not be assigned to you or your course —
+check with your lecturer.
 
 If you see a "Tether Browser Active" badge, it means your
 institution's Tether Secure Browser (the Electron lockdown client) is
