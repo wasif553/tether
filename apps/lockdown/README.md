@@ -17,7 +17,14 @@ desktop app built with Electron, separate from the main Next.js web app.
   once a submission ID is known and the app is online.
 - Attempts `win.setContentProtection(true)` and reports whether it
   succeeded — this is best-effort and platform-dependent; it does not
-  guarantee screenshots or screen recordings are blocked.
+  guarantee screenshots or screen recordings are blocked. **Side
+  effect:** on Windows, this also excludes the app's window from
+  screenshot tools, screen recorders, remote-support software, and
+  screen-sharing — the window shows as black/empty to any of those
+  tools even though it renders normally on the physical display. See
+  `PILOT-INSTALL.md` → "Remote support limitation" and
+  "Pre-pilot sign-off" before relying on remote/automated checks of
+  this app's behavior.
 - Exposes a minimal `window.sesLockdown` bridge (see Part 4 below) so
   the SES web page can detect the lockdown browser and forward exam
   context.

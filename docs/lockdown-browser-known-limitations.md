@@ -36,6 +36,20 @@ cheat-proof or guaranteed-prevention tool.
   best-effort, platform-dependent, and not guaranteed — some recording
   tools can still capture the screen on some platforms. The client never
   claims to detect or prevent screenshots.
+- **This same content protection blocks remote support tooling.** A
+  confirmed side effect on Windows: the app's window does not appear in
+  screenshot tools, screen recorders, remote-support software, or
+  screen-sharing (Zoom/Teams/TeamViewer/etc.) — it shows as black/empty
+  in those tools even though the student's own physical screen renders
+  it normally. This also means automated or remote QA (including
+  screenshot-based testing tools) cannot visually verify this app's
+  on-screen behavior. **Final packaged-app sign-off before a pilot
+  requires a human physically viewing a real screen** — see
+  `apps/lockdown/PILOT-INSTALL.md` → "Pre-pilot sign-off." Support teams
+  should not rely on remote screen-viewing while a student is inside an
+  active protected exam window; use verbal description or the pilot's
+  out-of-band support channel instead (see `apps/lockdown/PILOT-INSTALL.md`
+  → "Remote support limitation").
 - **Does not cancel network requests.** External (non-SES) domains are
   logged for evidence, not blocked.
 - **Requires student installation.** This is a separate desktop app the

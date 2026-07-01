@@ -15,6 +15,14 @@ automatically. See `apps/lockdown/README.md` and
 **Institutions should test installation at least 24 hours before exam
 day** — do not install for the first time on the morning of an exam.
 
+**Screen-sharing and remote support will not show this app's window.**
+SES Secure Exam Browser enables best-effort content protection
+(`setContentProtection(true)`), which deliberately excludes its window
+from screenshots, screen recording, and remote screen-sharing tools —
+this is intentional anti-recording behavior, not a bug. See "Remote
+support limitation" below before relying on any screen-share-based
+troubleshooting.
+
 ---
 
 ## Windows installation
@@ -72,6 +80,38 @@ day** — do not install for the first time on the morning of an exam.
 - Closing the window is always possible — the app never traps a student
 
 ---
+
+## Remote support limitation (content protection)
+
+SES Secure Exam Browser calls `setContentProtection(true)` on its
+window as a best-effort measure against screenshots and screen
+recording during an exam. A side effect is that **the app's window will
+not appear in screen-sharing tools, remote-support software, or
+screenshot/screen-capture utilities** — including tools an IT helpdesk
+or support agent might normally use to see what a student sees.
+
+**What this means in practice:**
+
+- If a student shares their screen with support staff (Zoom, Teams,
+  TeamViewer, etc.) while the app is open, support staff will typically
+  see a black or empty rectangle where the app window is — **this is
+  expected and does not mean the app crashed or is showing a blank
+  screen to the student**. The student's own physical display shows the
+  app normally.
+- Support teams should **not rely on remote screen-viewing** to
+  diagnose issues while a student is inside an active protected exam
+  window. Remote viewing works normally for everything else on the
+  student's desktop (browser, other apps) — it is specifically this
+  app's own window that is excluded.
+- For pilot support, ask the student to **describe verbally** what they
+  see (e.g. "I see the login page," "I see the status bar at the
+  bottom," "I see a yellow warning banner"), or use the out-of-band
+  support channel established for the pilot (phone, messaging app,
+  in-person) rather than asking them to screen-share the exam window
+  itself.
+- If genuinely necessary, ask the student to take a **photo of their
+  screen with a second device** (phone camera) — this captures what a
+  human eye sees, unlike software-based screen capture.
 
 ## Troubleshooting
 
@@ -151,3 +191,31 @@ Before escalating to the development team, confirm:
 If all the above are confirmed and the issue persists, escalate with:
 the OS and version, SES Secure Exam Browser version (Settings/About or
 the version in the installer filename), and the exact point of failure.
+
+---
+
+## Pre-pilot sign-off: physical verification required
+
+Because content protection excludes this app's window from screenshots,
+screen recording, and remote-support tools (see above), **automated or
+remote QA cannot visually confirm the app's on-screen behavior**. Before
+distributing the installer to pilot students, an operator must
+physically sit at a real machine, look at the real screen, and confirm
+each item below with their own eyes:
+
+- [ ] The login page is visible after launching the app
+- [ ] The **"SES Lockdown Browser Active"** status bar is visible at
+      the bottom of the window
+- [ ] A warning banner appears when triggering a blur or fullscreen-exit
+      event (e.g. Alt+Tab away, then back; or exit fullscreen)
+- [ ] The events-recorded counter in the status bar increases when a
+      signal is triggered
+- [ ] A test exam can be started and submitted successfully from inside
+      the app
+- [ ] The lecturer can open the submission's evidence report afterward
+      and see the recorded integrity events
+
+Do not sign off on pilot readiness based on remote testing, automated
+scripts, or screenshots alone — none of these can see this app's
+window. This physical checklist is the only reliable verification
+method for this app's interactive behavior.

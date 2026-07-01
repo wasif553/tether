@@ -113,6 +113,11 @@ Complete this at least 24 hours before the exam, not on exam day.
 - [ ] Test the installer yourself at least 24 hours before exam day —
       it is unsigned and will trigger a SmartScreen/Gatekeeper warning
       (expected; documented in `apps/lockdown/PILOT-INSTALL.md`)
+- [ ] Complete the physical sign-off checklist in
+      `apps/lockdown/PILOT-INSTALL.md` → "Pre-pilot sign-off" by
+      physically viewing a real screen — remote/automated testing
+      cannot verify this app's on-screen behavior because content
+      protection excludes its window from screenshots and screen-share
 - [ ] Test that the "SES Lockdown Browser Active" badge appears on the
       exam page when the app is running
 - [ ] Communicate to students whether the app is required, how to
@@ -211,6 +216,23 @@ Complete this at least 24 hours before the exam, not on exam day.
 - If the app cannot be opened: the student can take the exam in a
   regular browser; the lockdown badge will not appear but the exam
   will work normally
+
+**Remote support during an active exam in SES Secure Exam Browser**
+- The app's window will not appear in screen-sharing or remote-support
+  tools — this is caused by intentional content-protection behavior
+  (`setContentProtection(true)`), not a crash or blank screen. See
+  `apps/lockdown/PILOT-INSTALL.md` → "Remote support limitation."
+- Do not ask a student to screen-share the exam window for
+  troubleshooting — it will appear black/empty to you even though the
+  student sees it normally. Ask the student to describe what they see
+  verbally instead, or use the pilot's established out-of-band support
+  channel.
+- Before distributing the installer for any pilot, an operator must
+  have physically verified the app's on-screen behavior (login,
+  lockdown badge, warning banner, event counter, exam submit, evidence
+  review) on a real screen — see `apps/lockdown/PILOT-INSTALL.md` →
+  "Pre-pilot sign-off." Remote or automated testing cannot substitute
+  for this.
 
 **Network issue during exam**
 - Auto-save runs on every answer change

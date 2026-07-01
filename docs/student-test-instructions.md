@@ -84,3 +84,9 @@ the exam to see your score.
 - **Exam not visible** — confirm you are signed in with the correct
   account; contact your exam coordinator if the exam does not appear
 - **Any other issue** — contact your lecturer or exam coordinator
+- **If you're using SES Secure Exam Browser and support asks you to
+  screen-share** — the app's window will not appear correctly in
+  screen-sharing tools; this is expected. Describe what you see out
+  loud instead (e.g. "I see the login page," "there's a yellow banner
+  at the top"), or follow whatever out-of-band support process your
+  institution has set up
