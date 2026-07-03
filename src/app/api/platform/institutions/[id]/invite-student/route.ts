@@ -46,8 +46,17 @@ export async function POST(
       passwordHash,
       role: "STUDENT",
       institutionId: institution.id,
+      institutionStudentId: parsed.institutionStudentId,
     },
-    select: { id: true, name: true, email: true, role: true, institutionId: true, createdAt: true },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      role: true,
+      institutionId: true,
+      institutionStudentId: true,
+      createdAt: true,
+    },
   });
 
   await createPlatformAuditLog({

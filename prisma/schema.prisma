@@ -146,6 +146,13 @@ model User {
   // docs/course-enrolment-and-exam-assignment.md.
   courseEnrollments CourseEnrollment[]
   examAssignments   ExamAssignment[]
+  // Assessment Operations v1 (additive) — see
+  // docs/assessment-operations-v1.md. An optional institution-issued
+  // student ID (e.g. a roll number or SIS ID), distinct from this row's
+  // database id and never used as a login credential. Not unique-
+  // constrained at the DB level in v1 — see that doc for why uniqueness
+  // is deferred to a future release rather than enforced here.
+  institutionStudentId String?
 
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])

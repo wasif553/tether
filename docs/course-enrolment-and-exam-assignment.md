@@ -168,6 +168,15 @@ This pass adds a **foundation**, not a rebuild of Canvas integration:
 
 ---
 
+## Enrolment listing shows institutional student ID
+
+`GET /api/courses/[id]` returns each enrolled student's
+`institutionStudentId` (Assessment Operations v1 — see
+docs/assessment-operations-v1.md) alongside name/email, and the
+lecturer course detail page displays it when set. This is display-only
+here — enrolment itself is still keyed by email/user id, not by
+student ID.
+
 ## What this is not
 
 - **Not a full SIS integration.** There is no automated roster sync,

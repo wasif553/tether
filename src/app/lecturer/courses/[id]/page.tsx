@@ -5,7 +5,13 @@ import { useEffect, useState, use as usePromise } from "react";
 type Enrollment = {
   id: string;
   role: "STUDENT" | "LECTURER";
-  user: { id: string; name: string; email: string; role: string };
+  user: {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
+    institutionStudentId: string | null;
+  };
 };
 
 type CourseDetail = {
@@ -120,6 +126,9 @@ export default function CourseDetailPage({
           >
             <span>
               {e.user.name} — {e.user.email}
+              {e.user.institutionStudentId && (
+                <span className="text-gray-500"> · ID: {e.user.institutionStudentId}</span>
+              )}
             </span>
             <button
               onClick={() => removeEnrolment(e.user.id)}

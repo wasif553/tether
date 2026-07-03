@@ -49,6 +49,7 @@ export default function PlatformInstitutionsPage() {
   const [studentName, setStudentName] = useState("");
   const [studentEmail, setStudentEmail] = useState("");
   const [studentPassword, setStudentPassword] = useState("");
+  const [studentInstitutionStudentId, setStudentInstitutionStudentId] = useState("");
   const [invitingStudent, setInvitingStudent] = useState(false);
   const [studentError, setStudentError] = useState<string | null>(null);
   const [studentSuccess, setStudentSuccess] = useState<string | null>(null);
@@ -144,7 +145,12 @@ export default function PlatformInstitutionsPage() {
     const res = await fetch(`/api/platform/institutions/${studentInstitutionId}/invite-student`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: studentName, email: studentEmail, password: studentPassword }),
+      body: JSON.stringify({
+        name: studentName,
+        email: studentEmail,
+        password: studentPassword,
+        institutionStudentId: studentInstitutionStudentId || undefined,
+      }),
     });
 
     setInvitingStudent(false);
@@ -159,6 +165,7 @@ export default function PlatformInstitutionsPage() {
     setStudentName("");
     setStudentEmail("");
     setStudentPassword("");
+    setStudentInstitutionStudentId("");
     await loadAll();
   }
 
@@ -391,6 +398,19 @@ export default function PlatformInstitutionsPage() {
               value={studentPassword}
               onChange={(e) => setStudentPassword(e.target.value)}
             />
+          </div>
+          <div>
+            <label className="block text-sm font-medium">Institutional student ID (optional)</label>
+            <input
+              type="text"
+              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              placeholder="e.g. a roll number or SIS ID"
+              value={studentInstitutionStudentId}
+              onChange={(e) => setStudentInstitutionStudentId(e.target.value)}
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              Not a login credential. Used only for identification on exports and reports.
+            </p>
           </div>
           <p className="text-sm text-amber-700">
             Share temporary passwords securely. Email sending is not implemented yet.

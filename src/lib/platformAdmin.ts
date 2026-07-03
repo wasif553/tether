@@ -144,9 +144,30 @@ export function validateInviteLecturerPayload(
   };
 }
 
-// Student Onboarding v1 — invite-student bodies have the exact same
-// shape (name/email/password) as invite-lecturer, so the validator is
-// reused under a student-facing name rather than duplicated.
-export type InviteStudentPayload = InviteLecturerPayload;
+// Student Onboarding v1 — invite-student bodies are the same shape as
+// invite-lecturer (name/email/password) plus an optional institution
+// student ID (Assessment Operations v1 — see
+// docs/assessment-operations-v1.md). Not the login credential, not the
+// database user id, and never treated as secret.
+export type InviteStudentPayload = InviteLecturerPayload & {
+  institutionStudentId: string | null;
+};
 export type InviteStudentPayloadError = InviteLecturerPayloadError;
-export const validateInviteStudentPayload = validateInviteLecturerPayload;
+
+export function validateInviteStudentPayload(
+  body: unknown,
+): InviteStudentPayload | InviteStudentPayloadError {
+  const base = validateInviteLecturerPayload(body);
+  if ("error" in base) return base;
+
+  const { institutionStudentId } = body as Record<string, unknown>;
+  if (institutionStudentId !== undefined && institutionStudentId !== null && typeof institutionStudentId !== "string") {
+    return { error: "institutionStudentId must be a string" };
+  }
+  const trimmed = typeof institutionStudentId === "string" ? institutionStudentId.trim() : "";
+
+  return {
+    ...base,
+    institutionStudentId: trimmed.length > 0 ? trimmed : null,
+  };
+}

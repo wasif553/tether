@@ -2,6 +2,11 @@
 
 import { useEffect, useState, use as usePromise } from "react";
 import Link from "next/link";
+import {
+  parseBulkQuestionsText,
+  BULK_QUESTION_FORMAT_EXAMPLE,
+  type BulkParseResult,
+} from "@/lib/bulkQuestionParser";
 
 type Question = {
   id: string;
@@ -142,6 +147,16 @@ export default function LecturerExamPage({
   const [qCorrect, setQCorrect] = useState("");
   const [qPoints, setQPoints] = useState(1);
   const [adding, setAdding] = useState(false);
+
+  const [bulkText, setBulkText] = useState("");
+  const [bulkPreview, setBulkPreview] = useState<BulkParseResult | null>(null);
+  const [bulkSaveToBankId, setBulkSaveToBankId] = useState("");
+  const [bulkBanks, setBulkBanks] = useState<{ id: string; title: string }[]>([]);
+  const [bulkImporting, setBulkImporting] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [bulkResult, setBulkResult] = useState<{ created: number; bankSaved: number; warning?: string } | null>(
+    null,
+  );
 
   const [sourceMaterial, setSourceMaterial] = useState("");
   const [subject, setSubject] = useState("");
@@ -355,6 +370,48 @@ export default function LecturerExamPage({
     setQOptions("");
     setQCorrect("");
     setQPoints(1);
+    await loadExam();
+  }
+
+  function handlePreviewBulkQuestions() {
+    setBulkResult(null);
+    setBulkError(null);
+    setBulkPreview(parseBulkQuestionsText(bulkText));
+    if (bulkBanks.length === 0) {
+      fetch("/api/lecturer/question-banks")
+        .then((res) => (res.ok ? res.json() : []))
+        .then((banks) => setBulkBanks(Array.isArray(banks) ? banks : []))
+        .catch(() => {});
+    }
+  }
+
+  async function handleImportBulkQuestions() {
+    if (!bulkPreview || bulkPreview.invalidCount > 0 || bulkPreview.rows.length === 0) return;
+    setBulkImporting(true);
+    setBulkError(null);
+    setBulkResult(null);
+
+    const res = await fetch(`/api/lecturer/exams/${id}/bulk-questions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: bulkText,
+        saveToBankId: bulkSaveToBankId || undefined,
+      }),
+    });
+
+    setBulkImporting(false);
+
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      if (data?.rows) setBulkPreview({ rows: data.rows, validCount: 0, invalidCount: data.rows.length });
+      setBulkError(typeof data?.error === "string" ? data.error : "Failed to import questions");
+      return;
+    }
+
+    setBulkResult(data);
+    setBulkText("");
+    setBulkPreview(null);
     await loadExam();
   }
 
@@ -1016,6 +1073,67 @@ export default function LecturerExamPage({
         {accessCodeMessage && <p className="text-sm text-gray-600">{accessCodeMessage}</p>}
       </div>
 
+      <h2 className="mt-8 text-lg font-medium">Export results</h2>
+      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+        <div>
+          <p className="text-sm font-medium">Full marks report</p>
+          <p className="text-xs text-gray-500">
+            Every column: scores, integrity risk level, access code/camera settings, and notes.
+            For lecturer/institution use.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <a
+              href={`/api/lecturer/exams/${id}/export/marks-csv`}
+              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+            >
+              Export marks CSV
+            </a>
+            <a
+              href={`/api/lecturer/exams/${id}/export/marks-xlsx`}
+              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+            >
+              Export marks Excel
+            </a>
+          </div>
+        </div>
+        <div>
+          <p className="text-sm font-medium">Canvas/IRM marks upload export</p>
+          <p className="text-xs text-gray-500">
+            Marks-only — no integrity signals, no access code data. For uploading to Canvas or an
+            institutional marks system.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <a
+              href={`/api/lecturer/exams/${id}/export/upload-csv`}
+              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+            >
+              Export upload-ready CSV
+            </a>
+            <a
+              href={`/api/lecturer/exams/${id}/export/upload-xlsx`}
+              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+            >
+              Export upload-ready Excel
+            </a>
+          </div>
+        </div>
+        <div>
+          <p className="text-sm font-medium">PDF report</p>
+          <p className="text-xs text-gray-500">
+            A human-readable summary with marks table and integrity summary, suitable for
+            printing or filing.
+          </p>
+          <div className="mt-2">
+            <a
+              href={`/api/lecturer/exams/${id}/export/report-pdf`}
+              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+            >
+              Export PDF report
+            </a>
+          </div>
+        </div>
+      </div>
+
       <h2 className="mt-8 text-lg font-medium">Questions</h2>
       <div className="mt-3 space-y-3">
         {exam.questions.length === 0 && (
@@ -1051,6 +1169,113 @@ export default function LecturerExamPage({
             </div>
           </div>
         ))}
+      </div>
+
+      <h2 className="mt-8 text-lg font-medium">Add multiple questions</h2>
+      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+        <p className="text-sm text-gray-600">
+          Paste one or more questions in the format below, then preview before importing. Nothing
+          is saved until you click &quot;Import questions&quot;, and if any question has an error
+          nothing is saved.
+        </p>
+        <details className="rounded border border-gray-200 p-2 text-sm">
+          <summary className="cursor-pointer font-medium">Show accepted format</summary>
+          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-xs text-gray-700">
+            {BULK_QUESTION_FORMAT_EXAMPLE}
+          </pre>
+        </details>
+        {exam.published && (
+          <p className="text-sm text-amber-700">
+            This exam is published — imported questions will be visible/available to students
+            immediately.
+          </p>
+        )}
+        <textarea
+          rows={10}
+          className="w-full rounded border border-gray-300 px-3 py-2 font-mono text-xs"
+          placeholder="QUESTION:&#10;What is 2 + 2?&#10;TYPE: MCQ&#10;OPTIONS:&#10;A. 3&#10;B. 4&#10;ANSWER: B&#10;POINTS: 1"
+          value={bulkText}
+          onChange={(e) => {
+            setBulkText(e.target.value);
+            setBulkPreview(null);
+            setBulkResult(null);
+          }}
+        />
+        <button
+          onClick={handlePreviewBulkQuestions}
+          disabled={!bulkText.trim()}
+          className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-50"
+        >
+          Preview
+        </button>
+
+        {bulkPreview && (
+          <div className="space-y-2">
+            <p className="text-sm">
+              {bulkPreview.validCount} valid, {bulkPreview.invalidCount} with errors (
+              {bulkPreview.rows.length} total)
+            </p>
+            {bulkPreview.rows.map((row) => (
+              <div
+                key={row.row}
+                className={`rounded border p-2 text-sm ${
+                  row.errors.length > 0 ? "border-red-300 bg-red-50" : "border-gray-200"
+                }`}
+              >
+                <p className="text-xs text-gray-500">
+                  Question {row.row} {row.type ? `· ${row.type}` : ""} {row.points ? `· ${row.points} pt(s)` : ""}
+                </p>
+                <p className="mt-1">{row.text || <em className="text-gray-400">(no text)</em>}</p>
+                {row.errors.length > 0 && (
+                  <ul className="mt-1 list-disc pl-5 text-red-700">
+                    {row.errors.map((e) => (
+                      <li key={e}>{e}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+
+            {bulkBanks.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium">
+                  Also save to question bank (optional)
+                </label>
+                <select
+                  className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                  value={bulkSaveToBankId}
+                  onChange={(e) => setBulkSaveToBankId(e.target.value)}
+                >
+                  <option value="">Don&apos;t save to a bank</option>
+                  {bulkBanks.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <button
+              onClick={handleImportBulkQuestions}
+              disabled={bulkImporting || bulkPreview.invalidCount > 0 || bulkPreview.rows.length === 0}
+              className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+            >
+              {bulkImporting ? "Importing..." : `Import ${bulkPreview.validCount} question(s)`}
+            </button>
+          </div>
+        )}
+
+        {bulkError && <p className="text-sm text-red-600">{bulkError}</p>}
+        {bulkResult && (
+          <div className="text-sm text-green-700">
+            <p>
+              Imported {bulkResult.created} question(s)
+              {bulkResult.bankSaved > 0 && ` and saved ${bulkResult.bankSaved} to the question bank`}.
+            </p>
+            {bulkResult.warning && <p className="text-amber-700">{bulkResult.warning}</p>}
+          </div>
+        )}
       </div>
 
       <h2 className="mt-8 text-lg font-medium">Generate questions with AI</h2>

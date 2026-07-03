@@ -49,7 +49,11 @@ export async function GET(
 
     const enrollments = await prisma.courseEnrollment.findMany({
       where: { courseId: id },
-      include: { user: { select: { id: true, name: true, email: true, role: true } } },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, role: true, institutionStudentId: true },
+        },
+      },
       orderBy: { createdAt: "asc" },
     });
 

@@ -23,11 +23,23 @@ adds both, kept deliberately simple.
 
 Equivalent API: `POST /api/platform/institutions/[id]/invite-student`
 ```json
-{ "name": "Student Name", "email": "student@example.edu", "password": "temporary-password" }
+{
+  "name": "Student Name",
+  "email": "student@example.edu",
+  "password": "temporary-password",
+  "institutionStudentId": "S-1001"
+}
 ```
-Returns only `id, name, email, role, institutionId, createdAt` — never
-the password or its hash. Rejects a duplicate email with 409, and an
-inactive target institution with 400.
+`institutionStudentId` is optional (Assessment Operations v1 — see
+docs/assessment-operations-v1.md) — an institution-issued ID such as a
+roll number or SIS ID, never the login credential and never the
+database user id. It's used only for identification on lecturer
+exports and course rosters.
+
+Returns only `id, name, email, role, institutionId,
+institutionStudentId, createdAt` — never the password or its hash.
+Rejects a duplicate email with 409, and an inactive target institution
+with 400.
 
 ## How a lecturer sets an exam access code
 

@@ -12,11 +12,30 @@ A step-by-step guide for a lecturer joining a Safe Exam System pilot.
 
 1. Click "New exam" or "Create exam"
 2. Enter the exam title, subject, and duration
-3. Add questions (MCQ, short answer, essay)
+3. Add questions one at a time, or use "Add multiple questions" to paste
+   several at once — see "Adding questions in bulk" below
 4. Configure Secure Exam Mode settings
 5. (Optional) Assign the exam to a course and set a schedule — see
    "Courses and exam assignment" below
 6. Publish the exam
+
+## Adding questions in bulk
+
+On the exam edit page, "Add multiple questions" lets you paste several
+questions at once instead of adding them one at a time:
+
+1. Paste your questions in the format shown under "Show accepted format"
+   (one `QUESTION:` block per question, with `TYPE`, `OPTIONS`/`ANSWER`
+   for MCQ, and `POINTS`)
+2. Click "Preview" — every question is checked and shown with any
+   errors before anything is saved
+3. Fix any errors shown, or click "Import" once every question is valid
+4. If you have a question bank, you can optionally also save the
+   imported questions to it
+
+If any question in the batch has an error, nothing is saved — fix the
+errors and try again. See docs/assessment-operations-v1.md for the
+full format reference.
 
 ## Courses and exam assignment (optional)
 
@@ -146,6 +165,20 @@ for human review, never an automatic misconduct determination.
 - **Integrity review** — CSV export of all events
 - **Evidence report** — per-student report, suitable for printing or
   forwarding to an academic integrity panel
+- **Exam detail page — "Export results"** — final marks/results for a
+  whole exam, in three forms:
+  - **Full marks report** (CSV or Excel) — every column, including
+    integrity risk and access-code/camera settings, for your own
+    records
+  - **Canvas/IRM marks upload export** (CSV or Excel) — a minimal,
+    marks-only file for uploading to Canvas or an institutional marks
+    system; deliberately excludes integrity details and access-code
+    data
+  - **PDF report** — a human-readable summary with a marks table and
+    integrity summary, suitable for printing or filing
+
+  See docs/assessment-operations-v1.md for exactly what each export
+  includes and excludes.
 
 ## Optional: Canvas integration
 

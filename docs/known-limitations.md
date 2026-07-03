@@ -145,6 +145,25 @@ docs/course-enrolment-and-exam-assignment.md):
   Canvas mapping fields on Course exist but are not yet wired to any
   LTI launch behavior).
 
+Assessment Operations v1 is implemented (see
+docs/assessment-operations-v1.md):
+
+- Students have an optional `institutionStudentId`, set only via the
+  platform-admin invite-student flow — not a login credential, not
+  unique-constrained at the database level in v1 (deferred rather than
+  enforced; see that doc for why).
+- Lecturers can paste multiple questions at once ("Add multiple
+  questions" on the exam edit page) with row-level preview/validation
+  before saving; an invalid batch is never partially saved.
+- Lecturers can export final marks/results per exam as a full CSV/Excel
+  report, a minimal Canvas/IRM-upload-ready CSV/Excel file, or a PDF
+  report — all three use the exact same ownership/institution access
+  check as the existing analytics and evidence exports.
+- Not implemented: bulk/CSV student ID import (IDs are entered one at a
+  time via invite-student), a dedicated student-ID uniqueness
+  constraint, and a CSV-paste bulk-question format (only the structured
+  text format is implemented in v1).
+
 ## Tether Secure Browser (Electron lockdown client)
 
 Electron Packaging v1 produces pilot installers (Windows NSIS, macOS
