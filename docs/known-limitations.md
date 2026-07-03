@@ -53,6 +53,10 @@ published exam:
 - It grants no access beyond what the student's existing enrolment or
   assignment already permits
 
+Real-device camera hardware verification (actual preview rendering,
+minimize/restore, camera-loss event) is still pending human signoff —
+see docs/camera-preview-and-deep-link-pilot-signoff.md.
+
 ## Capacity
 
 - Recommended: 30–40 students per exam on the current Vercel + Supabase
