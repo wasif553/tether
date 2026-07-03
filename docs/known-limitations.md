@@ -57,6 +57,20 @@ Real-device camera hardware verification (actual preview rendering,
 minimize/restore, camera-loss event) is still pending human signoff —
 see docs/camera-preview-and-deep-link-pilot-signoff.md.
 
+## Live proctoring (not implemented)
+
+SES does not currently support live proctoring. Camera Monitoring v1
+and Persistent Camera Preview v1 are both **local-only** — a
+student's camera stream never leaves their own browser today; no one
+else can view it live. A future Live Proctoring v1 (authorised
+proctors viewing a student's live camera and screen, nothing
+recorded) would require external WebRTC/SFU media infrastructure that
+does not exist in this codebase, plus its own privacy review and
+vendor/sub-processor approval, before any implementation begins. See
+docs/live-proctoring-v1-design-audit.md for the full design audit —
+design only, not built, and not scheduled ahead of the first
+controlled pilot unless a confirmed pilot partner requires it.
+
 ## Capacity
 
 - Recommended: 30–40 students per exam on the current Vercel + Supabase
