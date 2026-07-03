@@ -80,6 +80,32 @@ are never re-prompted for the code on resuming.
 - Share the [student test instructions](student-test-instructions.md)
   document
 
+## Sharing an exam link
+
+Every exam detail page has a "Share exam link" section with a direct URL
+you can send to students (email, LMS announcement, chat) instead of
+telling them to find the exam in their dashboard:
+
+1. Open your exam detail page
+2. Find the "Share exam link" section
+3. Click "Copy link" to copy the URL to your clipboard
+4. Send it to your students
+
+Important things to know about this link:
+
+- The exam must be **published** before you can share it — an
+  unpublished exam shows a warning instead of the link.
+- Students must **log in** to use it. An unauthenticated student who
+  opens the link is sent to log in first, then returned straight to the
+  exam automatically.
+- If the exam requires an **access code**, students still enter it after
+  opening the link — the link does not embed or bypass the code.
+- If the exam is assigned to a specific course or to selected students,
+  the link only works for students who already have that access — it is
+  a shortcut to the exam, not a separate grant of access. Sharing it
+  with an unauthorized student has no effect; they'll see "You do not
+  have access to this exam."
+
 ## Monitoring submissions
 
 - Open your exam → Submissions tab

@@ -120,6 +120,22 @@ export default function LecturerExamPage({
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [scheduleMessage, setScheduleMessage] = useState<string | null>(null);
 
+  // Safe Exam Deep Link v1 — see docs/course-enrolment-and-exam-assignment.md.
+  const [copiedJoinLink, setCopiedJoinLink] = useState(false);
+  const joinLinkUrl =
+    typeof window !== "undefined" ? `${window.location.origin}/student/exams/join/${id}` : "";
+
+  async function handleCopyJoinLink() {
+    try {
+      await navigator.clipboard.writeText(joinLinkUrl);
+      setCopiedJoinLink(true);
+      setTimeout(() => setCopiedJoinLink(false), 2000);
+    } catch {
+      // Clipboard API can be denied/unavailable — the input field itself
+      // is selectable as a fallback, so this failure is silent.
+    }
+  }
+
   const [qType, setQType] = useState<Question["type"]>("MULTIPLE_CHOICE");
   const [qText, setQText] = useState("");
   const [qOptions, setQOptions] = useState("");
@@ -904,6 +920,49 @@ export default function LecturerExamPage({
           {savingSchedule ? "Saving..." : "Save course & schedule"}
         </button>
         {scheduleMessage && <p className="text-sm text-gray-600">{scheduleMessage}</p>}
+      </div>
+
+      <h2 className="mt-8 text-lg font-medium">Share exam link</h2>
+      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+        {!exam.published ? (
+          <p className="text-sm text-amber-700">
+            Publish this exam before sharing the link — unpublished exams cannot be accessed by
+            students.
+          </p>
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <input
+                readOnly
+                type="text"
+                value={joinLinkUrl}
+                className="flex-1 rounded border border-gray-300 bg-gray-50 px-3 py-1.5 text-sm"
+                onFocus={(e) => e.target.select()}
+              />
+              <button
+                onClick={handleCopyJoinLink}
+                className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+              >
+                {copiedJoinLink ? "Copied!" : "Copy link"}
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">
+              Students must be logged in to access this link. If this exam requires an access
+              code, students will still need to enter it after opening the link. This link does
+              not grant access on its own — it only works for students who are already authorized
+              to take this exam.
+            </p>
+            {courseId && (
+              <p className="text-xs text-gray-500">
+                {assignmentMode === "SELECTED_STUDENTS"
+                  ? "Only students assigned to this exam will be able to access it via this link."
+                  : `Only students enrolled in ${
+                      courses.find((c) => c.id === courseId)?.name ?? "this course"
+                    } will be able to access it via this link.`}
+              </p>
+            )}
+          </>
+        )}
       </div>
 
       <h2 className="mt-8 text-lg font-medium">Exam access code</h2>

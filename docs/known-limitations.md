@@ -30,6 +30,29 @@ Camera Monitoring v1 checks camera availability only:
 - Does not detect phone usage
 - Does not track eye gaze
 
+Persistent Camera Preview v1 keeps a live, local-only preview of the
+student's own camera visible (and minimizable) for the whole exam, not
+just the pre-exam check:
+
+- The preview is rendered entirely in the student's browser — no video
+  or image is ever sent to the server, recorded, or stored
+- Minimizing/restoring the preview is local UI state only; it never
+  pauses camera monitoring or the heartbeat, and never creates an
+  integrity event or affects a student's risk score
+- Only a real interruption to the camera itself — the stream stopping,
+  permission being revoked, the video track going inactive, or a missed
+  heartbeat — produces an integrity event
+
+Safe Exam Deep Link v1 lets a lecturer share a direct link to a
+published exam:
+
+- The link is a convenience shortcut only — it runs through the exact
+  same institution/course/assignment/availability checks as the normal
+  dashboard, and still requires login and (if configured) the access
+  code
+- It grants no access beyond what the student's existing enrolment or
+  assignment already permits
+
 ## Capacity
 
 - Recommended: 30–40 students per exam on the current Vercel + Supabase

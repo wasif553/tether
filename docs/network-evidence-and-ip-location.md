@@ -172,6 +172,11 @@ another approved provider) be set in the production environment.
 - Geolocation is called only after the student has been authenticated and
   their submission created — never on rejected attempts (wrong access code,
   cross-institution, etc.)
+- Safe Exam Deep Link v1 (`/student/exams/join/[examId]`) does not change
+  this: it calls the same `POST /api/exams/[id]/start` route the
+  dashboard uses, so network evidence capture timing and content are
+  identical regardless of whether the student started from the
+  dashboard or a shared link
 - IP is retained as long as the submission exists (cascades on deletion)
 - No video, no image, no GPS data is collected by this feature
 - Network evidence is visible only to the exam's owner and platform admins

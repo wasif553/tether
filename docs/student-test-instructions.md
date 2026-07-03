@@ -30,6 +30,26 @@ If an exam you expect to see is missing, it may not be open yet, may
 have already closed, or may not be assigned to you or your course —
 check with your lecturer.
 
+Your lecturer may also send you a direct link to an exam instead of
+telling you to find it in "My Exams." You will still need to log in
+(if you aren't already) and pass the same checks — the link is just a
+shortcut, not a bypass.
+
+## Camera preview during the exam
+
+If your exam requires camera monitoring, a small preview of your own
+camera stays visible in the corner of the screen for the whole exam so
+you can confirm it's still working. You can:
+
+- Click the collapse arrow to minimize it to a small "Camera active"
+  pill if it's in your way
+- Click the pill to expand it again at any time
+
+Minimizing the preview is just a display choice — it does not pause or
+affect camera monitoring in any way, and it is not recorded as an
+event. Monitoring continues normally whether the preview is shown or
+minimized.
+
 If you see a "Tether Browser Active" badge, it means your
 institution's Tether Secure Browser (the Electron lockdown client) is
 running and OS-level integrity signals are being recorded in addition

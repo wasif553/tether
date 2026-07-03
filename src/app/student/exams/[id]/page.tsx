@@ -189,6 +189,12 @@ export default function TakeExamPage({
   );
   const [cameraWarning, setCameraWarning] = useState<string | null>(null);
   const heartbeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Persistent Camera Preview v1 — purely local UI state. Minimizing or
+  // restoring the preview never creates an IntegrityEvent and never
+  // pauses the stream/heartbeat below; it only toggles which DOM element
+  // is rendered. See docs/known-limitations.md.
+  const [cameraPreviewMinimized, setCameraPreviewMinimized] = useState(false);
+  const examVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const [inLockdownBrowser, setInLockdownBrowser] = useState(false);
 
@@ -461,6 +467,24 @@ export default function TakeExamPage({
     } else if (secureSettings?.recordCameraUnavailableEvents) {
       reportIntegrityEvent("CAMERA_UNAVAILABLE");
     }
+  }
+
+  // Persistent Camera Preview v1 — reattaches the already-running stream
+  // (held in cameraStreamRef, never re-requested) to the exam-view video
+  // element whenever it becomes visible: on entering the exam (gate ->
+  // exam transition mounts a new <video> node) and on restoring from
+  // minimized. The stream itself and the heartbeat above are never
+  // affected by this — minimizing only stops rendering the <video> tag.
+  useEffect(() => {
+    if (gateAcknowledged && !cameraPreviewMinimized && examVideoRef.current && cameraStreamRef.current) {
+      examVideoRef.current.srcObject = cameraStreamRef.current;
+    }
+  }, [gateAcknowledged, cameraPreviewMinimized, cameraStatus]);
+
+  // Local UI state only — see the comment on cameraPreviewMinimized above.
+  // Never reports an IntegrityEvent and never touches the camera stream.
+  function toggleCameraPreviewMinimized() {
+    setCameraPreviewMinimized((prev) => !prev);
   }
 
   // Clean up the camera stream on unmount, regardless of how the page is left.
@@ -743,6 +767,46 @@ export default function TakeExamPage({
           >
             Restore camera
           </button>
+        </div>
+      )}
+
+      {/* Persistent Camera Preview v1 — live-only, never recorded or
+          uploaded (see docs/known-limitations.md). Minimize/restore is
+          local UI state only: it never creates an IntegrityEvent and
+          never pauses the stream or heartbeat above. */}
+      {requireCamera && cameraStatus === "granted" && secureSettings?.showCameraPreview && (
+        <div className="fixed bottom-4 right-4 z-50">
+          {cameraPreviewMinimized ? (
+            <button
+              onClick={toggleCameraPreviewMinimized}
+              className="flex items-center gap-2 rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs shadow"
+              aria-label="Expand camera preview"
+            >
+              <span className="h-2 w-2 rounded-full bg-green-500" />
+              Camera active
+              <span aria-hidden>▸</span>
+            </button>
+          ) : (
+            <div className="rounded border border-gray-300 bg-white p-2 shadow">
+              <div className="mb-1 flex items-center justify-between gap-3">
+                <span className="text-xs text-gray-500">Your camera — only you can see this</span>
+                <button
+                  onClick={toggleCameraPreviewMinimized}
+                  className="rounded border border-gray-300 px-1.5 py-0.5 text-xs"
+                  aria-label="Minimize camera preview"
+                >
+                  <span aria-hidden>▾</span>
+                </button>
+              </div>
+              <video
+                ref={examVideoRef}
+                autoPlay
+                muted
+                playsInline
+                className="w-40 rounded border border-gray-200"
+              />
+            </div>
+          )}
         </div>
       )}
 
