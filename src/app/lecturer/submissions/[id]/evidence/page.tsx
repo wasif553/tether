@@ -23,7 +23,15 @@ type EvidenceReport = {
     resolvedAt: string | null;
     resolvedByName: string | null;
     resolutionNote: string | null;
+    confidenceBand: string | null;
   }>;
+  aiCameraIntegritySummary: {
+    possiblePhoneCount: number;
+    possibleSecondPersonCount: number;
+    noPersonCount: number;
+    cameraBlockedOrDarkCount: number;
+    disclaimer: string;
+  } | null;
   canvasPassback: {
     status: string;
     scoreGiven: number | null;
@@ -280,6 +288,39 @@ export default function EvidenceReportPage({
         );
       })()}
 
+      {data.aiCameraIntegritySummary && (
+        <div className="mt-8">
+          <h2 className="text-lg font-medium">AI-assisted camera integrity signals</h2>
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">
+                {data.aiCameraIntegritySummary.possiblePhoneCount}
+              </p>
+              <p className="text-xs text-gray-500">Possible phone visible</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">
+                {data.aiCameraIntegritySummary.possibleSecondPersonCount}
+              </p>
+              <p className="text-xs text-gray-500">Possible additional person visible</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.aiCameraIntegritySummary.noPersonCount}</p>
+              <p className="text-xs text-gray-500">No person visible</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">
+                {data.aiCameraIntegritySummary.cameraBlockedOrDarkCount}
+              </p>
+              <p className="text-xs text-gray-500">Camera blocked/dark</p>
+            </div>
+          </div>
+          <p className="mt-3 rounded border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">
+            {data.aiCameraIntegritySummary.disclaimer}
+          </p>
+        </div>
+      )}
+
       <h2 className="mt-8 text-lg font-medium">Integrity event timeline</h2>
       <div className="mt-3 overflow-x-auto rounded border border-gray-200">
         <table className="w-full text-sm">
@@ -305,7 +346,14 @@ export default function EvidenceReportPage({
                 <td className="whitespace-nowrap p-2">{new Date(e.occurredAt).toLocaleString()}</td>
                 <td className="p-2">{e.eventLabel}</td>
                 <td className="p-2">{severityBadge(e.severity)}</td>
-                <td className="max-w-xs p-2">{e.message}</td>
+                <td className="max-w-xs p-2">
+                  {e.message}
+                  {e.confidenceBand && (
+                    <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600">
+                      {e.confidenceBand} confidence
+                    </span>
+                  )}
+                </td>
                 <td className="p-2">
                   {e.resolvedAt ? (
                     <span className="text-green-700">

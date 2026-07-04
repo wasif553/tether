@@ -68,6 +68,17 @@ below.
 - **Require fullscreen** — prompts the student to go fullscreen
 - **Require camera** — student must grant camera access before starting
 - **Camera heartbeat** — monitors camera availability during the exam
+- **Require student verification before exam** — student must tick a
+  one-time confirmation of their name/ID/email before starting; no
+  photo ID scan, no face comparison, no image capture
+- **Enable AI-assisted camera integrity checks** — runs local, on-device
+  checks for a possible phone, a possible additional person, no visible
+  person, or a blocked/dark camera view. This is **not** live
+  proctoring — video is never recorded, streamed, or stored, and no one
+  watches the student's camera live. See
+  docs/on-device-ai-integrity-detection-v1.md for the full design,
+  including limitations (false positives, limited field of view) before
+  enabling this for a real exam.
 
 These are browser-level friction controls, not an OS-level lockdown — see
 docs/known-limitations.md for the full picture of what SES can and

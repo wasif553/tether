@@ -17,6 +17,7 @@ export async function GET(
       exam: { include: { questions: { orderBy: { order: "asc" } } } },
       answers: true,
       gradePassback: true,
+      student: { select: { name: true, email: true, institutionStudentId: true } },
     },
   });
 
@@ -63,6 +64,14 @@ export async function GET(
     totalScore: submission.totalScore,
     deadline,
     canvasPassback,
+    // Optional Student Verification v1 — see
+    // docs/on-device-ai-integrity-detection-v1.md. Never includes
+    // passwordHash or any other sensitive field.
+    student: {
+      name: submission.student.name,
+      email: submission.student.email,
+      institutionStudentId: submission.student.institutionStudentId,
+    },
     exam: {
       id: submission.exam.id,
       title: submission.exam.title,

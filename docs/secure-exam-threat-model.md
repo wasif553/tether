@@ -77,17 +77,43 @@ not guarantee academic integrity on its own.
 - A lecturer-only evidence report per submission combining the event
   timeline, grading outcome, and optional-module status into one place.
 
+## Optional Student Verification + On-Device AI Camera Integrity Detection v1
+
+Updates the "future controls" note below: **on-device phone/person
+object detection is now implemented**, as a lecturer opt-in layered on
+top of Camera Monitoring v1 — see
+docs/on-device-ai-integrity-detection-v1.md for the full design. It
+remains scoped narrowly:
+
+- Detection runs **locally in the student's browser** against the
+  existing camera preview stream — nothing is uploaded, streamed, or
+  recorded; only metadata (event type, confidence band, model
+  name/version) is ever sent to the server.
+- Still explicitly out of scope, and not changed by this feature: face
+  recognition, gaze tracking, emotion detection, biometric identity
+  verification, and any automatic misconduct determination.
+- Student verification (a one-time tick-box identity confirmation) is
+  a separate, independent opt-in — no photo ID scan, no face
+  comparison, no image capture.
+- Risk scoring remains the same fixed, transparent point system
+  described above — no anomaly-detection model was introduced; the new
+  event severities were chosen conservatively (verification/unavailable
+  events carry zero weight; a single low-confidence signal cannot reach
+  high risk on its own).
+
 ## Future controls (explicitly out of scope for v1)
 
 - Electron-based lockdown browser (blocks OS-level app switching).
 - Microphone monitoring.
-- AI face recognition, gaze tracking, or phone/object detection.
-- Camera Monitoring v1 (see below) checks camera *availability* only — it
-  does not perform any of the above.
+- Face recognition, gaze tracking, emotion detection, or biometric
+  identity verification (on-device phone/person object detection is
+  implemented — see above — but none of these remain out of scope).
 - Certification-grade identity verification.
 - AI-assisted anomaly detection across integrity signals (v1's risk score
   is a fixed, transparent point system — not a model).
 - Cross-submission plagiarism comparison.
+- Live proctoring — see docs/live-proctoring-v1-design-audit.md
+  (design only, not implemented).
 
 ## Evidence captured
 
@@ -95,7 +121,9 @@ Each integrity event records: event type, severity, a short human-
 readable message, the timestamp it occurred, and (server-side only) the
 submission/exam/student it belongs to. No screenshots, keystrokes, screen
 recordings, camera/microphone data, or full network traffic are captured
-in v1 — only the specific browser signals listed above.
+in v1 — only the specific browser signals listed above, plus (for the
+on-device AI camera checks) confidence-band/model metadata, never image
+or video data.
 
 ## False-positive handling
 

@@ -71,6 +71,36 @@ docs/live-proctoring-v1-design-audit.md for the full design audit —
 design only, not built, and not scheduled ahead of the first
 controlled pilot unless a confirmed pilot partner requires it.
 
+## Optional student verification and on-device AI camera integrity checks
+
+Implemented locally (see docs/on-device-ai-integrity-detection-v1.md),
+one additive `IntegrityEventType` migration required before production
+deployment. Both are lecturer opt-in, off by default:
+
+- **Student verification** — a one-time tick-box identity confirmation
+  before starting an exam. No photo ID scan, no face comparison, no
+  image capture or storage.
+- **On-device AI camera integrity checks** — local, in-browser checks
+  (TensorFlow.js + COCO-SSD) for a possible phone, a possible
+  additional person, no visible person, or a blocked/dark camera view.
+  Runs against the same camera stream already used for the existing
+  local-only preview — **this is not live proctoring**: nothing is
+  recorded, streamed, or stored, and no one watches the camera live.
+
+Known limitations of the AI checks specifically:
+
+- False positives are expected — object detection can misclassify a
+  book, reflection, or unusual lighting as a phone or person.
+- Limited to the webcam's field of view — cannot detect anything
+  outside the frame.
+- No face recognition, gaze tracking, emotion detection, or biometric
+  identity verification — none exist in this feature.
+- Actual detection accuracy has not been verified against real webcam
+  hardware in the environment this feature was built in (the same
+  limitation as the Persistent Camera Preview v1 real-device signoff) —
+  a human with real hardware should verify before relying on this in a
+  live exam.
+
 ## Capacity
 
 - Recommended: 30–40 students per exam on the current Vercel + Supabase

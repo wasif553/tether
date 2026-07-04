@@ -3,6 +3,16 @@
 import { useCallback, useEffect, useRef, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
+import {
+  bandForConfidence,
+  classifyFrameQuality,
+  computeLuminanceVariance,
+  evaluatePersonDetections,
+  evaluatePhoneDetections,
+  DetectionCooldownTracker,
+  type DetectedObject,
+} from "@/lib/cameraIntegrityDetection";
+import { loadCameraObjectDetector, type CameraObjectDetector } from "@/lib/cameraObjectDetector";
 
 type Question = {
   id: string;
@@ -37,6 +47,8 @@ type SecureSettings = {
   blockKeyboardShortcuts: boolean;
   disableQuestionTextSelection: boolean;
   enforceFullscreenReturn: boolean;
+  requireStudentVerification: boolean;
+  enableAiCameraIntegrityChecks: boolean;
 };
 
 type SubmissionData = {
@@ -46,6 +58,7 @@ type SubmissionData = {
   totalScore: number | null;
   exam: { id: string; title: string; questions: Question[]; secureSettings: SecureSettings };
   answers: Answer[];
+  student: { name: string; email: string; institutionStudentId: string | null };
 };
 
 type IntegrityEventType =
@@ -67,7 +80,14 @@ type IntegrityEventType =
   | "CAMERA_HEARTBEAT_MISSED"
   | "CAMERA_PRECHECK_FAILED"
   | "KEYBOARD_SHORTCUT_BLOCKED"
-  | "FULLSCREEN_FORCED_RETURN";
+  | "FULLSCREEN_FORCED_RETURN"
+  | "STUDENT_VERIFICATION_CONFIRMED"
+  | "POSSIBLE_PHONE_VISIBLE"
+  | "POSSIBLE_SECOND_PERSON_VISIBLE"
+  | "NO_PERSON_VISIBLE"
+  | "CAMERA_VIEW_BLOCKED"
+  | "CAMERA_TOO_DARK"
+  | "AI_CAMERA_CHECK_UNAVAILABLE";
 
 type IntegritySeverity = "INFO" | "LOW" | "MEDIUM" | "HIGH";
 
@@ -79,6 +99,12 @@ const DEBOUNCE_MS: Partial<Record<IntegrityEventType, number>> = {
   KEYBOARD_SHORTCUT_BLOCKED: 5_000,
   CAMERA_HEARTBEAT_MISSED: 5_000,
   CAMERA_UNAVAILABLE: 5_000,
+  POSSIBLE_PHONE_VISIBLE: 45_000,
+  POSSIBLE_SECOND_PERSON_VISIBLE: 45_000,
+  NO_PERSON_VISIBLE: 45_000,
+  CAMERA_VIEW_BLOCKED: 60_000,
+  CAMERA_TOO_DARK: 60_000,
+  AI_CAMERA_CHECK_UNAVAILABLE: 60_000,
 };
 
 const MESSAGES: Record<IntegrityEventType, string> = {
@@ -101,6 +127,14 @@ const MESSAGES: Record<IntegrityEventType, string> = {
   CAMERA_PRECHECK_FAILED: "The camera pre-check failed.",
   KEYBOARD_SHORTCUT_BLOCKED: "A keyboard shortcut was blocked.",
   FULLSCREEN_FORCED_RETURN: "Fullscreen mode was restored.",
+  STUDENT_VERIFICATION_CONFIRMED: "Student confirmed identity before starting the exam.",
+  POSSIBLE_PHONE_VISIBLE: "Possible mobile phone visible in camera view. Lecturer review required.",
+  POSSIBLE_SECOND_PERSON_VISIBLE:
+    "Possible additional person visible in camera view. Lecturer review required.",
+  NO_PERSON_VISIBLE: "No student appears visible in the camera view. Lecturer review required.",
+  CAMERA_VIEW_BLOCKED: "Camera view appears blocked or covered. Lecturer review required.",
+  CAMERA_TOO_DARK: "Camera view appears too dark or unusable. Lecturer review required.",
+  AI_CAMERA_CHECK_UNAVAILABLE: "On-device camera integrity checks are unavailable.",
 };
 
 function severityFor(eventType: IntegrityEventType, settings: SecureSettings): IntegritySeverity {
@@ -138,6 +172,19 @@ function severityFor(eventType: IntegrityEventType, settings: SecureSettings): I
       return "INFO";
     case "FULLSCREEN_FORCED_RETURN":
       return "LOW";
+    // --- Optional Student Verification + On-Device AI Camera Integrity
+    // Detection v1 — see docs/on-device-ai-integrity-detection-v1.md.
+    case "STUDENT_VERIFICATION_CONFIRMED":
+      return "INFO";
+    case "POSSIBLE_PHONE_VISIBLE":
+    case "POSSIBLE_SECOND_PERSON_VISIBLE":
+    case "NO_PERSON_VISIBLE":
+    case "CAMERA_VIEW_BLOCKED":
+      return "MEDIUM";
+    case "CAMERA_TOO_DARK":
+      return "LOW";
+    case "AI_CAMERA_CHECK_UNAVAILABLE":
+      return "INFO";
   }
 }
 
@@ -196,6 +243,29 @@ export default function TakeExamPage({
   const [cameraPreviewMinimized, setCameraPreviewMinimized] = useState(false);
   const examVideoRef = useRef<HTMLVideoElement | null>(null);
 
+  // --- Optional Student Verification v1 ---
+  // Purely a one-time confirmation gate — no face comparison, no ID
+  // image capture/storage. See docs/on-device-ai-integrity-detection-v1.md.
+  const [verificationConfirmed, setVerificationConfirmed] = useState(false);
+  const [verificationChecked, setVerificationChecked] = useState(false);
+
+  // --- On-Device AI Camera Integrity Detection v1 ---
+  // Always samples from the same cameraStreamRef stream used for the
+  // preview/heartbeat above — never a second getUserMedia call. A
+  // dedicated hidden <video> element (detectionVideoRef) keeps sampling
+  // alive even while the visible preview is minimized. Detection never
+  // uploads or stores a frame — only numeric aggregates and, if the
+  // object-detection model loaded, class/confidence pairs are sent as
+  // IntegrityEvent metadata. See docs/on-device-ai-integrity-detection-v1.md.
+  const detectionVideoRef = useRef<HTMLVideoElement | null>(null);
+  const detectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const detectorRef = useRef<CameraObjectDetector | null>(null);
+  const detectionCooldown = useRef(new DetectionCooldownTracker());
+  const detectionTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [aiCheckStatus, setAiCheckStatus] = useState<"idle" | "loading" | "active" | "unavailable">(
+    "idle",
+  );
+
   const [inLockdownBrowser, setInLockdownBrowser] = useState(false);
 
   useEffect(() => {
@@ -229,7 +299,7 @@ export default function TakeExamPage({
   const secureModeEnabled = secureSettings?.secureModeEnabled ?? false;
 
   const reportIntegrityEvent = useCallback(
-    (eventType: IntegrityEventType) => {
+    (eventType: IntegrityEventType, metadata?: Record<string, unknown>) => {
       if (!data || data.status !== "IN_PROGRESS" || !secureSettings) return;
 
       const debounceMs = DEBOUNCE_MS[eventType];
@@ -246,7 +316,13 @@ export default function TakeExamPage({
       fetch(`/api/submissions/${id}/integrity-events`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventType, severity, message, occurredAt: new Date().toISOString() }),
+        body: JSON.stringify({
+          eventType,
+          severity,
+          message,
+          metadata,
+          occurredAt: new Date().toISOString(),
+        }),
       }).catch(() => {
         // Reporting failures should never interrupt the exam session.
       });
@@ -276,6 +352,7 @@ export default function TakeExamPage({
 
     if (res.ok) {
       stopCamera();
+      stopAiDetection();
       const updated = await res.json();
       setData((prev) => (prev ? { ...prev, status: updated.status, totalScore: updated.totalScore } : prev));
       router.refresh();
@@ -487,10 +564,184 @@ export default function TakeExamPage({
     setCameraPreviewMinimized((prev) => !prev);
   }
 
+  // Reattaches the same camera stream to the hidden detection video
+  // element regardless of the visible preview's minimized state, so AI
+  // camera checks (if enabled) keep running even while minimized.
+  useEffect(() => {
+    if (gateAcknowledged && detectionVideoRef.current && cameraStreamRef.current) {
+      detectionVideoRef.current.srcObject = cameraStreamRef.current;
+    }
+  }, [gateAcknowledged, cameraStatus]);
+
   // Clean up the camera stream on unmount, regardless of how the page is left.
   useEffect(() => {
-    return () => stopCamera();
+    return () => {
+      stopCamera();
+      stopAiDetection();
+    };
   }, []);
+
+  function stopAiDetection() {
+    if (detectionTimer.current) {
+      clearInterval(detectionTimer.current);
+      detectionTimer.current = null;
+    }
+    detectorRef.current?.dispose();
+    detectorRef.current = null;
+    detectionCooldown.current.reset();
+  }
+
+  // On-Device AI Camera Integrity Detection v1 — runs entirely against
+  // the existing camera stream (via the hidden detectionVideoRef), on a
+  // fixed interval (not per-frame), independent of the preview's
+  // minimize/restore state. Never uploads or stores a frame; only
+  // numeric aggregates and, once loaded, object-detection class/score
+  // pairs are ever sent as event metadata. A failed model load falls
+  // back to "unavailable" and never crashes or blocks the exam.
+  useEffect(() => {
+    const enabled = secureSettings?.enableAiCameraIntegrityChecks ?? false;
+    if (!enabled || !gateAcknowledged || cameraStatus !== "granted" || data?.status !== "IN_PROGRESS") {
+      return;
+    }
+
+    let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAiCheckStatus("loading");
+
+    loadCameraObjectDetector().then((detector) => {
+      if (cancelled) return;
+      detectorRef.current = detector;
+      if (!detector) {
+        setAiCheckStatus("unavailable");
+        reportIntegrityEvent("AI_CAMERA_CHECK_UNAVAILABLE");
+        return;
+      }
+      setAiCheckStatus("active");
+    });
+
+    const intervalMs = 8_000; // within the recommended 5-10s range
+
+    detectionTimer.current = setInterval(async () => {
+      const video = detectionVideoRef.current;
+      if (!video || video.readyState < 2 || video.videoWidth === 0) return;
+
+      if (!detectionCanvasRef.current) {
+        detectionCanvasRef.current = document.createElement("canvas");
+      }
+      const canvas = detectionCanvasRef.current;
+      canvas.width = 160;
+      canvas.height = Math.round((160 * video.videoHeight) / video.videoWidth) || 120;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const now = Date.now();
+      const cooldown = detectionCooldown.current;
+
+      // Non-AI camera quality checks — no model required.
+      let imageData: ImageData;
+      try {
+        imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      } catch {
+        return;
+      }
+      const { avgLuminance, variance } = computeLuminanceVariance(imageData.data);
+      const quality = classifyFrameQuality(avgLuminance, variance);
+
+      const blockedCount = cooldown.recordObservation("blocked", quality === "blocked");
+      const darkCount = cooldown.recordObservation("dark", quality === "dark");
+      if (quality !== "blocked") cooldown.recordObservation("blocked", false);
+      if (quality !== "dark") cooldown.recordObservation("dark", false);
+
+      if (quality === "blocked" && blockedCount >= 2 && cooldown.canEmit("CAMERA_VIEW_BLOCKED", now, 60_000)) {
+        cooldown.markEmitted("CAMERA_VIEW_BLOCKED", now);
+        reportIntegrityEvent("CAMERA_VIEW_BLOCKED", {
+          source: "on_device_camera_ai",
+          confidenceBand: "medium",
+          detectionIntervalSeconds: intervalMs / 1000,
+        });
+      } else if (quality === "dark" && darkCount >= 2 && cooldown.canEmit("CAMERA_TOO_DARK", now, 60_000)) {
+        cooldown.markEmitted("CAMERA_TOO_DARK", now);
+        reportIntegrityEvent("CAMERA_TOO_DARK", {
+          source: "on_device_camera_ai",
+          confidenceBand: "medium",
+          detectionIntervalSeconds: intervalMs / 1000,
+        });
+      }
+
+      // Object-detection-based checks — only if the model loaded.
+      const detector = detectorRef.current;
+      if (!detector) return;
+      let detections: DetectedObject[] = [];
+      try {
+        detections = await detector.detect(video);
+      } catch {
+        return;
+      }
+
+      const phone = evaluatePhoneDetections(detections, 0.65);
+      const phoneCount = cooldown.recordObservation("phone", phone.detected);
+      if (
+        phone.detected &&
+        phoneCount >= 2 &&
+        cooldown.canEmit("POSSIBLE_PHONE_VISIBLE", now, 45_000)
+      ) {
+        cooldown.markEmitted("POSSIBLE_PHONE_VISIBLE", now);
+        reportIntegrityEvent("POSSIBLE_PHONE_VISIBLE", {
+          source: "on_device_camera_ai",
+          confidence: phone.confidence,
+          confidenceBand: bandForConfidence(phone.confidence),
+          modelName: detector.modelName,
+          modelVersion: detector.modelVersion,
+          detectionIntervalSeconds: intervalMs / 1000,
+        });
+      }
+
+      const person = evaluatePersonDetections(detections, 0.6);
+      const secondPersonCount = cooldown.recordObservation("secondPerson", person.multiplePersons);
+      if (
+        person.multiplePersons &&
+        secondPersonCount >= 2 &&
+        cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000)
+      ) {
+        cooldown.markEmitted("POSSIBLE_SECOND_PERSON_VISIBLE", now);
+        reportIntegrityEvent("POSSIBLE_SECOND_PERSON_VISIBLE", {
+          source: "on_device_camera_ai",
+          confidenceBand: "medium",
+          modelName: detector.modelName,
+          modelVersion: detector.modelVersion,
+          detectionIntervalSeconds: intervalMs / 1000,
+        });
+      }
+
+      const noPersonCount = cooldown.recordObservation("noPerson", person.noPersonDetected);
+      if (
+        person.noPersonDetected &&
+        noPersonCount >= 3 &&
+        cooldown.canEmit("NO_PERSON_VISIBLE", now, 45_000)
+      ) {
+        cooldown.markEmitted("NO_PERSON_VISIBLE", now);
+        reportIntegrityEvent("NO_PERSON_VISIBLE", {
+          source: "on_device_camera_ai",
+          confidenceBand: "medium",
+          modelName: detector.modelName,
+          modelVersion: detector.modelVersion,
+          detectionIntervalSeconds: intervalMs / 1000,
+        });
+      }
+    }, intervalMs);
+
+    return () => {
+      cancelled = true;
+      stopAiDetection();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [secureSettings?.enableAiCameraIntegrityChecks, gateAcknowledged, cameraStatus, data?.status]);
+
+  function handleConfirmVerification() {
+    setVerificationConfirmed(true);
+    reportIntegrityEvent("STUDENT_VERIFICATION_CONFIRMED");
+  }
 
   async function handleStartSecureExam() {
     if (secureSettings?.requireFullscreen) {
@@ -598,7 +849,11 @@ export default function TakeExamPage({
   }
 
   const requireCamera = secureSettings?.requireCamera ?? false;
-  const cameraGateSatisfied = !requireCamera || cameraStatus === "granted";
+  const requireStudentVerification = secureSettings?.requireStudentVerification ?? false;
+  const enableAiCameraIntegrityChecks = secureSettings?.enableAiCameraIntegrityChecks ?? false;
+  const verificationGateSatisfied = !requireStudentVerification || verificationConfirmed;
+  const cameraGateSatisfied =
+    (!requireCamera || cameraStatus === "granted") && verificationGateSatisfied;
 
   if (secureModeEnabled && !gateAcknowledged) {
     return (
@@ -622,6 +877,15 @@ export default function TakeExamPage({
             {requireCamera && <li>This exam requires camera access.</li>}
             <li>Exam integrity signals (such as switching windows) may be recorded for lecturer review.</li>
             <li>Network interruptions during the exam may be logged.</li>
+            {enableAiCameraIntegrityChecks && (
+              <li>
+                AI-assisted camera integrity checks are enabled for this exam. During this exam,
+                your camera may be checked locally on your device for integrity signals such as
+                whether a phone or another person may be visible. Video is not recorded, streamed,
+                or stored. Any signals are indicators for lecturer review, not automatic misconduct
+                decisions.
+              </li>
+            )}
             <li>
               Your lecturer and institution make the final academic integrity decision — recorded
               signals are evidence for human review, not an automatic judgment.
@@ -633,6 +897,53 @@ export default function TakeExamPage({
               Fullscreen was not enabled. Your browser may have blocked the request — try clicking
               the button again, or check your browser&apos;s permission prompt.
             </p>
+          )}
+
+          {requireStudentVerification && (
+            <div className="mt-4 rounded border border-gray-200 bg-gray-50 p-3">
+              <p className="text-sm font-medium">Confirm your identity</p>
+              <dl className="mt-2 text-sm text-gray-700">
+                <div className="flex gap-2">
+                  <dt className="text-gray-500">Name:</dt>
+                  <dd>{data.student.name}</dd>
+                </div>
+                {data.student.institutionStudentId && (
+                  <div className="flex gap-2">
+                    <dt className="text-gray-500">Student ID:</dt>
+                    <dd>{data.student.institutionStudentId}</dd>
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <dt className="text-gray-500">Email:</dt>
+                  <dd>{data.student.email}</dd>
+                </div>
+              </dl>
+              <label className="mt-3 flex items-start gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={verificationChecked}
+                  onChange={(e) => setVerificationChecked(e.target.checked)}
+                  disabled={verificationConfirmed}
+                />
+                I confirm I am the student listed above and I will complete this exam myself.
+              </label>
+              {!verificationConfirmed ? (
+                <button
+                  onClick={handleConfirmVerification}
+                  disabled={!verificationChecked}
+                  className="mt-2 rounded border border-gray-300 bg-white px-3 py-1.5 text-sm disabled:opacity-50"
+                >
+                  Confirm identity
+                </button>
+              ) : (
+                <p className="mt-2 text-sm text-green-700">Identity confirmed.</p>
+              )}
+              <p className="mt-2 text-xs text-gray-500">
+                This is a self-confirmation step only — no photo ID scan, face comparison, or
+                image is captured or stored.
+              </p>
+            </div>
           )}
 
           {requireCamera && (
@@ -675,6 +986,11 @@ export default function TakeExamPage({
             </div>
           )}
 
+          {requireStudentVerification && !verificationConfirmed && (
+            <p className="mt-3 text-sm text-red-600">
+              Please confirm your identity above before starting the exam.
+            </p>
+          )}
           <button
             onClick={handleStartSecureExam}
             disabled={!cameraGateSatisfied}
@@ -746,6 +1062,19 @@ export default function TakeExamPage({
               Camera monitoring active
             </span>
           )}
+          {enableAiCameraIntegrityChecks && cameraStatus === "granted" && (
+            <span
+              className={
+                aiCheckStatus === "unavailable"
+                  ? "rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600"
+                  : "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
+              }
+            >
+              {aiCheckStatus === "unavailable"
+                ? "Camera integrity checks unavailable"
+                : "Camera integrity checks active"}
+            </span>
+          )}
           <a href="/privacy/student-exam-notice" target="_blank" rel="noreferrer" className="text-xs underline">
             What does this record?
           </a>
@@ -808,6 +1137,15 @@ export default function TakeExamPage({
             </div>
           )}
         </div>
+      )}
+
+      {/* On-Device AI Camera Integrity Detection v1 — hidden, always-
+          mounted video element used only for local frame sampling.
+          Kept separate from the visible preview above so detection
+          keeps running even while the preview is minimized. Never
+          rendered visibly, never uploaded, never recorded. */}
+      {requireCamera && cameraStatus === "granted" && enableAiCameraIntegrityChecks && (
+        <video ref={detectionVideoRef} autoPlay muted playsInline style={{ display: "none" }} />
       )}
 
       <div className="mt-6 space-y-4">

@@ -29,9 +29,38 @@ const INTEGRITY_EVENT_TYPES = [
   // Browser-Level Friction v1
   "KEYBOARD_SHORTCUT_BLOCKED",
   "FULLSCREEN_FORCED_RETURN",
+  // Optional Student Verification + On-Device AI Camera Integrity
+  // Detection v1 — see docs/on-device-ai-integrity-detection-v1.md.
+  "STUDENT_VERIFICATION_CONFIRMED",
+  "POSSIBLE_PHONE_VISIBLE",
+  "POSSIBLE_SECOND_PERSON_VISIBLE",
+  "NO_PERSON_VISIBLE",
+  "CAMERA_VIEW_BLOCKED",
+  "CAMERA_TOO_DARK",
+  "AI_CAMERA_CHECK_UNAVAILABLE",
 ] as const;
 
 const INTEGRITY_SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH"] as const;
+
+// Metadata is for AI-detection confidence/source details only — never
+// image, frame, or video data. Reject any key that even suggests media
+// content, and any string value that looks like a data: URL or long
+// base64 blob, so this is enforced structurally, not just by convention.
+const FORBIDDEN_METADATA_KEY_PATTERN = /image|frame|screenshot|thumbnail|snapshot|base64|blob|dataurl/i;
+const DATA_URL_PATTERN = /^data:/i;
+
+function metadataContainsMediaData(metadata: Record<string, unknown>): boolean {
+  for (const [key, value] of Object.entries(metadata)) {
+    if (FORBIDDEN_METADATA_KEY_PATTERN.test(key)) return true;
+    if (typeof value === "string") {
+      if (DATA_URL_PATTERN.test(value)) return true;
+      // A long, high-entropy-looking base64 string is a strong signal
+      // of accidentally-attached image data even under an innocuous key.
+      if (value.length > 2000 && /^[A-Za-z0-9+/=]+$/.test(value)) return true;
+    }
+  }
+  return false;
+}
 
 const createEventSchema = z.object({
   eventType: z.enum(INTEGRITY_EVENT_TYPES),
@@ -47,6 +76,15 @@ const DEBOUNCE_WINDOWS_MS: Partial<Record<(typeof INTEGRITY_EVENT_TYPES)[number]
   PASTE_ATTEMPT: 5_000,
   KEYBOARD_SHORTCUT_BLOCKED: 5_000,
   CAMERA_HEARTBEAT_MISSED: 30_000,
+  // AI camera checks run every 5-10s client-side; server-side cooldowns
+  // are a second, independent layer against event flooding (see
+  // docs/on-device-ai-integrity-detection-v1.md, "Timing and cooldown").
+  POSSIBLE_PHONE_VISIBLE: 45_000,
+  POSSIBLE_SECOND_PERSON_VISIBLE: 45_000,
+  NO_PERSON_VISIBLE: 45_000,
+  CAMERA_VIEW_BLOCKED: 60_000,
+  CAMERA_TOO_DARK: 60_000,
+  AI_CAMERA_CHECK_UNAVAILABLE: 60_000,
 };
 
 export async function POST(
@@ -79,6 +117,13 @@ export async function POST(
   }
 
   const { eventType, severity, message, metadata, occurredAt } = parsed.data;
+
+  if (metadata && metadataContainsMediaData(metadata)) {
+    return NextResponse.json(
+      { error: "Event metadata must not contain image, frame, or media data" },
+      { status: 400 },
+    );
+  }
 
   const debounceWindowMs = DEBOUNCE_WINDOWS_MS[eventType];
   if (debounceWindowMs) {

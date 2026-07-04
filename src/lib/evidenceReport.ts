@@ -13,6 +13,19 @@ export const NETWORK_EVIDENCE_DISCLAIMER =
   "or ISP routing. Treat as an integrity signal, not proof of misconduct. SES does not use GPS " +
   "location. Network evidence is for lecturer review only and is never an automatic determination.";
 
+// Optional Student Verification + On-Device AI Camera Integrity
+// Detection v1 — see docs/on-device-ai-integrity-detection-v1.md.
+export const AI_CAMERA_INTEGRITY_DISCLAIMER =
+  "AI camera signals are indicators for review. They are not automatic misconduct decisions.";
+
+const AI_CAMERA_EVENT_TYPES = [
+  "POSSIBLE_PHONE_VISIBLE",
+  "POSSIBLE_SECOND_PERSON_VISIBLE",
+  "NO_PERSON_VISIBLE",
+  "CAMERA_VIEW_BLOCKED",
+  "CAMERA_TOO_DARK",
+] as const;
+
 export class EvidenceNotFoundError extends Error {}
 export class EvidenceForbiddenError extends Error {}
 
@@ -36,7 +49,15 @@ export type EvidenceReport = {
     resolvedAt: string | null;
     resolvedByName: string | null;
     resolutionNote: string | null;
+    confidenceBand: string | null;
   }>;
+  aiCameraIntegritySummary: {
+    possiblePhoneCount: number;
+    possibleSecondPersonCount: number;
+    noPersonCount: number;
+    cameraBlockedOrDarkCount: number;
+    disclaimer: string;
+  } | null;
   canvasPassback: {
     status: string;
     scoreGiven: number | null;
@@ -126,6 +147,23 @@ export async function buildEvidenceReport(
   const startNe = submission.networkEvidence.find((e) => e.source === "EXAM_START") ?? null;
   const submitNe = submission.networkEvidence.find((e) => e.source === "EXAM_SUBMIT") ?? null;
 
+  const aiCameraEvents = submission.integrityEvents.filter((e) =>
+    (AI_CAMERA_EVENT_TYPES as readonly string[]).includes(e.eventType),
+  );
+  const aiCameraIntegritySummary = aiCameraEvents.length
+    ? {
+        possiblePhoneCount: aiCameraEvents.filter((e) => e.eventType === "POSSIBLE_PHONE_VISIBLE").length,
+        possibleSecondPersonCount: aiCameraEvents.filter(
+          (e) => e.eventType === "POSSIBLE_SECOND_PERSON_VISIBLE",
+        ).length,
+        noPersonCount: aiCameraEvents.filter((e) => e.eventType === "NO_PERSON_VISIBLE").length,
+        cameraBlockedOrDarkCount: aiCameraEvents.filter(
+          (e) => e.eventType === "CAMERA_VIEW_BLOCKED" || e.eventType === "CAMERA_TOO_DARK",
+        ).length,
+        disclaimer: AI_CAMERA_INTEGRITY_DISCLAIMER,
+      }
+    : null;
+
   return {
     submissionId: submission.id,
     student: { name: submission.student.name, email: submission.student.email },
@@ -137,16 +175,23 @@ export async function buildEvidenceReport(
     totalScore: submission.totalScore,
     riskScore,
     riskLevel,
-    events: submission.integrityEvents.map((e) => ({
-      eventType: e.eventType,
-      eventLabel: labelForEventType(e.eventType),
-      severity: e.severity,
-      message: e.message,
-      occurredAt: e.occurredAt.toISOString(),
-      resolvedAt: e.resolvedAt?.toISOString() ?? null,
-      resolvedByName: e.resolvedBy?.name ?? null,
-      resolutionNote: e.resolutionNote,
-    })),
+    events: submission.integrityEvents.map((e) => {
+      const metadata = e.metadataJson as Record<string, unknown> | null;
+      const confidenceBand =
+        metadata && typeof metadata.confidenceBand === "string" ? metadata.confidenceBand : null;
+      return {
+        eventType: e.eventType,
+        eventLabel: labelForEventType(e.eventType),
+        severity: e.severity,
+        message: e.message,
+        occurredAt: e.occurredAt.toISOString(),
+        resolvedAt: e.resolvedAt?.toISOString() ?? null,
+        resolvedByName: e.resolvedBy?.name ?? null,
+        resolutionNote: e.resolutionNote,
+        confidenceBand,
+      };
+    }),
+    aiCameraIntegritySummary,
     canvasPassback: submission.gradePassback
       ? {
           status: submission.gradePassback.status,
@@ -221,7 +266,7 @@ export function evidenceReportToCsv(report: EvidenceReport): string {
   lines.push(`Risk Score,${esc(String(report.riskScore))}`);
   lines.push(`Risk Level,${esc(report.riskLevel)}`);
   lines.push("");
-  lines.push("Event Type,Severity,Message,Occurred At,Resolved At,Resolved By,Note");
+  lines.push("Event Type,Severity,Message,Occurred At,Resolved At,Resolved By,Note,Confidence Band");
   for (const e of report.events) {
     lines.push(
       [
@@ -232,8 +277,19 @@ export function evidenceReportToCsv(report: EvidenceReport): string {
         esc(e.resolvedAt ?? ""),
         esc(e.resolvedByName ?? ""),
         esc(e.resolutionNote ?? ""),
+        esc(e.confidenceBand ?? ""),
       ].join(","),
     );
+  }
+  if (report.aiCameraIntegritySummary) {
+    lines.push("");
+    lines.push("AI-assisted camera integrity signals");
+    const ai = report.aiCameraIntegritySummary;
+    lines.push(`Possible phone visible,${esc(String(ai.possiblePhoneCount))}`);
+    lines.push(`Possible additional person visible,${esc(String(ai.possibleSecondPersonCount))}`);
+    lines.push(`No person visible,${esc(String(ai.noPersonCount))}`);
+    lines.push(`Camera blocked/dark,${esc(String(ai.cameraBlockedOrDarkCount))}`);
+    lines.push(esc(ai.disclaimer));
   }
   lines.push("");
   lines.push("Network Evidence");

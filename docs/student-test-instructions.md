@@ -85,6 +85,26 @@ integrity decisions.
 
 Read the full privacy notice at `/privacy/student-exam-notice`.
 
+## Student verification and AI camera checks (if enabled)
+
+Some lecturers enable one or both of these optional checks:
+
+- **Student verification** — before starting, you confirm your name,
+  student ID (if set), and email are correct with a simple checkbox. No
+  photo ID scan, no face comparison, no image is captured.
+- **AI-assisted camera integrity checks** — your camera may be checked
+  locally on your own device for signals such as whether a phone or
+  another person may be visible, or whether the view is blocked or too
+  dark. This runs entirely on your device — nothing is recorded,
+  streamed, or uploaded. This is **not** live proctoring; no one watches
+  your camera in real time. Any signal produced is worded as
+  "possible" and reviewed by your lecturer, never an automatic finding.
+
+If enabled, you'll see "Camera integrity checks active" near your
+camera preview during the exam, or "Camera integrity checks
+unavailable" if the on-device check couldn't load — either way, your
+exam continues normally.
+
 ## Submitting your exam
 
 - Answer all questions

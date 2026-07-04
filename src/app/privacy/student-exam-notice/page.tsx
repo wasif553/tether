@@ -96,6 +96,36 @@ export default function StudentExamNoticePage() {
         </section>
 
         <section>
+          <h2 className="font-medium text-gray-900">Student verification and AI camera checks, if enabled</h2>
+          <p className="mt-1">
+            If your lecturer enables it, you may be asked to confirm your identity before starting
+            an exam — a simple tick-box confirmation of your name, student ID, and email already on
+            file. This does <strong>not</strong> involve scanning a photo ID, comparing your face
+            to anything, or storing any image.
+          </p>
+          <p className="mt-1">
+            If your lecturer also enables AI-assisted camera integrity checks, your camera may be
+            checked <strong>locally on your own device</strong> for signals such as whether a phone
+            or another person may be visible, or whether the camera view is blocked or too dark.
+          </p>
+          <p className="mt-2">This does <strong>not</strong>:</p>
+          <ul className="mt-1 list-disc space-y-1 pl-5">
+            <li>record, stream, or store your camera video</li>
+            <li>store any image, frame, or screenshot</li>
+            <li>use facial recognition or compare your face to anything</li>
+            <li>track your eye gaze</li>
+            <li>detect your emotions</li>
+            <li>make an automatic misconduct decision</li>
+          </ul>
+          <p className="mt-2">
+            Any signal produced is worded as a <strong>possible</strong> indicator — for example
+            &quot;possible mobile phone visible&quot; — and is reviewed by your lecturer, who makes
+            the final academic decision. This is not live proctoring: no one watches your camera in
+            real time.
+          </p>
+        </section>
+
+        <section>
           <h2 className="font-medium text-gray-900">Browser secure mode</h2>
           <p className="mt-1">When Secure Exam Mode is active, SES may:</p>
           <ul className="mt-1 list-disc space-y-1 pl-5">

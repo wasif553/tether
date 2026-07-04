@@ -50,6 +50,17 @@ enum IntegrityEventType {
   // Browser-Level Friction v1 (additive)
   KEYBOARD_SHORTCUT_BLOCKED
   FULLSCREEN_FORCED_RETURN
+  // Optional Student Verification + On-Device AI Camera Integrity
+  // Detection v1 (additive — see
+  // docs/on-device-ai-integrity-detection-v1.md). All AI signals are
+  // metadata-only: no image, frame, or video data is ever stored.
+  STUDENT_VERIFICATION_CONFIRMED
+  POSSIBLE_PHONE_VISIBLE
+  POSSIBLE_SECOND_PERSON_VISIBLE
+  NO_PERSON_VISIBLE
+  CAMERA_VIEW_BLOCKED
+  CAMERA_TOO_DARK
+  AI_CAMERA_CHECK_UNAVAILABLE
 }
 
 enum IntegritySeverity {

@@ -30,6 +30,18 @@ export const secureExamSettingsSchema = z.object({
   blockKeyboardShortcuts: z.boolean().default(true),
   disableQuestionTextSelection: z.boolean().default(true),
   enforceFullscreenReturn: z.boolean().default(false),
+
+  // --- Optional Student Verification + On-Device AI Camera Integrity
+  // Detection v1 (additive) — see
+  // docs/on-device-ai-integrity-detection-v1.md. Both default to off;
+  // neither weakens or replaces requireCamera/showCameraPreview above.
+  // This is NOT live proctoring — nothing here streams, records, or
+  // stores video/images. requireStudentVerification only shows a
+  // one-time confirmation step before the exam starts;
+  // enableAiCameraIntegrityChecks only runs local, on-device checks
+  // against the same camera stream already used for the preview.
+  requireStudentVerification: z.boolean().default(false),
+  enableAiCameraIntegrityChecks: z.boolean().default(false),
 });
 
 export type SecureExamSettings = z.infer<typeof secureExamSettingsSchema>;
@@ -72,7 +84,14 @@ export type IntegrityEventTypeName =
   | "CAMERA_HEARTBEAT_MISSED"
   | "CAMERA_PRECHECK_FAILED"
   | "KEYBOARD_SHORTCUT_BLOCKED"
-  | "FULLSCREEN_FORCED_RETURN";
+  | "FULLSCREEN_FORCED_RETURN"
+  | "STUDENT_VERIFICATION_CONFIRMED"
+  | "POSSIBLE_PHONE_VISIBLE"
+  | "POSSIBLE_SECOND_PERSON_VISIBLE"
+  | "NO_PERSON_VISIBLE"
+  | "CAMERA_VIEW_BLOCKED"
+  | "CAMERA_TOO_DARK"
+  | "AI_CAMERA_CHECK_UNAVAILABLE";
 
 export function severityFor(
   eventType: IntegrityEventTypeName,
@@ -119,5 +138,28 @@ export function severityFor(
     case "FULLSCREEN_FORCED_RETURN":
       // LOW so it contributes the minimum non-zero weight (1).
       return "LOW";
+    // --- Optional Student Verification + On-Device AI Camera Integrity
+    // Detection v1 — see docs/on-device-ai-integrity-detection-v1.md.
+    // Confirmation and "unavailable" states must never increase risk;
+    // repeated occurrences of the same signal already accumulate risk
+    // naturally through src/lib/integrityRisk.ts summing severity
+    // weights across events, so no per-type escalation logic is added
+    // here — keeps the model simple and conservative by construction.
+    case "STUDENT_VERIFICATION_CONFIRMED":
+      return "INFO";
+    case "POSSIBLE_PHONE_VISIBLE":
+      return "MEDIUM";
+    case "POSSIBLE_SECOND_PERSON_VISIBLE":
+      return "MEDIUM";
+    case "NO_PERSON_VISIBLE":
+      return "MEDIUM";
+    case "CAMERA_VIEW_BLOCKED":
+      return "MEDIUM";
+    case "CAMERA_TOO_DARK":
+      // Deliberately lower weight than phone/second-person signals —
+      // a dark room is far more likely to be an innocent lighting issue.
+      return "LOW";
+    case "AI_CAMERA_CHECK_UNAVAILABLE":
+      return "INFO";
   }
 }

@@ -41,6 +41,8 @@ type SecureSettings = {
   blockKeyboardShortcuts: boolean;
   disableQuestionTextSelection: boolean;
   enforceFullscreenReturn: boolean;
+  requireStudentVerification: boolean;
+  enableAiCameraIntegrityChecks: boolean;
 };
 
 type Exam = {
@@ -893,6 +895,39 @@ export default function LecturerExamPage({
                 }
                 className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
               />
+            </div>
+          </div>
+
+          <div>
+            <h3 className="font-medium">Student verification and AI integrity checks</h3>
+            <p className="mt-1 text-sm text-gray-500">
+              This is not live proctoring. AI camera checks run locally on the student&apos;s
+              device. Video is not recorded, streamed, or stored. Signals are indicators for
+              lecturer review only.
+            </p>
+            <div className="mt-2 space-y-2">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.requireStudentVerification}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, requireStudentVerification: e.target.checked })
+                  }
+                />
+                Require student verification before exam
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.enableAiCameraIntegrityChecks}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, enableAiCameraIntegrityChecks: e.target.checked })
+                  }
+                />
+                Enable AI-assisted camera integrity checks
+              </label>
             </div>
           </div>
 
