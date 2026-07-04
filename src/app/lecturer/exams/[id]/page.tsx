@@ -7,6 +7,11 @@ import {
   BULK_QUESTION_FORMAT_EXAMPLE,
   type BulkParseResult,
 } from "@/lib/bulkQuestionParser";
+import {
+  createEmptyManualDraft,
+  validateManualDraft,
+  type ManualQuestionDraft,
+} from "@/lib/manualQuestionDraft";
 
 type Question = {
   id: string;
@@ -99,7 +104,6 @@ export default function LecturerExamPage({
 
   const [exam, setExam] = useState<Exam | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   const [secureForm, setSecureForm] = useState<SecureSettings | null>(null);
   const [savingSecure, setSavingSecure] = useState(false);
@@ -141,12 +145,11 @@ export default function LecturerExamPage({
     }
   }
 
-  const [qType, setQType] = useState<Question["type"]>("MULTIPLE_CHOICE");
-  const [qText, setQText] = useState("");
-  const [qOptions, setQOptions] = useState("");
-  const [qCorrect, setQCorrect] = useState("");
-  const [qPoints, setQPoints] = useState(1);
+  const [manualDrafts, setManualDrafts] = useState<ManualQuestionDraft[]>([createEmptyManualDraft()]);
+  const [manualErrors, setManualErrors] = useState<Record<number, string[]>>({});
   const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+  const [addSuccess, setAddSuccess] = useState<string | null>(null);
 
   const [bulkText, setBulkText] = useState("");
   const [bulkPreview, setBulkPreview] = useState<BulkParseResult | null>(null);
@@ -339,37 +342,59 @@ export default function LecturerExamPage({
     }
   }, [exam, subject]);
 
-  async function handleAddQuestion(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setAdding(true);
+  function updateManualDraft(index: number, patch: Partial<ManualQuestionDraft>) {
+    setManualDrafts((prev) => prev.map((d, i) => (i === index ? { ...d, ...patch } : d)));
+  }
 
-    const res = await fetch(`/api/exams/${id}/questions`, {
+  function updateManualDraftOption(index: number, optionIndex: number, value: string) {
+    setManualDrafts((prev) =>
+      prev.map((d, i) => {
+        if (i !== index) return d;
+        const options = [...d.options];
+        options[optionIndex] = value;
+        return { ...d, options };
+      }),
+    );
+  }
+
+  function addManualDraftCard() {
+    setManualDrafts((prev) => [...prev, createEmptyManualDraft()]);
+  }
+
+  function removeManualDraftCard(index: number) {
+    setManualDrafts((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== index)));
+  }
+
+  async function handleSaveManualQuestions() {
+    setAddError(null);
+    setAddSuccess(null);
+
+    const errorsByIndex: Record<number, string[]> = {};
+    manualDrafts.forEach((draft, i) => {
+      const errors = validateManualDraft(draft);
+      if (errors.length > 0) errorsByIndex[i] = errors;
+    });
+    setManualErrors(errorsByIndex);
+    if (Object.keys(errorsByIndex).length > 0) return;
+
+    setAdding(true);
+    const res = await fetch(`/api/lecturer/exams/${id}/bulk-questions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        type: qType,
-        text: qText,
-        options:
-          qType === "MULTIPLE_CHOICE"
-            ? qOptions.split("\n").map((o) => o.trim()).filter(Boolean)
-            : undefined,
-        correctAnswer: qType === "ESSAY" ? undefined : qCorrect || undefined,
-        points: qPoints,
-      }),
+      body: JSON.stringify({ questions: manualDrafts }),
     });
-
     setAdding(false);
 
     if (!res.ok) {
-      setError("Failed to add question");
+      const body = await res.json().catch(() => null);
+      setAddError(typeof body?.error === "string" ? body.error : "Failed to add questions");
       return;
     }
 
-    setQText("");
-    setQOptions("");
-    setQCorrect("");
-    setQPoints(1);
+    const body = await res.json();
+    setAddSuccess(`${body.created} question${body.created === 1 ? "" : "s"} added.`);
+    setManualDrafts([createEmptyManualDraft()]);
+    setManualErrors({});
     await loadExam();
   }
 
@@ -1469,68 +1494,118 @@ export default function LecturerExamPage({
         )}
       </div>
 
-      <h2 className="mt-8 text-lg font-medium">Add question</h2>
-      <form onSubmit={handleAddQuestion} className="mt-3 space-y-3 rounded border border-gray-200 p-4">
-        <div>
-          <label className="block text-sm font-medium">Type</label>
-          <select
-            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
-            value={qType}
-            onChange={(e) => setQType(e.target.value as Question["type"])}
-          >
-            <option value="MULTIPLE_CHOICE">Multiple choice</option>
-            <option value="SHORT_ANSWER">Short answer</option>
-            <option value="ESSAY">Essay</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-sm font-medium">Question text</label>
-          <textarea
-            required
-            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
-            value={qText}
-            onChange={(e) => setQText(e.target.value)}
-          />
-        </div>
-        {qType === "MULTIPLE_CHOICE" && (
-          <div>
-            <label className="block text-sm font-medium">Options (one per line)</label>
-            <textarea
-              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
-              value={qOptions}
-              onChange={(e) => setQOptions(e.target.value)}
-            />
+      <h2 className="mt-8 text-lg font-medium">Add questions</h2>
+      <div className="mt-3 space-y-3">
+        {manualDrafts.map((draft, index) => (
+          <div key={index} className="rounded border border-gray-200 p-4">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium">Question {index + 1}</p>
+              {manualDrafts.length > 1 && (
+                <button
+                  onClick={() => removeManualDraftCard(index)}
+                  className="text-xs text-red-600 underline"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+            <div className="mt-2 space-y-3">
+              <div>
+                <label className="block text-sm font-medium">Type</label>
+                <select
+                  className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                  value={draft.type}
+                  onChange={(e) =>
+                    updateManualDraft(index, { type: e.target.value as ManualQuestionDraft["type"] })
+                  }
+                >
+                  <option value="MULTIPLE_CHOICE">Multiple choice</option>
+                  <option value="SHORT_ANSWER">Short answer</option>
+                  <option value="ESSAY">Essay</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium">Question text</label>
+                <textarea
+                  className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                  value={draft.text}
+                  onChange={(e) => updateManualDraft(index, { text: e.target.value })}
+                />
+              </div>
+              {draft.type === "MULTIPLE_CHOICE" && (
+                <div>
+                  <label className="block text-sm font-medium">Options</label>
+                  <div className="mt-1 space-y-2">
+                    {draft.options.map((opt, optIndex) => (
+                      <input
+                        key={optIndex}
+                        placeholder={`Option ${String.fromCharCode(65 + optIndex)}`}
+                        className="w-full rounded border border-gray-300 px-3 py-2"
+                        value={opt}
+                        onChange={(e) => updateManualDraftOption(index, optIndex, e.target.value)}
+                      />
+                    ))}
+                  </div>
+                  <label className="mt-2 block text-sm font-medium">Correct answer</label>
+                  <input
+                    placeholder="Must match one of the options above"
+                    className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                    value={draft.correctAnswer}
+                    onChange={(e) => updateManualDraft(index, { correctAnswer: e.target.value })}
+                  />
+                </div>
+              )}
+              {draft.type === "SHORT_ANSWER" && (
+                <div>
+                  <label className="block text-sm font-medium">Correct answer (optional)</label>
+                  <input
+                    className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                    value={draft.correctAnswer}
+                    onChange={(e) => updateManualDraft(index, { correctAnswer: e.target.value })}
+                  />
+                </div>
+              )}
+              <div className="w-32">
+                <label className="block text-sm font-medium">Points</label>
+                <input
+                  type="number"
+                  min={1}
+                  className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                  value={draft.points}
+                  onChange={(e) => updateManualDraft(index, { points: Number(e.target.value) })}
+                />
+              </div>
+              {manualErrors[index] && manualErrors[index].length > 0 && (
+                <ul className="list-disc pl-5 text-sm text-red-600">
+                  {manualErrors[index].map((e) => (
+                    <li key={e}>{e}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
-        )}
-        {qType !== "ESSAY" && (
-          <div>
-            <label className="block text-sm font-medium">Correct answer</label>
-            <input
-              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
-              value={qCorrect}
-              onChange={(e) => setQCorrect(e.target.value)}
-            />
-          </div>
-        )}
-        <div className="w-32">
-          <label className="block text-sm font-medium">Points</label>
-          <input
-            type="number"
-            min={1}
-            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
-            value={qPoints}
-            onChange={(e) => setQPoints(Number(e.target.value))}
-          />
-        </div>
-        {error && <p className="text-sm text-red-600">{error}</p>}
+        ))}
+
         <button
-          type="submit"
-          disabled={adding}
-          className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+          onClick={addManualDraftCard}
+          className="rounded border border-gray-300 px-4 py-2 text-sm"
         >
-          {adding ? "Adding..." : "Add question"}
+          + Add another question
         </button>
-      </form>
+
+        <div className="pt-2">
+          <button
+            onClick={handleSaveManualQuestions}
+            disabled={adding}
+            className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+          >
+            {adding ? "Saving..." : "Save all questions"}
+          </button>
+        </div>
+
+        {addError && <p className="text-sm text-red-600">{addError}</p>}
+        {addSuccess && <p className="text-sm text-green-700">{addSuccess}</p>}
+      </div>
 
       <h2 className="mt-8 text-lg font-medium">Canvas / LTI linking</h2>
       <p className="mt-1 text-sm text-gray-500">

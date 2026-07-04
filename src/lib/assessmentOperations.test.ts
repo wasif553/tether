@@ -334,6 +334,84 @@ describe("bulk question entry", () => {
   });
 });
 
+// ── Manual multi-question entry (repeatable draft cards) ─────────────────────
+
+describe("manual multi-question entry (structured draft cards)", () => {
+  it("6. multiple valid manual questions (MCQ + short-answer + essay) are saved in one request", async () => {
+    const exam = await createExam();
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const res = await bulkQuestionsRoute.POST(
+      jsonRequest("POST", {
+        questions: [
+          {
+            type: "MULTIPLE_CHOICE",
+            text: "Capital of France?",
+            options: ["Berlin", "Paris", "", ""],
+            correctAnswer: "Paris",
+            points: 2,
+          },
+          {
+            type: "SHORT_ANSWER",
+            text: "Define photosynthesis.",
+            options: ["", "", "", ""],
+            correctAnswer: "",
+            points: 3,
+          },
+          {
+            type: "ESSAY",
+            text: "Discuss WWI causes.",
+            options: ["", "", "", ""],
+            correctAnswer: "",
+            points: 8,
+          },
+        ],
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.created).toBe(3);
+
+    const questions = await prisma.question.findMany({
+      where: { examId: exam.id },
+      orderBy: { order: "asc" },
+    });
+    expect(questions.map((q) => q.type)).toEqual(["MULTIPLE_CHOICE", "SHORT_ANSWER", "ESSAY"]);
+    expect(questions[0].correctAnswer).toBe("Paris");
+    expect(questions[2].correctAnswer).toBeNull();
+  });
+
+  it("5. an invalid card (MCQ missing correct answer) blocks the whole manual batch", async () => {
+    const exam = await createExam();
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const res = await bulkQuestionsRoute.POST(
+      jsonRequest("POST", {
+        questions: [
+          {
+            type: "SHORT_ANSWER",
+            text: "Valid question.",
+            options: ["", "", "", ""],
+            correctAnswer: "",
+            points: 1,
+          },
+          {
+            type: "MULTIPLE_CHOICE",
+            text: "Invalid MCQ.",
+            options: ["A", "B", "", ""],
+            correctAnswer: "",
+            points: 1,
+          },
+        ],
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(400);
+
+    const count = await prisma.question.count({ where: { examId: exam.id } });
+    expect(count).toBe(0);
+  });
+});
+
 // ── Final marks/results exports ──────────────────────────────────────────────
 
 describe("final marks/results exports", () => {
