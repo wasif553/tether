@@ -19,7 +19,7 @@ vi.mock("@/auth", () => ({ auth: mockAuth }));
 
 const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
-const { isSafeJoinCallbackUrl } = await import("./safeCallbackUrl");
+const { isSafeJoinCallbackUrl, isSafeAppCallbackUrl } = await import("./safeCallbackUrl");
 
 const stamp = Date.now();
 const cleanupUserIds: string[] = [];
@@ -144,6 +144,58 @@ describe("isSafeJoinCallbackUrl", () => {
 
   it("rejects a join path with extra segments appended", () => {
     expect(isSafeJoinCallbackUrl("/student/exams/join/abc/../../../lecturer")).toBe(false);
+  });
+});
+
+// ── isSafeAppCallbackUrl — student join route + lecturer area ───────────────
+
+describe("isSafeAppCallbackUrl", () => {
+  it("accepts a well-formed join path", () => {
+    expect(isSafeAppCallbackUrl("/student/exams/join/clabc123")).toBe(true);
+  });
+
+  it("accepts a lecturer exam detail path", () => {
+    expect(isSafeAppCallbackUrl("/lecturer/exams/clabc123")).toBe(true);
+  });
+
+  it("accepts a lecturer exam submissions path", () => {
+    expect(isSafeAppCallbackUrl("/lecturer/exams/clabc123/submissions")).toBe(true);
+  });
+
+  it("accepts a lecturer exam analytics path", () => {
+    expect(isSafeAppCallbackUrl("/lecturer/exams/clabc123/analytics")).toBe(true);
+  });
+
+  it("accepts a lecturer submission evidence path", () => {
+    expect(isSafeAppCallbackUrl("/lecturer/submissions/clabc123/evidence")).toBe(true);
+  });
+
+  it("accepts the bare lecturer dashboard root", () => {
+    expect(isSafeAppCallbackUrl("/lecturer")).toBe(true);
+  });
+
+  it("rejects an absolute URL", () => {
+    expect(isSafeAppCallbackUrl("https://evil.example.com/lecturer/exams/x")).toBe(false);
+  });
+
+  it("rejects a protocol-relative URL", () => {
+    expect(isSafeAppCallbackUrl("//evil.example.com/lecturer")).toBe(false);
+  });
+
+  it("rejects a path outside the join route or lecturer area", () => {
+    expect(isSafeAppCallbackUrl("/platform/institutions")).toBe(false);
+    expect(isSafeAppCallbackUrl("/student")).toBe(false);
+  });
+
+  it("rejects null/empty", () => {
+    expect(isSafeAppCallbackUrl(null)).toBe(false);
+    expect(isSafeAppCallbackUrl("")).toBe(false);
+  });
+
+  it("rejects a lecturer path with traversal or query/hash smuggled in", () => {
+    expect(isSafeAppCallbackUrl("/lecturer/exams/../../platform")).toBe(false);
+    expect(isSafeAppCallbackUrl("/lecturer/exams/x?redirect=https://evil.example.com")).toBe(false);
+    expect(isSafeAppCallbackUrl("/lecturer/exams/x#https://evil.example.com")).toBe(false);
   });
 });
 

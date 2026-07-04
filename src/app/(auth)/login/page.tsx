@@ -3,7 +3,7 @@
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
-import { isSafeJoinCallbackUrl } from "@/lib/safeCallbackUrl";
+import { isSafeAppCallbackUrl } from "@/lib/safeCallbackUrl";
 
 function LoginForm() {
   const router = useRouter();
@@ -28,11 +28,12 @@ function LoginForm() {
     }
 
     // Safe Exam Deep Link v1 — only ever follow callbackUrl when it's
-    // restricted to the exam join route; any other value (including
-    // absolute/protocol-relative URLs) falls back to "/" so this can
-    // never become an open redirect. See src/lib/safeCallbackUrl.ts.
+    // restricted to the exam join route or the authenticated lecturer
+    // area; any other value (including absolute/protocol-relative URLs)
+    // falls back to "/" so this can never become an open redirect. See
+    // src/lib/safeCallbackUrl.ts.
     const callbackUrl = searchParams.get("callbackUrl");
-    router.push(isSafeJoinCallbackUrl(callbackUrl) ? callbackUrl : "/");
+    router.push(isSafeAppCallbackUrl(callbackUrl) ? callbackUrl : "/");
     router.refresh();
   }
 

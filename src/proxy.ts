@@ -1,6 +1,6 @@
 import { auth } from "@/auth";
 import { NextResponse } from "next/server";
-import { isSafeJoinCallbackUrl } from "@/lib/safeCallbackUrl";
+import { isSafeAppCallbackUrl } from "@/lib/safeCallbackUrl";
 
 export default auth((req) => {
   const { pathname } = req.nextUrl;
@@ -8,13 +8,14 @@ export default auth((req) => {
 
   // Safe Exam Deep Link v1 — when redirecting an unauthenticated visitor
   // to login, preserve where they were headed so login can send them
-  // back afterward. Only ever set for the join route's own path pattern
-  // (validated by isSafeJoinCallbackUrl) — never a caller-supplied value,
-  // so this cannot become an open redirect. See
+  // back afterward. Only ever set for the current request's own path
+  // (validated by isSafeAppCallbackUrl, which allow-lists the student
+  // join route and the authenticated lecturer area) — never a
+  // caller-supplied value, so this cannot become an open redirect. See
   // docs/course-enrolment-and-exam-assignment.md.
   function loginRedirect(): NextResponse {
     const loginUrl = new URL("/login", req.url);
-    if (isSafeJoinCallbackUrl(pathname)) {
+    if (isSafeAppCallbackUrl(pathname)) {
       loginUrl.searchParams.set("callbackUrl", pathname);
     }
     return NextResponse.redirect(loginUrl);

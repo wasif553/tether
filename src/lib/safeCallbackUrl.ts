@@ -20,3 +20,21 @@ export function isSafeJoinCallbackUrl(value: string | null | undefined): value i
   if (!value.startsWith("/") || value.startsWith("//")) return false;
   return JOIN_PATH_RE.test(value);
 }
+
+/**
+ * Narrow companion to isSafeJoinCallbackUrl: also allows a same-origin,
+ * relative path under the authenticated lecturer area (e.g.
+ * `/lecturer/exams/[id]/submissions`), so a lecturer whose session
+ * expires mid-navigation is sent back to the page they wanted instead of
+ * "/" after logging back in — without loosening any of the open-redirect
+ * protection above. Every segment after `/lecturer` must be a plain path
+ * segment (letters/digits/hyphen/underscore only) — no query/hash
+ * smuggling, no `..` traversal, no encoded slashes.
+ */
+const LECTURER_PATH_RE = /^\/lecturer(\/[A-Za-z0-9_-]+)*$/;
+
+export function isSafeAppCallbackUrl(value: string | null | undefined): value is string {
+  if (!value) return false;
+  if (!value.startsWith("/") || value.startsWith("//")) return false;
+  return JOIN_PATH_RE.test(value) || LECTURER_PATH_RE.test(value);
+}
