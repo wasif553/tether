@@ -117,6 +117,23 @@ export class DetectionCooldownTracker {
   }
 }
 
+/**
+ * Gate for the dev-only, opt-in AI camera diagnostic logging (see
+ * docs/on-device-ai-integrity-detection-v1.md). Pure so it's testable
+ * without a browser: BOTH the environment must be "development" AND the
+ * caller must have explicitly set `localStorage.sesAiCameraDebug` to the
+ * exact string "true" — being in development mode alone is never enough,
+ * and this must always be false when `nodeEnv` is "production" regardless
+ * of the flag value.
+ */
+export function shouldLogAiCameraDebug(
+  nodeEnv: string | undefined,
+  debugFlagValue: string | null | undefined,
+): boolean {
+  if (nodeEnv !== "development") return false;
+  return debugFlagValue === "true";
+}
+
 export type DetectedObject = { className: string; score: number };
 
 export type PhoneDetectionResult = { detected: boolean; confidence: number };

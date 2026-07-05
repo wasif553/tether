@@ -10,11 +10,37 @@ import {
   computeLuminanceVariance,
   evaluatePersonDetections,
   evaluatePhoneDetections,
+  shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   assertSafeIntegrityMetadata,
 } from "./cameraIntegrityDetection";
 
 // ── Pure helpers ──────────────────────────────────────────────────────────
+
+describe("shouldLogAiCameraDebug", () => {
+  it("is false in production regardless of the debug flag", () => {
+    expect(shouldLogAiCameraDebug("production", "true")).toBe(false);
+  });
+
+  it("is false in development when the flag is absent", () => {
+    expect(shouldLogAiCameraDebug("development", null)).toBe(false);
+    expect(shouldLogAiCameraDebug("development", undefined)).toBe(false);
+  });
+
+  it("is false in development when the flag is any value other than the exact string \"true\"", () => {
+    expect(shouldLogAiCameraDebug("development", "false")).toBe(false);
+    expect(shouldLogAiCameraDebug("development", "1")).toBe(false);
+    expect(shouldLogAiCameraDebug("development", "")).toBe(false);
+  });
+
+  it("is true only when NODE_ENV is development AND the flag is exactly \"true\"", () => {
+    expect(shouldLogAiCameraDebug("development", "true")).toBe(true);
+  });
+
+  it("is false when NODE_ENV is undefined even if the flag is set", () => {
+    expect(shouldLogAiCameraDebug(undefined, "true")).toBe(false);
+  });
+});
 
 describe("bandForConfidence", () => {
   it("buckets scores into low/medium/high", () => {
@@ -165,7 +191,7 @@ describe("assertSafeIntegrityMetadata", () => {
         confidenceBand: "high",
         modelName: "coco-ssd",
         modelVersion: "lite_mobilenet_v2",
-        detectionIntervalSeconds: 8,
+        detectionIntervalSeconds: 3,
       }),
     ).not.toThrow();
   });

@@ -100,6 +100,10 @@ Known limitations of the AI checks specifically:
   limitation as the Persistent Camera Preview v1 real-device signoff) —
   a human with real hardware should verify before relying on this in a
   live exam.
+- AI detection confidence thresholds are initial defaults and have not
+  been calibrated against real-world lighting/camera conditions.
+  Institutions should test with representative hardware before relying
+  on this feature for a real exam.
 
 ## Capacity
 

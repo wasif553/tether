@@ -9,6 +9,7 @@ import {
   computeLuminanceVariance,
   evaluatePersonDetections,
   evaluatePhoneDetections,
+  shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   type DetectedObject,
 } from "@/lib/cameraIntegrityDetection";
@@ -261,7 +262,7 @@ export default function TakeExamPage({
   const detectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const detectorRef = useRef<CameraObjectDetector | null>(null);
   const detectionCooldown = useRef(new DetectionCooldownTracker());
-  const detectionTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const detectionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [aiCheckStatus, setAiCheckStatus] = useState<"idle" | "loading" | "active" | "unavailable">(
     "idle",
   );
@@ -583,12 +584,27 @@ export default function TakeExamPage({
 
   function stopAiDetection() {
     if (detectionTimer.current) {
-      clearInterval(detectionTimer.current);
+      clearTimeout(detectionTimer.current);
       detectionTimer.current = null;
     }
     detectorRef.current?.dispose();
     detectorRef.current = null;
     detectionCooldown.current.reset();
+  }
+
+  // Dev-only, opt-in diagnostic logging for tuning the interval/confidence
+  // threshold — see docs/on-device-ai-integrity-detection-v1.md. Gated on
+  // BOTH NODE_ENV === "development" AND an explicit localStorage flag, so
+  // it never logs in production and never logs just because a developer
+  // happens to be running `next dev`. Never sent to the server; only
+  // class names, confidence scores, and timing numbers are ever logged —
+  // never image/frame/base64/blob data.
+  function logAiCameraDebug(message: string, data: Record<string, unknown>) {
+    if (typeof window === "undefined") return;
+    if (!shouldLogAiCameraDebug(process.env.NODE_ENV, window.localStorage.getItem("sesAiCameraDebug"))) {
+      return;
+    }
+    console.log(`[sesAiCameraDebug] ${message}`, data);
   }
 
   // On-Device AI Camera Integrity Detection v1 — runs entirely against
@@ -619,117 +635,159 @@ export default function TakeExamPage({
       setAiCheckStatus("active");
     });
 
-    const intervalMs = 8_000; // within the recommended 5-10s range
+    // Recommended range: 2-3 seconds. Below 2s is not recommended — model
+    // inference itself can take a non-trivial fraction of a second on a
+    // slower device, and running much more often than that mostly burns
+    // battery/CPU without meaningfully improving detection latency. See
+    // docs/on-device-ai-integrity-detection-v1.md for the tradeoff.
+    const AI_DETECTION_MIN_INTERVAL_MS = 2_000;
+    const intervalMs = Math.max(AI_DETECTION_MIN_INTERVAL_MS, 3_000);
 
-    detectionTimer.current = setInterval(async () => {
+    // Self-scheduling (setTimeout-after-completion), not a fixed-rate
+    // setInterval: each tick waits for the previous inference to fully
+    // resolve before scheduling the next one, so a slow device can never
+    // stack up overlapping detector.detect() calls even at a short
+    // interval.
+    async function runDetectionTick() {
+      if (cancelled) return;
       const video = detectionVideoRef.current;
-      if (!video || video.readyState < 2 || video.videoWidth === 0) return;
-
-      if (!detectionCanvasRef.current) {
-        detectionCanvasRef.current = document.createElement("canvas");
-      }
-      const canvas = detectionCanvasRef.current;
-      canvas.width = 160;
-      canvas.height = Math.round((160 * video.videoHeight) / video.videoWidth) || 120;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      const now = Date.now();
       const cooldown = detectionCooldown.current;
+      const now = Date.now();
 
-      // Non-AI camera quality checks — no model required.
-      let imageData: ImageData;
       try {
-        imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      } catch {
-        return;
-      }
-      const { avgLuminance, variance } = computeLuminanceVariance(imageData.data);
-      const quality = classifyFrameQuality(avgLuminance, variance);
+        if (!video || video.readyState < 2 || video.videoWidth === 0) return;
 
-      const blockedCount = cooldown.recordObservation("blocked", quality === "blocked");
-      const darkCount = cooldown.recordObservation("dark", quality === "dark");
-      if (quality !== "blocked") cooldown.recordObservation("blocked", false);
-      if (quality !== "dark") cooldown.recordObservation("dark", false);
+        if (!detectionCanvasRef.current) {
+          detectionCanvasRef.current = document.createElement("canvas");
+        }
+        const canvas = detectionCanvasRef.current;
+        canvas.width = 160;
+        canvas.height = Math.round((160 * video.videoHeight) / video.videoWidth) || 120;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      if (quality === "blocked" && blockedCount >= 2 && cooldown.canEmit("CAMERA_VIEW_BLOCKED", now, 60_000)) {
-        cooldown.markEmitted("CAMERA_VIEW_BLOCKED", now);
-        reportIntegrityEvent("CAMERA_VIEW_BLOCKED", {
-          source: "on_device_camera_ai",
-          confidenceBand: "medium",
-          detectionIntervalSeconds: intervalMs / 1000,
+        // Non-AI camera quality checks — no model required.
+        let imageData: ImageData;
+        try {
+          imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        } catch {
+          return;
+        }
+        const { avgLuminance, variance } = computeLuminanceVariance(imageData.data);
+        const quality = classifyFrameQuality(avgLuminance, variance);
+
+        const blockedCount = cooldown.recordObservation("blocked", quality === "blocked");
+        const darkCount = cooldown.recordObservation("dark", quality === "dark");
+        if (quality !== "blocked") cooldown.recordObservation("blocked", false);
+        if (quality !== "dark") cooldown.recordObservation("dark", false);
+
+        if (quality === "blocked" && blockedCount >= 2 && cooldown.canEmit("CAMERA_VIEW_BLOCKED", now, 60_000)) {
+          cooldown.markEmitted("CAMERA_VIEW_BLOCKED", now);
+          reportIntegrityEvent("CAMERA_VIEW_BLOCKED", {
+            source: "on_device_camera_ai",
+            confidenceBand: "medium",
+            detectionIntervalSeconds: intervalMs / 1000,
+          });
+        } else if (quality === "dark" && darkCount >= 2 && cooldown.canEmit("CAMERA_TOO_DARK", now, 60_000)) {
+          cooldown.markEmitted("CAMERA_TOO_DARK", now);
+          reportIntegrityEvent("CAMERA_TOO_DARK", {
+            source: "on_device_camera_ai",
+            confidenceBand: "medium",
+            detectionIntervalSeconds: intervalMs / 1000,
+          });
+        }
+
+        // Object-detection-based checks — only if the model loaded.
+        const detector = detectorRef.current;
+        if (!detector) {
+          logAiCameraDebug("tick: model not loaded", { modelLoaded: false });
+          return;
+        }
+        let detections: DetectedObject[] = [];
+        const inferenceStart = performance.now();
+        let inferenceMs: number | null = null;
+        try {
+          detections = await detector.detect(video);
+          inferenceMs = performance.now() - inferenceStart;
+        } catch {
+          inferenceMs = performance.now() - inferenceStart;
+          logAiCameraDebug("tick: inference threw", { modelLoaded: true, inferenceMs });
+          return;
+        }
+
+        const phoneThreshold = 0.65;
+        const personThreshold = 0.6;
+        const phone = evaluatePhoneDetections(detections, phoneThreshold);
+        const person = evaluatePersonDetections(detections, personThreshold);
+
+        logAiCameraDebug("tick: inference complete", {
+          modelLoaded: true,
+          inferenceMs,
+          rawDetections: detections.map((d) => ({ className: d.className, score: d.score })),
+          phoneThreshold,
+          personThreshold,
+          phoneDetected: phone.detected,
+          phoneConfidence: phone.confidence,
+          personCount: person.personCount,
         });
-      } else if (quality === "dark" && darkCount >= 2 && cooldown.canEmit("CAMERA_TOO_DARK", now, 60_000)) {
-        cooldown.markEmitted("CAMERA_TOO_DARK", now);
-        reportIntegrityEvent("CAMERA_TOO_DARK", {
-          source: "on_device_camera_ai",
-          confidenceBand: "medium",
-          detectionIntervalSeconds: intervalMs / 1000,
-        });
-      }
 
-      // Object-detection-based checks — only if the model loaded.
-      const detector = detectorRef.current;
-      if (!detector) return;
-      let detections: DetectedObject[] = [];
-      try {
-        detections = await detector.detect(video);
-      } catch {
-        return;
-      }
+        const phoneCount = cooldown.recordObservation("phone", phone.detected);
+        if (
+          phone.detected &&
+          phoneCount >= 2 &&
+          cooldown.canEmit("POSSIBLE_PHONE_VISIBLE", now, 45_000)
+        ) {
+          cooldown.markEmitted("POSSIBLE_PHONE_VISIBLE", now);
+          reportIntegrityEvent("POSSIBLE_PHONE_VISIBLE", {
+            source: "on_device_camera_ai",
+            confidence: phone.confidence,
+            confidenceBand: bandForConfidence(phone.confidence),
+            modelName: detector.modelName,
+            modelVersion: detector.modelVersion,
+            detectionIntervalSeconds: intervalMs / 1000,
+          });
+        }
 
-      const phone = evaluatePhoneDetections(detections, 0.65);
-      const phoneCount = cooldown.recordObservation("phone", phone.detected);
-      if (
-        phone.detected &&
-        phoneCount >= 2 &&
-        cooldown.canEmit("POSSIBLE_PHONE_VISIBLE", now, 45_000)
-      ) {
-        cooldown.markEmitted("POSSIBLE_PHONE_VISIBLE", now);
-        reportIntegrityEvent("POSSIBLE_PHONE_VISIBLE", {
-          source: "on_device_camera_ai",
-          confidence: phone.confidence,
-          confidenceBand: bandForConfidence(phone.confidence),
-          modelName: detector.modelName,
-          modelVersion: detector.modelVersion,
-          detectionIntervalSeconds: intervalMs / 1000,
-        });
-      }
+        const secondPersonCount = cooldown.recordObservation("secondPerson", person.multiplePersons);
+        if (
+          person.multiplePersons &&
+          secondPersonCount >= 2 &&
+          cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000)
+        ) {
+          cooldown.markEmitted("POSSIBLE_SECOND_PERSON_VISIBLE", now);
+          reportIntegrityEvent("POSSIBLE_SECOND_PERSON_VISIBLE", {
+            source: "on_device_camera_ai",
+            confidenceBand: "medium",
+            modelName: detector.modelName,
+            modelVersion: detector.modelVersion,
+            detectionIntervalSeconds: intervalMs / 1000,
+          });
+        }
 
-      const person = evaluatePersonDetections(detections, 0.6);
-      const secondPersonCount = cooldown.recordObservation("secondPerson", person.multiplePersons);
-      if (
-        person.multiplePersons &&
-        secondPersonCount >= 2 &&
-        cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000)
-      ) {
-        cooldown.markEmitted("POSSIBLE_SECOND_PERSON_VISIBLE", now);
-        reportIntegrityEvent("POSSIBLE_SECOND_PERSON_VISIBLE", {
-          source: "on_device_camera_ai",
-          confidenceBand: "medium",
-          modelName: detector.modelName,
-          modelVersion: detector.modelVersion,
-          detectionIntervalSeconds: intervalMs / 1000,
-        });
+        const noPersonCount = cooldown.recordObservation("noPerson", person.noPersonDetected);
+        if (
+          person.noPersonDetected &&
+          noPersonCount >= 3 &&
+          cooldown.canEmit("NO_PERSON_VISIBLE", now, 45_000)
+        ) {
+          cooldown.markEmitted("NO_PERSON_VISIBLE", now);
+          reportIntegrityEvent("NO_PERSON_VISIBLE", {
+            source: "on_device_camera_ai",
+            confidenceBand: "medium",
+            modelName: detector.modelName,
+            modelVersion: detector.modelVersion,
+            detectionIntervalSeconds: intervalMs / 1000,
+          });
+        }
+      } finally {
+        if (!cancelled) {
+          detectionTimer.current = setTimeout(runDetectionTick, intervalMs);
+        }
       }
+    }
 
-      const noPersonCount = cooldown.recordObservation("noPerson", person.noPersonDetected);
-      if (
-        person.noPersonDetected &&
-        noPersonCount >= 3 &&
-        cooldown.canEmit("NO_PERSON_VISIBLE", now, 45_000)
-      ) {
-        cooldown.markEmitted("NO_PERSON_VISIBLE", now);
-        reportIntegrityEvent("NO_PERSON_VISIBLE", {
-          source: "on_device_camera_ai",
-          confidenceBand: "medium",
-          modelName: detector.modelName,
-          modelVersion: detector.modelVersion,
-          detectionIntervalSeconds: intervalMs / 1000,
-        });
-      }
-    }, intervalMs);
+    detectionTimer.current = setTimeout(runDetectionTick, intervalMs);
 
     return () => {
       cancelled = true;

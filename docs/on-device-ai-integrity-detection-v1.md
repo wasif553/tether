@@ -36,12 +36,14 @@ Confirming records exactly one metadata-only `STUDENT_VERIFICATION_CONFIRMED` in
 
 Detection runs entirely in the student's browser against the **same `MediaStream`** already held in `cameraStreamRef` for the existing camera preview/heartbeat (`src/app/student/exams/[id]/page.tsx`) — no second `getUserMedia()` call. A dedicated hidden `<video>` element (`detectionVideoRef`) keeps sampling frames even while the visible preview widget is minimized, since minimizing is deliberately just a display choice (see `docs/known-limitations.md`) and must never pause any monitoring.
 
-Every 8 seconds (within the recommended 5–10s range), the current frame is drawn to an in-memory, never-rendered `<canvas>` and:
+Every 3 seconds by default (minimum 2 seconds; the previous default was 8 seconds), the current frame is drawn to an in-memory, never-rendered `<canvas>` and:
 
 1. **Non-AI camera quality checks** (no model, no dependency): `computeLuminanceVariance()` and `classifyFrameQuality()` in `src/lib/cameraIntegrityDetection.ts` compute average luminance and pixel variance from the canvas `ImageData` to detect a blocked/covered lens (near-zero variance) or a too-dark room (low luminance). These run unconditionally, independent of whether the object-detection model below loaded successfully.
 2. **Object-detection checks** (model-dependent): if the model loaded, `detector.detect(video)` returns class/confidence pairs, which `evaluatePhoneDetections()` / `evaluatePersonDetections()` turn into phone/person/no-person/second-person signals.
 
 **Nothing above ever returns, logs, or transmits pixel data.** The canvas and its `ImageData` never leave the browser tab; only the numeric aggregates (luminance, variance) and, from the model, class names and confidence scores are ever used — and only those are sent to the server as `IntegrityEvent` metadata.
+
+**Scheduling:** the loop is self-scheduling (`setTimeout` after each inference resolves), not a fixed-rate `setInterval` — the next tick is only scheduled once the current frame's checks (including the async `detector.detect()` call) have fully completed. This means a slow device can never stack up overlapping inference calls even at a short interval; a single slow tick simply delays the next one rather than compounding. 2–3 seconds is the recommended range: below 2 seconds is not the default and is not recommended without first confirming CPU/inference-time impact on real hardware, since `lite_mobilenet_v2` inference itself can take a non-trivial fraction of a second on a slower device.
 
 ### Model/library choice
 
@@ -86,11 +88,22 @@ Every AI-sourced event's metadata contains only:
   "confidenceBand": "high",
   "modelName": "coco-ssd",
   "modelVersion": "lite_mobilenet_v2",
-  "detectionIntervalSeconds": 8
+  "detectionIntervalSeconds": 3
 }
 ```
 
 `confidence`/`modelName`/`modelVersion` are omitted for the two non-AI quality checks (blocked/dark), which have no model to report.
+
+### Dev-only diagnostic logging (`sesAiCameraDebug`)
+
+To help tune the interval and confidence threshold against real hardware without adding any student-facing UI or server-side logging, the detection loop supports an opt-in, development-only console log:
+
+- Gated on **both** `process.env.NODE_ENV === "development"` **and** `localStorage.getItem("sesAiCameraDebug") === "true"` (pure gate function: `shouldLogAiCameraDebug()` in `src/lib/cameraIntegrityDetection.ts`) — being in a dev server alone is never enough, and it is hard-disabled whenever `NODE_ENV` is not exactly `"development"`.
+- To enable: open the browser console on a local dev build and run `localStorage.setItem("sesAiCameraDebug", "true")`, then reload the exam page. To disable: `localStorage.removeItem("sesAiCameraDebug")`.
+- Logs, per detection tick: whether the model is loaded, the **raw** detection results (all classes and confidence scores, not just phone/person), the phone/person thresholds each detection is compared against, and `inferenceMs` (wall-clock time of the `detector.detect()` call only, measured with `performance.now()` immediately before/after).
+- Never sent to the server, never enabled by default, and never includes image/frame/base64/blob data — only class names, confidence numbers, and timing numbers ever appear in the log.
+
+**Confidence threshold tuning is expected before broad institutional rollout.** The current thresholds (phone ≥0.65, person ≥0.6) are initial defaults carried over from v1 and have not been calibrated against real-world lighting/camera/distance conditions. Use `sesAiCameraDebug` to collect real confidence scores on representative hardware (see the manual test steps in the PR/commit that introduced this logging) before deciding whether to adjust either threshold — do not lower them speculatively without that data.
 
 **Structural guardrail, not just convention:** `POST /api/submissions/[id]/integrity-events` rejects any request whose metadata contains a key matching `image|frame|screenshot|thumbnail|snapshot|base64|blob|dataurl` (case-insensitive), or any string value that looks like a `data:` URL or a long base64 blob — with a 400 response, before anything is written. The same check is mirrored client-side as `assertSafeIntegrityMetadata()` for defense-in-depth. **No API endpoint anywhere in this feature accepts an uploaded image, video, or file** — there is no upload endpoint, no storage bucket, and no code path that could accept one.
 
