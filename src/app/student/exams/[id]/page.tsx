@@ -9,6 +9,7 @@ import {
   computeLuminanceVariance,
   evaluatePersonDetections,
   evaluatePhoneDetections,
+  decideSecondPersonEmission,
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   type DetectedObject,
@@ -108,10 +109,16 @@ const DEBOUNCE_MS: Partial<Record<IntegrityEventType, number>> = {
   AI_CAMERA_CHECK_UNAVAILABLE: 60_000,
 };
 
-const MESSAGES: Record<IntegrityEventType, string> = {
-  FULLSCREEN_EXIT: "You exited fullscreen mode.",
-  WINDOW_BLUR: "You switched away from the exam window.",
-  WINDOW_FOCUS_RETURN: "You returned to the exam window.",
+// Exported (not just internal) so wording can be asserted against the
+// neutral-language rules in src/lib/secureExam.ts's tests without
+// duplicating this map — see docs/secure-exam-threat-model.md, "False-
+// positive handling". Never accusatory: no "cheating", "caught",
+// "confirmed misconduct", or "proof" — every message is either a plain
+// factual statement or ends with "Needs review"/"review required".
+export const MESSAGES: Record<IntegrityEventType, string> = {
+  FULLSCREEN_EXIT: "Student left full-screen mode. Needs review.",
+  WINDOW_BLUR: "Exam window lost focus. Needs review.",
+  WINDOW_FOCUS_RETURN: "Student returned to the exam window.",
   COPY_ATTEMPT: "A copy action was attempted.",
   PASTE_ATTEMPT: "A paste action was attempted.",
   RIGHT_CLICK_ATTEMPT: "A right-click was attempted.",
@@ -404,8 +411,27 @@ export default function TakeExamPage({
         setFullscreenReturnNeeded(false);
       }
     };
+    // `window.blur`/`window.focus` alone do not reliably fire when a
+    // student switches to another tab in the same browser — in many
+    // browsers the window itself never loses focus, only the document's
+    // visibility changes. `document.visibilitychange` is the primary
+    // signal for that case; `window.blur`/`window.focus` remain as a
+    // secondary signal for switching to another application or
+    // minimizing, where visibilitychange can be less consistent across
+    // browsers. Both share the same debounced WINDOW_BLUR/
+    // WINDOW_FOCUS_RETURN event types and the same 10s cooldown (see
+    // DEBOUNCE_MS above), so a single real action (e.g. Alt-Tab, which
+    // can fire both) is never double-recorded.
     const onBlur = () => secureSettings.trackWindowBlur && reportIntegrityEvent("WINDOW_BLUR");
     const onFocus = () => secureSettings.trackWindowBlur && reportIntegrityEvent("WINDOW_FOCUS_RETURN");
+    const onVisibilityChange = () => {
+      if (!secureSettings.trackWindowBlur) return;
+      if (document.hidden) {
+        reportIntegrityEvent("WINDOW_BLUR");
+      } else {
+        reportIntegrityEvent("WINDOW_FOCUS_RETURN");
+      }
+    };
 
     const onCopy = (e: ClipboardEvent) => {
       if (secureSettings.blockCopyPaste) e.preventDefault();
@@ -438,6 +464,7 @@ export default function TakeExamPage({
     document.addEventListener("fullscreenchange", onFullscreenChange);
     window.addEventListener("blur", onBlur);
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     document.addEventListener("copy", onCopy);
     document.addEventListener("cut", onCut);
     document.addEventListener("paste", onPaste);
@@ -450,6 +477,7 @@ export default function TakeExamPage({
       document.removeEventListener("fullscreenchange", onFullscreenChange);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       document.removeEventListener("copy", onCopy);
       document.removeEventListener("cut", onCut);
       document.removeEventListener("paste", onPaste);
@@ -749,16 +777,33 @@ export default function TakeExamPage({
           });
         }
 
+        // Confidence-aware second-person detection: a high-confidence
+        // multi-person read (>=0.75) emits immediately, without waiting
+        // for a second consecutive tick — the consecutive-count
+        // requirement stays in place only for the normal-confidence band
+        // (0.60-0.75), where a single frame is more likely to be a
+        // fleeting misclassification. Either path is still subject to the
+        // same 45s cooldown, so a second person who remains visible does
+        // not flood the evidence timeline.
         const secondPersonCount = cooldown.recordObservation("secondPerson", person.multiplePersons);
-        if (
-          person.multiplePersons &&
-          secondPersonCount >= 2 &&
-          cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000)
-        ) {
+        const secondPersonCooldownOk = cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000);
+        const secondPersonDecision = decideSecondPersonEmission(person, secondPersonCount, secondPersonCooldownOk);
+
+        logAiCameraDebug("tick: second-person decision", {
+          multiplePersons: person.multiplePersons,
+          multiplePersonsHighConfidence: person.multiplePersonsHighConfidence,
+          consecutiveCount: secondPersonCount,
+          cooldownBlocked: !secondPersonCooldownOk,
+          shouldEmit: secondPersonDecision.shouldEmit,
+          confidenceBand: secondPersonDecision.confidenceBand,
+          intervalMs,
+        });
+
+        if (secondPersonDecision.shouldEmit) {
           cooldown.markEmitted("POSSIBLE_SECOND_PERSON_VISIBLE", now);
           reportIntegrityEvent("POSSIBLE_SECOND_PERSON_VISIBLE", {
             source: "on_device_camera_ai",
-            confidenceBand: "medium",
+            confidenceBand: secondPersonDecision.confidenceBand,
             modelName: detector.modelName,
             modelVersion: detector.modelVersion,
             detectionIntervalSeconds: intervalMs / 1000,
@@ -787,7 +832,15 @@ export default function TakeExamPage({
       }
     }
 
-    detectionTimer.current = setTimeout(runDetectionTick, intervalMs);
+    // Run the first tick immediately rather than waiting a full interval —
+    // this effect only starts once the camera stream is granted, the
+    // pre-exam gate is acknowledged, and the exam is IN_PROGRESS (see the
+    // guard above), so those preconditions are already satisfied by the
+    // time we get here. If the hidden detection video hasn't loaded
+    // metadata yet, runDetectionTick's own readyState/videoWidth guard
+    // makes this a harmless no-op for that one tick, and the `finally`
+    // block still schedules the next attempt at the normal interval.
+    void runDetectionTick();
 
     return () => {
       cancelled = true;

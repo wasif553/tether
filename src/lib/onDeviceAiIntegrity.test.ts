@@ -10,6 +10,7 @@ import {
   computeLuminanceVariance,
   evaluatePersonDetections,
   evaluatePhoneDetections,
+  decideSecondPersonEmission,
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   assertSafeIntegrityMetadata,
@@ -140,6 +141,104 @@ describe("evaluatePersonDetections", () => {
     expect(result.multiplePersons).toBe(false);
     expect(result.noPersonDetected).toBe(false);
   });
+
+  it("7. two persons at high confidence (>=0.75) sets multiplePersonsHighConfidence", () => {
+    const result = evaluatePersonDetections(
+      [
+        { className: "person", score: 0.9 },
+        { className: "person", score: 0.8 },
+      ],
+      0.6,
+      0.75,
+    );
+    expect(result.multiplePersons).toBe(true);
+    expect(result.multiplePersonsHighConfidence).toBe(true);
+  });
+
+  it("8. two persons at normal confidence (0.60-0.75) does not set multiplePersonsHighConfidence", () => {
+    const result = evaluatePersonDetections(
+      [
+        { className: "person", score: 0.7 },
+        { className: "person", score: 0.65 },
+      ],
+      0.6,
+      0.75,
+    );
+    expect(result.multiplePersons).toBe(true);
+    expect(result.multiplePersonsHighConfidence).toBe(false);
+  });
+
+  it("only one of two persons at high confidence does not set multiplePersonsHighConfidence", () => {
+    const result = evaluatePersonDetections(
+      [
+        { className: "person", score: 0.9 },
+        { className: "person", score: 0.62 },
+      ],
+      0.6,
+      0.75,
+    );
+    expect(result.multiplePersons).toBe(true);
+    expect(result.multiplePersonsHighConfidence).toBe(false);
+  });
+
+  it("10. one person only never sets multiplePersons or multiplePersonsHighConfidence", () => {
+    const result = evaluatePersonDetections([{ className: "person", score: 0.95 }], 0.6, 0.75);
+    expect(result.multiplePersons).toBe(false);
+    expect(result.multiplePersonsHighConfidence).toBe(false);
+  });
+});
+
+describe("decideSecondPersonEmission", () => {
+  it("7. high-confidence two-person detection emits immediately (consecutiveCount 1)", () => {
+    const person = evaluatePersonDetections(
+      [
+        { className: "person", score: 0.9 },
+        { className: "person", score: 0.8 },
+      ],
+      0.6,
+      0.75,
+    );
+    const decision = decideSecondPersonEmission(person, 1, true);
+    expect(decision.shouldEmit).toBe(true);
+    expect(decision.confidenceBand).toBe("high");
+  });
+
+  it("8. normal-confidence two-person detection requires a second consecutive tick", () => {
+    const person = evaluatePersonDetections(
+      [
+        { className: "person", score: 0.7 },
+        { className: "person", score: 0.65 },
+      ],
+      0.6,
+      0.75,
+    );
+    expect(decideSecondPersonEmission(person, 1, true).shouldEmit).toBe(false);
+    const secondTick = decideSecondPersonEmission(person, 2, true);
+    expect(secondTick.shouldEmit).toBe(true);
+    expect(secondTick.confidenceBand).toBe("medium");
+  });
+
+  it("9. cooldown blocks emission even when high-confidence and consecutive conditions are met", () => {
+    const person = evaluatePersonDetections(
+      [
+        { className: "person", score: 0.95 },
+        { className: "person", score: 0.9 },
+      ],
+      0.6,
+      0.75,
+    );
+    const decision = decideSecondPersonEmission(person, 3, false);
+    expect(decision.shouldEmit).toBe(false);
+    expect(decision.confidenceBand).toBe(null);
+  });
+
+  it("10/11. no event is emitted for one person or zero persons, regardless of consecutive count", () => {
+    const onePerson = evaluatePersonDetections([{ className: "person", score: 0.95 }], 0.6, 0.75);
+    expect(decideSecondPersonEmission(onePerson, 5, true).shouldEmit).toBe(false);
+
+    const noPersons = evaluatePersonDetections([], 0.6, 0.75);
+    expect(decideSecondPersonEmission(noPersons, 5, true).shouldEmit).toBe(false);
+  });
 });
 
 describe("DetectionCooldownTracker", () => {
@@ -207,6 +306,8 @@ const { getOrCreateTestInstitution } = await import("./testInstitution");
 const examRoute = await import("../app/api/exams/[id]/route");
 const integrityEventsRoute = await import("../app/api/submissions/[id]/integrity-events/route");
 const { buildEvidenceReport } = await import("./evidenceReport");
+const { MESSAGES } = await import("../app/student/exams/[id]/page");
+const { labelForEventType } = await import("./integrityEventLabels");
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT", institutionId: string) {
   return {
@@ -407,6 +508,82 @@ describe("AI event types accepted, media metadata rejected", () => {
   });
 });
 
+describe("window blur/focus-loss and focus-return event types", () => {
+  it("1. WINDOW_BLUR is accepted by the student integrity-events API", async () => {
+    const exam = await createExam();
+    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: studentA.id } });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await integrityEventsRoute.POST(
+      jsonRequest("POST", {
+        eventType: "WINDOW_BLUR",
+        severity: "MEDIUM",
+        message: "Exam window lost focus. Needs review.",
+        occurredAt: new Date().toISOString(),
+      }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it("2. WINDOW_FOCUS_RETURN is accepted by the student integrity-events API", async () => {
+    const exam = await createExam();
+    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: studentA.id } });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await integrityEventsRoute.POST(
+      jsonRequest("POST", {
+        eventType: "WINDOW_FOCUS_RETURN",
+        severity: "INFO",
+        message: "Student returned to the exam window.",
+        occurredAt: new Date().toISOString(),
+      }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it("5. a duplicate WINDOW_BLUR within the debounce window returns the existing event, not a new one", async () => {
+    const exam = await createExam();
+    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: studentA.id } });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const body = jsonRequest("POST", {
+      eventType: "WINDOW_BLUR",
+      severity: "MEDIUM",
+      message: "Exam window lost focus. Needs review.",
+      occurredAt: new Date().toISOString(),
+    });
+    const first = await integrityEventsRoute.POST(body, { params: Promise.resolve({ id: submission.id }) });
+    expect(first.status).toBe(201);
+
+    const second = await integrityEventsRoute.POST(
+      jsonRequest("POST", {
+        eventType: "WINDOW_BLUR",
+        severity: "MEDIUM",
+        message: "Exam window lost focus. Needs review.",
+        occurredAt: new Date().toISOString(),
+      }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(second.status).toBe(200);
+
+    const count = await prisma.integrityEvent.count({ where: { submissionId: submission.id, eventType: "WINDOW_BLUR" } });
+    expect(count).toBe(1);
+  });
+
+  it("6. no student-facing message or lecturer-facing label anywhere uses accusatory wording", () => {
+    const bannedWords = ["cheating", "caught", "confirmed misconduct", "proof"];
+    const allMessages = Object.values(MESSAGES).join(" ").toLowerCase();
+    for (const banned of bannedWords) {
+      expect(allMessages).not.toContain(banned);
+    }
+
+    const allEventTypes = Object.keys(MESSAGES);
+    const allLabels = allEventTypes.map((t) => labelForEventType(t)).join(" ").toLowerCase();
+    for (const banned of bannedWords) {
+      expect(allLabels).not.toContain(banned);
+    }
+  });
+});
+
 describe("evidence report: neutral wording, AI summary, risk scoring", () => {
   async function createGradedSubmissionWithEvents(events: Array<{ eventType: string; severity: string; metadata?: object }>) {
     const exam = await createExam();
@@ -459,6 +636,31 @@ describe("evidence report: neutral wording, AI summary, risk scoring", () => {
     const phoneEvent = report.events.find((e) => e.eventType === "POSSIBLE_PHONE_VISIBLE");
     expect(phoneEvent?.confidenceBand).toBe("high");
     expect(phoneEvent?.eventLabel).toContain("Possible");
+  });
+
+  it("3/4/6. WINDOW_BLUR/WINDOW_FOCUS_RETURN/FULLSCREEN_EXIT appear with neutral eventLabel wording", async () => {
+    const submission = await createGradedSubmissionWithEvents([
+      { eventType: "WINDOW_BLUR", severity: "MEDIUM" },
+      { eventType: "WINDOW_FOCUS_RETURN", severity: "INFO" },
+      { eventType: "FULLSCREEN_EXIT", severity: "MEDIUM" },
+    ]);
+    const lecturer = await prisma.user.findUniqueOrThrow({ where: { id: lecturerA.id } });
+    const report = await buildEvidenceReport(submission.id, {
+      user: { id: lecturer.id, role: "LECTURER", institutionId: instA },
+    } as never);
+
+    const blurEvent = report.events.find((e) => e.eventType === "WINDOW_BLUR");
+    const focusReturnEvent = report.events.find((e) => e.eventType === "WINDOW_FOCUS_RETURN");
+    const fullscreenEvent = report.events.find((e) => e.eventType === "FULLSCREEN_EXIT");
+    expect(blurEvent?.eventLabel).toBe("Exam window lost focus — needs review");
+    expect(focusReturnEvent?.eventLabel).toBe("Returned to exam window");
+    expect(fullscreenEvent?.eventLabel).toBe("Left full-screen mode — needs review");
+
+    const allText = JSON.stringify(report.events).toLowerCase();
+    expect(allText).not.toContain("cheating");
+    expect(allText).not.toContain("caught");
+    expect(allText).not.toContain("proof");
+    expect(allText).not.toContain("confirmed misconduct");
   });
 
   it("13. AI-unavailable events do not increase risk", async () => {

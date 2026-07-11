@@ -25,7 +25,7 @@ assumes their presence.
 
 | Threat | Control |
 |---|---|
-| Tab switching / window focus loss | `WINDOW_BLUR` / `WINDOW_FOCUS_RETURN` integrity events, debounced |
+| Tab switching / window focus loss | `WINDOW_BLUR` / `WINDOW_FOCUS_RETURN` integrity events, debounced. Detected via `document.visibilitychange` (primary — reliably fires on same-browser tab switches, where `window.blur` alone often does not) plus `window.blur`/`window.focus` (secondary — covers switching to another application or minimizing). Both signals share the same debounced event types, so a single real action is never double-recorded. |
 | Copy/paste of question content or answers | `COPY_ATTEMPT` / `PASTE_ATTEMPT` integrity events; severity raised when the lecturer enables "Block copy/paste" |
 | Right-click (e.g. to open dev tools or search) | `RIGHT_CLICK_ATTEMPT` integrity event |
 | Fullscreen exit | `FULLSCREEN_EXIT` integrity event; severity raised to HIGH when the lecturer requires fullscreen |
@@ -55,6 +55,20 @@ assumes their presence.
   machines, secondary monitors). This is explicitly deferred to a future
   Electron lockdown layer.
 - AI-assisted plagiarism detection in free-text answers.
+- Guaranteed cross-browser blur/tab-switch detection. `document.visibilitychange`
+  and `window.blur`/`window.focus` are both best-effort browser APIs — a
+  browser vendor could change firing behavior, and some in-app/embedded
+  browser contexts are known to behave inconsistently. This has not been
+  verified against a matrix of real browsers/devices; a human should
+  confirm on the target institution's actual browser mix before a live
+  exam. See "Browser-Level Friction v1" below for the same caveat as it
+  applies to other client-side signals.
+- On-device AI camera phone/second-person detection cannot tell whether a
+  detected additional person *replaced* the original student — it only
+  reports how many `person`-class detections are in frame per tick. There
+  is no face recognition or identity comparison in this feature, and none
+  is planned without a separate privacy/legal review (see
+  docs/on-device-ai-integrity-detection-v1.md).
 
 These gaps are the reason SES never claims to be "cheat-proof." Secure
 Exam Mode reduces opportunity and creates a reviewable record; it does
