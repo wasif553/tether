@@ -150,67 +150,21 @@ export function evaluatePhoneDetections(
   return { detected: true, confidence: best.score };
 }
 
-export type PersonDetectionResult = {
-  personCount: number;
-  noPersonDetected: boolean;
-  multiplePersons: boolean;
-  /**
-   * True when at least 2 persons are detected at `highConfidence` or
-   * above (not just `minConfidence`) — used to decide whether a
-   * second-person signal is confident enough to skip the consecutive-tick
-   * requirement. See "Confidence-aware person detection" in
-   * docs/on-device-ai-integrity-detection-v1.md.
-   */
-  multiplePersonsHighConfidence: boolean;
-};
+export type PersonDetectionResult = { personCount: number; noPersonDetected: boolean; multiplePersons: boolean };
 
-/**
- * Counts person-class detections at or above `minConfidence`, and
- * separately at or above `highConfidence` (a stricter bar used only to
- * decide whether a second-person signal is confident enough to emit
- * without waiting for a second consecutive tick).
- */
+/** Counts person-class detections at or above `minConfidence`. */
 export function evaluatePersonDetections(
   detections: DetectedObject[],
   minConfidence = 0.6,
-  highConfidence = 0.75,
 ): PersonDetectionResult {
-  const atMinConfidence = detections.filter(
+  const personCount = detections.filter(
     (d) => d.className.toLowerCase() === "person" && d.score >= minConfidence,
-  );
-  const personCount = atMinConfidence.length;
-  const highConfidenceCount = atMinConfidence.filter((d) => d.score >= highConfidence).length;
+  ).length;
   return {
     personCount,
     noPersonDetected: personCount === 0,
     multiplePersons: personCount >= 2,
-    multiplePersonsHighConfidence: highConfidenceCount >= 2,
   };
-}
-
-export type SecondPersonEmissionDecision = {
-  shouldEmit: boolean;
-  confidenceBand: "high" | "medium" | null;
-};
-
-/**
- * Pure decision function for whether a POSSIBLE_SECOND_PERSON_VISIBLE
- * event should be emitted this tick — extracted so it's unit-testable
- * without a browser/camera harness. A high-confidence read (both persons
- * >=0.75) is allowed to emit on the very first tick it's observed;
- * a normal-confidence read (0.60-0.75) still requires
- * `consecutiveCount >= 2` to guard against a single fleeting
- * misclassification. Either path respects the same cooldown.
- */
-export function decideSecondPersonEmission(
-  person: PersonDetectionResult,
-  consecutiveCount: number,
-  cooldownOk: boolean,
-): SecondPersonEmissionDecision {
-  if (!cooldownOk) return { shouldEmit: false, confidenceBand: null };
-  if (person.multiplePersonsHighConfidence) return { shouldEmit: true, confidenceBand: "high" };
-  if (person.multiplePersons && consecutiveCount >= 2) return { shouldEmit: true, confidenceBand: "medium" };
-  return { shouldEmit: false, confidenceBand: null };
 }
 
 /**

@@ -5,9 +5,6 @@
  * listed here, so existing event types keep their current display.
  */
 const EVENT_TYPE_LABELS: Partial<Record<string, string>> = {
-  FULLSCREEN_EXIT: "Left full-screen mode — needs review",
-  WINDOW_BLUR: "Exam window lost focus — needs review",
-  WINDOW_FOCUS_RETURN: "Returned to exam window",
   CAMERA_PERMISSION_GRANTED: "Camera permission granted",
   CAMERA_PERMISSION_DENIED: "Camera permission denied",
   CAMERA_STARTED: "Camera monitoring started",

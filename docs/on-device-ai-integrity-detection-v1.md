@@ -60,7 +60,7 @@ Every 3 seconds by default (minimum 2 seconds; the previous default was 8 second
 | Event | Trigger | Severity | Cooldown |
 |---|---|---|---|
 | `POSSIBLE_PHONE_VISIBLE` | A phone-class detection ≥0.65 confidence, on ≥2 consecutive checks | MEDIUM | 45s |
-| `POSSIBLE_SECOND_PERSON_VISIBLE` | Confidence-aware — see below | MEDIUM | 45s |
+| `POSSIBLE_SECOND_PERSON_VISIBLE` | ≥2 person detections ≥0.60 confidence, on ≥2 consecutive checks | MEDIUM | 45s |
 | `NO_PERSON_VISIBLE` | Zero person detections, on ≥3 consecutive checks | MEDIUM | 45s |
 | `CAMERA_VIEW_BLOCKED` | Near-zero frame variance, on ≥2 consecutive checks | MEDIUM | 60s |
 | `CAMERA_TOO_DARK` | Low average luminance, on ≥2 consecutive checks | LOW | 60s |
@@ -68,31 +68,14 @@ Every 3 seconds by default (minimum 2 seconds; the previous default was 8 second
 
 Existing camera lifecycle events (`CAMERA_STOPPED`, `CAMERA_PERMISSION_DENIED`, `CAMERA_UNAVAILABLE`, `CAMERA_HEARTBEAT_MISSED`) are reused unchanged — no duplicate event types were created for camera-stopped/revoked scenarios.
 
-### Confidence-aware second-person detection and timing
+### Timing, debounce, and cooldown
 
-`POSSIBLE_SECOND_PERSON_VISIBLE` uses a two-tier confidence rule (`decideSecondPersonEmission()` in `src/lib/cameraIntegrityDetection.ts`), tuned to reduce perceived latency without lowering the underlying person-detection threshold (0.60) or raising false-positive risk:
+Two independent layers prevent event flooding:
 
-- **High confidence (both persons ≥0.75):** emits on the very first tick they're observed — no consecutive-tick wait.
-- **Normal confidence (0.60-0.75):** still requires 2 consecutive ticks, same as v1, to guard against a single fleeting misclassification.
-- Either path is gated by the same 45s cooldown, so a second person who remains visible in frame does not repeatedly flood the evidence timeline.
-
-Combined with running the first detection tick immediately (instead of waiting a full interval after the camera stream is ready — see "Architecture" above) and the 3s interval, expected latency is:
-
-| Scenario | Old (v1) | New |
-|---|---|---|
-| High-confidence second person, already in frame when detection starts | up to 8s (interval wait) + 2 ticks (~16s) | ~0-3s (first tick, immediate emit) |
-| Normal/lower-confidence second person | up to 8s + 2 ticks (~16s) | up to 3s + 1 more tick (~6s) |
-
-These are expected-case estimates, not guarantees — actual latency depends on device inference speed (see `inferenceMs` in the dev diagnostic log below) and exactly when in the tick cycle the second person becomes visible.
-
-Two independent layers prevent event flooding beyond the confidence-tier logic above:
-
-1. **Client-side:** `DetectionCooldownTracker` (`src/lib/cameraIntegrityDetection.ts`) tracks a per-signal consecutive-detection counter (reset to 0 on any miss) and a per-signal "last emitted" timestamp; an event is only sent once the confidence/consecutive-count rule above is satisfied **and** the cooldown window has elapsed.
+1. **Client-side:** `DetectionCooldownTracker` (`src/lib/cameraIntegrityDetection.ts`) tracks a per-signal consecutive-detection counter (reset to 0 on any miss) and a per-signal "last emitted" timestamp; an event is only sent once the consecutive-count threshold is met **and** the cooldown window has elapsed.
 2. **Server-side:** `POST /api/submissions/[id]/integrity-events` independently enforces the same cooldown windows by checking the most recent event of that type for the submission — a second, defense-in-depth layer in case client-side state is somehow bypassed.
 
 Both layers are cleared on unmount, on submission, or when the camera stream stops (`stopAiDetection()`).
-
-**Still no image/frame/snapshot capture, no face recognition, and no person-change (biometric identity) detection** — this feature only ever counts how many `person`-class detections are in frame per tick; it does not compare faces or attempt to determine whether the *same* person left and a *different* person returned. See "Explicitly out of scope" below.
 
 ### Metadata shape and safety guardrails
 
@@ -155,22 +138,6 @@ Every label, message, and disclaimer added by this feature uses "possible," "nee
 - **No face recognition, no gaze tracking, no biometric identity verification, no emotion detection** — none of these exist anywhere in this feature, and none should be added under a future version without a fresh, separate privacy review.
 - **No automatic misconduct finding.** Every signal is a review indicator; the lecturer and institution make the final academic decision, exactly as with every other integrity signal in SES.
 - **Real-webcam accuracy verification is pending** — see "Model/library choice" above.
-
-**Explicitly out of scope (not implemented, and not planned without a separate
-review):** snapshot/image/frame/screenshot capture, video recording, live
-streaming, face recognition, face comparison, biometric identity matching,
-and "the person changed" detection across time. Detecting that the visible
-person changed would require comparing faces or another biometric signal —
-that is a separate privacy/legal/product decision, not a natural extension
-of the existing metadata-only counting approach this feature uses.
-
-**Possible future non-biometric work (documented, not implemented):** a
-lecturer-configurable "re-confirm after camera interruption" step — i.e.
-re-showing the existing (non-biometric) student verification tick-box
-confirmation from "Student verification (v1)" above if the camera stream
-stops and restarts mid-exam — would not require any image storage or face
-comparison, since it reuses the existing yes/no confirmation gate. This is
-future work, not implemented in this pass.
 
 ---
 
