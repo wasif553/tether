@@ -108,6 +108,21 @@ export default function LecturerExamPage({
   const [loading, setLoading] = useState(true);
 
   const [secureForm, setSecureForm] = useState<SecureSettings | null>(null);
+
+  // Temporary dev-only diagnostic (see loadExam above) — logs secureForm
+  // (and therefore what the toggles below will render as `checked`)
+  // every time it changes. Remove once the production/local mismatch is
+  // resolved.
+  useEffect(() => {
+    if (
+      process.env.NODE_ENV === "development" &&
+      typeof window !== "undefined" &&
+      window.localStorage.getItem("sesSecureSettingsDebug") === "true"
+    ) {
+      console.log("[sesSecureSettingsDebug] secureForm state (drives toggle checked props):", secureForm);
+    }
+  }, [secureForm]);
+
   const [savingSecure, setSavingSecure] = useState(false);
   const [accessCodeInput, setAccessCodeInput] = useState("");
   const [savingAccessCode, setSavingAccessCode] = useState(false);
@@ -203,6 +218,17 @@ export default function LecturerExamPage({
     const res = await fetch(`/api/exams/${id}`);
     if (res.ok) {
       const data: Exam = await res.json();
+      // Temporary dev-only diagnostic for the production secureSettings
+      // display investigation — never fires outside NODE_ENV=development,
+      // and only when explicitly opted in via localStorage. Remove once
+      // the production/local mismatch is resolved.
+      if (
+        process.env.NODE_ENV === "development" &&
+        typeof window !== "undefined" &&
+        window.localStorage.getItem("sesSecureSettingsDebug") === "true"
+      ) {
+        console.log("[sesSecureSettingsDebug] raw exam.secureSettings from GET /api/exams/[id]:", data.secureSettings);
+      }
       setExam(data);
       setSecureForm(data.secureSettings);
       setCourseId(data.courseId ?? "");

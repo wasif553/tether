@@ -278,6 +278,17 @@ export default function TakeExamPage({
     fetch(`/api/submissions/${id}`)
       .then((res) => res.json())
       .then((d: SubmissionData) => {
+        // Temporary dev-only diagnostic for the production secureSettings
+        // display investigation — never fires outside NODE_ENV=development,
+        // and only when explicitly opted in via localStorage. Remove once
+        // the production/local mismatch is resolved.
+        if (
+          process.env.NODE_ENV === "development" &&
+          typeof window !== "undefined" &&
+          window.localStorage.getItem("sesSecureSettingsDebug") === "true"
+        ) {
+          console.log("[sesSecureSettingsDebug] raw exam.secureSettings from GET /api/submissions/[id]:", d.exam.secureSettings);
+        }
         setData(d);
         const initial: Record<string, string> = {};
         d.answers.forEach((a) => {
@@ -912,6 +923,23 @@ export default function TakeExamPage({
   const verificationGateSatisfied = !requireStudentVerification || verificationConfirmed;
   const cameraGateSatisfied =
     (!requireCamera || cameraStatus === "granted") && verificationGateSatisfied;
+
+  // Temporary dev-only diagnostic for the production secureSettings
+  // display investigation — never fires outside NODE_ENV=development,
+  // and only when explicitly opted in via localStorage. Remove once the
+  // production/local mismatch is resolved.
+  if (
+    process.env.NODE_ENV === "development" &&
+    typeof window !== "undefined" &&
+    window.localStorage.getItem("sesSecureSettingsDebug") === "true"
+  ) {
+    console.log("[sesSecureSettingsDebug] gate state:", {
+      parsedSecureSettings: secureSettings,
+      requireCamera,
+      cameraStatus,
+      cameraGateSatisfied,
+    });
+  }
 
   if (secureModeEnabled && !gateAcknowledged) {
     return (
