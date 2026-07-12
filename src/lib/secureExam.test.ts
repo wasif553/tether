@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SECURE_SETTINGS, parseSecureSettings, severityFor } from "./secureExam";
+import {
+  activeSafeExamControlLabels,
+  DEFAULT_SECURE_SETTINGS,
+  parseSecureSettings,
+  safeExamModeStatusLabel,
+  secureSettingsChanged,
+  severityFor,
+} from "./secureExam";
 
 describe("parseSecureSettings", () => {
   it("returns defaults for null/undefined input", () => {
@@ -129,5 +136,49 @@ describe("secure settings additions (camera + browser-friction)", () => {
   it("does not require Canvas or AI configuration for any secure setting default", () => {
     const keys = Object.keys(DEFAULT_SECURE_SETTINGS);
     expect(keys.some((k) => /canvas|lti|anthropic|^ai/i.test(k))).toBe(false);
+  });
+});
+
+describe("safe exam mode UI helpers", () => {
+  it("labels safe mode status clearly as enabled or disabled", () => {
+    expect(safeExamModeStatusLabel({ ...DEFAULT_SECURE_SETTINGS, secureModeEnabled: true })).toBe(
+      "Safe Exam Mode: Enabled",
+    );
+    expect(safeExamModeStatusLabel({ ...DEFAULT_SECURE_SETTINGS, secureModeEnabled: false })).toBe(
+      "Safe Exam Mode: Disabled",
+    );
+  });
+
+  it("lists active safe mode controls only when safe mode is enabled", () => {
+    expect(
+      activeSafeExamControlLabels({
+        ...DEFAULT_SECURE_SETTINGS,
+        secureModeEnabled: true,
+        requireCamera: true,
+        requireFullscreen: true,
+        requireStudentVerification: true,
+        enableAiCameraIntegrityChecks: true,
+      }),
+    ).toEqual([
+      "Camera required",
+      "Full screen required",
+      "Student verification required",
+      "AI camera checks enabled",
+    ]);
+    expect(
+      activeSafeExamControlLabels({
+        ...DEFAULT_SECURE_SETTINGS,
+        secureModeEnabled: false,
+        requireCamera: true,
+        requireFullscreen: true,
+      }),
+    ).toEqual([]);
+  });
+
+  it("detects unsaved safe exam changes independently of question saves", () => {
+    const saved = { ...DEFAULT_SECURE_SETTINGS, secureModeEnabled: false };
+    const draft = { ...saved, secureModeEnabled: true };
+    expect(secureSettingsChanged(saved, draft)).toBe(true);
+    expect(secureSettingsChanged(saved, { ...saved })).toBe(false);
   });
 });

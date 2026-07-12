@@ -12,6 +12,11 @@ import {
   validateManualDraft,
   type ManualQuestionDraft,
 } from "@/lib/manualQuestionDraft";
+import {
+  activeSafeExamControlLabels,
+  safeExamModeStatusLabel,
+  secureSettingsChanged,
+} from "@/lib/secureExam";
 
 type Question = {
   id: string;
@@ -126,6 +131,7 @@ export default function LecturerExamPage({
   }, [secureForm]);
 
   const [savingSecure, setSavingSecure] = useState(false);
+  const [secureSaveMessage, setSecureSaveMessage] = useState<string | null>(null);
   const [accessCodeInput, setAccessCodeInput] = useState("");
   const [savingAccessCode, setSavingAccessCode] = useState(false);
   const [accessCodeMessage, setAccessCodeMessage] = useState<string | null>(null);
@@ -217,7 +223,7 @@ export default function LecturerExamPage({
 
   const difficultySum = easyPct + mediumPct + hardPct;
 
-  async function loadExam() {
+  async function loadExam(options: { preserveSecureForm?: boolean } = {}) {
     setLoading(true);
     const res = await fetch(`/api/exams/${id}`);
     if (res.ok) {
@@ -234,7 +240,9 @@ export default function LecturerExamPage({
         console.log("[sesSecureSettingsDebug] raw exam.secureSettings from GET /api/exams/[id]:", data.secureSettings);
       }
       setExam(data);
-      setSecureForm(data.secureSettings);
+      if (!options.preserveSecureForm) {
+        setSecureForm(data.secureSettings);
+      }
       setCourseId(data.courseId ?? "");
       setAssignmentMode(data.assignmentMode ?? "COURSE");
       setAvailableFrom(data.availableFrom ? data.availableFrom.slice(0, 16) : "");
@@ -427,7 +435,7 @@ export default function LecturerExamPage({
     setAddSuccess(`${body.created} question${body.created === 1 ? "" : "s"} added.`);
     setManualDrafts([createEmptyManualDraft()]);
     setManualErrors({});
-    await loadExam();
+    await loadExam({ preserveSecureForm: true });
   }
 
   function handlePreviewBulkQuestions() {
@@ -469,12 +477,12 @@ export default function LecturerExamPage({
     setBulkResult(data);
     setBulkText("");
     setBulkPreview(null);
-    await loadExam();
+    await loadExam({ preserveSecureForm: true });
   }
 
   async function handleDeleteQuestion(questionId: string) {
     await fetch(`/api/exams/${id}/questions/${questionId}`, { method: "DELETE" });
-    await loadExam();
+    await loadExam({ preserveSecureForm: true });
   }
 
   async function togglePublish() {
@@ -490,13 +498,19 @@ export default function LecturerExamPage({
   async function handleSaveSecureSettings() {
     if (!secureForm) return;
     setSavingSecure(true);
+    setSecureSaveMessage(null);
     const res = await fetch(`/api/exams/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ secureSettings: secureForm }),
     });
     setSavingSecure(false);
-    if (res.ok) await loadExam();
+    if (res.ok) {
+      setSecureSaveMessage("Safe exam settings saved.");
+      await loadExam();
+    } else {
+      setSecureSaveMessage("Safe exam settings could not be saved. Please try again.");
+    }
   }
 
   async function handleSetAccessCode() {
@@ -674,11 +688,16 @@ export default function LecturerExamPage({
 
     setGenerated([]);
     setIncluded([]);
-    await loadExam();
+    await loadExam({ preserveSecureForm: true });
   }
 
   if (loading) return <p className="text-gray-500">Loading...</p>;
   if (!exam) return <p className="text-red-600">Exam not found</p>;
+
+  const hasUnsavedSecureChanges =
+    secureForm != null && secureSettingsChanged(exam.secureSettings, secureForm);
+  const safeModeStatus = safeExamModeStatusLabel(exam.secureSettings);
+  const activeSafeModeControls = activeSafeExamControlLabels(exam.secureSettings);
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -774,7 +793,7 @@ export default function LecturerExamPage({
 
       <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
         <div className="rounded border border-gray-200 p-3">
-          <p className="text-xs uppercase text-gray-500">Secure Exam Mode</p>
+          <p className="text-xs uppercase text-gray-500">Safe Exam Mode</p>
           <p className="mt-1 text-sm">
             {exam.secureSettings.secureModeEnabled ? "Enabled" : "Disabled"}
           </p>
@@ -797,20 +816,47 @@ export default function LecturerExamPage({
         </div>
       </div>
 
-      <h2 className="mt-8 text-lg font-medium">Secure Exam Mode</h2>
+      <h2 className="mt-8 text-lg font-medium">Safe Exam Mode</h2>
       <p className="mt-1 text-sm text-gray-500">
-        Secure Exam Mode records exam integrity signals for lecturer review. It does not
+        Safe Exam Mode records exam integrity signals for lecturer review. It does not
         automatically accuse students of misconduct.
       </p>
       {secureForm && (
         <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+          <div className="rounded border border-gray-200 bg-gray-50 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={
+                  exam.secureSettings.secureModeEnabled
+                    ? "rounded bg-green-100 px-2 py-0.5 text-sm font-medium text-green-700"
+                    : "rounded bg-gray-200 px-2 py-0.5 text-sm font-medium text-gray-700"
+                }
+              >
+                {safeModeStatus}
+              </span>
+              {hasUnsavedSecureChanges && (
+                <span className="rounded bg-amber-100 px-2 py-0.5 text-sm text-amber-800">
+                  Unsaved safe exam changes
+                </span>
+              )}
+            </div>
+            {activeSafeModeControls.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {activeSafeModeControls.map((label) => (
+                  <span key={label} className="rounded bg-white px-2 py-0.5 text-xs text-gray-700">
+                    {label}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
           <label className="flex items-center gap-2 text-sm font-medium">
             <input
               type="checkbox"
               checked={secureForm.secureModeEnabled}
               onChange={(e) => setSecureForm({ ...secureForm, secureModeEnabled: e.target.checked })}
             />
-            Enable Secure Exam Mode
+            Enable Safe Exam Mode
           </label>
 
           <div className="grid grid-cols-2 gap-2 pl-1 text-sm text-gray-700">
@@ -1039,8 +1085,11 @@ export default function LecturerExamPage({
             disabled={savingSecure}
             className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
           >
-            {savingSecure ? "Saving..." : "Save Secure Exam Mode settings"}
+            {savingSecure ? "Saving..." : "Save Safe Exam Mode settings"}
           </button>
+          {secureSaveMessage && (
+            <p className="text-sm text-gray-600">{secureSaveMessage}</p>
+          )}
         </div>
       )}
 

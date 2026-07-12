@@ -13,14 +13,27 @@ export function shouldAutoSubmit(params: {
   remainingSecs: number | null;
   autoSubmitOnTimerEnd: boolean;
   alreadyTriggered: boolean;
+  terminal: boolean;
 }): boolean {
   return (
     params.status === "IN_PROGRESS" &&
     params.remainingSecs != null &&
     params.remainingSecs <= 0 &&
     params.autoSubmitOnTimerEnd &&
-    !params.alreadyTriggered
+    !params.alreadyTriggered &&
+    !params.terminal
   );
+}
+
+export function shouldRunExamTimer(params: {
+  status: string;
+  terminal: boolean;
+}): boolean {
+  return params.status === "IN_PROGRESS" && !params.terminal;
+}
+
+export function isFinalizedSubmissionStatus(status: string): boolean {
+  return status !== "IN_PROGRESS";
 }
 
 export function canAcceptSubmit(params: {
@@ -59,4 +72,3 @@ export function canStudentViewMarks(params: {
 }): boolean {
   return params.role === "STUDENT" && params.isOwner && params.marksReleasedAt != null;
 }
-

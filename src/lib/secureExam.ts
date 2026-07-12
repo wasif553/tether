@@ -58,6 +58,32 @@ export function parseSecureSettings(raw: unknown): SecureExamSettings {
 
 export const secureSettingsInputSchema = secureExamSettingsSchema.partial();
 
+export function safeExamModeStatusLabel(settings: Pick<SecureExamSettings, "secureModeEnabled">): string {
+  return settings.secureModeEnabled ? "Safe Exam Mode: Enabled" : "Safe Exam Mode: Disabled";
+}
+
+export function activeSafeExamControlLabels(
+  settings: Pick<
+    SecureExamSettings,
+    "secureModeEnabled" | "requireCamera" | "requireFullscreen" | "requireStudentVerification" | "enableAiCameraIntegrityChecks"
+  >,
+): string[] {
+  if (!settings.secureModeEnabled) return [];
+  return [
+    settings.requireCamera ? "Camera required" : null,
+    settings.requireFullscreen ? "Full screen required" : null,
+    settings.requireStudentVerification ? "Student verification required" : null,
+    settings.enableAiCameraIntegrityChecks ? "AI camera checks enabled" : null,
+  ].filter((label): label is string => label != null);
+}
+
+export function secureSettingsChanged(
+  saved: unknown,
+  draft: unknown,
+): boolean {
+  return JSON.stringify(saved) !== JSON.stringify(draft);
+}
+
 export type IntegritySeverityLevel = "INFO" | "LOW" | "MEDIUM" | "HIGH";
 
 /**

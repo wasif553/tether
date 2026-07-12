@@ -2,7 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
-import { remainingSeconds, shouldAutoSubmit } from "@/lib/assessmentLifecycle";
+import {
+  isFinalizedSubmissionStatus,
+  remainingSeconds,
+  shouldAutoSubmit,
+  shouldRunExamTimer,
+} from "@/lib/assessmentLifecycle";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
 import {
   bandForConfidence,
@@ -221,6 +226,7 @@ export default function TakeExamPage({
   const [remainingSecs, setRemainingSecs] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [autoSubmitLocked, setAutoSubmitLocked] = useState(false);
+  const [timerStopped, setTimerStopped] = useState(false);
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
@@ -232,6 +238,7 @@ export default function TakeExamPage({
   const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoSubmitTriggeredRef = useRef(false);
   const timerExpiredLoggedRef = useRef(false);
+  const terminalSubmitRef = useRef(false);
 
   // --- Camera Monitoring v1 state ---
   // Camera Monitoring v1 records only camera availability status (see
@@ -281,10 +288,7 @@ export default function TakeExamPage({
     setInLockdownBrowser(isRunningInLockdownBrowser());
   }, []);
 
-  useEffect(() => {
-    fetch(`/api/submissions/${id}`)
-      .then((res) => res.json())
-      .then((d: SubmissionData) => {
+  const applySubmissionData = useCallback((d: SubmissionData) => {
         // Temporary dev-only diagnostic for the production secureSettings
         // display investigation — never fires outside NODE_ENV=development,
         // and only when explicitly opted in via localStorage. Remove once
@@ -302,8 +306,20 @@ export default function TakeExamPage({
           if (a.response != null) initial[a.questionId] = a.response;
         });
         setResponses(initial);
-      });
-  }, [id]);
+  }, []);
+
+  const loadSubmission = useCallback(async () => {
+    const res = await fetch(`/api/submissions/${id}`);
+    if (!res.ok) return null;
+    const d: SubmissionData = await res.json();
+    applySubmissionData(d);
+    return d;
+  }, [id, applySubmissionData]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadSubmission();
+  }, [loadSubmission]);
 
   // Lets the Electron Lockdown Browser (if present) know which
   // submission to attach queued OS-level integrity events to. This is a
@@ -372,7 +388,7 @@ export default function TakeExamPage({
   }
 
   async function handleSubmit(options: { systemAutoSubmit?: boolean } = {}) {
-    if (submitting) return;
+    if (submitting || terminalSubmitRef.current) return;
     setSubmitting(true);
     setSubmitMessage(null);
     if (options.systemAutoSubmit) {
@@ -398,8 +414,23 @@ export default function TakeExamPage({
     }
 
     if (res.status === 409) {
-      if (options.systemAutoSubmit) setAutoSubmitLocked(false);
       const body = await res.json().catch(() => ({}));
+      terminalSubmitRef.current = true;
+      setTimerStopped(true);
+      const latest = await loadSubmission();
+      if (latest && isFinalizedSubmissionStatus(latest.status)) {
+        setAutoSubmitLocked(false);
+        setSubmitMessage(
+          options.systemAutoSubmit
+            ? "Time is up. Your exam has already been submitted."
+            : "Your exam has already been submitted.",
+        );
+        stopCamera();
+        stopAiDetection();
+        router.refresh();
+        return;
+      }
+      if (options.systemAutoSubmit) setAutoSubmitLocked(false);
       setSubmitMessage(
         typeof body.error === "string" ? body.error : "This exam can no longer be submitted.",
       );
@@ -410,6 +441,9 @@ export default function TakeExamPage({
       stopCamera();
       stopAiDetection();
       const updated = await res.json();
+      terminalSubmitRef.current = true;
+      setTimerStopped(true);
+      setAutoSubmitLocked(false);
       setData((prev) => (prev ? { ...prev, status: updated.status, totalScore: updated.totalScore } : prev));
       if (options.systemAutoSubmit) {
         setSubmitMessage("Time is up. Your exam has been submitted automatically.");
@@ -419,7 +453,7 @@ export default function TakeExamPage({
   }
 
   useEffect(() => {
-    if (!data || data.status !== "IN_PROGRESS") return;
+    if (!data || !shouldRunExamTimer({ status: data.status, terminal: timerStopped })) return;
     const tick = () => {
       const secs = remainingSeconds(new Date(data.deadline));
       setRemainingSecs(secs);
@@ -434,6 +468,7 @@ export default function TakeExamPage({
             remainingSecs: secs,
             autoSubmitOnTimerEnd: data.exam.secureSettings.autoSubmitOnTimerEnd,
             alreadyTriggered: autoSubmitTriggeredRef.current,
+            terminal: terminalSubmitRef.current,
           })
         ) {
           autoSubmitTriggeredRef.current = true;
@@ -446,7 +481,7 @@ export default function TakeExamPage({
     const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data]);
+  }, [data, timerStopped]);
 
   // --- Browser-level friction: copy/cut/paste, right-click, keyboard shortcuts ---
   useEffect(() => {
@@ -902,7 +937,7 @@ export default function TakeExamPage({
   );
 
   function handleChange(questionId: string, value: string) {
-    if (submitting || autoSubmitLocked) return;
+    if (submitting || autoSubmitLocked || timerStopped) return;
     setResponses((prev) => ({ ...prev, [questionId]: value }));
     saveAnswer(questionId, value);
   }
@@ -1335,7 +1370,7 @@ export default function TakeExamPage({
                       value={opt}
                       checked={responses[q.id] === opt}
                       onChange={(e) => handleChange(q.id, e.target.value)}
-                      disabled={submitting || autoSubmitLocked}
+                      disabled={submitting || autoSubmitLocked || timerStopped}
                     />
                     {opt}
                   </label>
@@ -1348,7 +1383,7 @@ export default function TakeExamPage({
                 className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
                 value={responses[q.id] ?? ""}
                 onChange={(e) => handleChange(q.id, e.target.value)}
-                disabled={submitting || autoSubmitLocked}
+                disabled={submitting || autoSubmitLocked || timerStopped}
               />
             )}
 
@@ -1358,7 +1393,7 @@ export default function TakeExamPage({
                 className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
                 value={responses[q.id] ?? ""}
                 onChange={(e) => handleChange(q.id, e.target.value)}
-                disabled={submitting || autoSubmitLocked}
+                disabled={submitting || autoSubmitLocked || timerStopped}
               />
             )}
           </div>
@@ -1371,7 +1406,7 @@ export default function TakeExamPage({
             ? handleSubmit({ systemAutoSubmit: true })
             : handleSubmit()
         }
-        disabled={submitting || autoSubmitLocked}
+        disabled={submitting || autoSubmitLocked || timerStopped}
         className="mt-6 rounded bg-black px-4 py-2 text-white disabled:opacity-50"
       >
         {submitting ? "Submitting..." : "Submit exam"}

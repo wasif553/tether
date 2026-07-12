@@ -4,9 +4,11 @@ import {
   canAcceptSubmit,
   canCreateAttempt,
   canStudentViewMarks,
+  isFinalizedSubmissionStatus,
   nextAttemptNumber,
   remainingSeconds,
   shouldAutoSubmit,
+  shouldRunExamTimer,
   submissionDeadline,
 } from "./assessmentLifecycle";
 
@@ -26,6 +28,7 @@ describe("assessment lifecycle timer helpers", () => {
         remainingSecs: 0,
         autoSubmitOnTimerEnd: true,
         alreadyTriggered: false,
+        terminal: false,
       }),
     ).toBe(true);
     expect(
@@ -34,6 +37,7 @@ describe("assessment lifecycle timer helpers", () => {
         remainingSecs: 0,
         autoSubmitOnTimerEnd: true,
         alreadyTriggered: true,
+        terminal: false,
       }),
     ).toBe(false);
     expect(
@@ -42,6 +46,53 @@ describe("assessment lifecycle timer helpers", () => {
         remainingSecs: 0,
         autoSubmitOnTimerEnd: true,
         alreadyTriggered: false,
+        terminal: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoSubmit({
+        status: "IN_PROGRESS",
+        remainingSecs: 0,
+        autoSubmitOnTimerEnd: true,
+        alreadyTriggered: false,
+        terminal: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("stops the timer after terminal submit handling", () => {
+    expect(shouldRunExamTimer({ status: "IN_PROGRESS", terminal: false })).toBe(true);
+    expect(shouldRunExamTimer({ status: "IN_PROGRESS", terminal: true })).toBe(false);
+    expect(shouldRunExamTimer({ status: "SUBMITTED", terminal: false })).toBe(false);
+    expect(isFinalizedSubmissionStatus("SUBMITTED")).toBe(true);
+    expect(isFinalizedSubmissionStatus("GRADED")).toBe(true);
+    expect(isFinalizedSubmissionStatus("IN_PROGRESS")).toBe(false);
+  });
+
+  it("does not retry auto-submit after a 409 conflict is treated as terminal", () => {
+    const terminal = true;
+    expect(shouldRunExamTimer({ status: "IN_PROGRESS", terminal })).toBe(false);
+    expect(
+      shouldAutoSubmit({
+        status: "IN_PROGRESS",
+        remainingSecs: 0,
+        autoSubmitOnTimerEnd: true,
+        alreadyTriggered: true,
+        terminal,
+      }),
+    ).toBe(false);
+  });
+
+  it("treats already-finalized submit responses as terminal", () => {
+    expect(isFinalizedSubmissionStatus("SUBMITTED")).toBe(true);
+    expect(shouldRunExamTimer({ status: "SUBMITTED", terminal: true })).toBe(false);
+    expect(
+      shouldAutoSubmit({
+        status: "SUBMITTED",
+        remainingSecs: 0,
+        autoSubmitOnTimerEnd: true,
+        alreadyTriggered: true,
+        terminal: true,
       }),
     ).toBe(false);
   });
@@ -61,6 +112,19 @@ describe("assessment lifecycle timer helpers", () => {
         systemAutoSubmit: true,
       }),
     ).toBe(false);
+  });
+
+  it("allows normal manual submit before the deadline", () => {
+    const deadline = new Date("2026-01-01T10:00:00.000Z");
+    const now = new Date("2026-01-01T09:59:59.000Z");
+    expect(
+      canAcceptSubmit({
+        now,
+        deadline,
+        settings: { allowLateSubmit: false, autoSubmitOnTimerEnd: true },
+        systemAutoSubmit: false,
+      }),
+    ).toBe(true);
   });
 });
 
@@ -102,4 +166,3 @@ describe("assessment lifecycle marks release helper", () => {
     ).toBe(false);
   });
 });
-

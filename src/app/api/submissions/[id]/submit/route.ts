@@ -55,7 +55,10 @@ export async function POST(
     }
 
     if (submission.status !== "IN_PROGRESS") {
-      return NextResponse.json(studentSubmitResponse(submission));
+      return NextResponse.json({
+        ...studentSubmitResponse(submission),
+        code: "ALREADY_FINALIZED",
+      });
     }
 
     const settings = parseSecureSettings(submission.exam.secureSettings);
@@ -73,7 +76,10 @@ export async function POST(
         },
       });
       return NextResponse.json(
-        { error: "The deadline for this exam has passed and late submission is not allowed" },
+        {
+          code: "DEADLINE_PASSED",
+          error: "The deadline for this exam has passed and late submission is not allowed",
+        },
         { status: 409 },
       );
     }
@@ -193,7 +199,12 @@ export async function POST(
         where: { id },
         include: { exam: { select: { marksReleasedAt: true } } },
       });
-      if (current) return NextResponse.json(studentSubmitResponse(current));
+      if (current) {
+        return NextResponse.json({
+          ...studentSubmitResponse(current),
+          code: "ALREADY_FINALIZED",
+        });
+      }
     }
     return NextResponse.json({ error: "Failed to submit exam" }, { status: 500 });
   }
