@@ -33,6 +33,7 @@ type QuestionAnalytics = {
 
 type StudentResult = {
   submissionId: string;
+  attemptNumber: number;
   studentName: string;
   studentEmail: string;
   status: string;
@@ -252,6 +253,7 @@ export default function ExamAnalyticsPage({
           <thead>
             <tr className="border-b border-gray-200 bg-gray-50 text-left">
               <th className="p-2">Student</th>
+              <th className="p-2">Attempt</th>
               <th className="p-2">Status</th>
               <th className="p-2">Score</th>
               <th className="p-2">Submitted</th>
@@ -266,6 +268,7 @@ export default function ExamAnalyticsPage({
                   <div>{s.studentName}</div>
                   <div className="text-xs text-gray-500">{s.studentEmail}</div>
                 </td>
+                <td className="p-2">{s.attemptNumber}</td>
                 <td className="p-2">{s.status}</td>
                 <td className="p-2">
                   {s.totalScore != null ? `${s.totalScore} / ${s.maxScore} (${pct(s.scorePct)})` : "—"}

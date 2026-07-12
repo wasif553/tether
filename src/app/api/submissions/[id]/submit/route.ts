@@ -5,6 +5,26 @@ import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
 import { parseSecureSettings, severityFor } from "@/lib/secureExam";
 import { Prisma } from "@/generated/prisma/client";
 import { captureNetworkEvidence, getClientIpFromRequest } from "@/lib/networkEvidence";
+import { canAcceptSubmit, submissionDeadline } from "@/lib/assessmentLifecycle";
+
+function studentSubmitResponse(submission: {
+  id: string;
+  status: string;
+  submittedAt: Date | null;
+  attemptNumber: number;
+  exam?: { marksReleasedAt?: Date | null } | null;
+  totalScore?: number | null;
+}) {
+  const marksReleased = submission.exam?.marksReleasedAt != null;
+  return {
+    id: submission.id,
+    status: submission.status,
+    submittedAt: submission.submittedAt,
+    attemptNumber: submission.attemptNumber,
+    totalScore: marksReleased ? (submission.totalScore ?? null) : null,
+    marksReleased,
+  };
+}
 
 export async function POST(
   req: Request,
@@ -18,6 +38,9 @@ export async function POST(
   const { id } = await params;
 
   try {
+    const body = await req.json().catch(() => ({}));
+    const systemAutoSubmit = body?.systemAutoSubmit === true;
+
     // --- Reads: submission + answers + exam + questions, all in one
     // query, all before any transaction. Grading is computed entirely
     // from this data in memory — the transaction below contains writes
@@ -32,14 +55,12 @@ export async function POST(
     }
 
     if (submission.status !== "IN_PROGRESS") {
-      return NextResponse.json(submission);
+      return NextResponse.json(studentSubmitResponse(submission));
     }
 
     const settings = parseSecureSettings(submission.exam.secureSettings);
-    const deadline = new Date(
-      submission.startedAt.getTime() + submission.exam.durationMins * 60_000,
-    );
-    if (new Date() > deadline && !settings.allowLateSubmit) {
+    const deadline = submissionDeadline(submission.startedAt, submission.exam.durationMins);
+    if (!canAcceptSubmit({ now: new Date(), deadline, settings, systemAutoSubmit })) {
       await prisma.integrityEvent.create({
         data: {
           submissionId: id,
@@ -158,7 +179,7 @@ export async function POST(
       }).catch(() => {/* never block submit */});
     }
 
-    return NextResponse.json(result);
+    return NextResponse.json(studentSubmitResponse({ ...result, exam: submission.exam }));
   } catch (error) {
     console.error("[submit] error:", error);
     // A P2025 here means another concurrent request already finalized
@@ -168,8 +189,11 @@ export async function POST(
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2025"
     ) {
-      const current = await prisma.submission.findUnique({ where: { id } });
-      if (current) return NextResponse.json(current);
+      const current = await prisma.submission.findUnique({
+        where: { id },
+        include: { exam: { select: { marksReleasedAt: true } } },
+      });
+      if (current) return NextResponse.json(studentSubmitResponse(current));
     }
     return NextResponse.json({ error: "Failed to submit exam" }, { status: 500 });
   }

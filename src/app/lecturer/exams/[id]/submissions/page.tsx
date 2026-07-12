@@ -9,6 +9,7 @@ type SubmissionRow = {
   id: string;
   status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
   totalScore: number | null;
+  attemptNumber: number;
   startedAt: string;
   submittedAt: string | null;
   student: { id: string; name: string; email: string };
@@ -73,6 +74,7 @@ export default function SubmissionsListPage({
             <div>
               <p className="font-medium">{s.student.name}</p>
               <p className="text-sm text-gray-500">{s.student.email}</p>
+              <p className="text-xs text-gray-500">Attempt {s.attemptNumber}</p>
             </div>
             <div className="flex items-center gap-3">
               <span className="text-sm text-gray-500">

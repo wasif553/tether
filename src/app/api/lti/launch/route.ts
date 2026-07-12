@@ -244,11 +244,18 @@ export async function POST(req: Request) {
     if (!exam || !exam.published) {
       redirectPath = notLinkedPath;
     } else {
-      const submission = await prisma.submission.upsert({
-        where: { examId_studentId: { examId: exam.id, studentId: user.id } },
-        update: {},
-        create: { examId: exam.id, studentId: user.id },
-      });
+      const submission =
+        (await prisma.submission.findFirst({
+          where: { examId: exam.id, studentId: user.id, status: "IN_PROGRESS" },
+          orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
+        })) ??
+        (await prisma.submission.findFirst({
+          where: { examId: exam.id, studentId: user.id },
+          orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
+        })) ??
+        (await prisma.submission.create({
+          data: { examId: exam.id, studentId: user.id, attemptNumber: 1 },
+        }));
       redirectPath = `/student/exams/${submission.id}`;
     }
   } else if (resourceLinkId) {

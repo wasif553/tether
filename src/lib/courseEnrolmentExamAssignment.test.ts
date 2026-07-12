@@ -189,7 +189,7 @@ describe("POST /api/exams/[id]/start — assignment and scheduling enforcement",
     const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
     expect(res.status).toBe(404);
 
-    const submission = await prisma.submission.findUnique({ where: { examId_studentId: { examId: exam.id, studentId: studentNotInCourse } } });
+    const submission = await prisma.submission.findFirst({ where: { examId: exam.id, studentId: studentNotInCourse } });
     expect(submission).toBeNull();
   });
 
@@ -218,7 +218,7 @@ describe("POST /api/exams/[id]/start — assignment and scheduling enforcement",
     const req = new Request(`http://localhost/api/exams/${exam.id}/start`, { method: "POST" });
     const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
     expect(res.status).toBe(403);
-    const submission = await prisma.submission.findUnique({ where: { examId_studentId: { examId: exam.id, studentId: studentNotInCourse } } });
+    const submission = await prisma.submission.findFirst({ where: { examId: exam.id, studentId: studentNotInCourse } });
     expect(submission).toBeNull();
   });
 
@@ -255,7 +255,7 @@ describe("POST /api/exams/[id]/start — assignment and scheduling enforcement",
     });
     const wrongRes = await POST(wrongReq, { params: Promise.resolve({ id: exam.id }) });
     expect(wrongRes.status).toBe(403);
-    const noSubmission = await prisma.submission.findUnique({ where: { examId_studentId: { examId: exam.id, studentId: studentNotInCourse } } });
+    const noSubmission = await prisma.submission.findFirst({ where: { examId: exam.id, studentId: studentNotInCourse } });
     expect(noSubmission).toBeNull();
 
     const rightReq = new Request(`http://localhost/api/exams/${exam.id}/start`, {

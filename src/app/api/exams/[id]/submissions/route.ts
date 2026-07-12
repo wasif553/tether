@@ -38,6 +38,7 @@ export async function GET(
   return NextResponse.json(
     submissions.map((s) => ({
       ...s,
+      attemptNumber: s.attemptNumber,
       canvasStatus: s.gradePassback?.status ?? null,
       gradePassback: undefined,
     })),

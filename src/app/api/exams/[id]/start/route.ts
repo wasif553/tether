@@ -5,6 +5,8 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionErrorResponse, requireInstitutionId } from "@/lib/institutionScope";
 import { captureNetworkEvidence } from "@/lib/networkEvidence";
+import { canCreateAttempt, nextAttemptNumber } from "@/lib/assessmentLifecycle";
+import { parseSecureSettings } from "@/lib/secureExam";
 
 export async function POST(
   req: Request,
@@ -69,16 +71,29 @@ export async function POST(
     return NextResponse.json({ error: "Exam window has closed" }, { status: 403 });
   }
 
-  const existing = await prisma.submission.findUnique({
-    where: { examId_studentId: { examId: id, studentId: session.user.id } },
+  const existingInProgress = await prisma.submission.findFirst({
+    where: { examId: id, studentId: session.user.id, status: "IN_PROGRESS" },
+    orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
   });
-  if (existing) return NextResponse.json(existing);
+  if (existingInProgress) return NextResponse.json(existingInProgress);
+
+  const settings = parseSecureSettings(exam.secureSettings);
+  const attempts = await prisma.submission.findMany({
+    where: { examId: id, studentId: session.user.id },
+    select: { attemptNumber: true, status: true },
+    orderBy: { attemptNumber: "desc" },
+  });
+  const finalizedAttemptCount = attempts.filter((attempt) => attempt.status !== "IN_PROGRESS").length;
+  if (!canCreateAttempt({ finalizedAttemptCount, maxAttempts: settings.maxAttempts })) {
+    return NextResponse.json({ error: "No attempts remaining for this exam." }, { status: 409 });
+  }
+  const attemptNumber = nextAttemptNumber(attempts);
 
   // Student Onboarding and Exam Access v1 — see
   // docs/student-onboarding-and-exam-access.md. Checked after the
-  // existing-submission idempotency check above, so resuming an
-  // already-started exam never re-prompts for the code, but no new
-  // submission is ever created without a valid one.
+  // existing in-progress submission idempotency check above, so resuming
+  // an already-started attempt never re-prompts for the code, but every
+  // new attempt still requires a valid one.
   if (exam.accessCodeRequired) {
     const body = await req.json().catch(() => ({}));
     const accessCode = typeof body?.accessCode === "string" ? body.accessCode : "";
@@ -101,7 +116,7 @@ export async function POST(
   // submission instead of a 500, so starting is idempotent under races.
   try {
     const submission = await prisma.submission.create({
-      data: { examId: id, studentId: session.user.id },
+      data: { examId: id, studentId: session.user.id, attemptNumber },
     });
 
     // Academic Integrity Network Evidence v1 — captured fire-and-forget
@@ -119,8 +134,9 @@ export async function POST(
     return NextResponse.json(submission, { status: 201 });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      const winner = await prisma.submission.findUnique({
-        where: { examId_studentId: { examId: id, studentId: session.user.id } },
+      const winner = await prisma.submission.findFirst({
+        where: { examId: id, studentId: session.user.id, status: "IN_PROGRESS" },
+        orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
       });
       if (winner) return NextResponse.json(winner);
     }

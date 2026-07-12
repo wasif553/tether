@@ -3,6 +3,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { parseSecureSettings } from "@/lib/secureExam";
+import { submissionDeadline } from "@/lib/assessmentLifecycle";
 
 const answerSchema = z.object({
   questionId: z.string(),
@@ -32,9 +33,7 @@ export async function PATCH(
     return NextResponse.json({ error: "Submission already finalized" }, { status: 409 });
   }
 
-  const deadline = new Date(
-    submission.startedAt.getTime() + submission.exam.durationMins * 60_000,
-  );
+  const deadline = submissionDeadline(submission.startedAt, submission.exam.durationMins);
   const settings = parseSecureSettings(submission.exam.secureSettings);
   if (new Date() > deadline && !settings.allowLateSubmit) {
     return NextResponse.json({ error: "Time is up" }, { status: 409 });

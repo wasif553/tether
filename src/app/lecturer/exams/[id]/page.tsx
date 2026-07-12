@@ -58,6 +58,8 @@ type Exam = {
   assignmentMode: "COURSE" | "SELECTED_STUDENTS";
   availableFrom: string | null;
   availableUntil: string | null;
+  marksReleasedAt: string | null;
+  marksReleasedById: string | null;
 };
 
 type LecturerCourse = {
@@ -198,6 +200,8 @@ export default function LecturerExamPage({
   const [hasUngradedSubmissions, setHasUngradedSubmissions] = useState(false);
   const [markingEssays, setMarkingEssays] = useState(false);
   const [markEssaysMessage, setMarkEssaysMessage] = useState<string | null>(null);
+  const [savingMarksRelease, setSavingMarksRelease] = useState(false);
+  const [marksReleaseMessage, setMarksReleaseMessage] = useState<string | null>(null);
 
   const [ltiLinks, setLtiLinks] = useState<LtiExamLink[]>([]);
   const [platforms, setPlatforms] = useState<LtiPlatformOption[]>([]);
@@ -558,6 +562,43 @@ export default function LecturerExamPage({
     await loadSubmissionStatus();
   }
 
+  async function handleReleaseMarks() {
+    if (!exam) return;
+    if (
+      !confirm(
+        "Students will be able to see their marks for this exam. This does not change the recorded marks.",
+      )
+    ) {
+      return;
+    }
+
+    setSavingMarksRelease(true);
+    setMarksReleaseMessage(null);
+    const res = await fetch(`/api/lecturer/exams/${id}/marks-release`, { method: "POST" });
+    setSavingMarksRelease(false);
+
+    if (!res.ok) {
+      setMarksReleaseMessage("Failed to release marks.");
+      return;
+    }
+    setMarksReleaseMessage("Marks released to students.");
+    await loadExam();
+  }
+
+  async function handleHideMarks() {
+    setSavingMarksRelease(true);
+    setMarksReleaseMessage(null);
+    const res = await fetch(`/api/lecturer/exams/${id}/marks-release`, { method: "DELETE" });
+    setSavingMarksRelease(false);
+
+    if (!res.ok) {
+      setMarksReleaseMessage("Failed to hide marks.");
+      return;
+    }
+    setMarksReleaseMessage("Marks hidden from students.");
+    await loadExam();
+  }
+
   function toggleType(type: GeneratedQuestion["type"]) {
     setSelectedTypes((prev) =>
       prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type],
@@ -693,6 +734,42 @@ export default function LecturerExamPage({
         </div>
       </div>
       <p className="text-sm text-gray-500">{exam.durationMins} minutes</p>
+      <div className="mt-4 rounded border border-gray-200 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium">
+              {exam.marksReleasedAt ? "Marks released" : "Marks not released"}
+            </p>
+            <p className="text-sm text-gray-500">
+              {exam.marksReleasedAt
+                ? `Released ${new Date(exam.marksReleasedAt).toLocaleString()}`
+                : "Students cannot see scores or feedback until marks are released."}
+            </p>
+          </div>
+          {exam.marksReleasedAt ? (
+            <button
+              type="button"
+              onClick={handleHideMarks}
+              disabled={savingMarksRelease}
+              className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+            >
+              {savingMarksRelease ? "Saving..." : "Hide marks from students"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleReleaseMarks}
+              disabled={savingMarksRelease}
+              className="rounded bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
+            >
+              {savingMarksRelease ? "Saving..." : "Release marks to students"}
+            </button>
+          )}
+        </div>
+        {marksReleaseMessage && (
+          <p className="mt-2 text-sm text-gray-600">{marksReleaseMessage}</p>
+        )}
+      </div>
       {markEssaysMessage && <p className="mt-2 text-sm text-gray-600">{markEssaysMessage}</p>}
 
       <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">

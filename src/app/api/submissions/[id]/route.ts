@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { parseSecureSettings } from "@/lib/secureExam";
+import { canStudentViewMarks, submissionDeadline } from "@/lib/assessmentLifecycle";
 
 export async function GET(
   _req: Request,
@@ -30,16 +31,22 @@ export async function GET(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const deadline = new Date(
-    submission.startedAt.getTime() + submission.exam.durationMins * 60_000,
-  );
+  const deadline = submissionDeadline(submission.startedAt, submission.exam.durationMins);
+  const studentCanViewMarks = canStudentViewMarks({
+    role: session.user.role,
+    isOwner,
+    marksReleasedAt: submission.exam.marksReleasedAt,
+  });
+  const canViewMarks = isExamOwner || studentCanViewMarks;
+  const canViewQuestionPoints =
+    isExamOwner || submission.status === "IN_PROGRESS" || studentCanViewMarks;
 
   const questions = submission.exam.questions.map((q) => ({
     id: q.id,
     type: q.type,
     text: q.text,
     options: q.options,
-    points: q.points,
+    points: canViewQuestionPoints ? q.points : undefined,
     order: q.order,
     correctAnswer: isExamOwner ? q.correctAnswer : undefined,
   }));
@@ -59,10 +66,13 @@ export async function GET(
   return NextResponse.json({
     id: submission.id,
     status: submission.status,
+    attemptNumber: submission.attemptNumber,
     startedAt: submission.startedAt,
     submittedAt: submission.submittedAt,
-    totalScore: submission.totalScore,
+    totalScore: canViewMarks ? submission.totalScore : null,
     deadline,
+    marksReleasedAt: submission.exam.marksReleasedAt,
+    marksReleased: submission.exam.marksReleasedAt != null,
     canvasPassback,
     // Optional Student Verification v1 — see
     // docs/on-device-ai-integrity-detection-v1.md. Never includes
@@ -81,8 +91,8 @@ export async function GET(
     answers: submission.answers.map((a) => ({
       questionId: a.questionId,
       response: a.response,
-      score: isOwner && submission.status !== "GRADED" ? undefined : a.score,
-      feedback: isOwner && submission.status !== "GRADED" ? undefined : a.feedback,
+      score: canViewMarks ? a.score : undefined,
+      feedback: canViewMarks ? a.feedback : undefined,
       aiDraftScore: isExamOwner ? a.aiDraftScore : undefined,
       aiReasoning: isExamOwner ? a.aiReasoning : undefined,
     })),

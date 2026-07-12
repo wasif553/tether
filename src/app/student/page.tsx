@@ -14,7 +14,14 @@ type AvailableExam = {
   availableUntil: string | null;
   course: { id: string; name: string; code: string } | null;
   availability: "open" | "upcoming" | "closed";
-  submission: { id: string; status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" } | null;
+  maxAttempts: number;
+  remainingAttempts: number;
+  canStartAttempt: boolean;
+  submission: {
+    id: string;
+    status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
+    attemptNumber: number;
+  } | null;
 };
 
 export default function StudentDashboard() {
@@ -78,7 +85,12 @@ export default function StudentDashboard() {
             {exam.description && (
               <p className="mt-1 text-sm text-gray-600">{exam.description}</p>
             )}
-            {exam.accessCodeRequired && !exam.submission && (
+            {exam.submission && (
+              <p className="mt-1 text-xs text-gray-500">
+                Attempt {exam.submission.attemptNumber} of {exam.maxAttempts}
+              </p>
+            )}
+            {exam.accessCodeRequired && exam.canStartAttempt && (
               <span className="mt-2 inline-block rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">
                 Access code required
               </span>
@@ -89,10 +101,10 @@ export default function StudentDashboard() {
               </p>
             )}
             <div className="mt-3">
-              {exam.availability === "upcoming" && !exam.submission && (
+              {exam.availability === "upcoming" && exam.canStartAttempt && (
                 <span className="text-sm text-gray-500">Not yet open</span>
               )}
-              {exam.availability === "open" && !exam.submission && exam.accessCodeRequired && (
+              {exam.availability === "open" && exam.canStartAttempt && exam.accessCodeRequired && (
                 <div className="flex items-end gap-2">
                   <input
                     type="text"
@@ -108,17 +120,25 @@ export default function StudentDashboard() {
                     disabled={startingId === exam.id || !(accessCodeInputs[exam.id] ?? "").trim()}
                     className="rounded bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
                   >
-                    {startingId === exam.id ? "Starting..." : "Start exam"}
+                    {startingId === exam.id
+                      ? "Starting..."
+                      : exam.submission
+                        ? "Start next attempt"
+                        : "Start exam"}
                   </button>
                 </div>
               )}
-              {exam.availability === "open" && !exam.submission && !exam.accessCodeRequired && (
+              {exam.availability === "open" && exam.canStartAttempt && !exam.accessCodeRequired && (
                 <button
                   onClick={() => startExam(exam.id)}
                   disabled={startingId === exam.id}
                   className="rounded bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
                 >
-                  {startingId === exam.id ? "Starting..." : "Start exam"}
+                  {startingId === exam.id
+                    ? "Starting..."
+                    : exam.submission
+                      ? "Start next attempt"
+                      : "Start exam"}
                 </button>
               )}
               {startErrors[exam.id] && (
@@ -133,15 +153,27 @@ export default function StudentDashboard() {
                 </a>
               )}
               {exam.submission?.status === "SUBMITTED" && (
-                <span className="text-sm text-gray-500">Submitted, awaiting grading</span>
+                <div className="space-y-1 text-sm text-gray-500">
+                  <p>Submitted, awaiting grading</p>
+                  {exam.remainingAttempts > 0 && (
+                    <p>You have {exam.remainingAttempts} attempt(s) remaining.</p>
+                  )}
+                </div>
               )}
               {exam.submission?.status === "GRADED" && (
-                <a
-                  href={`/student/exams/${exam.submission.id}`}
-                  className="text-sm underline"
-                >
-                  View result
-                </a>
+                <div className="space-y-1 text-sm">
+                  <a
+                    href={`/student/exams/${exam.submission.id}`}
+                    className="underline"
+                  >
+                    View submission
+                  </a>
+                  {exam.remainingAttempts > 0 && (
+                    <p className="text-gray-500">
+                      You have {exam.remainingAttempts} attempt(s) remaining.
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           </div>

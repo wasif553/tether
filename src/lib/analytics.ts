@@ -107,6 +107,7 @@ export type ExamAnalytics = {
   }>;
   studentResults: Array<{
     submissionId: string;
+    attemptNumber: number;
     studentName: string;
     studentEmail: string;
     status: string;
@@ -255,6 +256,7 @@ export async function calculateExamAnalytics(examId: string): Promise<ExamAnalyt
       submission.totalScore != null ? scorePercentage(submission.totalScore, maxScore) : null;
     return {
       submissionId: submission.id,
+      attemptNumber: submission.attemptNumber,
       studentName: submission.student.name,
       studentEmail: submission.student.email,
       status: submission.status,

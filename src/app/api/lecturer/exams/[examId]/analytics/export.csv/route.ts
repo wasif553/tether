@@ -58,13 +58,14 @@ export async function GET(
 
   lines.push("Student Results");
   lines.push(
-    toCsvRow(["Student", "Email", "Status", "Total Score", "Max Score", "Score %", "Submitted At", "Graded At"]),
+    toCsvRow(["Student", "Email", "Attempt Number", "Status", "Total Score", "Max Score", "Score %", "Submitted At", "Graded At"]),
   );
   for (const s of analytics.studentResults) {
     lines.push(
       toCsvRow([
         s.studentName,
         s.studentEmail,
+        s.attemptNumber,
         s.status,
         s.totalScore,
         s.maxScore,

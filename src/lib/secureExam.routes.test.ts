@@ -12,10 +12,11 @@ const answersRoute = await import("../app/api/submissions/[id]/answers/route");
 const submitRoute = await import("../app/api/submissions/[id]/submit/route");
 const submissionRoute = await import("../app/api/submissions/[id]/route");
 const evidenceRoute = await import("../app/api/lecturer/submissions/[id]/evidence/route");
+const marksReleaseRoute = await import("../app/api/lecturer/exams/[examId]/marks-release/route");
 
 let testInstitution: { id: string };
 
-function sessionFor(userId: string, role: "LECTURER" | "STUDENT") {
+function sessionFor(userId: string, role: "LECTURER" | "STUDENT" | "PLATFORM_ADMIN") {
   return { user: { id: userId, role, email: `${userId}@test.local`, name: userId, institutionId: testInstitution.id } };
 }
 
@@ -29,6 +30,7 @@ function jsonRequest(method: string, body?: unknown) {
 
 let lecturer: { id: string };
 let otherLecturer: { id: string };
+let platformAdmin: { id: string };
 let student: { id: string };
 let otherStudent: { id: string };
 
@@ -42,6 +44,9 @@ beforeAll(async () => {
   otherLecturer = await prisma.user.create({
     data: { name: "SE Other Lecturer", email: `se-lect2-${stamp}@test.local`, passwordHash, role: "LECTURER", institutionId: testInstitution.id },
   });
+  platformAdmin = await prisma.user.create({
+    data: { name: "SE Platform Admin", email: `se-admin-${stamp}@test.local`, passwordHash, role: "PLATFORM_ADMIN", institutionId: testInstitution.id },
+  });
   student = await prisma.user.create({
     data: { name: "SE Student", email: `se-stud-${stamp}@test.local`, passwordHash, role: "STUDENT", institutionId: testInstitution.id },
   });
@@ -51,7 +56,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  const userIds = [lecturer.id, otherLecturer.id, student.id, otherStudent.id];
+  const userIds = [lecturer, otherLecturer, platformAdmin, student, otherStudent]
+    .map((user) => user?.id)
+    .filter((id): id is string => Boolean(id));
+  if (userIds.length === 0) {
+    await prisma.$disconnect();
+    return;
+  }
   await prisma.integrityEvent.deleteMany({ where: { studentId: { in: userIds } } });
   await prisma.answer.deleteMany({ where: { submission: { studentId: { in: userIds } } } });
   await prisma.submission.deleteMany({ where: { studentId: { in: userIds } } });
@@ -134,6 +145,107 @@ describe("maxAttempts enforcement (v1: single attempt)", () => {
     const count = await prisma.submission.count({ where: { examId: exam.id, studentId: student.id } });
     expect(count).toBe(1);
   });
+
+  it("blocks a second attempt after a finalized single-attempt exam", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const exam = await prisma.exam.create({
+      data: {
+        title: "Single Attempt Finalized Exam",
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: { maxAttempts: 1 },
+      },
+    });
+
+    await prisma.submission.create({
+      data: {
+        examId: exam.id,
+        studentId: student.id,
+        status: "GRADED",
+        attemptNumber: 1,
+        submittedAt: new Date(),
+        gradedAt: new Date(),
+        totalScore: 0,
+      },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const res = await startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(409);
+  });
+
+  it("allows a second attempt when maxAttempts is greater than one", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const exam = await prisma.exam.create({
+      data: {
+        title: "Multi Attempt Exam",
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: { maxAttempts: 2 },
+      },
+    });
+
+    await prisma.submission.create({
+      data: {
+        examId: exam.id,
+        studentId: student.id,
+        status: "GRADED",
+        attemptNumber: 1,
+        submittedAt: new Date(),
+        gradedAt: new Date(),
+        totalScore: 0,
+      },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const res = await startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.attemptNumber).toBe(2);
+  });
+
+  it("requires the access code again for a new multi-attempt submission", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const exam = await prisma.exam.create({
+      data: {
+        title: "Multi Attempt Code Exam",
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: { maxAttempts: 2 },
+        accessCodeHash: await bcrypt.hash("TRY-2", 4),
+        accessCodeRequired: true,
+      },
+    });
+
+    await prisma.submission.create({
+      data: {
+        examId: exam.id,
+        studentId: student.id,
+        status: "GRADED",
+        attemptNumber: 1,
+        submittedAt: new Date(),
+        gradedAt: new Date(),
+        totalScore: 0,
+      },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const blocked = await startRoute.POST(jsonRequest("POST", {}), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    expect(blocked.status).toBe(403);
+
+    const allowed = await startRoute.POST(jsonRequest("POST", { accessCode: "TRY-2" }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    expect(allowed.status).toBe(201);
+  });
 });
 
 describe("save/submit blocked after final submission", () => {
@@ -173,7 +285,7 @@ describe("save/submit blocked after final submission", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("GRADED");
-    expect(body.totalScore).toBe(5);
+    expect(body.totalScore).toBeNull();
   });
 });
 
@@ -378,5 +490,128 @@ describe("student cannot access another student's submission or lecturer-only in
     expect(body.answers[0].aiDraftScore).toBeUndefined();
     expect(body.answers[0].aiReasoning).toBeUndefined();
     expect(body.canvasPassback).toBeNull();
+  });
+});
+
+describe("marks release gates student-visible scores", () => {
+  async function createGradedSubmission() {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const exam = await prisma.exam.create({
+      data: {
+        title: "Marks Release Exam",
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+      },
+    });
+    const question = await prisma.question.create({
+      data: {
+        examId: exam.id,
+        type: "SHORT_ANSWER",
+        text: "Q1",
+        points: 5,
+        correctAnswer: "secret",
+      },
+    });
+    const submission = await prisma.submission.create({
+      data: {
+        examId: exam.id,
+        studentId: student.id,
+        status: "GRADED",
+        submittedAt: new Date(),
+        gradedAt: new Date(),
+        totalScore: 4,
+      },
+    });
+    await prisma.answer.create({
+      data: {
+        submissionId: submission.id,
+        questionId: question.id,
+        response: "answer",
+        score: 4,
+        feedback: "Good work",
+      },
+    });
+    return { exam, submission };
+  }
+
+  it("hides score and per-question marks from the student before release", async () => {
+    const { submission } = await createGradedSubmission();
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+
+    const res = await submissionRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    const body = await res.json();
+
+    expect(body.totalScore).toBeNull();
+    expect(body.marksReleased).toBe(false);
+    expect(body.answers[0].score).toBeUndefined();
+    expect(body.answers[0].feedback).toBeUndefined();
+    expect(body.exam.questions[0].correctAnswer).toBeUndefined();
+  });
+
+  it("lets the lecturer see marks before release", async () => {
+    const { submission } = await createGradedSubmission();
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+
+    const res = await submissionRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    const body = await res.json();
+
+    expect(body.totalScore).toBe(4);
+    expect(body.answers[0].score).toBe(4);
+    expect(body.answers[0].feedback).toBe("Good work");
+    expect(body.exam.questions[0].correctAnswer).toBe("secret");
+  });
+
+  it("releases marks to students at exam level", async () => {
+    const { exam, submission } = await createGradedSubmission();
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+
+    const releaseRes = await marksReleaseRoute.POST(jsonRequest("POST"), {
+      params: Promise.resolve({ examId: exam.id }),
+    });
+    expect(releaseRes.status).toBe(200);
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const studentRes = await submissionRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    const body = await studentRes.json();
+
+    expect(body.marksReleased).toBe(true);
+    expect(body.totalScore).toBe(4);
+    expect(body.answers[0].score).toBe(4);
+    expect(body.answers[0].feedback).toBe("Good work");
+    expect(body.exam.questions[0].correctAnswer).toBeUndefined();
+  });
+
+  it("blocks students and non-owning lecturers from releasing marks", async () => {
+    const { exam } = await createGradedSubmission();
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const studentRes = await marksReleaseRoute.POST(jsonRequest("POST"), {
+      params: Promise.resolve({ examId: exam.id }),
+    });
+    expect(studentRes.status).toBe(401);
+
+    mockAuth.mockResolvedValue(sessionFor(otherLecturer.id, "LECTURER"));
+    const lecturerRes = await marksReleaseRoute.POST(jsonRequest("POST"), {
+      params: Promise.resolve({ examId: exam.id }),
+    });
+    expect(lecturerRes.status).toBe(404);
+  });
+
+  it("allows platform admin release within the institution", async () => {
+    const { exam } = await createGradedSubmission();
+    mockAuth.mockResolvedValue(sessionFor(platformAdmin.id, "PLATFORM_ADMIN"));
+
+    const res = await marksReleaseRoute.POST(jsonRequest("POST"), {
+      params: Promise.resolve({ examId: exam.id }),
+    });
+    expect(res.status).toBe(200);
   });
 });

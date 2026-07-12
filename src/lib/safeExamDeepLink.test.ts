@@ -220,8 +220,8 @@ describe("GET /api/exams/[id]/access-check", () => {
     const { GET } = await import("@/app/api/exams/[id]/access-check/route");
     await GET(new Request("http://localhost"), { params: Promise.resolve({ id: exam.id }) });
 
-    const submission = await prisma.submission.findUnique({
-      where: { examId_studentId: { examId: exam.id, studentId: studentNotInCourse } },
+    const submission = await prisma.submission.findFirst({
+      where: { examId: exam.id, studentId: studentNotInCourse },
     });
     expect(submission).toBeNull();
   });

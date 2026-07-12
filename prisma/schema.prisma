@@ -199,6 +199,10 @@ model Exam {
   // so clearing the code is an explicit, unambiguous action.
   accessCodeHash     String?
   accessCodeRequired Boolean       @default(false)
+  // Assessment Lifecycle v1: exam-level marks release. Students only see
+  // score/feedback data after this is set by the owning lecturer/admin.
+  marksReleasedAt    DateTime?
+  marksReleasedById  String?
 
   // Course, Enrolment, Exam Assignment, Scheduling v1 — see
   // docs/course-enrolment-and-exam-assignment.md. courseId is nullable:
@@ -242,6 +246,7 @@ model Submission {
   studentId   String
   student     User             @relation(fields: [studentId], references: [id])
   status      SubmissionStatus @default(IN_PROGRESS)
+  attemptNumber Int              @default(1)
   startedAt   DateTime         @default(now())
   submittedAt DateTime?
   gradedAt    DateTime?
@@ -251,7 +256,8 @@ model Submission {
   gradePassback   CanvasGradePassback?
   networkEvidence NetworkEvidence[]
 
-  @@unique([examId, studentId])
+  @@unique([examId, studentId, attemptNumber])
+  @@index([examId, studentId])
 }
 
 model Answer {

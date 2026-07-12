@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
+import { remainingSeconds, shouldAutoSubmit } from "@/lib/assessmentLifecycle";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
 import {
   bandForConfidence,
@@ -55,8 +56,11 @@ type SecureSettings = {
 type SubmissionData = {
   id: string;
   status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
+  attemptNumber: number;
   deadline: string;
   totalScore: number | null;
+  marksReleased: boolean;
+  marksReleasedAt: string | null;
   exam: { id: string; title: string; questions: Question[]; secureSettings: SecureSettings };
   answers: Answer[];
   student: { name: string; email: string; institutionStudentId: string | null };
@@ -216,6 +220,7 @@ export default function TakeExamPage({
   const [responses, setResponses] = useState<Record<string, string>>({});
   const [remainingSecs, setRemainingSecs] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [autoSubmitLocked, setAutoSubmitLocked] = useState(false);
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
@@ -225,6 +230,8 @@ export default function TakeExamPage({
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const lastEventAt = useRef<Partial<Record<IntegrityEventType, number>>>({});
   const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoSubmitTriggeredRef = useRef(false);
+  const timerExpiredLoggedRef = useRef(false);
 
   // --- Camera Monitoring v1 state ---
   // Camera Monitoring v1 records only camera availability status (see
@@ -348,13 +355,50 @@ export default function TakeExamPage({
     [data, id, secureSettings],
   );
 
-  async function handleSubmit() {
+  async function flushResponsesBeforeSubmit() {
+    if (!data) return;
+    Object.values(saveTimers.current).forEach((timer) => clearTimeout(timer));
+    saveTimers.current = {};
+
+    await Promise.allSettled(
+      Object.entries(responses).map(([questionId, response]) =>
+        fetch(`/api/submissions/${id}/answers`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ questionId, response }),
+        }),
+      ),
+    );
+  }
+
+  async function handleSubmit(options: { systemAutoSubmit?: boolean } = {}) {
+    if (submitting) return;
     setSubmitting(true);
     setSubmitMessage(null);
-    const res = await fetch(`/api/submissions/${id}/submit`, { method: "POST" });
+    if (options.systemAutoSubmit) {
+      setSubmitMessage("Time is up. Submitting your exam automatically...");
+      await flushResponsesBeforeSubmit();
+    }
+
+    const res = await fetch(`/api/submissions/${id}/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ systemAutoSubmit: options.systemAutoSubmit === true }),
+    }).catch(() => null);
     setSubmitting(false);
 
+    if (!res) {
+      if (options.systemAutoSubmit) setAutoSubmitLocked(false);
+      setSubmitMessage(
+        options.systemAutoSubmit
+          ? "Time is up. Automatic submission could not reach the server. Please retry submission now."
+          : "Submission failed. Please try again.",
+      );
+      return;
+    }
+
     if (res.status === 409) {
+      if (options.systemAutoSubmit) setAutoSubmitLocked(false);
       const body = await res.json().catch(() => ({}));
       setSubmitMessage(
         typeof body.error === "string" ? body.error : "This exam can no longer be submitted.",
@@ -367,6 +411,9 @@ export default function TakeExamPage({
       stopAiDetection();
       const updated = await res.json();
       setData((prev) => (prev ? { ...prev, status: updated.status, totalScore: updated.totalScore } : prev));
+      if (options.systemAutoSubmit) {
+        setSubmitMessage("Time is up. Your exam has been submitted automatically.");
+      }
       router.refresh();
     }
   }
@@ -374,11 +421,25 @@ export default function TakeExamPage({
   useEffect(() => {
     if (!data || data.status !== "IN_PROGRESS") return;
     const tick = () => {
-      const secs = Math.max(0, Math.floor((new Date(data.deadline).getTime() - Date.now()) / 1000));
+      const secs = remainingSeconds(new Date(data.deadline));
       setRemainingSecs(secs);
       if (secs === 0) {
-        reportIntegrityEvent("TIMER_EXPIRED");
-        if (data.exam.secureSettings.autoSubmitOnTimerEnd) handleSubmit();
+        if (!timerExpiredLoggedRef.current) {
+          timerExpiredLoggedRef.current = true;
+          reportIntegrityEvent("TIMER_EXPIRED");
+        }
+        if (
+          shouldAutoSubmit({
+            status: data.status,
+            remainingSecs: secs,
+            autoSubmitOnTimerEnd: data.exam.secureSettings.autoSubmitOnTimerEnd,
+            alreadyTriggered: autoSubmitTriggeredRef.current,
+          })
+        ) {
+          autoSubmitTriggeredRef.current = true;
+          setAutoSubmitLocked(true);
+          handleSubmit({ systemAutoSubmit: true });
+        }
       }
     };
     tick();
@@ -841,6 +902,7 @@ export default function TakeExamPage({
   );
 
   function handleChange(questionId: string, value: string) {
+    if (submitting || autoSubmitLocked) return;
     setResponses((prev) => ({ ...prev, [questionId]: value }));
     saveAnswer(questionId, value);
   }
@@ -852,9 +914,10 @@ export default function TakeExamPage({
       <div className="mx-auto max-w-2xl">
         <h1 className="text-2xl font-semibold">{data.exam.title}</h1>
         <p className="mt-4 text-gray-700">
-          {inLockdownBrowser
-            ? "Your exam has been submitted. You may now close Tether Secure Browser."
-            : "Your exam has been submitted."}
+          {submitMessage ??
+            (inLockdownBrowser
+              ? "Your exam has been submitted. You may now close Tether Secure Browser."
+              : "Your exam has been submitted.")}
         </p>
         {inLockdownBrowser && (
           <p className="mt-2 text-sm text-gray-500">
@@ -883,11 +946,17 @@ export default function TakeExamPage({
         </div>
         {data.status === "SUBMITTED" && (
           <p className="mt-4 text-gray-600">
-            Submitted. Some answers require manual grading — check back later.
+            Your exam has been submitted. Your marks will appear here after your lecturer releases them.
           </p>
         )}
-        {data.status === "GRADED" && (
+        {data.status === "GRADED" && !data.marksReleased && (
+          <p className="mt-4 text-gray-600">
+            Submitted. Marks have not been released yet.
+          </p>
+        )}
+        {data.status === "GRADED" && data.marksReleased && (
           <div className="mt-4">
+            <p className="text-sm text-green-700">Marks released</p>
             <p className="text-lg">
               Score: <span className="font-semibold">{data.totalScore}</span>
             </p>
@@ -1266,6 +1335,7 @@ export default function TakeExamPage({
                       value={opt}
                       checked={responses[q.id] === opt}
                       onChange={(e) => handleChange(q.id, e.target.value)}
+                      disabled={submitting || autoSubmitLocked}
                     />
                     {opt}
                   </label>
@@ -1278,6 +1348,7 @@ export default function TakeExamPage({
                 className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
                 value={responses[q.id] ?? ""}
                 onChange={(e) => handleChange(q.id, e.target.value)}
+                disabled={submitting || autoSubmitLocked}
               />
             )}
 
@@ -1287,6 +1358,7 @@ export default function TakeExamPage({
                 className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
                 value={responses[q.id] ?? ""}
                 onChange={(e) => handleChange(q.id, e.target.value)}
+                disabled={submitting || autoSubmitLocked}
               />
             )}
           </div>
@@ -1294,8 +1366,12 @@ export default function TakeExamPage({
       </div>
 
       <button
-        onClick={handleSubmit}
-        disabled={submitting}
+        onClick={() =>
+          remainingSecs === 0 && data.exam.secureSettings.autoSubmitOnTimerEnd
+            ? handleSubmit({ systemAutoSubmit: true })
+            : handleSubmit()
+        }
+        disabled={submitting || autoSubmitLocked}
         className="mt-6 rounded bg-black px-4 py-2 text-white disabled:opacity-50"
       >
         {submitting ? "Submitting..." : "Submit exam"}

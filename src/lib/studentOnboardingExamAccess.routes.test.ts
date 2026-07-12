@@ -263,8 +263,8 @@ describe("11-15. Student exam list and start with access codes", () => {
     const body = await res.json();
     expect(body.error).toMatch(/access code/i);
 
-    const submission = await prisma.submission.findUnique({
-      where: { examId_studentId: { examId: exam.id, studentId: studentA.id } },
+    const submission = await prisma.submission.findFirst({
+      where: { examId: exam.id, studentId: studentA.id },
     });
     expect(submission).toBeNull();
   });
@@ -289,8 +289,8 @@ describe("11-15. Student exam list and start with access codes", () => {
     });
     expect(res.status).toBe(403);
 
-    const submission = await prisma.submission.findUnique({
-      where: { examId_studentId: { examId: exam.id, studentId: studentA.id } },
+    const submission = await prisma.submission.findFirst({
+      where: { examId: exam.id, studentId: studentA.id },
     });
     expect(submission).toBeNull();
   });
@@ -340,8 +340,8 @@ describe("11-15. Student exam list and start with access codes", () => {
     });
     expect([403, 404]).toContain(startRes.status);
 
-    const submission = await prisma.submission.findUnique({
-      where: { examId_studentId: { examId: exam.id, studentId: studentB.id } },
+    const submission = await prisma.submission.findFirst({
+      where: { examId: exam.id, studentId: studentB.id },
     });
     expect(submission).toBeNull();
   });

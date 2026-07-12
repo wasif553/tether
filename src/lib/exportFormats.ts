@@ -35,6 +35,7 @@ const FULL_REPORT_HEADERS = [
   "Student ID",
   "Student Email",
   "Submission ID",
+  "Attempt Number",
   "Status",
   "Started At",
   "Submitted At",
@@ -60,6 +61,7 @@ function fullReportRowValues(r: MarksRow): Array<string | number | boolean | nul
     r.institutionStudentId,
     r.studentEmail,
     r.submissionId,
+    r.attemptNumber,
     r.status,
     r.startedAt,
     r.submittedAt,
@@ -86,6 +88,7 @@ const UPLOAD_READY_HEADERS = [
   "Student Name",
   "Student Email",
   "Exam/Assignment Name",
+  "Attempt Number",
   "Mark",
   "Mark Out Of",
   "Percentage",
@@ -99,6 +102,7 @@ function uploadReadyRowValues(r: UploadReadyRow): Array<string | number | boolea
     r.studentName,
     r.studentEmail,
     r.examName,
+    r.attemptNumber,
     r.mark,
     r.markOutOf,
     r.percentage != null ? Math.round(r.percentage * 100) / 100 : null,
@@ -207,8 +211,8 @@ export async function buildPdfReportBuffer(report: MarksReport): Promise<Buffer>
   writeLine("Marks", { size: 12, bold: true, color: [0, 0, 0] });
   y -= 2;
 
-  const colWidths = [110, 70, 130, 60, 45, 55, 60];
-  const headers = ["Student", "Student ID", "Email", "Score", "%", "Status", "Submitted"];
+  const colWidths = [100, 60, 120, 45, 50, 40, 50, 55];
+  const headers = ["Student", "Student ID", "Email", "Attempt", "Score", "%", "Status", "Submitted"];
   ensureSpace(20);
   let x = MARGIN;
   headers.forEach((h, i) => {
@@ -224,6 +228,7 @@ export async function buildPdfReportBuffer(report: MarksReport): Promise<Buffer>
       row.studentName,
       row.institutionStudentId ?? "",
       row.studentEmail,
+      row.attemptNumber,
       row.totalScore != null ? `${row.totalScore}/${row.maxScore}` : "",
       row.percentage != null ? `${Math.round(row.percentage)}%` : "",
       row.status,

@@ -29,6 +29,7 @@ export type MarksRow = {
   institutionStudentId: string | null;
   studentEmail: string;
   submissionId: string;
+  attemptNumber: number;
   status: string;
   startedAt: string;
   submittedAt: string | null;
@@ -123,6 +124,7 @@ export async function buildMarksReport(examId: string): Promise<MarksReport> {
       institutionStudentId: s.student.institutionStudentId,
       studentEmail: s.student.email,
       submissionId: s.id,
+      attemptNumber: s.attemptNumber,
       status: s.status,
       startedAt: s.startedAt.toISOString(),
       submittedAt: s.submittedAt?.toISOString() ?? null,
@@ -171,6 +173,7 @@ export type UploadReadyRow = {
   studentName: string;
   studentEmail: string;
   examName: string;
+  attemptNumber: number;
   mark: number | null;
   markOutOf: number;
   percentage: number | null;
@@ -190,6 +193,7 @@ export function toUploadReadyRows(report: MarksReport): UploadReadyRow[] {
     studentName: r.studentName,
     studentEmail: r.studentEmail,
     examName: r.examTitle,
+    attemptNumber: r.attemptNumber,
     mark: r.totalScore,
     markOutOf: r.maxScore,
     percentage: r.percentage,

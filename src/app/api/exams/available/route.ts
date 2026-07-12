@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
+import { attemptsRemaining } from "@/lib/assessmentLifecycle";
+import { parseSecureSettings } from "@/lib/secureExam";
 
 export async function GET() {
   const session = await auth();
@@ -39,7 +41,10 @@ export async function GET() {
       },
       orderBy: { createdAt: "desc" },
       include: {
-        submissions: { where: { studentId: session.user.id } },
+        submissions: {
+          where: { studentId: session.user.id },
+          orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
+        },
         _count: { select: { questions: true } },
         course: { select: { id: true, name: true, code: true } },
       },
@@ -55,6 +60,16 @@ export async function GET() {
         const isUpcoming = opensAt != null && now < opensAt;
         const isClosed = closesAt != null && now > closesAt;
 
+        const settings = parseSecureSettings(exam.secureSettings);
+        const inProgressSubmission = exam.submissions.find((submission) => submission.status === "IN_PROGRESS");
+        const latestSubmission = exam.submissions[0] ?? null;
+        const finalizedAttemptCount = exam.submissions.filter((submission) => submission.status !== "IN_PROGRESS").length;
+        const remainingAttempts = attemptsRemaining({
+          finalizedAttemptCount,
+          maxAttempts: settings.maxAttempts,
+        });
+        const activeSubmission = inProgressSubmission ?? latestSubmission;
+
         return {
           id: exam.id,
           title: exam.title,
@@ -68,8 +83,15 @@ export async function GET() {
           accessCodeRequired: exam.accessCodeRequired,
           course: exam.course,
           availability: isClosed ? "closed" : isUpcoming ? "upcoming" : "open",
-          submission: exam.submissions[0]
-            ? { id: exam.submissions[0].id, status: exam.submissions[0].status }
+          maxAttempts: settings.maxAttempts,
+          remainingAttempts,
+          canStartAttempt: !inProgressSubmission && remainingAttempts > 0,
+          submission: activeSubmission
+            ? {
+                id: activeSubmission.id,
+                status: activeSubmission.status,
+                attemptNumber: activeSubmission.attemptNumber,
+              }
             : null,
         };
       })

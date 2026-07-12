@@ -33,6 +33,7 @@ type CanvasPassback = {
 type SubmissionData = {
   id: string;
   status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
+  attemptNumber: number;
   totalScore: number | null;
   exam: { title: string; questions: Question[] };
   answers: Answer[];
@@ -165,7 +166,9 @@ export default function GradeSubmissionPage({
           Evidence report
         </Link>
       </div>
-      <p className="text-sm text-gray-500">Status: {data.status}</p>
+      <p className="text-sm text-gray-500">
+        Status: {data.status} · Attempt {data.attemptNumber}
+      </p>
 
       <div className="mt-6 space-y-4">
         {data.exam.questions.map((q, i) => {

@@ -80,10 +80,17 @@ export async function GET(
     return NextResponse.json({ ok: false, reason: "closed" });
   }
 
-  const existingSubmission = await prisma.submission.findUnique({
-    where: { examId_studentId: { examId: id, studentId: session.user.id } },
-    select: { id: true, status: true },
-  });
+  const existingSubmission =
+    (await prisma.submission.findFirst({
+      where: { examId: id, studentId: session.user.id, status: "IN_PROGRESS" },
+      orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
+      select: { id: true, status: true, attemptNumber: true },
+    })) ??
+    (await prisma.submission.findFirst({
+      where: { examId: id, studentId: session.user.id },
+      orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
+      select: { id: true, status: true, attemptNumber: true },
+    }));
 
   return NextResponse.json({
     ok: true,
