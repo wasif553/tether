@@ -328,6 +328,38 @@ describe("settings: requireStudentVerification / enableAiCameraIntegrityChecks",
     expect(body.secureSettings.enableAiCameraIntegrityChecks).toBe(true);
     expect(body.accessCodeHash).toBeUndefined();
   });
+
+  it("a full secureSettings save (secureModeEnabled/requireCamera/blockCopyPaste) round-trips correctly through save-then-reload, as the lecturer edit page relies on", async () => {
+    const exam = await createExam();
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const patchRes = await examRoute.PATCH(
+      jsonRequest("PATCH", {
+        secureSettings: {
+          secureModeEnabled: true,
+          requireCamera: true,
+          blockCopyPaste: true,
+          requireFullscreen: true,
+        },
+      }),
+      { params: Promise.resolve({ id: exam.id }) },
+    );
+    expect(patchRes.status).toBe(200);
+
+    // Simulate the lecturer navigating away and reopening the edit page —
+    // a fresh GET, not just the PATCH response — since that's the path
+    // the reported "toggles reset" symptom would show up on.
+    const getRes = await examRoute.GET(new Request("http://test.local"), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    expect(getRes.status).toBe(200);
+    const body = await getRes.json();
+    expect(body.secureSettings).toMatchObject({
+      secureModeEnabled: true,
+      requireCamera: true,
+      blockCopyPaste: true,
+      requireFullscreen: true,
+    });
+  });
 });
 
 describe("AI event types accepted, media metadata rejected", () => {
