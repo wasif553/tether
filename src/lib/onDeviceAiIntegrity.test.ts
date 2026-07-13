@@ -10,6 +10,7 @@ import {
   computeLuminanceVariance,
   evaluatePersonDetections,
   evaluatePhoneDetections,
+  decideSecondPersonEmission,
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   assertSafeIntegrityMetadata,
@@ -139,6 +140,82 @@ describe("evaluatePersonDetections", () => {
     const result = evaluatePersonDetections([{ className: "person", score: 0.9 }], 0.6);
     expect(result.multiplePersons).toBe(false);
     expect(result.noPersonDetected).toBe(false);
+  });
+
+  it("detects high-confidence multiple persons when both ≥0.75", () => {
+    const result = evaluatePersonDetections(
+      [
+        { className: "person", score: 0.8 },
+        { className: "person", score: 0.76 },
+      ],
+      0.6,
+      0.75,
+    );
+    expect(result.multiplePersons).toBe(true);
+    expect(result.multiplePersonsHighConfidence).toBe(true);
+  });
+
+  it("does not flag high-confidence when one person is below 0.75", () => {
+    const result = evaluatePersonDetections(
+      [
+        { className: "person", score: 0.8 },
+        { className: "person", score: 0.65 },
+      ],
+      0.6,
+      0.75,
+    );
+    expect(result.multiplePersons).toBe(true);
+    expect(result.multiplePersonsHighConfidence).toBe(false);
+  });
+});
+
+describe("decideSecondPersonEmission", () => {
+  it("allows immediate emission for high-confidence multi-person detection", () => {
+    const decision = decideSecondPersonEmission(
+      { personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: true },
+      0,
+      true,
+    );
+    expect(decision.shouldEmit).toBe(true);
+    expect(decision.confidenceBand).toBe("high");
+  });
+
+  it("requires 2 consecutive checks for normal-confidence multi-person detection", () => {
+    const decision = decideSecondPersonEmission(
+      { personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: false },
+      1,
+      true,
+    );
+    expect(decision.shouldEmit).toBe(false);
+  });
+
+  it("emits on second consecutive tick for normal-confidence multi-person", () => {
+    const decision = decideSecondPersonEmission(
+      { personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: false },
+      2,
+      true,
+    );
+    expect(decision.shouldEmit).toBe(true);
+    expect(decision.confidenceBand).toBe("medium");
+  });
+
+  it("respects cooldown even for high-confidence detection", () => {
+    const decision = decideSecondPersonEmission(
+      { personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: true },
+      0,
+      false,
+    );
+    expect(decision.shouldEmit).toBe(false);
+    expect(decision.confidenceBand).toBeNull();
+  });
+
+  it("does not emit when multiplePersons is false", () => {
+    const decision = decideSecondPersonEmission(
+      { personCount: 1, noPersonDetected: false, multiplePersons: false, multiplePersonsHighConfidence: false },
+      2,
+      true,
+    );
+    expect(decision.shouldEmit).toBe(false);
   });
 });
 

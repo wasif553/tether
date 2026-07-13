@@ -150,21 +150,52 @@ export function evaluatePhoneDetections(
   return { detected: true, confidence: best.score };
 }
 
-export type PersonDetectionResult = { personCount: number; noPersonDetected: boolean; multiplePersons: boolean };
+export type PersonDetectionResult = {
+  personCount: number;
+  noPersonDetected: boolean;
+  multiplePersons: boolean;
+  multiplePersonsHighConfidence: boolean;
+};
 
-/** Counts person-class detections at or above `minConfidence`. */
+/** Counts person-class detections at or above `minConfidence`, and separately at or above `highConfidence`. */
 export function evaluatePersonDetections(
   detections: DetectedObject[],
   minConfidence = 0.6,
+  highConfidence = 0.75,
 ): PersonDetectionResult {
-  const personCount = detections.filter(
+  const atMinConfidence = detections.filter(
     (d) => d.className.toLowerCase() === "person" && d.score >= minConfidence,
-  ).length;
+  );
+  const personCount = atMinConfidence.length;
+  const highConfidenceCount = atMinConfidence.filter((d) => d.score >= highConfidence).length;
   return {
     personCount,
     noPersonDetected: personCount === 0,
     multiplePersons: personCount >= 2,
+    multiplePersonsHighConfidence: highConfidenceCount >= 2,
   };
+}
+
+export type SecondPersonEmissionDecision = {
+  shouldEmit: boolean;
+  confidenceBand: "high" | "medium" | null;
+};
+
+/**
+ * Decision function for whether POSSIBLE_SECOND_PERSON_VISIBLE should emit:
+ * - High confidence (both persons ≥0.75): emit immediately (no consecutive-check wait)
+ * - Normal confidence (0.60-0.75): require 2 consecutive ticks (guard against fleeting misclassification)
+ * - Either path respects the 45s cooldown to prevent flooding
+ */
+export function decideSecondPersonEmission(
+  person: PersonDetectionResult,
+  consecutiveCount: number,
+  cooldownOk: boolean,
+): SecondPersonEmissionDecision {
+  if (!cooldownOk) return { shouldEmit: false, confidenceBand: null };
+  if (person.multiplePersonsHighConfidence) return { shouldEmit: true, confidenceBand: "high" };
+  if (person.multiplePersons && consecutiveCount >= 2) return { shouldEmit: true, confidenceBand: "medium" };
+  return { shouldEmit: false, confidenceBand: null };
 }
 
 /**

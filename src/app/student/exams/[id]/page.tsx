@@ -15,6 +15,7 @@ import {
   computeLuminanceVariance,
   evaluatePersonDetections,
   evaluatePhoneDetections,
+  decideSecondPersonEmission,
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   type DetectedObject,
@@ -513,6 +514,14 @@ export default function TakeExamPage({
     };
     const onBlur = () => secureSettings.trackWindowBlur && reportIntegrityEvent("WINDOW_BLUR");
     const onFocus = () => secureSettings.trackWindowBlur && reportIntegrityEvent("WINDOW_FOCUS_RETURN");
+    const onVisibilityChange = () => {
+      if (!secureSettings.trackWindowBlur) return;
+      if (document.hidden) {
+        reportIntegrityEvent("WINDOW_BLUR");
+      } else {
+        reportIntegrityEvent("WINDOW_FOCUS_RETURN");
+      }
+    };
 
     const onCopy = (e: ClipboardEvent) => {
       if (secureSettings.blockCopyPaste) e.preventDefault();
@@ -545,6 +554,7 @@ export default function TakeExamPage({
     document.addEventListener("fullscreenchange", onFullscreenChange);
     window.addEventListener("blur", onBlur);
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     document.addEventListener("copy", onCopy);
     document.addEventListener("cut", onCut);
     document.addEventListener("paste", onPaste);
@@ -557,6 +567,7 @@ export default function TakeExamPage({
       document.removeEventListener("fullscreenchange", onFullscreenChange);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       document.removeEventListener("copy", onCopy);
       document.removeEventListener("cut", onCut);
       document.removeEventListener("paste", onPaste);
@@ -857,15 +868,23 @@ export default function TakeExamPage({
         }
 
         const secondPersonCount = cooldown.recordObservation("secondPerson", person.multiplePersons);
-        if (
-          person.multiplePersons &&
-          secondPersonCount >= 2 &&
-          cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000)
-        ) {
+        const secondPersonCooldownOk = cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000);
+        const secondPersonDecision = decideSecondPersonEmission(person, secondPersonCount, secondPersonCooldownOk);
+
+        logAiCameraDebug("tick: second-person decision", {
+          multiplePersons: person.multiplePersons,
+          multiplePersonsHighConfidence: person.multiplePersonsHighConfidence,
+          consecutiveCount: secondPersonCount,
+          cooldownBlocked: !secondPersonCooldownOk,
+          shouldEmit: secondPersonDecision.shouldEmit,
+          confidenceBand: secondPersonDecision.confidenceBand,
+        });
+
+        if (secondPersonDecision.shouldEmit) {
           cooldown.markEmitted("POSSIBLE_SECOND_PERSON_VISIBLE", now);
           reportIntegrityEvent("POSSIBLE_SECOND_PERSON_VISIBLE", {
             source: "on_device_camera_ai",
-            confidenceBand: "medium",
+            confidenceBand: secondPersonDecision.confidenceBand,
             modelName: detector.modelName,
             modelVersion: detector.modelVersion,
             detectionIntervalSeconds: intervalMs / 1000,
@@ -894,7 +913,12 @@ export default function TakeExamPage({
       }
     }
 
-    detectionTimer.current = setTimeout(runDetectionTick, intervalMs);
+    // Run the first tick immediately — preconditions (stream granted, gate
+    // acknowledged, exam IN_PROGRESS) are already satisfied by the time this
+    // effect runs. If the detection video hasn't loaded metadata yet, the
+    // readyState/videoWidth guard in runDetectionTick makes it a harmless
+    // no-op for that tick, and the finally block still schedules the next attempt.
+    void runDetectionTick();
 
     return () => {
       cancelled = true;
