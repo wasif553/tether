@@ -21,6 +21,11 @@ import {
   type DetectedObject,
 } from "@/lib/cameraIntegrityDetection";
 import { loadCameraObjectDetector, type CameraObjectDetector } from "@/lib/cameraObjectDetector";
+import {
+  clearAiCameraViolationOverlay,
+  handleAiCameraIntegrityReport,
+  type AiCameraViolationOverlayState,
+} from "@/lib/aiCameraViolationOverlay";
 
 type Question = {
   id: string;
@@ -281,6 +286,13 @@ export default function TakeExamPage({
   const [aiCheckStatus, setAiCheckStatus] = useState<"idle" | "loading" | "active" | "unavailable">(
     "idle",
   );
+  // Local exam-content blur/overlay driven by AI camera violation events
+  // (distinct from browser/window blur — see aiCameraViolationOverlay.ts).
+  // Purely local UI state: acknowledging it clears this back to null but
+  // never deletes the backend IntegrityEvent, and detection may set it
+  // again later if the underlying signal persists past its cooldown.
+  const [aiCameraViolationOverlay, setAiCameraViolationOverlay] =
+    useState<AiCameraViolationOverlayState | null>(null);
 
   const [inLockdownBrowser, setInLockdownBrowser] = useState(false);
 
@@ -349,18 +361,24 @@ export default function TakeExamPage({
       const severity = severityFor(eventType, secureSettings);
       const message = MESSAGES[eventType];
 
-      fetch(`/api/submissions/${id}/integrity-events`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          eventType,
-          severity,
-          message,
-          metadata,
-          occurredAt: new Date().toISOString(),
-        }),
-      }).catch(() => {
-        // Reporting failures should never interrupt the exam session.
+      // Local exam-content overlay (if this is an AI camera violation
+      // event) is set synchronously, before the backend call is even
+      // made — and a backend failure never clears it. See
+      // src/lib/aiCameraViolationOverlay.ts.
+      void handleAiCameraIntegrityReport(eventType, {
+        setOverlay: setAiCameraViolationOverlay,
+        sendToBackend: () =>
+          fetch(`/api/submissions/${id}/integrity-events`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              eventType,
+              severity,
+              message,
+              metadata,
+              occurredAt: new Date().toISOString(),
+            }),
+          }),
       });
 
       if (secureSettings.showIntegrityWarningToStudent && (severity === "MEDIUM" || severity === "HIGH")) {
@@ -932,6 +950,15 @@ export default function TakeExamPage({
     reportIntegrityEvent("STUDENT_VERIFICATION_CONFIRMED");
   }
 
+  // Acknowledging the AI camera violation overlay only clears local UI
+  // state — it never deletes or modifies the backend IntegrityEvent, and
+  // detection keeps running, so the overlay may reappear later if the
+  // same signal persists past its cooldown. Never auto-submits and never
+  // permanently locks the exam.
+  function acknowledgeAiCameraViolationOverlay() {
+    setAiCameraViolationOverlay(clearAiCameraViolationOverlay());
+  }
+
   async function handleStartSecureExam() {
     if (secureSettings?.requireFullscreen) {
       const ok = await enterFullscreen();
@@ -1362,80 +1389,110 @@ export default function TakeExamPage({
         <video ref={detectionVideoRef} autoPlay muted playsInline style={{ display: "none" }} />
       )}
 
-      <div className="mt-6 space-y-4">
-        {data.exam.questions.map((q, i) => (
-          <div key={q.id} className="rounded border border-gray-200 p-4">
-            <p
-              className="text-sm text-gray-500"
-              style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
-            >
-              Q{i + 1} · {q.points} pt(s)
-            </p>
-            <p
-              className="mt-1"
-              style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
-            >
-              {q.text}
-            </p>
+      <div className="relative">
+        {/* On-Device AI Camera Integrity Detection v1 — local exam-content
+            blur, distinct from browser/window blur. Blurred and made
+            non-interactive only while an AI camera violation overlay is
+            active; the modal below is a sibling (not a descendant), so it
+            stays sharp and clickable. See src/lib/aiCameraViolationOverlay.ts. */}
+        <div
+          className={aiCameraViolationOverlay ? "pointer-events-none select-none blur-sm" : undefined}
+          aria-hidden={aiCameraViolationOverlay ? true : undefined}
+        >
+          <div className="mt-6 space-y-4">
+            {data.exam.questions.map((q, i) => (
+              <div key={q.id} className="rounded border border-gray-200 p-4">
+                <p
+                  className="text-sm text-gray-500"
+                  style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
+                >
+                  Q{i + 1} · {q.points} pt(s)
+                </p>
+                <p
+                  className="mt-1"
+                  style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
+                >
+                  {q.text}
+                </p>
 
-            {q.type === "MULTIPLE_CHOICE" && q.options && (
-              <div className="mt-2 space-y-1">
-                {q.options.map((opt) => (
-                  <label
-                    key={opt}
-                    className="flex items-center gap-2 text-sm"
-                    style={
-                      secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined
-                    }
-                  >
-                    <input
-                      type="radio"
-                      name={q.id}
-                      value={opt}
-                      checked={responses[q.id] === opt}
-                      onChange={(e) => handleChange(q.id, e.target.value)}
-                      disabled={submitting || autoSubmitLocked || timerStopped}
-                    />
-                    {opt}
-                  </label>
-                ))}
+                {q.type === "MULTIPLE_CHOICE" && q.options && (
+                  <div className="mt-2 space-y-1">
+                    {q.options.map((opt) => (
+                      <label
+                        key={opt}
+                        className="flex items-center gap-2 text-sm"
+                        style={
+                          secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined
+                        }
+                      >
+                        <input
+                          type="radio"
+                          name={q.id}
+                          value={opt}
+                          checked={responses[q.id] === opt}
+                          onChange={(e) => handleChange(q.id, e.target.value)}
+                          disabled={submitting || autoSubmitLocked || timerStopped}
+                        />
+                        {opt}
+                      </label>
+                    ))}
+                  </div>
+                )}
+
+                {q.type === "SHORT_ANSWER" && (
+                  <input
+                    className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
+                    value={responses[q.id] ?? ""}
+                    onChange={(e) => handleChange(q.id, e.target.value)}
+                    disabled={submitting || autoSubmitLocked || timerStopped}
+                  />
+                )}
+
+                {q.type === "ESSAY" && (
+                  <textarea
+                    rows={5}
+                    className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
+                    value={responses[q.id] ?? ""}
+                    onChange={(e) => handleChange(q.id, e.target.value)}
+                    disabled={submitting || autoSubmitLocked || timerStopped}
+                  />
+                )}
               </div>
-            )}
-
-            {q.type === "SHORT_ANSWER" && (
-              <input
-                className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
-                value={responses[q.id] ?? ""}
-                onChange={(e) => handleChange(q.id, e.target.value)}
-                disabled={submitting || autoSubmitLocked || timerStopped}
-              />
-            )}
-
-            {q.type === "ESSAY" && (
-              <textarea
-                rows={5}
-                className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
-                value={responses[q.id] ?? ""}
-                onChange={(e) => handleChange(q.id, e.target.value)}
-                disabled={submitting || autoSubmitLocked || timerStopped}
-              />
-            )}
+            ))}
           </div>
-        ))}
-      </div>
 
-      <button
-        onClick={() =>
-          remainingSecs === 0 && data.exam.secureSettings.autoSubmitOnTimerEnd
-            ? handleSubmit({ systemAutoSubmit: true })
-            : handleSubmit()
-        }
-        disabled={submitting || autoSubmitLocked || timerStopped}
-        className="mt-6 rounded bg-black px-4 py-2 text-white disabled:opacity-50"
-      >
-        {submitting ? "Submitting..." : "Submit exam"}
-      </button>
-      {submitMessage && <p className="mt-2 text-sm text-red-600">{submitMessage}</p>}
+          <button
+            onClick={() =>
+              remainingSecs === 0 && data.exam.secureSettings.autoSubmitOnTimerEnd
+                ? handleSubmit({ systemAutoSubmit: true })
+                : handleSubmit()
+            }
+            disabled={submitting || autoSubmitLocked || timerStopped}
+            className="mt-6 rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+          >
+            {submitting ? "Submitting..." : "Submit exam"}
+          </button>
+          {submitMessage && <p className="mt-2 text-sm text-red-600">{submitMessage}</p>}
+        </div>
+
+        {aiCameraViolationOverlay && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-sm rounded border border-gray-300 bg-white p-5 shadow-lg">
+              <p className="text-base font-semibold">{aiCameraViolationOverlay.title}</p>
+              <p className="mt-2 text-sm text-gray-700">{aiCameraViolationOverlay.reason}</p>
+              <p className="mt-2 text-sm text-gray-600">
+                Please return to the expected exam conditions before continuing.
+              </p>
+              <button
+                onClick={acknowledgeAiCameraViolationOverlay}
+                className="mt-4 rounded bg-black px-4 py-2 text-sm text-white"
+              >
+                I understand — continue
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
