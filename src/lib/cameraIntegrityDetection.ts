@@ -204,6 +204,16 @@ export function evaluatePhoneDetections(
 }
 
 export type PhoneEmissionDecision = {
+  /**
+   * Whether the phone detection rule itself is satisfied this tick —
+   * independent of the backend-logging cooldown. This is what should
+   * drive the LOCAL overlay (see shouldShowLocalAiOverlay /
+   * src/lib/aiCameraViolationOverlay.ts): a phone that's still visible
+   * keeps this true tick after tick, even while `shouldEmit` below is
+   * suppressed by cooldown.
+   */
+  conditionMet: boolean;
+  /** Whether this tick should send a NEW backend integrity event: conditionMet AND the cooldown has elapsed. */
   shouldEmit: boolean;
   confidenceBand: ConfidenceBand | null;
 };
@@ -214,15 +224,18 @@ export type PhoneEmissionDecision = {
  * first qualifying "cell phone" detection — no waiting for a second
  * consecutive tick — because a student may show a phone only briefly
  * (e.g. to photograph a question) and hide it again before a second
- * check would run. The existing cooldown still applies, so a phone that
- * stays visible does not flood the evidence timeline with repeat events.
+ * check would run. The existing cooldown still applies to backend
+ * logging, so a phone that stays visible does not flood the evidence
+ * timeline with repeat events — but see `conditionMet` above for what
+ * should still drive the local overlay regardless of that cooldown.
  */
 export function decidePhoneEmission(
   phone: PhoneDetectionResult,
   cooldownOk: boolean,
 ): PhoneEmissionDecision {
-  if (!cooldownOk || !phone.detected) return { shouldEmit: false, confidenceBand: null };
-  return { shouldEmit: true, confidenceBand: bandForConfidence(phone.confidence) };
+  const conditionMet = phone.detected;
+  const shouldEmit = conditionMet && cooldownOk;
+  return { conditionMet, shouldEmit, confidenceBand: shouldEmit ? bandForConfidence(phone.confidence) : null };
 }
 
 export type PersonDetectionResult = {
@@ -252,6 +265,14 @@ export function evaluatePersonDetections(
 }
 
 export type SecondPersonEmissionDecision = {
+  /**
+   * Whether the second-person confirmation rule (high-confidence
+   * immediate, or normal-confidence + 2 consecutive ticks) is satisfied
+   * this tick — independent of the backend-logging cooldown. Drives the
+   * local overlay (see shouldShowLocalAiOverlay below).
+   */
+  conditionMet: boolean;
+  /** Whether this tick should send a NEW backend integrity event: conditionMet AND the cooldown has elapsed. */
   shouldEmit: boolean;
   confidenceBand: "high" | "medium" | null;
 };
@@ -260,17 +281,92 @@ export type SecondPersonEmissionDecision = {
  * Decision function for whether POSSIBLE_SECOND_PERSON_VISIBLE should emit:
  * - High confidence (both persons ≥0.75): emit immediately (no consecutive-check wait)
  * - Normal confidence (0.60-0.75): require 2 consecutive ticks (guard against fleeting misclassification)
- * - Either path respects the 45s cooldown to prevent flooding
+ * - `shouldEmit` additionally respects the 45s cooldown to prevent backend flooding;
+ *   `conditionMet` does not, so it can keep driving the local overlay while cooldown is active.
  */
 export function decideSecondPersonEmission(
   person: PersonDetectionResult,
   consecutiveCount: number,
   cooldownOk: boolean,
 ): SecondPersonEmissionDecision {
-  if (!cooldownOk) return { shouldEmit: false, confidenceBand: null };
-  if (person.multiplePersonsHighConfidence) return { shouldEmit: true, confidenceBand: "high" };
-  if (person.multiplePersons && consecutiveCount >= 2) return { shouldEmit: true, confidenceBand: "medium" };
-  return { shouldEmit: false, confidenceBand: null };
+  const highConfidenceMet = person.multiplePersonsHighConfidence;
+  const normalConfidenceMet = person.multiplePersons && consecutiveCount >= 2;
+  const conditionMet = highConfidenceMet || normalConfidenceMet;
+  const shouldEmit = conditionMet && cooldownOk;
+  const confidenceBand: "high" | "medium" | null = !shouldEmit ? null : highConfidenceMet ? "high" : "medium";
+  return { conditionMet, shouldEmit, confidenceBand };
+}
+
+export type NoPersonEmissionDecision = {
+  /** Whether the no-person confirmation rule (≥3 consecutive no-person ticks) is satisfied — independent of cooldown. */
+  conditionMet: boolean;
+  /** Whether this tick should send a NEW backend integrity event: conditionMet AND the cooldown has elapsed. */
+  shouldEmit: boolean;
+};
+
+/**
+ * NO_PERSON_VISIBLE requires 3 consecutive no-person checks — unchanged
+ * confirmation rule, factored out as its own decision function (mirroring
+ * decidePhoneEmission/decideSecondPersonEmission) so `conditionMet` can
+ * drive the local overlay independent of the backend cooldown.
+ */
+export function decideNoPersonEmission(
+  person: PersonDetectionResult,
+  consecutiveCount: number,
+  cooldownOk: boolean,
+): NoPersonEmissionDecision {
+  const conditionMet = person.noPersonDetected && consecutiveCount >= 3;
+  return { conditionMet, shouldEmit: conditionMet && cooldownOk };
+}
+
+export type FrameQualityEmissionDecision = {
+  /** Whether the frame-quality condition (blocked or dark) has held for ≥2 consecutive checks — independent of cooldown. */
+  conditionMet: boolean;
+  /** Whether this tick should send a NEW backend integrity event: conditionMet AND the cooldown has elapsed. */
+  shouldEmit: boolean;
+};
+
+/**
+ * CAMERA_VIEW_BLOCKED / CAMERA_TOO_DARK both require 2 consecutive
+ * checks of the matching frame-quality classification — unchanged
+ * confirmation rule, factored out for the same reason as
+ * decideNoPersonEmission above.
+ */
+export function decideFrameQualityEmission(
+  qualityMatches: boolean,
+  consecutiveCount: number,
+  cooldownOk: boolean,
+): FrameQualityEmissionDecision {
+  const conditionMet = qualityMatches && consecutiveCount >= 2;
+  return { conditionMet, shouldEmit: conditionMet && cooldownOk };
+}
+
+/**
+ * Backend integrity-event logging should happen only when the on-device
+ * detection condition is currently met AND the spam-prevention cooldown
+ * has elapsed — this is exactly the `shouldEmit` field each decide*
+ * function above already returns; exported as a small named function so
+ * the "backend logging is cooldown-gated" rule is explicit and directly
+ * testable on its own, separate from the local-overlay rule below. See
+ * docs/on-device-ai-integrity-detection-v1.md.
+ */
+export function shouldLogAiIntegrityEvent(conditionMet: boolean, cooldownOk: boolean): boolean {
+  return conditionMet && cooldownOk;
+}
+
+/**
+ * The local exam-content overlay should be shown whenever the detection
+ * condition is currently true, full stop — never gated by the backend
+ * cooldown. This is the crux of the acknowledge-then-reappear fix: even
+ * while `shouldLogAiIntegrityEvent` is false (cooldown still active),
+ * this stays true for as long as the underlying signal (phone/person/
+ * frame quality) keeps being detected, so the overlay can reopen almost
+ * immediately after the student acknowledges it if the condition
+ * persists. See src/lib/aiCameraViolationOverlay.ts and
+ * docs/on-device-ai-integrity-detection-v1.md.
+ */
+export function shouldShowLocalAiOverlay(conditionMet: boolean): boolean {
+  return conditionMet;
 }
 
 /**

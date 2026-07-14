@@ -92,10 +92,28 @@ The confidence threshold was also lowered from the original 0.65 to `PHONE_CONFI
 
 Two independent layers prevent event flooding:
 
-1. **Client-side:** `DetectionCooldownTracker` (`src/lib/cameraIntegrityDetection.ts`) tracks a per-signal consecutive-detection counter (reset to 0 on any miss) and a per-signal "last emitted" timestamp. For second-person (normal-confidence path), no-person, blocked, and dark, an event is only sent once the consecutive-count threshold is met **and** the cooldown window has elapsed. **Phone is the exception**: `decidePhoneEmission()` only checks the cooldown, not a consecutive count, so it can emit on the very first qualifying tick — see "Phone detection is high-priority" above.
+1. **Client-side:** `DetectionCooldownTracker` (`src/lib/cameraIntegrityDetection.ts`) tracks a per-signal consecutive-detection counter (reset to 0 on any miss) and a per-signal "last emitted" timestamp. For second-person (normal-confidence path), no-person, blocked, and dark, a **backend** event is only sent once the consecutive-count threshold is met **and** the cooldown window has elapsed. **Phone is the exception**: `decidePhoneEmission()` only checks the cooldown, not a consecutive count, so it can log to the backend on the very first qualifying tick — see "Phone detection is high-priority" above.
 2. **Server-side:** `POST /api/submissions/[id]/integrity-events` independently enforces the same cooldown windows by checking the most recent event of that type for the submission — a second, defense-in-depth layer in case client-side state is somehow bypassed.
 
 Both layers are cleared on unmount, on submission, or when the camera stream stops (`stopAiDetection()`).
+
+### Local overlay vs. backend logging — two independent decisions
+
+Every signal's decide* function (`decidePhoneEmission`, `decideSecondPersonEmission`, `decideNoPersonEmission`, `decideFrameQualityEmission` — all in `src/lib/cameraIntegrityDetection.ts`) returns **two** separate fields, not one:
+
+- **`conditionMet`** — whether the signal's detection rule (confidence threshold, and where applicable the consecutive-check count) is satisfied *this tick*, independent of any cooldown. This is what the local exam-content overlay is driven by (`shouldShowLocalAiOverlay(conditionMet)`), via `computeLocalAiCameraOverlay()` in `src/lib/aiCameraViolationOverlay.ts`, which is recomputed on **every** detection tick.
+- **`shouldEmit`** — whether *this tick* should send a new `IntegrityEvent` to the backend: `conditionMet` **and** the 45s/60s cooldown above has elapsed (`shouldLogAiIntegrityEvent(conditionMet, cooldownOk)`). This is unchanged from before and still exists specifically to stop the evidence timeline from filling up with a near-duplicate row every tick while a signal stays continuously true.
+
+**Why this split exists:** earlier, the local overlay was set only as a side effect of a backend log actually being sent (`handleAiCameraIntegrityReport()`, called from inside `reportIntegrityEvent()`). Since backend logging is cooldown-gated, this meant the overlay was *also* accidentally cooldown-gated — once shown, "I understand — continue" cleared it locally, but the phone/person condition being *still present* couldn't reopen it until the full 45–60s cooldown had elapsed, because nothing else was checking the overlay's underlying condition. `handleAiCameraIntegrityReport()` still fires the overlay immediately on the very first occurrence (unchanged, and still tested in `aiCameraViolationOverlay.test.ts`); what's new is the *second*, independent check every tick afterwards, driven purely by `conditionMet`, that keeps the overlay in sync with reality regardless of whether a backend log happens that tick.
+
+**What this means for the student experience:**
+- Acknowledging the overlay ("I understand — continue") only ever clears the local display — never the backend `IntegrityEvent`, never the cooldown tracker, never the detection loop (which keeps running exactly as before).
+- If the same condition (phone / second person / no person / blocked / dark) is **still true** on the next detection tick (typically ~1–1.5s later), the overlay reopens immediately — it does not wait for the 45–60s backend cooldown to elapse.
+- If the condition has **cleared** by the next tick, the overlay stays cleared.
+- If a **different** condition becomes true, its overlay replaces whatever was showing, immediately (priority order when more than one signal is true in the same tick: phone > second person > no person > blocked > dark — phone is highest because it's the most urgent signal).
+- None of this changes auto-submit or lockout behavior: the overlay is always dismissible, the exam is never permanently locked, and no signal triggers automatic submission.
+
+The overlay reflects **only local, on-device detection state** — no image, video, or snapshot is ever part of this decision or sent anywhere as a result of it (see "Metadata shape and safety guardrails" below). Every signal remains a review indicator for the lecturer, never an automatic misconduct finding.
 
 ### Metadata shape and safety guardrails
 
@@ -122,10 +140,11 @@ To help tune the interval and confidence threshold against real hardware without
 - To enable: open the browser console on a local dev build and run `localStorage.setItem("sesAiCameraDebug", "true")`, then reload the exam page. To disable: `localStorage.removeItem("sesAiCameraDebug")`.
 - Logs, per detection tick:
   - `tick: start` — the tick's timestamp and the current adaptive cadence (`cadenceMs`).
+  - `tick: model not loaded` / `tick: inference threw` — when object detection didn't run this tick (model unavailable, or a single failed inference pass); frame-quality (blocked/dark) checks and their overlay contribution still proceed independently.
   - `tick: inference complete` — whether the model is loaded, the **raw** detection results (all classes and confidence scores, not just phone/person), the phone/person thresholds each detection is compared against, `inferenceMs` (wall-clock time of the `detector.detect()` call only, measured with `performance.now()` immediately before/after), and the current cadence.
-  - `tick: phone decision` — the phone confidence score and threshold, whether the cooldown blocked emission, whether an event was emitted (`shouldEmit`), and whether the overlay was set (`overlaySet` — always equal to `shouldEmit` for phone, since every `POSSIBLE_PHONE_VISIBLE` emission maps to an overlay).
-  - `tick: second-person decision` — unchanged from before (multi-person state, consecutive count, cooldown, emission decision).
-- Never sent to the server, never enabled by default, and never includes image/frame/base64/blob data — only class names, confidence numbers, and timing numbers ever appear in the log.
+  - `tick: phone decision` / `tick: second-person decision` / `tick: no-person decision` — for each: whether the underlying condition is currently true (`conditionMet`), whether the backend cooldown has elapsed (`backendLogCooldownOk`), and whether a backend event was actually sent this tick (`backendLogSent`). `conditionMet` can be `true` while `backendLogSent` is `false` — that's the local overlay continuing to reflect reality while backend logging stays cooldown-suppressed.
+  - `tick: local overlay decision` — whether any AI camera violation is currently present (`violationPresent`) and which one (`activeReason`), whether the overlay was already showing and awaiting acknowledgement before this tick (`overlayAwaitingAcknowledgement`), and whether this tick actually changed the overlay (`overlayWillChange` — `false` on most ticks once a condition is stable, which is what keeps the overlay from visibly flickering).
+- Never sent to the server, never enabled by default, and never includes image/frame/base64/blob data — only class names, confidence numbers, timing numbers, and boolean decision flags ever appear in the log.
 
 **Confidence threshold tuning is expected before broad institutional rollout.** The current thresholds (phone ≥0.45, person ≥0.6) are defaults and have not been calibrated against real-world lighting/camera/distance conditions. The phone threshold was deliberately lowered from its original 0.65 alongside removing the consecutive-check requirement (see "Phone detection is high-priority" above) — use `sesAiCameraDebug` to collect real confidence scores on representative hardware before deciding whether to raise it back toward 0.5; avoid going far below 0.4.
 

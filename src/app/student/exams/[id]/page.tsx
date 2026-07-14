@@ -17,6 +17,8 @@ import {
   evaluatePhoneDetections,
   decidePhoneEmission,
   decideSecondPersonEmission,
+  decideNoPersonEmission,
+  decideFrameQualityEmission,
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   PHONE_CONFIDENCE_THRESHOLD,
@@ -25,6 +27,7 @@ import {
 import { loadCameraObjectDetector, type CameraObjectDetector } from "@/lib/cameraObjectDetector";
 import {
   clearAiCameraViolationOverlay,
+  computeLocalAiCameraOverlay,
   handleAiCameraIntegrityReport,
   type AiCameraViolationOverlayState,
 } from "@/lib/aiCameraViolationOverlay";
@@ -291,10 +294,23 @@ export default function TakeExamPage({
   // Local exam-content blur/overlay driven by AI camera violation events
   // (distinct from browser/window blur — see aiCameraViolationOverlay.ts).
   // Purely local UI state: acknowledging it clears this back to null but
-  // never deletes the backend IntegrityEvent, and detection may set it
-  // again later if the underlying signal persists past its cooldown.
+  // never deletes the backend IntegrityEvent. Local display is driven by
+  // computeLocalAiCameraOverlay() every detection tick — independent of
+  // the backend-logging cooldown — so if the underlying signal is still
+  // present, the overlay reopens on the very next tick after being
+  // acknowledged, instead of waiting out the 45-60s backend cooldown.
   const [aiCameraViolationOverlay, setAiCameraViolationOverlay] =
     useState<AiCameraViolationOverlayState | null>(null);
+  // Mirrors aiCameraViolationOverlay for synchronous reads inside the
+  // detection tick closure (which is defined once per effect run and
+  // would otherwise see a stale value of the state variable itself).
+  // Used only to avoid redundant setState calls (no visible flicker when
+  // the same overlay reason is recomputed tick after tick) and for debug
+  // logging — never used to gate correctness-critical logic.
+  const aiCameraViolationOverlayRef = useRef<AiCameraViolationOverlayState | null>(null);
+  useEffect(() => {
+    aiCameraViolationOverlayRef.current = aiCameraViolationOverlay;
+  }, [aiCameraViolationOverlay]);
 
   const [inLockdownBrowser, setInLockdownBrowser] = useState(false);
 
@@ -824,14 +840,30 @@ export default function TakeExamPage({
         if (quality !== "blocked") cooldown.recordObservation("blocked", false);
         if (quality !== "dark") cooldown.recordObservation("dark", false);
 
-        if (quality === "blocked" && blockedCount >= 2 && cooldown.canEmit("CAMERA_VIEW_BLOCKED", now, 60_000)) {
+        // Frame-quality decisions: `conditionMet` (drives the local
+        // overlay) is independent of the backend cooldown; `shouldEmit`
+        // (drives backend logging) additionally requires it. See
+        // shouldShowLocalAiOverlay / shouldLogAiIntegrityEvent in
+        // cameraIntegrityDetection.ts.
+        const blockedDecision = decideFrameQualityEmission(
+          quality === "blocked",
+          blockedCount,
+          cooldown.canEmit("CAMERA_VIEW_BLOCKED", now, 60_000),
+        );
+        const darkDecision = decideFrameQualityEmission(
+          quality === "dark",
+          darkCount,
+          cooldown.canEmit("CAMERA_TOO_DARK", now, 60_000),
+        );
+
+        if (blockedDecision.shouldEmit) {
           cooldown.markEmitted("CAMERA_VIEW_BLOCKED", now);
           reportIntegrityEvent("CAMERA_VIEW_BLOCKED", {
             source: "on_device_camera_ai",
             confidenceBand: "medium",
             detectionIntervalSeconds: currentDetectionDelayMs / 1000,
           });
-        } else if (quality === "dark" && darkCount >= 2 && cooldown.canEmit("CAMERA_TOO_DARK", now, 60_000)) {
+        } else if (darkDecision.shouldEmit) {
           cooldown.markEmitted("CAMERA_TOO_DARK", now);
           reportIntegrityEvent("CAMERA_TOO_DARK", {
             source: "on_device_camera_ai",
@@ -840,109 +872,176 @@ export default function TakeExamPage({
           });
         }
 
-        // Object-detection-based checks — only if the model loaded.
+        // Object-detection-based checks — only if the model loaded. These
+        // default to "not currently met" so the local-overlay refresh
+        // below (which must run regardless of whether object detection
+        // ran this tick) has a well-defined value for every signal —
+        // blocked/dark can still drive/reopen the overlay even on a tick
+        // where the model isn't loaded or a single inference call fails.
         const detector = detectorRef.current;
+        // Placeholder for ticks with no fresh object-detection data this
+        // tick (model not loaded / inference threw) — deliberately
+        // "nothing detected," never "no person," so it can't spuriously
+        // satisfy any condition below.
+        const noFreshPersonData = {
+          personCount: 0,
+          noPersonDetected: false,
+          multiplePersons: false,
+          multiplePersonsHighConfidence: false,
+        };
+        let phoneDecision = decidePhoneEmission({ detected: false, confidence: 0 }, true);
+        let secondPersonDecision = decideSecondPersonEmission(noFreshPersonData, 0, true);
+        let noPersonDecision = decideNoPersonEmission(noFreshPersonData, 0, true);
+
         if (!detector) {
           logAiCameraDebug("tick: model not loaded", { modelLoaded: false });
-          return;
-        }
-        let detections: DetectedObject[] = [];
-        const inferenceStart = performance.now();
-        try {
-          detections = await detector.detect(video);
-          inferenceMs = performance.now() - inferenceStart;
-        } catch {
-          inferenceMs = performance.now() - inferenceStart;
-          logAiCameraDebug("tick: inference threw", { modelLoaded: true, inferenceMs });
-          return;
+        } else {
+          let detections: DetectedObject[] = [];
+          const inferenceStart = performance.now();
+          let inferenceThrew = false;
+          try {
+            detections = await detector.detect(video);
+            inferenceMs = performance.now() - inferenceStart;
+          } catch {
+            inferenceMs = performance.now() - inferenceStart;
+            inferenceThrew = true;
+            logAiCameraDebug("tick: inference threw", { modelLoaded: true, inferenceMs });
+          }
+
+          if (!inferenceThrew) {
+            const phoneThreshold = PHONE_CONFIDENCE_THRESHOLD;
+            const personThreshold = 0.6;
+            const phone = evaluatePhoneDetections(detections, phoneThreshold);
+            const person = evaluatePersonDetections(detections, personThreshold);
+
+            logAiCameraDebug("tick: inference complete", {
+              modelLoaded: true,
+              inferenceMs,
+              cadenceMs: currentDetectionDelayMs,
+              rawDetections: detections.map((d) => ({ className: d.className, score: d.score })),
+              phoneThreshold,
+              personThreshold,
+              phoneDetected: phone.detected,
+              phoneConfidence: phone.confidence,
+              personCount: person.personCount,
+            });
+
+            // Phone is the urgent exception: `conditionMet` is true on the
+            // first qualifying detection rather than waiting for a second
+            // consecutive tick (see decidePhoneEmission), since a student
+            // may show a phone only briefly. `shouldEmit` (backend
+            // logging) still respects the cooldown, so a phone that stays
+            // visible doesn't flood the evidence timeline with repeat
+            // events — but the local overlay, driven by `conditionMet`
+            // below, is not held back by that same cooldown.
+            const phoneCooldownOk = cooldown.canEmit("POSSIBLE_PHONE_VISIBLE", now, 45_000);
+            phoneDecision = decidePhoneEmission(phone, phoneCooldownOk);
+
+            const secondPersonCount = cooldown.recordObservation("secondPerson", person.multiplePersons);
+            const secondPersonCooldownOk = cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000);
+            secondPersonDecision = decideSecondPersonEmission(person, secondPersonCount, secondPersonCooldownOk);
+
+            const noPersonCount = cooldown.recordObservation("noPerson", person.noPersonDetected);
+            const noPersonCooldownOk = cooldown.canEmit("NO_PERSON_VISIBLE", now, 45_000);
+            noPersonDecision = decideNoPersonEmission(person, noPersonCount, noPersonCooldownOk);
+
+            logAiCameraDebug("tick: phone decision", {
+              phoneDetected: phone.detected,
+              phoneConfidence: phone.confidence,
+              phoneThreshold,
+              conditionMet: phoneDecision.conditionMet,
+              backendLogCooldownOk: phoneCooldownOk,
+              backendLogSent: phoneDecision.shouldEmit,
+              confidenceBand: phoneDecision.confidenceBand,
+            });
+
+            logAiCameraDebug("tick: second-person decision", {
+              multiplePersons: person.multiplePersons,
+              multiplePersonsHighConfidence: person.multiplePersonsHighConfidence,
+              consecutiveCount: secondPersonCount,
+              conditionMet: secondPersonDecision.conditionMet,
+              backendLogCooldownOk: secondPersonCooldownOk,
+              backendLogSent: secondPersonDecision.shouldEmit,
+              confidenceBand: secondPersonDecision.confidenceBand,
+            });
+
+            logAiCameraDebug("tick: no-person decision", {
+              noPersonDetected: person.noPersonDetected,
+              consecutiveCount: noPersonCount,
+              conditionMet: noPersonDecision.conditionMet,
+              backendLogCooldownOk: noPersonCooldownOk,
+              backendLogSent: noPersonDecision.shouldEmit,
+            });
+
+            if (phoneDecision.shouldEmit) {
+              cooldown.markEmitted("POSSIBLE_PHONE_VISIBLE", now);
+              reportIntegrityEvent("POSSIBLE_PHONE_VISIBLE", {
+                source: "on_device_camera_ai",
+                confidence: phone.confidence,
+                confidenceBand: phoneDecision.confidenceBand,
+                modelName: detector.modelName,
+                modelVersion: detector.modelVersion,
+                detectionIntervalSeconds: currentDetectionDelayMs / 1000,
+              });
+            }
+
+            if (secondPersonDecision.shouldEmit) {
+              cooldown.markEmitted("POSSIBLE_SECOND_PERSON_VISIBLE", now);
+              reportIntegrityEvent("POSSIBLE_SECOND_PERSON_VISIBLE", {
+                source: "on_device_camera_ai",
+                confidenceBand: secondPersonDecision.confidenceBand,
+                modelName: detector.modelName,
+                modelVersion: detector.modelVersion,
+                detectionIntervalSeconds: currentDetectionDelayMs / 1000,
+              });
+            }
+
+            if (noPersonDecision.shouldEmit) {
+              cooldown.markEmitted("NO_PERSON_VISIBLE", now);
+              reportIntegrityEvent("NO_PERSON_VISIBLE", {
+                source: "on_device_camera_ai",
+                confidenceBand: "medium",
+                modelName: detector.modelName,
+                modelVersion: detector.modelVersion,
+                detectionIntervalSeconds: currentDetectionDelayMs / 1000,
+              });
+            }
+          }
         }
 
-        const phoneThreshold = PHONE_CONFIDENCE_THRESHOLD;
-        const personThreshold = 0.6;
-        const phone = evaluatePhoneDetections(detections, phoneThreshold);
-        const person = evaluatePersonDetections(detections, personThreshold);
+        // Local overlay refresh — runs every tick regardless of the
+        // backend-logging cooldown above. This is the fix for slow/never
+        // re-detection after "I understand — continue": acknowledging
+        // only clears the previously-shown overlay object, it never
+        // touches the cooldown tracker or this recomputation, so if the
+        // same condition is still true on the very next tick the overlay
+        // reopens immediately; if it cleared, the overlay stays cleared;
+        // if a different condition is true, its overlay shows instead.
+        // See src/lib/aiCameraViolationOverlay.ts.
+        const activeConditions = [
+          { eventType: "POSSIBLE_PHONE_VISIBLE", conditionMet: phoneDecision.conditionMet },
+          { eventType: "POSSIBLE_SECOND_PERSON_VISIBLE", conditionMet: secondPersonDecision.conditionMet },
+          { eventType: "NO_PERSON_VISIBLE", conditionMet: noPersonDecision.conditionMet },
+          { eventType: "CAMERA_VIEW_BLOCKED", conditionMet: blockedDecision.conditionMet },
+          { eventType: "CAMERA_TOO_DARK", conditionMet: darkDecision.conditionMet },
+        ];
+        const nextOverlay = computeLocalAiCameraOverlay(activeConditions);
+        const currentOverlay = aiCameraViolationOverlayRef.current;
 
-        logAiCameraDebug("tick: inference complete", {
-          modelLoaded: true,
-          inferenceMs,
-          cadenceMs: currentDetectionDelayMs,
-          rawDetections: detections.map((d) => ({ className: d.className, score: d.score })),
-          phoneThreshold,
-          personThreshold,
-          phoneDetected: phone.detected,
-          phoneConfidence: phone.confidence,
-          personCount: person.personCount,
+        logAiCameraDebug("tick: local overlay decision", {
+          violationPresent: nextOverlay != null,
+          activeReason: nextOverlay?.reason ?? null,
+          overlayAwaitingAcknowledgement: currentOverlay != null,
+          overlayWillChange: (currentOverlay?.reason ?? null) !== (nextOverlay?.reason ?? null),
         });
 
-        // Phone is the urgent exception: it emits on the first
-        // qualifying detection rather than waiting for a second
-        // consecutive tick (see decidePhoneEmission), since a student
-        // may show a phone only briefly. Still gated by the same
-        // cooldown as before, so a phone that stays visible doesn't
-        // flood the evidence timeline with repeat events.
-        const phoneCooldownOk = cooldown.canEmit("POSSIBLE_PHONE_VISIBLE", now, 45_000);
-        const phoneDecision = decidePhoneEmission(phone, phoneCooldownOk);
-
-        logAiCameraDebug("tick: phone decision", {
-          phoneDetected: phone.detected,
-          phoneConfidence: phone.confidence,
-          phoneThreshold,
-          cooldownBlocked: !phoneCooldownOk,
-          shouldEmit: phoneDecision.shouldEmit,
-          confidenceBand: phoneDecision.confidenceBand,
-          overlaySet: phoneDecision.shouldEmit,
-        });
-
-        if (phoneDecision.shouldEmit) {
-          cooldown.markEmitted("POSSIBLE_PHONE_VISIBLE", now);
-          reportIntegrityEvent("POSSIBLE_PHONE_VISIBLE", {
-            source: "on_device_camera_ai",
-            confidence: phone.confidence,
-            confidenceBand: phoneDecision.confidenceBand,
-            modelName: detector.modelName,
-            modelVersion: detector.modelVersion,
-            detectionIntervalSeconds: currentDetectionDelayMs / 1000,
-          });
-        }
-
-        const secondPersonCount = cooldown.recordObservation("secondPerson", person.multiplePersons);
-        const secondPersonCooldownOk = cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000);
-        const secondPersonDecision = decideSecondPersonEmission(person, secondPersonCount, secondPersonCooldownOk);
-
-        logAiCameraDebug("tick: second-person decision", {
-          multiplePersons: person.multiplePersons,
-          multiplePersonsHighConfidence: person.multiplePersonsHighConfidence,
-          consecutiveCount: secondPersonCount,
-          cooldownBlocked: !secondPersonCooldownOk,
-          shouldEmit: secondPersonDecision.shouldEmit,
-          confidenceBand: secondPersonDecision.confidenceBand,
-        });
-
-        if (secondPersonDecision.shouldEmit) {
-          cooldown.markEmitted("POSSIBLE_SECOND_PERSON_VISIBLE", now);
-          reportIntegrityEvent("POSSIBLE_SECOND_PERSON_VISIBLE", {
-            source: "on_device_camera_ai",
-            confidenceBand: secondPersonDecision.confidenceBand,
-            modelName: detector.modelName,
-            modelVersion: detector.modelVersion,
-            detectionIntervalSeconds: currentDetectionDelayMs / 1000,
-          });
-        }
-
-        const noPersonCount = cooldown.recordObservation("noPerson", person.noPersonDetected);
-        if (
-          person.noPersonDetected &&
-          noPersonCount >= 3 &&
-          cooldown.canEmit("NO_PERSON_VISIBLE", now, 45_000)
-        ) {
-          cooldown.markEmitted("NO_PERSON_VISIBLE", now);
-          reportIntegrityEvent("NO_PERSON_VISIBLE", {
-            source: "on_device_camera_ai",
-            confidenceBand: "medium",
-            modelName: detector.modelName,
-            modelVersion: detector.modelVersion,
-            detectionIntervalSeconds: currentDetectionDelayMs / 1000,
-          });
+        if ((currentOverlay?.reason ?? null) !== (nextOverlay?.reason ?? null)) {
+          // Avoids setState (and any resulting re-render/flicker) on
+          // every tick when nothing has actually changed — only updates
+          // when the overlay is newly appearing, newly clearing, or
+          // switching to a different violation's reason.
+          aiCameraViolationOverlayRef.current = nextOverlay;
+          setAiCameraViolationOverlay(nextOverlay);
         }
       } finally {
         if (!cancelled) {
@@ -977,7 +1076,17 @@ export default function TakeExamPage({
   // same signal persists past its cooldown. Never auto-submits and never
   // permanently locks the exam.
   function acknowledgeAiCameraViolationOverlay() {
-    setAiCameraViolationOverlay(clearAiCameraViolationOverlay());
+    // Clears ONLY the local overlay display — never the backend
+    // IntegrityEvent, and never the detection loop or its cooldown
+    // tracker. The ref is updated synchronously (not just via the
+    // state-sync effect) so that if the next detection tick's setTimeout
+    // fires before React has re-rendered, it still reads the correct
+    // (cleared) value rather than a stale one. If the same condition is
+    // still present, the very next tick's local-overlay refresh reopens
+    // it — see the detection effect above and
+    // src/lib/aiCameraViolationOverlay.ts.
+    aiCameraViolationOverlayRef.current = clearAiCameraViolationOverlay();
+    setAiCameraViolationOverlay(aiCameraViolationOverlayRef.current);
   }
 
   async function handleStartSecureExam() {

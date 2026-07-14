@@ -21,7 +21,11 @@ import {
   evaluatePhoneDetections,
   decidePhoneEmission,
   decideSecondPersonEmission,
+  decideNoPersonEmission,
+  decideFrameQualityEmission,
   shouldLogAiCameraDebug,
+  shouldLogAiIntegrityEvent,
+  shouldShowLocalAiOverlay,
   DetectionCooldownTracker,
   PHONE_CONFIDENCE_THRESHOLD,
   assertSafeIntegrityMetadata,
@@ -181,6 +185,37 @@ describe("decidePhoneEmission", () => {
     expect(decision.confidenceBand).toBe(bandForConfidence(0.9));
     expect(decision.confidenceBand).toBe("high");
   });
+
+  it("2. backend logging cooldown does not suppress conditionMet (the local-overlay driver)", () => {
+    // The core acknowledge-then-reappear fix: a phone that stays visible
+    // keeps conditionMet true even while shouldEmit (backend logging) is
+    // suppressed by cooldown.
+    const decision = decidePhoneEmission({ detected: true, confidence: 0.9 }, false);
+    expect(decision.shouldEmit).toBe(false); // backend still suppressed
+    expect(decision.conditionMet).toBe(true); // but the condition itself is still true
+  });
+
+  it("3/4. phone overlay reopens after acknowledgement if the phone remains visible (simulated across two ticks)", () => {
+    const stillVisible = { detected: true, confidence: 0.7 };
+    // Tick 1: first sighting — cooldown is fresh, so both fire.
+    const tick1 = decidePhoneEmission(stillVisible, true);
+    expect(tick1.shouldEmit).toBe(true);
+    expect(tick1.conditionMet).toBe(true);
+    // Student acknowledges (a purely local UI action — does not touch
+    // the cooldown tracker). Tick 2, ~1s later: cooldown hasn't elapsed
+    // yet, so backend logging is suppressed, but the phone is still
+    // visible, so conditionMet (and therefore the local overlay) is true again.
+    const tick2 = decidePhoneEmission(stillVisible, false);
+    expect(tick2.shouldEmit).toBe(false);
+    expect(tick2.conditionMet).toBe(true);
+  });
+
+  it("4. phone overlay stays cleared after acknowledgement if the phone is gone", () => {
+    // Same cooldown-blocked state as above, but the phone has left frame.
+    const decision = decidePhoneEmission({ detected: false, confidence: 0 }, false);
+    expect(decision.conditionMet).toBe(false);
+    expect(decision.shouldEmit).toBe(false);
+  });
 });
 
 describe("evaluatePersonDetections", () => {
@@ -289,6 +324,118 @@ describe("decideSecondPersonEmission", () => {
       true,
     );
     expect(decision.shouldEmit).toBe(false);
+  });
+
+  it("2. backend cooldown does not suppress conditionMet for high-confidence second-person", () => {
+    const decision = decideSecondPersonEmission(
+      { personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: true },
+      0,
+      false,
+    );
+    expect(decision.shouldEmit).toBe(false);
+    expect(decision.conditionMet).toBe(true);
+  });
+
+  it("5. second-person overlay can reopen after acknowledgement if the second person remains visible", () => {
+    const twoPeopleNormalConfidence = {
+      personCount: 2,
+      noPersonDetected: false,
+      multiplePersons: true,
+      multiplePersonsHighConfidence: false,
+    };
+    // Tick 1 and 2: consecutive-check rule satisfied on the 2nd tick, cooldown fresh — emits.
+    decideSecondPersonEmission(twoPeopleNormalConfidence, 1, true);
+    const confirmingTick = decideSecondPersonEmission(twoPeopleNormalConfidence, 2, true);
+    expect(confirmingTick.shouldEmit).toBe(true);
+    // Acknowledged locally; cooldown now blocks backend re-logging, but
+    // the second person is still in frame on tick 3 — conditionMet stays
+    // true (consecutive count keeps climbing past the >=2 threshold),
+    // so the local overlay can reopen even though shouldEmit is false.
+    const afterAcknowledge = decideSecondPersonEmission(twoPeopleNormalConfidence, 3, false);
+    expect(afterAcknowledge.shouldEmit).toBe(false);
+    expect(afterAcknowledge.conditionMet).toBe(true);
+  });
+
+  it("stays cleared after acknowledgement once the second person leaves frame", () => {
+    const decision = decideSecondPersonEmission(
+      { personCount: 1, noPersonDetected: false, multiplePersons: false, multiplePersonsHighConfidence: false },
+      0,
+      false,
+    );
+    expect(decision.conditionMet).toBe(false);
+  });
+});
+
+describe("decideNoPersonEmission", () => {
+  it("requires 3 consecutive no-person checks before the condition is met (unchanged confirmation rule)", () => {
+    const noPerson = { personCount: 0, noPersonDetected: true, multiplePersons: false, multiplePersonsHighConfidence: false };
+    expect(decideNoPersonEmission(noPerson, 1, true).conditionMet).toBe(false);
+    expect(decideNoPersonEmission(noPerson, 2, true).conditionMet).toBe(false);
+    expect(decideNoPersonEmission(noPerson, 3, true).conditionMet).toBe(true);
+  });
+
+  it("1/8. shouldEmit additionally requires the cooldown to have elapsed (backend spam prevention, unchanged)", () => {
+    const noPerson = { personCount: 0, noPersonDetected: true, multiplePersons: false, multiplePersonsHighConfidence: false };
+    const cooldownBlocked = decideNoPersonEmission(noPerson, 3, false);
+    expect(cooldownBlocked.conditionMet).toBe(true);
+    expect(cooldownBlocked.shouldEmit).toBe(false);
+  });
+
+  it("6. no-person overlay can reopen after acknowledgement if no person remains visible", () => {
+    const noPerson = { personCount: 0, noPersonDetected: true, multiplePersons: false, multiplePersonsHighConfidence: false };
+    // Tick 3: confirmation rule satisfied, cooldown fresh — emits and the overlay shows.
+    const confirmingTick = decideNoPersonEmission(noPerson, 3, true);
+    expect(confirmingTick.shouldEmit).toBe(true);
+    // Acknowledged locally. Tick 4: still no person, cooldown still
+    // active (backend suppressed), but conditionMet stays true so the
+    // local overlay reopens.
+    const afterAcknowledge = decideNoPersonEmission(noPerson, 4, false);
+    expect(afterAcknowledge.shouldEmit).toBe(false);
+    expect(afterAcknowledge.conditionMet).toBe(true);
+  });
+
+  it("stays cleared after acknowledgement once a person reappears (consecutive count resets to 0)", () => {
+    const personVisible = { personCount: 1, noPersonDetected: false, multiplePersons: false, multiplePersonsHighConfidence: false };
+    const decision = decideNoPersonEmission(personVisible, 0, false);
+    expect(decision.conditionMet).toBe(false);
+  });
+});
+
+describe("decideFrameQualityEmission", () => {
+  it("requires 2 consecutive matching-quality checks before the condition is met", () => {
+    expect(decideFrameQualityEmission(true, 1, true).conditionMet).toBe(false);
+    expect(decideFrameQualityEmission(true, 2, true).conditionMet).toBe(true);
+  });
+
+  it("shouldEmit additionally requires the cooldown to have elapsed", () => {
+    const decision = decideFrameQualityEmission(true, 2, false);
+    expect(decision.conditionMet).toBe(true);
+    expect(decision.shouldEmit).toBe(false);
+  });
+
+  it("does not meet the condition when the quality no longer matches", () => {
+    expect(decideFrameQualityEmission(false, 2, true).conditionMet).toBe(false);
+  });
+});
+
+describe("shouldLogAiIntegrityEvent", () => {
+  it("1/8. is true only when the condition is met AND the cooldown has elapsed (backend spam prevention)", () => {
+    expect(shouldLogAiIntegrityEvent(true, true)).toBe(true);
+    expect(shouldLogAiIntegrityEvent(true, false)).toBe(false);
+    expect(shouldLogAiIntegrityEvent(false, true)).toBe(false);
+    expect(shouldLogAiIntegrityEvent(false, false)).toBe(false);
+  });
+});
+
+describe("shouldShowLocalAiOverlay", () => {
+  it("2. is true whenever the condition is met, regardless of the backend cooldown", () => {
+    // This is the entire point of the fix: the local overlay must never
+    // be gated by the same cooldown that protects backend logging.
+    expect(shouldShowLocalAiOverlay(true)).toBe(true);
+  });
+
+  it("is false when the condition is not currently met", () => {
+    expect(shouldShowLocalAiOverlay(false)).toBe(false);
   });
 });
 

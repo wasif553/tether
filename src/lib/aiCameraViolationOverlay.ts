@@ -58,6 +58,60 @@ export function clearAiCameraViolationOverlay(): null {
   return null;
 }
 
+export type AiCameraOverlayCondition = {
+  eventType: string;
+  /** Whether this signal's detection rule is currently satisfied — independent of the backend-logging cooldown. */
+  conditionMet: boolean;
+};
+
+/**
+ * Priority order used when more than one AI camera signal is true on the
+ * same tick. Phone comes first: it is the highest-urgency signal (a
+ * student can photograph a question and hide the phone again quickly),
+ * so if a phone and, say, a second person are both detected in the same
+ * frame, the overlay shows the phone reason.
+ */
+export const AI_CAMERA_OVERLAY_PRIORITY_ORDER = [
+  "POSSIBLE_PHONE_VISIBLE",
+  "POSSIBLE_SECOND_PERSON_VISIBLE",
+  "NO_PERSON_VISIBLE",
+  "CAMERA_VIEW_BLOCKED",
+  "CAMERA_TOO_DARK",
+];
+
+/**
+ * Picks which AI camera violation event type (if any) should currently
+ * be shown as the local overlay, from this tick's per-signal
+ * condition-met flags — in `AI_CAMERA_OVERLAY_PRIORITY_ORDER`. Returns
+ * null when none of the conditions are currently true.
+ */
+export function pickActiveAiCameraOverlayEventType(conditions: AiCameraOverlayCondition[]): string | null {
+  const metByType = new Map(conditions.map((c) => [c.eventType, c.conditionMet]));
+  for (const eventType of AI_CAMERA_OVERLAY_PRIORITY_ORDER) {
+    if (metByType.get(eventType)) return eventType;
+  }
+  return null;
+}
+
+/**
+ * Computes the local overlay that should be visible THIS tick, driven
+ * purely by current on-device detection conditions — deliberately
+ * independent of the backend-logging cooldown (see
+ * docs/on-device-ai-integrity-detection-v1.md, "Local overlay vs.
+ * backend logging"). This is what lets the overlay reopen quickly after
+ * the student acknowledges it, as long as the underlying signal is still
+ * present: acknowledging only clears the previously-shown overlay
+ * object, it never silences this per-tick recomputation. Returns null
+ * when no condition currently holds, meaning the overlay should be
+ * cleared or stay cleared.
+ */
+export function computeLocalAiCameraOverlay(
+  conditions: AiCameraOverlayCondition[],
+): AiCameraViolationOverlayState | null {
+  const eventType = pickActiveAiCameraOverlayEventType(conditions);
+  return eventType ? createAiCameraViolationOverlay(eventType) : null;
+}
+
 export type AiCameraIntegrityReportHandlers = {
   /** Synchronously updates local overlay state — called before `sendToBackend`, regardless of its outcome. */
   setOverlay: (overlay: AiCameraViolationOverlayState) => void;

@@ -10,11 +10,22 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AI_CAMERA_VIOLATION_OVERLAY_TITLE,
   clearAiCameraViolationOverlay,
+  computeLocalAiCameraOverlay,
   createAiCameraViolationOverlay,
   handleAiCameraIntegrityReport,
   isAiCameraViolationEvent,
+  pickActiveAiCameraOverlayEventType,
   reasonForAiCameraViolation,
+  type AiCameraOverlayCondition,
 } from "./aiCameraViolationOverlay";
+
+const noConditionsMet: AiCameraOverlayCondition[] = [
+  { eventType: "POSSIBLE_PHONE_VISIBLE", conditionMet: false },
+  { eventType: "POSSIBLE_SECOND_PERSON_VISIBLE", conditionMet: false },
+  { eventType: "NO_PERSON_VISIBLE", conditionMet: false },
+  { eventType: "CAMERA_VIEW_BLOCKED", conditionMet: false },
+  { eventType: "CAMERA_TOO_DARK", conditionMet: false },
+];
 
 describe("createAiCameraViolationOverlay", () => {
   it("1. a second-person event creates an active overlay", () => {
@@ -105,6 +116,72 @@ describe("clearAiCameraViolationOverlay", () => {
   });
 });
 
+describe("pickActiveAiCameraOverlayEventType / computeLocalAiCameraOverlay", () => {
+  it("returns null when no condition is currently met", () => {
+    expect(pickActiveAiCameraOverlayEventType(noConditionsMet)).toBeNull();
+    expect(computeLocalAiCameraOverlay(noConditionsMet)).toBeNull();
+  });
+
+  it("3/6. returns the matching overlay when exactly one condition is met (phone, then no-person)", () => {
+    const phoneOnly = noConditionsMet.map((c) =>
+      c.eventType === "POSSIBLE_PHONE_VISIBLE" ? { ...c, conditionMet: true } : c,
+    );
+    expect(pickActiveAiCameraOverlayEventType(phoneOnly)).toBe("POSSIBLE_PHONE_VISIBLE");
+    expect(computeLocalAiCameraOverlay(phoneOnly)?.reason).toBe("Possible phone visible");
+
+    const noPersonOnly = noConditionsMet.map((c) =>
+      c.eventType === "NO_PERSON_VISIBLE" ? { ...c, conditionMet: true } : c,
+    );
+    expect(computeLocalAiCameraOverlay(noPersonOnly)?.reason).toBe("No person visible");
+  });
+
+  it("7. a different violation type replaces/reopens the overlay immediately when it becomes true", () => {
+    // Tick N: only second person present.
+    const secondPersonTick = noConditionsMet.map((c) =>
+      c.eventType === "POSSIBLE_SECOND_PERSON_VISIBLE" ? { ...c, conditionMet: true } : c,
+    );
+    expect(computeLocalAiCameraOverlay(secondPersonTick)?.reason).toBe("Possible second person visible");
+
+    // Tick N+1: second person gone, phone now visible instead — the
+    // overlay should immediately reflect the NEW condition, not linger
+    // on the old one or require any acknowledgement step in between.
+    const phoneTick = noConditionsMet.map((c) =>
+      c.eventType === "POSSIBLE_PHONE_VISIBLE" ? { ...c, conditionMet: true } : c,
+    );
+    expect(computeLocalAiCameraOverlay(phoneTick)?.reason).toBe("Possible phone visible");
+  });
+
+  it("phone takes priority over other signals true in the same tick, since it is the most urgent", () => {
+    const phoneAndSecondPerson = noConditionsMet.map((c) =>
+      c.eventType === "POSSIBLE_PHONE_VISIBLE" || c.eventType === "POSSIBLE_SECOND_PERSON_VISIBLE"
+        ? { ...c, conditionMet: true }
+        : c,
+    );
+    expect(pickActiveAiCameraOverlayEventType(phoneAndSecondPerson)).toBe("POSSIBLE_PHONE_VISIBLE");
+  });
+
+  it("9/10. is a pure function of the current conditions — recomputing it after a simulated acknowledgement (no state to reset) still reflects reality", () => {
+    // computeLocalAiCameraOverlay takes no "acknowledged" flag and no
+    // cooldown/backend input at all — there is nothing for
+    // acknowledgement to interfere with, and nothing for it to reset.
+    // "The detection loop continues after acknowledgement" reduces, at
+    // this pure level, to: calling this function again with the same
+    // conditions yields the same answer, and with changed conditions
+    // yields the updated answer — exactly like a real subsequent tick.
+    const phoneStillVisible = noConditionsMet.map((c) =>
+      c.eventType === "POSSIBLE_PHONE_VISIBLE" ? { ...c, conditionMet: true } : c,
+    );
+    const beforeAcknowledge = computeLocalAiCameraOverlay(phoneStillVisible);
+    // Acknowledgement is simulated by doing nothing to this function's
+    // inputs except the passage of a tick (conditions recomputed fresh).
+    const afterAcknowledgeConditionPersists = computeLocalAiCameraOverlay(phoneStillVisible);
+    expect(afterAcknowledgeConditionPersists).toEqual(beforeAcknowledge);
+
+    const afterAcknowledgeConditionCleared = computeLocalAiCameraOverlay(noConditionsMet);
+    expect(afterAcknowledgeConditionCleared).toBeNull();
+  });
+});
+
 describe("handleAiCameraIntegrityReport", () => {
   it("1. sets local overlay state before the backend logging promise resolves", async () => {
     let resolveBackend!: () => void;
@@ -189,5 +266,14 @@ describe("handleAiCameraIntegrityReport", () => {
 
     overlayState = clearAiCameraViolationOverlay();
     expect(overlayState).toBeNull();
+  });
+
+  it("9. clearAiCameraViolationOverlay clears local state only — it takes no backend/IntegrityEvent argument at all", () => {
+    // The function's own signature is the proof: it accepts nothing and
+    // always returns null. There is no submissionId, eventId, or fetch
+    // call anywhere in this path — acknowledging can only ever touch
+    // local UI state, never the backend-recorded IntegrityEvent.
+    expect(clearAiCameraViolationOverlay.length).toBe(0);
+    expect(clearAiCameraViolationOverlay()).toBeNull();
   });
 });
