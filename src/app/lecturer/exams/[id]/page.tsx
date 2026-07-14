@@ -17,6 +17,7 @@ import {
   safeExamModeStatusLabel,
   secureSettingsChanged,
 } from "@/lib/secureExam";
+import { buildStudentJoinLink } from "@/lib/examShareLink";
 
 type Question = {
   id: string;
@@ -157,7 +158,7 @@ export default function LecturerExamPage({
   // Safe Exam Deep Link v1 — see docs/course-enrolment-and-exam-assignment.md.
   const [copiedJoinLink, setCopiedJoinLink] = useState(false);
   const joinLinkUrl =
-    typeof window !== "undefined" ? `${window.location.origin}/student/exams/join/${id}` : "";
+    typeof window !== "undefined" ? buildStudentJoinLink(window.location.origin, id) : "";
 
   async function handleCopyJoinLink() {
     try {

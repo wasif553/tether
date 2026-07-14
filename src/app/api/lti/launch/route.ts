@@ -5,6 +5,7 @@ import { decodeProtectedHeader, importJWK, jwtVerify, type JWTPayload } from "jo
 import { prisma } from "@/lib/prisma";
 import { findPlatformJwk } from "@/lib/lti/jwks-cache";
 import { createSessionCookie } from "@/lib/lti/session";
+import { resolveInternalRedirectOrigin } from "@/lib/appOrigin";
 import type { Prisma } from "@/generated/prisma/client";
 
 const CONTEXT_CLAIM = "https://purl.imsglobal.org/spec/lti/claim/context";
@@ -222,12 +223,6 @@ export async function POST(req: Request) {
     institutionId: user.institutionId,
   });
 
-  const appUrl = process.env.APP_URL;
-  if (!appUrl) {
-    console.error("LTI launch: missing required environment variable APP_URL");
-    return NextResponse.json({ error: "Server configuration error" }, { status: 500 });
-  }
-
   const notLinkedPath = `/lti/not-linked?ref=${launch.id}&role=${user.role}`;
   let redirectPath: string;
 
@@ -265,7 +260,20 @@ export async function POST(req: Request) {
     redirectPath = "/student";
   }
 
-  const response = NextResponse.redirect(new URL(redirectPath, appUrl), 302);
+  // Redirect within THIS app after a successful launch — derived from the
+  // incoming request's own origin (src/lib/appOrigin.ts), not
+  // process.env.APP_URL. APP_URL is still used (and still required) by
+  // /api/lti/login and /api/lti/config to build the
+  // redirect_uri/target_link_uri that must match what's registered with
+  // Canvas, which legitimately needs a stable, explicitly-configured
+  // value. This redirect is different: it only ever sends the browser to
+  // a page within the SAME app that just received this POST, so the
+  // request's own origin is always correct and can never go stale the
+  // way a manually-set env var can (e.g. after a new Vercel Preview
+  // deployment gets a fresh URL) — see docs/deployment-vercel-supabase.md
+  // for the APP_URL/env-var context.
+  const requestOrigin = resolveInternalRedirectOrigin(req.url);
+  const response = NextResponse.redirect(new URL(redirectPath, requestOrigin), 302);
   response.cookies.set(cookie.name, cookie.value, cookie.options);
   return response;
 }

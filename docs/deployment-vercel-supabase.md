@@ -14,7 +14,7 @@ separated, later, optional steps.
 |---|---|---|
 | `DATABASE_URL` | Prisma connection string | Use the Supabase **Connection pooling** string (port `6543`) for Vercel — see [Supabase connection strings](#supabase-connection-strings) below |
 | `AUTH_SECRET` | NextAuth (v5) session signing | This app reads `AUTH_SECRET`, **not** `NEXTAUTH_SECRET`. Generate with `openssl rand -base64 32` |
-| `APP_URL` | Builds LTI redirect/launch URLs; the one app-URL variable actually read by the codebase | Set to your deployed HTTPS domain, e.g. `https://ses.example.com` |
+| `APP_URL` | Builds the Canvas OIDC `redirect_uri`/`target_link_uri` in `/api/lti/login` and `/api/lti/config` — the one app-URL variable actually read by the codebase. Deliberately **not** used for the post-launch redirect in `/api/lti/launch`, which derives its (same-app) destination from the incoming request's own origin instead, so it can never point at a stale deployment URL. | Set to your deployed HTTPS domain, e.g. `https://ses.example.com` — this must match what's registered as the tool's redirect URI in Canvas's Developer Key, so keep it in sync if you change domains |
 
 `AUTH_URL` / `NEXTAUTH_URL` and `NEXT_PUBLIC_APP_URL` are **not currently
 read by any code path** in this app — NextAuth v5 auto-trusts the request
@@ -197,9 +197,14 @@ excludes both patterns.
 - **Auth redirect mismatch / login loops** — confirm `APP_URL` exactly
   matches your deployed domain, including `https://` and no trailing
   slash.
-- **Missing app URL** — `/api/lti/config`, `/api/lti/login`, and
-  `/api/lti/launch` all return a clear 500 error naming `APP_URL` if it's
-  unset. This does not affect the core (non-Canvas) app.
+- **Missing app URL** — `/api/lti/config` and `/api/lti/login` return a
+  clear 500 error naming `APP_URL` if it's unset (both build a Canvas-facing
+  URL that must match Canvas's registered value, so they can't safely fall
+  back to the request's own origin). `/api/lti/launch`'s internal
+  post-launch redirect does not depend on `APP_URL` at all — it always
+  redirects within whichever origin actually received the launch request,
+  so it can never end up pointing at a stale/previous deployment URL.
+  None of this affects the core (non-Canvas) app.
 - **LTI JWKS unavailable** (`/api/lti/jwks` returns 500) — expected and
   safe if the Canvas module isn't configured. If you intended to enable
   Canvas, confirm `LTI_PRIVATE_KEY_B64`/`LTI_PUBLIC_KEY_B64` (or the
