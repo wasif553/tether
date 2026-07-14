@@ -10,14 +10,16 @@ import {
 } from "@/lib/assessmentLifecycle";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
 import {
-  bandForConfidence,
   classifyFrameQuality,
   computeLuminanceVariance,
+  computeNextDetectionDelayMs,
   evaluatePersonDetections,
   evaluatePhoneDetections,
+  decidePhoneEmission,
   decideSecondPersonEmission,
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
+  PHONE_CONFIDENCE_THRESHOLD,
   type DetectedObject,
 } from "@/lib/cameraIntegrityDetection";
 import { loadCameraObjectDetector, type CameraObjectDetector } from "@/lib/cameraObjectDetector";
@@ -744,8 +746,8 @@ export default function TakeExamPage({
   }
 
   // On-Device AI Camera Integrity Detection v1 — runs entirely against
-  // the existing camera stream (via the hidden detectionVideoRef), on a
-  // fixed interval (not per-frame), independent of the preview's
+  // the existing camera stream (via the hidden detectionVideoRef), on an
+  // adaptive interval (not per-frame), independent of the preview's
   // minimize/restore state. Never uploads or stores a frame; only
   // numeric aggregates and, once loaded, object-detection class/score
   // pairs are ever sent as event metadata. A failed model load falls
@@ -771,24 +773,28 @@ export default function TakeExamPage({
       setAiCheckStatus("active");
     });
 
-    // Recommended range: 2-3 seconds. Below 2s is not recommended — model
-    // inference itself can take a non-trivial fraction of a second on a
-    // slower device, and running much more often than that mostly burns
-    // battery/CPU without meaningfully improving detection latency. See
-    // docs/on-device-ai-integrity-detection-v1.md for the tradeoff.
-    const AI_DETECTION_MIN_INTERVAL_MS = 2_000;
-    const intervalMs = Math.max(AI_DETECTION_MIN_INTERVAL_MS, 3_000);
+    // Adaptive cadence (computeNextDetectionDelayMs in
+    // cameraIntegrityDetection.ts): 1s between ticks by default — fast
+    // enough that a briefly-shown phone is very likely caught on the
+    // very next tick — backing off to 1.5s only when the previous tick's
+    // inference itself took long enough to suggest the device is
+    // struggling. Starts at the fast interval; only ever updated from
+    // measured inferenceMs, never guessed ahead of time.
+    let currentDetectionDelayMs = computeNextDetectionDelayMs(null);
 
     // Self-scheduling (setTimeout-after-completion), not a fixed-rate
     // setInterval: each tick waits for the previous inference to fully
     // resolve before scheduling the next one, so a slow device can never
-    // stack up overlapping detector.detect() calls even at a short
-    // interval.
+    // stack up overlapping detector.detect() calls regardless of how
+    // short the chosen delay is.
     async function runDetectionTick() {
       if (cancelled) return;
       const video = detectionVideoRef.current;
       const cooldown = detectionCooldown.current;
       const now = Date.now();
+      let inferenceMs: number | null = null;
+
+      logAiCameraDebug("tick: start", { tickTimestamp: now, cadenceMs: currentDetectionDelayMs });
 
       try {
         if (!video || video.readyState < 2 || video.videoWidth === 0) return;
@@ -823,14 +829,14 @@ export default function TakeExamPage({
           reportIntegrityEvent("CAMERA_VIEW_BLOCKED", {
             source: "on_device_camera_ai",
             confidenceBand: "medium",
-            detectionIntervalSeconds: intervalMs / 1000,
+            detectionIntervalSeconds: currentDetectionDelayMs / 1000,
           });
         } else if (quality === "dark" && darkCount >= 2 && cooldown.canEmit("CAMERA_TOO_DARK", now, 60_000)) {
           cooldown.markEmitted("CAMERA_TOO_DARK", now);
           reportIntegrityEvent("CAMERA_TOO_DARK", {
             source: "on_device_camera_ai",
             confidenceBand: "medium",
-            detectionIntervalSeconds: intervalMs / 1000,
+            detectionIntervalSeconds: currentDetectionDelayMs / 1000,
           });
         }
 
@@ -842,7 +848,6 @@ export default function TakeExamPage({
         }
         let detections: DetectedObject[] = [];
         const inferenceStart = performance.now();
-        let inferenceMs: number | null = null;
         try {
           detections = await detector.detect(video);
           inferenceMs = performance.now() - inferenceStart;
@@ -852,7 +857,7 @@ export default function TakeExamPage({
           return;
         }
 
-        const phoneThreshold = 0.65;
+        const phoneThreshold = PHONE_CONFIDENCE_THRESHOLD;
         const personThreshold = 0.6;
         const phone = evaluatePhoneDetections(detections, phoneThreshold);
         const person = evaluatePersonDetections(detections, personThreshold);
@@ -860,6 +865,7 @@ export default function TakeExamPage({
         logAiCameraDebug("tick: inference complete", {
           modelLoaded: true,
           inferenceMs,
+          cadenceMs: currentDetectionDelayMs,
           rawDetections: detections.map((d) => ({ className: d.className, score: d.score })),
           phoneThreshold,
           personThreshold,
@@ -868,20 +874,34 @@ export default function TakeExamPage({
           personCount: person.personCount,
         });
 
-        const phoneCount = cooldown.recordObservation("phone", phone.detected);
-        if (
-          phone.detected &&
-          phoneCount >= 2 &&
-          cooldown.canEmit("POSSIBLE_PHONE_VISIBLE", now, 45_000)
-        ) {
+        // Phone is the urgent exception: it emits on the first
+        // qualifying detection rather than waiting for a second
+        // consecutive tick (see decidePhoneEmission), since a student
+        // may show a phone only briefly. Still gated by the same
+        // cooldown as before, so a phone that stays visible doesn't
+        // flood the evidence timeline with repeat events.
+        const phoneCooldownOk = cooldown.canEmit("POSSIBLE_PHONE_VISIBLE", now, 45_000);
+        const phoneDecision = decidePhoneEmission(phone, phoneCooldownOk);
+
+        logAiCameraDebug("tick: phone decision", {
+          phoneDetected: phone.detected,
+          phoneConfidence: phone.confidence,
+          phoneThreshold,
+          cooldownBlocked: !phoneCooldownOk,
+          shouldEmit: phoneDecision.shouldEmit,
+          confidenceBand: phoneDecision.confidenceBand,
+          overlaySet: phoneDecision.shouldEmit,
+        });
+
+        if (phoneDecision.shouldEmit) {
           cooldown.markEmitted("POSSIBLE_PHONE_VISIBLE", now);
           reportIntegrityEvent("POSSIBLE_PHONE_VISIBLE", {
             source: "on_device_camera_ai",
             confidence: phone.confidence,
-            confidenceBand: bandForConfidence(phone.confidence),
+            confidenceBand: phoneDecision.confidenceBand,
             modelName: detector.modelName,
             modelVersion: detector.modelVersion,
-            detectionIntervalSeconds: intervalMs / 1000,
+            detectionIntervalSeconds: currentDetectionDelayMs / 1000,
           });
         }
 
@@ -905,7 +925,7 @@ export default function TakeExamPage({
             confidenceBand: secondPersonDecision.confidenceBand,
             modelName: detector.modelName,
             modelVersion: detector.modelVersion,
-            detectionIntervalSeconds: intervalMs / 1000,
+            detectionIntervalSeconds: currentDetectionDelayMs / 1000,
           });
         }
 
@@ -921,12 +941,13 @@ export default function TakeExamPage({
             confidenceBand: "medium",
             modelName: detector.modelName,
             modelVersion: detector.modelVersion,
-            detectionIntervalSeconds: intervalMs / 1000,
+            detectionIntervalSeconds: currentDetectionDelayMs / 1000,
           });
         }
       } finally {
         if (!cancelled) {
-          detectionTimer.current = setTimeout(runDetectionTick, intervalMs);
+          currentDetectionDelayMs = computeNextDetectionDelayMs(inferenceMs);
+          detectionTimer.current = setTimeout(runDetectionTick, currentDetectionDelayMs);
         }
       }
     }

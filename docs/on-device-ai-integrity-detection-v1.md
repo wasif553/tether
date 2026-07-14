@@ -36,14 +36,26 @@ Confirming records exactly one metadata-only `STUDENT_VERIFICATION_CONFIRMED` in
 
 Detection runs entirely in the student's browser against the **same `MediaStream`** already held in `cameraStreamRef` for the existing camera preview/heartbeat (`src/app/student/exams/[id]/page.tsx`) — no second `getUserMedia()` call. A dedicated hidden `<video>` element (`detectionVideoRef`) keeps sampling frames even while the visible preview widget is minimized, since minimizing is deliberately just a display choice (see `docs/known-limitations.md`) and must never pause any monitoring.
 
-Every 3 seconds by default (minimum 2 seconds; the previous default was 8 seconds), the current frame is drawn to an in-memory, never-rendered `<canvas>` and:
+Every tick (1–1.5 seconds by default — see "Adaptive cadence" below; the original v1 default was 3 seconds, and before that 8 seconds), the current frame is drawn to an in-memory, never-rendered `<canvas>` and:
 
 1. **Non-AI camera quality checks** (no model, no dependency): `computeLuminanceVariance()` and `classifyFrameQuality()` in `src/lib/cameraIntegrityDetection.ts` compute average luminance and pixel variance from the canvas `ImageData` to detect a blocked/covered lens (near-zero variance) or a too-dark room (low luminance). These run unconditionally, independent of whether the object-detection model below loaded successfully.
-2. **Object-detection checks** (model-dependent): if the model loaded, `detector.detect(video)` returns class/confidence pairs, which `evaluatePhoneDetections()` / `evaluatePersonDetections()` turn into phone/person/no-person/second-person signals.
+2. **Object-detection checks** (model-dependent): if the model loaded, a single `detector.detect(video)` call returns class/confidence pairs for every label in one pass (there is no separate detector instance or extra inference call for phone vs. person), which `evaluatePhoneDetections()` / `evaluatePersonDetections()` turn into phone/person/no-person/second-person signals.
 
 **Nothing above ever returns, logs, or transmits pixel data.** The canvas and its `ImageData` never leave the browser tab; only the numeric aggregates (luminance, variance) and, from the model, class names and confidence scores are ever used — and only those are sent to the server as `IntegrityEvent` metadata.
 
-**Scheduling:** the loop is self-scheduling (`setTimeout` after each inference resolves), not a fixed-rate `setInterval` — the next tick is only scheduled once the current frame's checks (including the async `detector.detect()` call) have fully completed. This means a slow device can never stack up overlapping inference calls even at a short interval; a single slow tick simply delays the next one rather than compounding. 2–3 seconds is the recommended range: below 2 seconds is not the default and is not recommended without first confirming CPU/inference-time impact on real hardware, since `lite_mobilenet_v2` inference itself can take a non-trivial fraction of a second on a slower device.
+**Scheduling:** the loop is self-scheduling (`setTimeout` after each inference resolves), not a fixed-rate `setInterval` — the next tick is only scheduled once the current frame's checks (including the async `detector.detect()` call) have fully completed. This means a slow device can never stack up overlapping inference calls regardless of how short the delay between ticks is; a single slow tick simply delays the next one rather than compounding.
+
+### Adaptive cadence
+
+`computeNextDetectionDelayMs()` (`src/lib/cameraIntegrityDetection.ts`) chooses the delay before each next tick from how long the *previous* tick's inference took:
+
+| Previous tick's `inferenceMs` | Next delay |
+|---|---|
+| `null` (no inference has run yet — first tick, or the model isn't loaded, or the tick short-circuited before inference) | 1000ms |
+| ≤ 900ms (healthy) | 1000ms |
+| \> 900ms (device is struggling) | 1500ms |
+
+This replaces the previous fixed 3-second interval. The faster baseline exists specifically so a briefly-shown mobile phone is very likely caught on the next tick rather than several ticks later; the back-off exists so a slower device doesn't get hammered with back-to-back inference calls. The non-overlapping self-scheduling guarantee above is what actually keeps this safe on slow hardware — the adaptive delay is a cadence tuning on top of that guarantee, not a replacement for it.
 
 ### Model/library choice
 
@@ -59,8 +71,8 @@ Every 3 seconds by default (minimum 2 seconds; the previous default was 8 second
 
 | Event | Trigger | Severity | Cooldown |
 |---|---|---|---|
-| `POSSIBLE_PHONE_VISIBLE` | A phone-class detection ≥0.65 confidence, on ≥2 consecutive checks | MEDIUM | 45s |
-| `POSSIBLE_SECOND_PERSON_VISIBLE` | ≥2 person detections ≥0.60 confidence, on ≥2 consecutive checks | MEDIUM | 45s |
+| `POSSIBLE_PHONE_VISIBLE` | A "cell phone" class detection ≥0.45 confidence, on the **first** qualifying check (no consecutive-check wait — see "Phone detection is high-priority" below) | MEDIUM | 45s |
+| `POSSIBLE_SECOND_PERSON_VISIBLE` | ≥2 person detections ≥0.60 confidence, on ≥2 consecutive checks (or immediately if both ≥0.75 — see `decideSecondPersonEmission()`) | MEDIUM | 45s |
 | `NO_PERSON_VISIBLE` | Zero person detections, on ≥3 consecutive checks | MEDIUM | 45s |
 | `CAMERA_VIEW_BLOCKED` | Near-zero frame variance, on ≥2 consecutive checks | MEDIUM | 60s |
 | `CAMERA_TOO_DARK` | Low average luminance, on ≥2 consecutive checks | LOW | 60s |
@@ -68,11 +80,19 @@ Every 3 seconds by default (minimum 2 seconds; the previous default was 8 second
 
 Existing camera lifecycle events (`CAMERA_STOPPED`, `CAMERA_PERMISSION_DENIED`, `CAMERA_UNAVAILABLE`, `CAMERA_HEARTBEAT_MISSED`) are reused unchanged — no duplicate event types were created for camera-stopped/revoked scenarios.
 
+### Phone detection is high-priority
+
+A mobile phone is the most urgent of the five signals: a student could show a phone just long enough to photograph an exam question (to use elsewhere, including with an external AI tool) and hide it again well within the multi-tick consecutive-check window the other signals use. `decidePhoneEmission()` (`src/lib/cameraIntegrityDetection.ts`) reflects this by emitting `POSSIBLE_PHONE_VISIBLE` on the **first** qualifying detection — unlike second-person (normal-confidence path) and no-person, which still require 2–3 consecutive checks to guard against a single fleeting misclassification. The 45-second cooldown is unchanged, so a phone that stays visible for an extended period still produces one event per cooldown window, not one per tick.
+
+The confidence threshold was also lowered from the original 0.65 to `PHONE_CONFIDENCE_THRESHOLD = 0.45` (`src/lib/cameraIntegrityDetection.ts`), specifically because removing the consecutive-check requirement means a single misclassified frame can no longer be caught by "wait for a second confirming frame" the way it could before — a slightly higher false-positive rate was accepted in exchange for a much lower chance of missing a real phone. If real-hardware testing (via `sesAiCameraDebug`, below) shows too many false positives, raise it toward 0.5; avoid going far below 0.4, which invites noise from unrelated small dark rectangular objects (remotes, wallets, etc).
+
+**Expected latency:** with the first tick running immediately and the adaptive 1–1.5s cadence above, a phone that stays in frame is typically flagged within one tick (as little as ~1 second on fast hardware, up to ~1.5s+inference time when the device has backed off). This is a *typical-case* number, not a guarantee — see "Limitations" below.
+
 ### Timing, debounce, and cooldown
 
 Two independent layers prevent event flooding:
 
-1. **Client-side:** `DetectionCooldownTracker` (`src/lib/cameraIntegrityDetection.ts`) tracks a per-signal consecutive-detection counter (reset to 0 on any miss) and a per-signal "last emitted" timestamp; an event is only sent once the consecutive-count threshold is met **and** the cooldown window has elapsed.
+1. **Client-side:** `DetectionCooldownTracker` (`src/lib/cameraIntegrityDetection.ts`) tracks a per-signal consecutive-detection counter (reset to 0 on any miss) and a per-signal "last emitted" timestamp. For second-person (normal-confidence path), no-person, blocked, and dark, an event is only sent once the consecutive-count threshold is met **and** the cooldown window has elapsed. **Phone is the exception**: `decidePhoneEmission()` only checks the cooldown, not a consecutive count, so it can emit on the very first qualifying tick — see "Phone detection is high-priority" above.
 2. **Server-side:** `POST /api/submissions/[id]/integrity-events` independently enforces the same cooldown windows by checking the most recent event of that type for the submission — a second, defense-in-depth layer in case client-side state is somehow bypassed.
 
 Both layers are cleared on unmount, on submission, or when the camera stream stops (`stopAiDetection()`).
@@ -88,11 +108,11 @@ Every AI-sourced event's metadata contains only:
   "confidenceBand": "high",
   "modelName": "coco-ssd",
   "modelVersion": "lite_mobilenet_v2",
-  "detectionIntervalSeconds": 3
+  "detectionIntervalSeconds": 1
 }
 ```
 
-`confidence`/`modelName`/`modelVersion` are omitted for the two non-AI quality checks (blocked/dark), which have no model to report.
+`confidence`/`modelName`/`modelVersion` are omitted for the two non-AI quality checks (blocked/dark), which have no model to report. `detectionIntervalSeconds` now varies (1 or 1.5) per the adaptive cadence above, rather than always being the previous fixed value of 3 — it reflects whichever cadence was in effect for that particular tick.
 
 ### Dev-only diagnostic logging (`sesAiCameraDebug`)
 
@@ -100,10 +120,14 @@ To help tune the interval and confidence threshold against real hardware without
 
 - Gated on **both** `process.env.NODE_ENV === "development"` **and** `localStorage.getItem("sesAiCameraDebug") === "true"` (pure gate function: `shouldLogAiCameraDebug()` in `src/lib/cameraIntegrityDetection.ts`) — being in a dev server alone is never enough, and it is hard-disabled whenever `NODE_ENV` is not exactly `"development"`.
 - To enable: open the browser console on a local dev build and run `localStorage.setItem("sesAiCameraDebug", "true")`, then reload the exam page. To disable: `localStorage.removeItem("sesAiCameraDebug")`.
-- Logs, per detection tick: whether the model is loaded, the **raw** detection results (all classes and confidence scores, not just phone/person), the phone/person thresholds each detection is compared against, and `inferenceMs` (wall-clock time of the `detector.detect()` call only, measured with `performance.now()` immediately before/after).
+- Logs, per detection tick:
+  - `tick: start` — the tick's timestamp and the current adaptive cadence (`cadenceMs`).
+  - `tick: inference complete` — whether the model is loaded, the **raw** detection results (all classes and confidence scores, not just phone/person), the phone/person thresholds each detection is compared against, `inferenceMs` (wall-clock time of the `detector.detect()` call only, measured with `performance.now()` immediately before/after), and the current cadence.
+  - `tick: phone decision` — the phone confidence score and threshold, whether the cooldown blocked emission, whether an event was emitted (`shouldEmit`), and whether the overlay was set (`overlaySet` — always equal to `shouldEmit` for phone, since every `POSSIBLE_PHONE_VISIBLE` emission maps to an overlay).
+  - `tick: second-person decision` — unchanged from before (multi-person state, consecutive count, cooldown, emission decision).
 - Never sent to the server, never enabled by default, and never includes image/frame/base64/blob data — only class names, confidence numbers, and timing numbers ever appear in the log.
 
-**Confidence threshold tuning is expected before broad institutional rollout.** The current thresholds (phone ≥0.65, person ≥0.6) are initial defaults carried over from v1 and have not been calibrated against real-world lighting/camera/distance conditions. Use `sesAiCameraDebug` to collect real confidence scores on representative hardware (see the manual test steps in the PR/commit that introduced this logging) before deciding whether to adjust either threshold — do not lower them speculatively without that data.
+**Confidence threshold tuning is expected before broad institutional rollout.** The current thresholds (phone ≥0.45, person ≥0.6) are defaults and have not been calibrated against real-world lighting/camera/distance conditions. The phone threshold was deliberately lowered from its original 0.65 alongside removing the consecutive-check requirement (see "Phone detection is high-priority" above) — use `sesAiCameraDebug` to collect real confidence scores on representative hardware before deciding whether to raise it back toward 0.5; avoid going far below 0.4.
 
 **Structural guardrail, not just convention:** `POST /api/submissions/[id]/integrity-events` rejects any request whose metadata contains a key matching `image|frame|screenshot|thumbnail|snapshot|base64|blob|dataurl` (case-insensitive), or any string value that looks like a `data:` URL or a long base64 blob — with a 400 response, before anything is written. The same check is mirrored client-side as `assertSafeIntegrityMetadata()` for defense-in-depth. **No API endpoint anywhere in this feature accepts an uploaded image, video, or file** — there is no upload endpoint, no storage bucket, and no code path that could accept one.
 
@@ -133,10 +157,13 @@ Every label, message, and disclaimer added by this feature uses "possible," "nee
 
 ## Limitations
 
-- **False positives are expected.** Object detection models misclassify; a book held up, a reflection, or unusual lighting can trigger a false "possible phone" or "possible person" signal. This is why every wording choice says "possible" and "needs review," never a determination.
+- **This does not guarantee catching every briefly shown phone.** Even with immediate-first-tick emission and no consecutive-check requirement for phone, detection is not instantaneous: a phone held up and put away faster than one detection cycle (roughly ~1–1.5s plus inference time, more on slower devices — see "Adaptive cadence" above) can still be missed entirely. Faster detection reduces this window; it does not close it. This is a review-signal system, not a guarantee of prevention, and it should never be described to students or lecturers as one.
+- **Expected latency depends on device performance and camera conditions.** A fast, uncluttered laptop will typically flag a phone within about a second; a slower device, poor lighting, an odd camera angle, or a partially-obscured view can all push real-world latency higher than the adaptive cadence's nominal 1–1.5s, since `inferenceMs` itself varies by hardware and the phone must still be clearly enough in frame for the model to classify it correctly.
+- **False positives are expected, and are somewhat more likely now than before.** Object detection models misclassify; a book held up, a reflection, or unusual lighting can trigger a false "possible phone" or "possible person" signal. Lowering the phone confidence threshold to 0.45 and removing its consecutive-check requirement (to prioritize not missing a real phone) makes an occasional false positive more likely, not less. This is why every wording choice says "possible" and "needs review," never a determination.
 - **Camera field of view is limited.** The webcam sees only what's in frame — it cannot detect a phone or person outside that view, under a desk, or behind the student.
 - **No face recognition, no gaze tracking, no biometric identity verification, no emotion detection** — none of these exist anywhere in this feature, and none should be added under a future version without a fresh, separate privacy review.
 - **No automatic misconduct finding.** Every signal is a review indicator; the lecturer and institution make the final academic decision, exactly as with every other integrity signal in SES.
+- **No images, video, or snapshots are ever uploaded, recorded, or streamed** by this feature, regardless of detection speed — this did not change with the phone-detection speed-up, and is enforced structurally (see "Metadata shape and safety guardrails" above), not just by convention.
 - **Real-webcam accuracy verification is pending** — see "Model/library choice" above.
 
 ---

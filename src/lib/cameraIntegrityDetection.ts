@@ -134,20 +134,95 @@ export function shouldLogAiCameraDebug(
   return debugFlagValue === "true";
 }
 
+export type AdaptiveCadenceConfig = {
+  /** Delay used when the previous tick's inference was fast (or hasn't run yet). */
+  fastIntervalMs: number;
+  /** Delay used when the previous tick's inference was slow, to avoid hammering a struggling CPU. */
+  slowIntervalMs: number;
+  /** Inference time (ms) above which the next tick backs off to `slowIntervalMs`. */
+  slowInferenceThresholdMs: number;
+};
+
+/**
+ * Fast enough that a briefly-shown phone is very likely caught on the
+ * very next tick (phone no longer waits for consecutive frames — see
+ * decidePhoneEmission), while still backing off automatically on
+ * hardware where inference itself is taking most of the budget.
+ */
+export const DEFAULT_ADAPTIVE_CADENCE_CONFIG: AdaptiveCadenceConfig = {
+  fastIntervalMs: 1_000,
+  slowIntervalMs: 1_500,
+  slowInferenceThresholdMs: 900,
+};
+
+/**
+ * Chooses the delay before the next detection tick from how long the
+ * previous tick's inference took. The detection loop remains
+ * self-scheduling/non-overlapping regardless of which delay is chosen
+ * (the caller only schedules the next tick after this one fully
+ * resolves) — this only changes how long that gap is. `inferenceMs:
+ * null` (no inference has run yet, or the model isn't loaded / the tick
+ * short-circuited before inference) always resolves to the fast
+ * interval, so the first tick and any quality-only tick stay prompt.
+ */
+export function computeNextDetectionDelayMs(
+  inferenceMs: number | null,
+  config: AdaptiveCadenceConfig = DEFAULT_ADAPTIVE_CADENCE_CONFIG,
+): number {
+  if (inferenceMs == null) return config.fastIntervalMs;
+  return inferenceMs > config.slowInferenceThresholdMs ? config.slowIntervalMs : config.fastIntervalMs;
+}
+
 export type DetectedObject = { className: string; score: number };
 
 export type PhoneDetectionResult = { detected: boolean; confidence: number };
 
+/**
+ * Default phone-class confidence threshold. Deliberately lower than the
+ * person threshold (0.6): a phone is the highest-urgency signal (a
+ * student can photograph a question and hide the phone again within a
+ * couple of seconds), so this trades a somewhat higher false-positive
+ * rate for materially lower miss risk. If real-hardware testing (via
+ * `sesAiCameraDebug`) shows too many false positives, raise toward 0.5 —
+ * avoid going much below 0.4, which invites noisy false positives from
+ * unrelated small dark rectangular objects (e.g. remotes, wallets).
+ */
+export const PHONE_CONFIDENCE_THRESHOLD = 0.45;
+
 /** Highest-confidence phone-like detection at or above `minConfidence`, or not detected. */
 export function evaluatePhoneDetections(
   detections: DetectedObject[],
-  minConfidence = 0.65,
+  minConfidence = PHONE_CONFIDENCE_THRESHOLD,
 ): PhoneDetectionResult {
   const phoneClasses = new Set(["cell phone", "mobile phone", "phone"]);
-  const matches = detections.filter((d) => phoneClasses.has(d.className.toLowerCase()) && d.score >= minConfidence);
+  const matches = detections.filter(
+    (d) => phoneClasses.has(d.className.toLowerCase().trim()) && d.score >= minConfidence,
+  );
   if (matches.length === 0) return { detected: false, confidence: 0 };
   const best = matches.reduce((max, d) => (d.score > max.score ? d : max), matches[0]);
   return { detected: true, confidence: best.score };
+}
+
+export type PhoneEmissionDecision = {
+  shouldEmit: boolean;
+  confidenceBand: ConfidenceBand | null;
+};
+
+/**
+ * Phone is the urgent exception to the consecutive-frame policy used by
+ * second-person/no-person: unlike those signals, it emits on the very
+ * first qualifying "cell phone" detection — no waiting for a second
+ * consecutive tick — because a student may show a phone only briefly
+ * (e.g. to photograph a question) and hide it again before a second
+ * check would run. The existing cooldown still applies, so a phone that
+ * stays visible does not flood the evidence timeline with repeat events.
+ */
+export function decidePhoneEmission(
+  phone: PhoneDetectionResult,
+  cooldownOk: boolean,
+): PhoneEmissionDecision {
+  if (!cooldownOk || !phone.detected) return { shouldEmit: false, confidenceBand: null };
+  return { shouldEmit: true, confidenceBand: bandForConfidence(phone.confidence) };
 }
 
 export type PersonDetectionResult = {

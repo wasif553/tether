@@ -15,11 +15,15 @@ import {
   bandForConfidence,
   classifyFrameQuality,
   computeLuminanceVariance,
+  computeNextDetectionDelayMs,
+  DEFAULT_ADAPTIVE_CADENCE_CONFIG,
   evaluatePersonDetections,
   evaluatePhoneDetections,
+  decidePhoneEmission,
   decideSecondPersonEmission,
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
+  PHONE_CONFIDENCE_THRESHOLD,
   assertSafeIntegrityMetadata,
 } from "./cameraIntegrityDetection";
 
@@ -105,10 +109,15 @@ describe("classifyFrameQuality", () => {
 });
 
 describe("evaluatePhoneDetections", () => {
-  it("7. accepts a phone-like class at or above the confidence threshold", () => {
+  it("1. detects class \"cell phone\" at or above the confidence threshold", () => {
     const result = evaluatePhoneDetections([{ className: "cell phone", score: 0.7 }], 0.65);
     expect(result.detected).toBe(true);
     expect(result.confidence).toBe(0.7);
+  });
+
+  it("2. a low-confidence \"cell phone\" detection does not emit (detected stays false)", () => {
+    const result = evaluatePhoneDetections([{ className: "cell phone", score: 0.3 }], PHONE_CONFIDENCE_THRESHOLD);
+    expect(result.detected).toBe(false);
   });
 
   it("ignores phone-like detections below the confidence threshold", () => {
@@ -119,6 +128,58 @@ describe("evaluatePhoneDetections", () => {
   it("ignores unrelated classes", () => {
     const result = evaluatePhoneDetections([{ className: "book", score: 0.9 }], 0.65);
     expect(result.detected).toBe(false);
+  });
+
+  it("uses PHONE_CONFIDENCE_THRESHOLD (0.45) as the default threshold", () => {
+    expect(PHONE_CONFIDENCE_THRESHOLD).toBe(0.45);
+    expect(evaluatePhoneDetections([{ className: "cell phone", score: 0.5 }]).detected).toBe(true);
+    expect(evaluatePhoneDetections([{ className: "cell phone", score: 0.4 }]).detected).toBe(false);
+  });
+
+  it("normalizes label case/whitespace defensively", () => {
+    const result = evaluatePhoneDetections([{ className: "  Cell Phone  ", score: 0.6 }], 0.45);
+    expect(result.detected).toBe(true);
+  });
+});
+
+describe("decidePhoneEmission", () => {
+  it("3. emits on the first qualifying frame (no consecutive-frame requirement)", () => {
+    const decision = decidePhoneEmission({ detected: true, confidence: 0.6 }, true);
+    expect(decision.shouldEmit).toBe(true);
+  });
+
+  it("4. does not require consecutive frames — a single detected=true call is enough", () => {
+    // Unlike decideSecondPersonEmission, there is no consecutiveCount
+    // parameter at all: the function's signature itself proves phone
+    // detection never waits for a second tick.
+    const decisionOnFirstObservation = decidePhoneEmission({ detected: true, confidence: 0.5 }, true);
+    expect(decisionOnFirstObservation.shouldEmit).toBe(true);
+  });
+
+  it("5. cooldown prevents a repeated/duplicate emission", () => {
+    const stillDetected = { detected: true, confidence: 0.6 };
+    const firstTick = decidePhoneEmission(stillDetected, true);
+    expect(firstTick.shouldEmit).toBe(true);
+    // Cooldown not yet elapsed on a later tick where the phone is still visible.
+    const secondTick = decidePhoneEmission(stillDetected, false);
+    expect(secondTick.shouldEmit).toBe(false);
+  });
+
+  it("does not emit when no phone is detected, even if cooldown allows it", () => {
+    const decision = decidePhoneEmission({ detected: false, confidence: 0 }, true);
+    expect(decision.shouldEmit).toBe(false);
+  });
+
+  it("does not emit when cooldown blocks it, even if a phone is detected", () => {
+    const decision = decidePhoneEmission({ detected: true, confidence: 0.9 }, false);
+    expect(decision.shouldEmit).toBe(false);
+    expect(decision.confidenceBand).toBeNull();
+  });
+
+  it("reports a confidence band matching bandForConfidence for the detected score", () => {
+    const decision = decidePhoneEmission({ detected: true, confidence: 0.9 }, true);
+    expect(decision.confidenceBand).toBe(bandForConfidence(0.9));
+    expect(decision.confidenceBand).toBe("high");
   });
 });
 
@@ -192,7 +253,7 @@ describe("decideSecondPersonEmission", () => {
     expect(decision.confidenceBand).toBe("high");
   });
 
-  it("requires 2 consecutive checks for normal-confidence multi-person detection", () => {
+  it("6. second-person logic still requires 2 consecutive checks at normal confidence (unchanged by the phone speed-up)", () => {
     const decision = decideSecondPersonEmission(
       { personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: false },
       1,
@@ -231,6 +292,25 @@ describe("decideSecondPersonEmission", () => {
   });
 });
 
+describe("no-person consecutive-frame policy (unchanged by the phone speed-up)", () => {
+  it("7. NO_PERSON_VISIBLE still requires 3 consecutive no-person checks, not the first one", () => {
+    // Mirrors the page's `noPersonCount >= 3` gate, driven by the same
+    // DetectionCooldownTracker primitive used for every non-phone signal.
+    const tracker = new DetectionCooldownTracker();
+    expect(tracker.recordObservation("noPerson", true)).toBe(1); // 1st: not enough yet
+    expect(tracker.recordObservation("noPerson", true)).toBe(2); // 2nd: still not enough
+    expect(tracker.recordObservation("noPerson", true)).toBe(3); // 3rd: threshold reached
+    expect(tracker.getConsecutiveCount("noPerson")).toBe(3);
+  });
+
+  it("resets the no-person streak on any frame where a person is visible again", () => {
+    const tracker = new DetectionCooldownTracker();
+    tracker.recordObservation("noPerson", true);
+    tracker.recordObservation("noPerson", true);
+    expect(tracker.recordObservation("noPerson", false)).toBe(0);
+  });
+});
+
 describe("DetectionCooldownTracker", () => {
   it("19. allows emission only after the cooldown window elapses", () => {
     const tracker = new DetectionCooldownTracker();
@@ -266,6 +346,29 @@ describe("DetectionCooldownTracker", () => {
     tracker.reset();
     expect(tracker.canEmit("PHONE", 0, 1000)).toBe(true);
     expect(tracker.getConsecutiveCount("PHONE")).toBe(0);
+  });
+});
+
+describe("computeNextDetectionDelayMs", () => {
+  it("8. chooses the fast interval (~1000ms) when inference is healthy", () => {
+    expect(computeNextDetectionDelayMs(200)).toBe(DEFAULT_ADAPTIVE_CADENCE_CONFIG.fastIntervalMs);
+    expect(computeNextDetectionDelayMs(200)).toBe(1_000);
+    expect(computeNextDetectionDelayMs(900)).toBe(1_000); // exactly at the threshold: still fast
+  });
+
+  it("8. chooses the fast interval when no inference has run yet (null)", () => {
+    expect(computeNextDetectionDelayMs(null)).toBe(1_000);
+  });
+
+  it("9. backs off to the slow interval when inference is slow", () => {
+    expect(computeNextDetectionDelayMs(901)).toBe(DEFAULT_ADAPTIVE_CADENCE_CONFIG.slowIntervalMs);
+    expect(computeNextDetectionDelayMs(2_000)).toBe(1_500);
+  });
+
+  it("respects a custom config", () => {
+    const config = { fastIntervalMs: 500, slowIntervalMs: 800, slowInferenceThresholdMs: 400 };
+    expect(computeNextDetectionDelayMs(100, config)).toBe(500);
+    expect(computeNextDetectionDelayMs(500, config)).toBe(800);
   });
 });
 

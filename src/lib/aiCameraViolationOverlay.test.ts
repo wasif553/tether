@@ -150,6 +150,25 @@ describe("handleAiCameraIntegrityReport", () => {
     );
   });
 
+  it("10/11. POSSIBLE_PHONE_VISIBLE gets an immediate overlay, and a backend failure does not prevent it", async () => {
+    const setOverlay = vi.fn();
+    const sendToBackend = vi.fn(() => Promise.reject(new Error("network error")));
+
+    await expect(
+      handleAiCameraIntegrityReport("POSSIBLE_PHONE_VISIBLE", { setOverlay, sendToBackend }),
+    ).resolves.toBeUndefined();
+
+    // Overlay set synchronously (verified more fully in test "1" above);
+    // here the important part is that a rejected sendToBackend does not
+    // change that outcome for the phone signal specifically.
+    expect(setOverlay).toHaveBeenCalledTimes(1);
+    expect(setOverlay).toHaveBeenCalledWith({
+      active: true,
+      title: AI_CAMERA_VIOLATION_OVERLAY_TITLE,
+      reason: "Possible phone visible",
+    });
+  });
+
   it("does not set overlay state for non-AI-camera event types, but still calls sendToBackend", async () => {
     const setOverlay = vi.fn();
     const sendToBackend = vi.fn(() => Promise.resolve());
