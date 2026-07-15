@@ -12,6 +12,8 @@ import {
   MAX_EVIDENCE_FRAME_BYTES,
   generateEvidenceFrameStorageKey,
   isEvidenceCaptureEligibleEventType,
+  isEvidenceFrameSourceReady,
+  shouldAttemptEvidenceUpload,
   shouldCaptureEvidenceFrame,
   validateEvidenceFrameUpload,
 } from "./aiCameraEvidenceFrame";
@@ -72,6 +74,43 @@ describe("shouldCaptureEvidenceFrame", () => {
       captureAiViolationEvidence: true,
     });
     expect(enabled).toBe(false);
+  });
+});
+
+describe("shouldAttemptEvidenceUpload", () => {
+  it("attempts the upload when eligible and the backend returned an event id", () => {
+    expect(shouldAttemptEvidenceUpload(true, "evt_123")).toBe(true);
+  });
+
+  it("skips the upload when no event id was returned (e.g. response body didn't parse)", () => {
+    expect(shouldAttemptEvidenceUpload(true, undefined)).toBe(false);
+    expect(shouldAttemptEvidenceUpload(true, null)).toBe(false);
+    expect(shouldAttemptEvidenceUpload(true, "")).toBe(false);
+  });
+
+  it("skips the upload when the event type/settings were not eligible, even with an id", () => {
+    expect(shouldAttemptEvidenceUpload(false, "evt_123")).toBe(false);
+  });
+});
+
+describe("isEvidenceFrameSourceReady", () => {
+  it("is ready when readyState >= 2 (HAVE_CURRENT_DATA) and videoWidth is non-zero", () => {
+    expect(isEvidenceFrameSourceReady({ readyState: 2, videoWidth: 320 })).toBe(true);
+    expect(isEvidenceFrameSourceReady({ readyState: 4, videoWidth: 640 })).toBe(true);
+  });
+
+  it("is not ready when videoWidth is zero (metadata not loaded yet)", () => {
+    expect(isEvidenceFrameSourceReady({ readyState: 4, videoWidth: 0 })).toBe(false);
+  });
+
+  it("is not ready when readyState is below HAVE_CURRENT_DATA", () => {
+    expect(isEvidenceFrameSourceReady({ readyState: 1, videoWidth: 320 })).toBe(false);
+    expect(isEvidenceFrameSourceReady({ readyState: 0, videoWidth: 320 })).toBe(false);
+  });
+
+  it("is not ready when there is no video element at all", () => {
+    expect(isEvidenceFrameSourceReady(null)).toBe(false);
+    expect(isEvidenceFrameSourceReady(undefined)).toBe(false);
   });
 });
 

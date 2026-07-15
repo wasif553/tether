@@ -141,12 +141,27 @@ export async function POST(
     return NextResponse.json({ ok: true, evidenceAssetId: asset.id }, { status: 201 });
   } catch (err) {
     // Clean up the just-written file if the DB insert failed (e.g. a race
-    // where two uploads for the same event both passed the pre-check).
+    // where two uploads for the same event both passed the pre-check, or
+    // the IntegrityEvidenceAsset table/columns are missing from this
+    // database — see docs/evidence-frame-migration.sql, which is applied
+    // by hand and can silently drift from prisma/schema.prisma).
     await adapter.delete(storageKey).catch(() => {});
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       return NextResponse.json({ error: "Evidence frame already exists for this event" }, { status: 409 });
     }
-    throw err;
+    // Any other DB failure (e.g. P2021 "table does not exist" when
+    // docs/evidence-frame-migration.sql hasn't been applied yet) must
+    // surface a clear, non-sensitive error instead of an opaque 500 —
+    // previously this rethrew the raw Prisma error, which meant a missing
+    // table failed completely silently from the student's/client's point
+    // of view: the storage write above would have already succeeded and
+    // then been deleted again by the cleanup line, leaving zero trace in
+    // both the DB and storage with no way to tell why.
+    console.error("Evidence frame DB write failed", err);
+    return NextResponse.json(
+      { error: "Evidence frame could not be recorded — evidence storage may not be fully configured" },
+      { status: 500 },
+    );
   }
 }
 

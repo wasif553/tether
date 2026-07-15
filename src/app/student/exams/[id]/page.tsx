@@ -31,7 +31,11 @@ import {
   handleAiCameraIntegrityReport,
   type AiCameraViolationOverlayState,
 } from "@/lib/aiCameraViolationOverlay";
-import { shouldCaptureEvidenceFrame } from "@/lib/aiCameraEvidenceFrame";
+import {
+  isEvidenceFrameSourceReady,
+  shouldAttemptEvidenceUpload,
+  shouldCaptureEvidenceFrame,
+} from "@/lib/aiCameraEvidenceFrame";
 
 type Question = {
   id: string;
@@ -423,15 +427,34 @@ export default function TakeExamPage({
       // overlay redisplay of an already-debounced signal. Capture/upload
       // never blocks the overlay or the backend event above, and a
       // failure here never blocks exam continuation.
-      if (shouldCaptureEvidenceFrame(eventType, secureSettings)) {
+      const evidenceEligible = shouldCaptureEvidenceFrame(eventType, secureSettings);
+      logAiCameraDebug("evidence: eligibility check", {
+        eventType,
+        captureAiViolationEvidence: secureSettings.captureAiViolationEvidence,
+        evidenceEligible,
+      });
+      if (evidenceEligible) {
         backendPromise
-          .then((res) => (res.ok ? (res.json() as Promise<{ id?: string }>) : null))
-          .then((created) => {
-            if (created?.id) void captureAndUploadEvidenceFrame(created.id);
+          .then((res) => {
+            logAiCameraDebug("evidence: integrity event POST result", { status: res.status, ok: res.ok });
+            return res.ok ? (res.json() as Promise<{ id?: string }>) : null;
           })
-          .catch(() => {
+          .then((created) => {
+            const uploadAttempted = shouldAttemptEvidenceUpload(evidenceEligible, created?.id);
+            logAiCameraDebug("evidence: integrity event id", {
+              eventId: created?.id ?? null,
+              uploadAttempted,
+            });
+            if (uploadAttempted && created?.id) {
+              void captureAndUploadEvidenceFrame(created.id);
+            }
+          })
+          .catch((err) => {
             // Backend logging failure is already handled above; without a
             // created event id there is nothing to attach a frame to.
+            logAiCameraDebug("evidence: integrity event POST threw", {
+              error: err instanceof Error ? err.message : String(err),
+            });
           });
       }
 
@@ -814,7 +837,14 @@ export default function TakeExamPage({
   async function captureAndUploadEvidenceFrame(integrityEventId: string) {
     try {
       const video = detectionVideoRef.current;
-      if (!video || video.readyState < 2 || video.videoWidth === 0) return;
+      logAiCameraDebug("evidence: video state at capture time", {
+        integrityEventId,
+        hasVideo: Boolean(video),
+        readyState: video?.readyState ?? null,
+        videoWidth: video?.videoWidth ?? null,
+        videoHeight: video?.videoHeight ?? null,
+      });
+      if (!isEvidenceFrameSourceReady(video)) return;
 
       if (!evidenceCanvasRef.current) {
         evidenceCanvasRef.current = document.createElement("canvas");
@@ -834,6 +864,12 @@ export default function TakeExamPage({
       const blob = await new Promise<Blob | null>((resolve) => {
         canvas.toBlob(resolve, "image/jpeg", 0.6);
       });
+      logAiCameraDebug("evidence: blob encoded", {
+        integrityEventId,
+        hasBlob: Boolean(blob),
+        contentType: blob?.type ?? null,
+        byteSize: blob?.size ?? null,
+      });
       if (!blob) return;
 
       const formData = new FormData();
@@ -845,7 +881,14 @@ export default function TakeExamPage({
       );
 
       if (!res.ok) {
-        logAiCameraDebug("evidence frame upload rejected", { status: res.status, integrityEventId });
+        const body = await res.json().catch(() => null);
+        logAiCameraDebug("evidence frame upload rejected", {
+          status: res.status,
+          integrityEventId,
+          error: typeof body?.error === "string" ? body.error : null,
+        });
+      } else {
+        logAiCameraDebug("evidence: upload succeeded", { status: res.status, integrityEventId });
       }
     } catch (err) {
       logAiCameraDebug("evidence frame capture/upload threw", {

@@ -55,6 +55,37 @@ export function shouldCaptureEvidenceFrame(
   return settings.captureAiViolationEvidence === true;
 }
 
+/**
+ * Whether the created backend event actually carries an id evidence can be
+ * attached to. Extracted as a pure decision (rather than inlined in the
+ * student exam page) so the "no id in the response -> no upload attempt"
+ * behavior is independently unit-testable without a browser/React.
+ */
+export function shouldAttemptEvidenceUpload(
+  eligible: boolean,
+  createdEventId: string | null | undefined,
+): boolean {
+  return eligible && typeof createdEventId === "string" && createdEventId.length > 0;
+}
+
+export type EvidenceFrameVideoSource = {
+  readyState: number;
+  videoWidth: number;
+};
+
+/**
+ * Whether a <video> element currently has a usable frame to capture from —
+ * the same readiness check the on-device detection tick already uses
+ * (HAVE_CURRENT_DATA / readyState >= 2, non-zero width). Extracted as a
+ * pure function so "video not ready yet" / "zero-dimension video" skip
+ * paths are unit-testable without a real <video> element.
+ */
+export function isEvidenceFrameSourceReady(
+  video: EvidenceFrameVideoSource | null | undefined,
+): video is EvidenceFrameVideoSource {
+  return Boolean(video) && video!.readyState >= 2 && video!.videoWidth !== 0;
+}
+
 const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
   "image/jpeg": "jpg",
   "image/webp": "webp",

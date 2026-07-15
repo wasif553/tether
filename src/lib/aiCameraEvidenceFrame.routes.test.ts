@@ -198,6 +198,22 @@ describe("POST /api/submissions/[id]/integrity-events/[eventId]/evidence-frame",
     expect(res.status).toBe(403);
   });
 
+  it("7. upload rejected with a non-sensitive JSON error when the file field is missing", async () => {
+    const exam = await createExam({ captureEnabled: true });
+    const { submission, event } = await createSubmissionAndEvent(exam.id, studentA.id, "POSSIBLE_PHONE_VISIBLE");
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await uploadRoute.POST(uploadRequest(null), {
+      params: Promise.resolve({ id: submission.id, eventId: event.id }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(typeof body.error).toBe("string");
+    expect(body.error.length).toBeGreaterThan(0);
+    // Non-sensitive: no storage key, path, or stack trace in the error.
+    expect(body.error).not.toMatch(/institution\/|storage|\.jpg|\.webp/i);
+  });
+
   it("4. upload rejected for non-image content (text/html)", async () => {
     const exam = await createExam({ captureEnabled: true });
     const { submission, event } = await createSubmissionAndEvent(exam.id, studentA.id, "POSSIBLE_PHONE_VISIBLE");
