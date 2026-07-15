@@ -61,11 +61,23 @@ See `docs/on-device-ai-integrity-detection-v1.md`, "Evidence Frames v1", for the
 
 | Variable | Required for | Notes |
 |---|---|---|
-| `EVIDENCE_STORAGE_PROVIDER` | Where evidence frame images are stored | `local_dev` (the default outside production) is filesystem-only and **must never be set in production** — Vercel serverless instances do not share a persistent filesystem. `vercel_blob` / `supabase_storage` / `s3` are defined as an interface in `src/lib/evidenceStorage.ts` but are NOT yet implemented (they throw a clear "not configured" error) — implement one and install its SDK before enabling this feature in production. |
+| `EVIDENCE_STORAGE_PROVIDER` | Where evidence frame images are stored | `local_dev` (the default outside production) is filesystem-only and **must never be set in production** — Vercel serverless instances do not share a persistent filesystem. `supabase_storage` is fully implemented (`src/lib/evidenceStorage.ts`) and is the recommended production provider, since this app already deploys on Vercel + Supabase. `vercel_blob` / `s3` remain unimplemented stubs that throw a clear "not configured" error. |
+| `EVIDENCE_STORAGE_BUCKET` | The Supabase Storage bucket name | Only used when `EVIDENCE_STORAGE_PROVIDER=supabase_storage`. Suggested: `safe-exam-evidence`. Must be a **private** bucket — see bucket setup below. |
+| `SUPABASE_URL` (or `NEXT_PUBLIC_SUPABASE_URL` as a fallback) | Supabase project URL | Server-side only — this app's evidence storage adapter never sends it to the browser, regardless of which of the two var names you set it under. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Full read/write access to Storage | **Server-only, sensitive.** Never prefix with `NEXT_PUBLIC_`, never expose to client code. Find it in the Supabase dashboard under Project Settings → API → `service_role` secret. |
+
+#### Supabase Storage bucket setup (before enabling `captureAiViolationEvidence` in production)
+
+1. In the Supabase dashboard, go to **Storage** → **New bucket**.
+2. Name it to match `EVIDENCE_STORAGE_BUCKET` (e.g. `safe-exam-evidence`).
+3. **Leave "Public bucket" OFF.** This must be a private bucket — the app's server-only service role key is the only thing that ever reads or writes to it; nothing here relies on Supabase's public-URL or anonymous-access features.
+4. No bucket-level RLS policy is required for the app's own server-side access, since it authenticates with the service role key (which bypasses RLS entirely) — but you may still add a default-deny policy for defense-in-depth if your organization requires it, since the app never relies on RLS to enforce access; access control happens entirely in `GET /api/integrity-evidence/[id]` (institution/ownership checks) before the service-role client is ever asked to read anything.
+5. Set the three env vars above in Vercel (Production and/or Preview environment, as applicable) and redeploy.
+6. Optional: configure a lifecycle/retention policy at the bucket level if your Supabase plan supports it, to match the retention window you document (suggested default: 30–90 days after exam finalization) — see "Evidence Frames v1" → "Retention" in `docs/on-device-ai-integrity-detection-v1.md`.
 
 **Before enabling `captureAiViolationEvidence` on any exam in production:**
 
-- [ ] Implement and test a real `EvidenceStorageAdapter` (`src/lib/evidenceStorage.ts`) for whichever provider your institution uses, and set `EVIDENCE_STORAGE_PROVIDER` accordingly
+- [ ] Create the private Supabase Storage bucket (steps above) and set `EVIDENCE_STORAGE_PROVIDER=supabase_storage`, `EVIDENCE_STORAGE_BUCKET`, `SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`
 - [ ] Apply the `IntegrityEvidenceAsset` table migration (`docs/evidence-frame-migration.sql`) via the Supabase SQL Editor
 - [ ] Confirm the student pre-exam notice (`/privacy/student-exam-notice`) describes evidence frames, and that the per-exam checklist shows the disclosure when the setting is on
 - [ ] Decide and document a retention window (suggested default: 30–90 days after exam finalization) and who is responsible for deletion, since no automated retention job exists yet

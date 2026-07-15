@@ -175,14 +175,17 @@ To help tune the interval and confidence threshold against real hardware without
 
 ### Storage
 
-No object-storage SDK (Vercel Blob, Supabase Storage, S3, etc.) was already installed in this repo, so `src/lib/evidenceStorage.ts` defines a small `EvidenceStorageAdapter` interface with:
+`src/lib/evidenceStorage.ts` defines a small `EvidenceStorageAdapter` interface with:
 
 - a fully-working `local_dev` adapter (plain filesystem under `.evidence-storage/` at the repo root — gitignored, never under `public/`, never served statically) for local development and tests;
-- clearly-stubbed `vercel_blob` / `supabase_storage` / `s3` adapters that throw a descriptive `EvidenceStorageNotConfiguredError` until a real implementation (plus the provider's SDK) is added.
+- a fully-working `supabase_storage` adapter — a **private** Supabase Storage bucket, using `@supabase/supabase-js` with the server-only service role key (never exposed to the client; this module is never imported from client components). This is the recommended production provider, since this app already deploys on Vercel + Supabase. Requires `EVIDENCE_STORAGE_BUCKET`, `SUPABASE_URL` (or `NEXT_PUBLIC_SUPABASE_URL`), and `SUPABASE_SERVICE_ROLE_KEY` — see docs/deployment-vercel-supabase.md for bucket setup steps and the full env var list;
+- clearly-stubbed `vercel_blob` / `s3` adapters that throw a descriptive `EvidenceStorageNotConfiguredError` until a real implementation (plus the provider's SDK) is added.
 
-**`local_dev` storage must never be used in production** — Vercel serverless function instances do not share a persistent, writable filesystem across invocations, so a file written during one request would not reliably be readable from another. `resolveEvidenceStorageAdapter()` fails closed (throws) in production unless `EVIDENCE_STORAGE_PROVIDER` names a real provider — see docs/deployment-vercel-supabase.md for what production needs before `captureAiViolationEvidence` may be enabled for any real exam.
+**`local_dev` storage must never be used in production** — Vercel serverless function instances do not share a persistent, writable filesystem across invocations, so a file written during one request would not reliably be readable from another. `resolveEvidenceStorageAdapter()` fails closed (throws) in production unless `EVIDENCE_STORAGE_PROVIDER` names a real, fully-configured provider — and `supabase_storage` itself fails closed if any of its three required env vars are missing, rather than guessing.
 
-Image bytes are never stored inline in the database. The `IntegrityEvidenceAsset` Prisma model (see "Production DDL" below) only holds a `storageKey` — an opaque pointer resolved server-side only, through `src/lib/evidenceStorage.ts` — and that key is never returned to any client, in any response, at any time.
+The `supabase_storage` adapter's `get()` downloads the object server-side and returns raw bytes to the caller — the already-authenticated `GET /api/integrity-evidence/[evidenceAssetId]` route below — rather than generating a signed URL. This keeps the "never send a storage reference to the browser" guarantee trivially true (there's no URL to leak) and means route code never needs to branch by provider.
+
+Image bytes are never stored inline in the database. The `IntegrityEvidenceAsset` Prisma model (see "Production DDL" below) only holds a `storageKey` — an opaque pointer resolved server-side only, through `src/lib/evidenceStorage.ts` — and that key is never returned to any client, in any response, at any time. The key itself is namespaced `institution/{institutionId}/exam/{examId}/submission/{submissionId}/event/{integrityEventId}/{random}.{jpg|webp}` (`generateEvidenceFrameStorageKey()` in `src/lib/aiCameraEvidenceFrame.ts`) — built entirely from IDs the system already generates, never from a student's name or email, so even direct inspection of the Supabase Storage dashboard reveals nothing identity-linkable without cross-referencing the database.
 
 ### Upload and access-control routes
 

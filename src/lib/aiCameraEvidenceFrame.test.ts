@@ -79,6 +79,7 @@ describe("generateEvidenceFrameStorageKey", () => {
   it("5. the generated key never contains a student name or email — only opaque IDs", () => {
     const key = generateEvidenceFrameStorageKey(
       {
+        institutionId: "inst_xyz000",
         examId: "exam_abc123",
         submissionId: "sub_def456",
         integrityEventId: "evt_ghi789",
@@ -88,6 +89,7 @@ describe("generateEvidenceFrameStorageKey", () => {
     );
     expect(key).not.toMatch(/@/); // no email
     expect(key).not.toContain(" "); // no "Firstname Lastname"-style name
+    expect(key).toContain("inst_xyz000");
     expect(key).toContain("exam_abc123");
     expect(key).toContain("sub_def456");
     expect(key).toContain("evt_ghi789");
@@ -95,17 +97,18 @@ describe("generateEvidenceFrameStorageKey", () => {
   });
 
   it("uses the correct extension per content type", () => {
-    const base = { examId: "e1", submissionId: "s1", integrityEventId: "ev1" };
+    const base = { institutionId: "i1", examId: "e1", submissionId: "s1", integrityEventId: "ev1" };
     expect(generateEvidenceFrameStorageKey({ ...base, contentType: "image/jpeg" }, "x")).toMatch(/\.jpg$/);
     expect(generateEvidenceFrameStorageKey({ ...base, contentType: "image/webp" }, "x")).toMatch(/\.webp$/);
   });
 
-  it("is namespaced under a stable, recognizable prefix", () => {
+  it("is namespaced institution/{id}/exam/{id}/submission/{id}/event/{id}/...", () => {
     const key = generateEvidenceFrameStorageKey(
-      { examId: "e1", submissionId: "s1", integrityEventId: "ev1", contentType: "image/jpeg" },
+      { institutionId: "i1", examId: "e1", submissionId: "s1", integrityEventId: "ev1", contentType: "image/jpeg" },
       "x",
     );
-    expect(key.startsWith("ai-camera-evidence/")).toBe(true);
+    expect(key).toBe("institution/i1/exam/e1/submission/s1/event/ev1/x.jpg");
+    expect(key.startsWith("institution/")).toBe(true);
   });
 });
 

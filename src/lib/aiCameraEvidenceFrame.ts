@@ -67,6 +67,7 @@ export const ALLOWED_EVIDENCE_FRAME_CONTENT_TYPES = Object.keys(CONTENT_TYPE_EXT
 export const MAX_EVIDENCE_FRAME_BYTES = 300 * 1024;
 
 export type EvidenceFrameKeyParams = {
+  institutionId: string;
   examId: string;
   submissionId: string;
   integrityEventId: string;
@@ -76,16 +77,24 @@ export type EvidenceFrameKeyParams = {
 /**
  * Builds an opaque storage key from IDs the system already generates
  * (cuids) — never from anything identity-revealing like the student's
- * name or email. Namespaced by exam/submission only so a reviewer
+ * name or email. Namespaced `institution/{institutionId}/exam/{examId}/
+ * submission/{submissionId}/event/{eventId}/{random}.{ext}` so a reviewer
  * inspecting the storage layout directly (e.g. an ops engineer debugging
- * the storage bucket) cannot infer who a frame belongs to without
- * cross-referencing the database. `randomSuffix` is caller-supplied
- * (e.g. `randomStorageSuffix()` from evidenceStorage.ts) so this stays a
- * pure function — the same inputs always produce the same key.
+ * the storage bucket, or browsing the Supabase Storage dashboard) cannot
+ * infer who a frame belongs to without cross-referencing the database —
+ * and so per-institution access/lifecycle policies (e.g. a future
+ * retention job, or a bucket-level policy scoped by prefix) can operate
+ * on the `institution/{institutionId}/` prefix directly. `randomSuffix`
+ * is caller-supplied (e.g. `randomStorageSuffix()` from
+ * evidenceStorage.ts) so this stays a pure function — the same inputs
+ * always produce the same key.
  */
 export function generateEvidenceFrameStorageKey(params: EvidenceFrameKeyParams, randomSuffix: string): string {
   const ext = CONTENT_TYPE_EXTENSIONS[params.contentType] ?? "bin";
-  return `ai-camera-evidence/${params.examId}/${params.submissionId}/${params.integrityEventId}-${randomSuffix}.${ext}`;
+  return (
+    `institution/${params.institutionId}/exam/${params.examId}/submission/${params.submissionId}` +
+    `/event/${params.integrityEventId}/${randomSuffix}.${ext}`
+  );
 }
 
 export type EvidenceFrameUploadValidationResult = { ok: true } | { ok: false; error: string };

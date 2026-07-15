@@ -104,6 +104,7 @@ export async function POST(
 
   const storageKey = generateEvidenceFrameStorageKey(
     {
+      institutionId,
       examId: submission.examId,
       submissionId: submission.id,
       integrityEventId: eventId,
@@ -114,7 +115,7 @@ export async function POST(
 
   const adapter = resolveEvidenceStorageAdapter();
   try {
-    await adapter.put(storageKey, bytes);
+    await adapter.put(storageKey, bytes, contentType);
   } catch (err) {
     console.error("Evidence frame storage write failed", err);
     return NextResponse.json({ error: "Evidence storage is currently unavailable" }, { status: 503 });
