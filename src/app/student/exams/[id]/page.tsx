@@ -31,6 +31,7 @@ import {
   handleAiCameraIntegrityReport,
   type AiCameraViolationOverlayState,
 } from "@/lib/aiCameraViolationOverlay";
+import { shouldCaptureEvidenceFrame } from "@/lib/aiCameraEvidenceFrame";
 
 type Question = {
   id: string;
@@ -67,6 +68,7 @@ type SecureSettings = {
   enforceFullscreenReturn: boolean;
   requireStudentVerification: boolean;
   enableAiCameraIntegrityChecks: boolean;
+  captureAiViolationEvidence: boolean;
 };
 
 type SubmissionData = {
@@ -285,6 +287,11 @@ export default function TakeExamPage({
   // IntegrityEvent metadata. See docs/on-device-ai-integrity-detection-v1.md.
   const detectionVideoRef = useRef<HTMLVideoElement | null>(null);
   const detectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Evidence Frames v1 — a separate, higher-resolution canvas from the
+  // tiny 160px-wide one above (that one is sized for the ML model only).
+  // Never rendered, never reused for detection — draws fresh from
+  // detectionVideoRef only at the moment an eligible event is captured.
+  const evidenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const detectorRef = useRef<CameraObjectDetector | null>(null);
   const detectionCooldown = useRef(new DetectionCooldownTracker());
   const detectionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -379,25 +386,54 @@ export default function TakeExamPage({
       const severity = severityFor(eventType, secureSettings);
       const message = MESSAGES[eventType];
 
+      // One backend POST, shared by two independent consumers below:
+      // handleAiCameraIntegrityReport (overlay + backend logging, existing
+      // behavior, unchanged) and — only for eligible AI camera events with
+      // evidence capture explicitly enabled — the evidence-frame upload,
+      // which needs the created event's id. Both read the same fetch
+      // Promise; only one of them ever calls response.json().
+      const backendPromise = fetch(`/api/submissions/${id}/integrity-events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eventType,
+          severity,
+          message,
+          metadata,
+          occurredAt: new Date().toISOString(),
+        }),
+      });
+
       // Local exam-content overlay (if this is an AI camera violation
       // event) is set synchronously, before the backend call is even
       // made — and a backend failure never clears it. See
       // src/lib/aiCameraViolationOverlay.ts.
       void handleAiCameraIntegrityReport(eventType, {
         setOverlay: setAiCameraViolationOverlay,
-        sendToBackend: () =>
-          fetch(`/api/submissions/${id}/integrity-events`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              eventType,
-              severity,
-              message,
-              metadata,
-              occurredAt: new Date().toISOString(),
-            }),
-          }),
+        sendToBackend: () => backendPromise,
       });
+
+      // On-Device AI Camera Integrity Detection v1 — Evidence Frames
+      // (opt-in, off by default — see src/lib/aiCameraEvidenceFrame.ts).
+      // Only for POSSIBLE_PHONE_VISIBLE / POSSIBLE_SECOND_PERSON_VISIBLE,
+      // only when the lecturer has explicitly enabled
+      // captureAiViolationEvidence, and only once per backend-logged
+      // event — this function body only runs past the debounce guard
+      // above when a NEW event is actually being reported, never on an
+      // overlay redisplay of an already-debounced signal. Capture/upload
+      // never blocks the overlay or the backend event above, and a
+      // failure here never blocks exam continuation.
+      if (shouldCaptureEvidenceFrame(eventType, secureSettings)) {
+        backendPromise
+          .then((res) => (res.ok ? (res.json() as Promise<{ id?: string }>) : null))
+          .then((created) => {
+            if (created?.id) void captureAndUploadEvidenceFrame(created.id);
+          })
+          .catch(() => {
+            // Backend logging failure is already handled above; without a
+            // created event id there is nothing to attach a frame to.
+          });
+      }
 
       if (secureSettings.showIntegrityWarningToStudent && (severity === "MEDIUM" || severity === "HIGH")) {
         setBanner(`Exam integrity event recorded: ${message} Please remain in the exam window.`);
@@ -405,6 +441,10 @@ export default function TakeExamPage({
         bannerTimer.current = setTimeout(() => setBanner(null), 8000);
       }
     },
+    // captureAndUploadEvidenceFrame is a plain function (re-created each
+    // render, reads current refs at call time) — intentionally omitted so
+    // this callback doesn't get a new identity every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [data, id, secureSettings],
   );
 
@@ -759,6 +799,60 @@ export default function TakeExamPage({
       return;
     }
     console.log(`[sesAiCameraDebug] ${message}`, data);
+  }
+
+  // On-Device AI Camera Integrity Detection v1 — Evidence Frames (opt-in,
+  // off by default). Draws the CURRENT frame from the same hidden
+  // detectionVideoRef used for on-device detection (never a new
+  // getUserMedia call, never getDisplayMedia/screen capture), downscales
+  // to at most 640x360 preserving aspect ratio, re-encodes as JPEG
+  // (quality ~0.6 — re-encoding also implicitly strips any embedded
+  // metadata), and uploads it once, attached to the already-created
+  // integrity event id. Never blocks the overlay (already shown by the
+  // time this runs) or exam continuation: any failure here is caught,
+  // optionally logged in development only, and never retried.
+  async function captureAndUploadEvidenceFrame(integrityEventId: string) {
+    try {
+      const video = detectionVideoRef.current;
+      if (!video || video.readyState < 2 || video.videoWidth === 0) return;
+
+      if (!evidenceCanvasRef.current) {
+        evidenceCanvasRef.current = document.createElement("canvas");
+      }
+      const canvas = evidenceCanvasRef.current;
+
+      const MAX_WIDTH = 640;
+      const MAX_HEIGHT = 360;
+      const scale = Math.min(MAX_WIDTH / video.videoWidth, MAX_HEIGHT / video.videoHeight, 1);
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob(resolve, "image/jpeg", 0.6);
+      });
+      if (!blob) return;
+
+      const formData = new FormData();
+      formData.append("file", blob, "evidence.jpg");
+
+      const res = await fetch(
+        `/api/submissions/${id}/integrity-events/${integrityEventId}/evidence-frame`,
+        { method: "POST", body: formData },
+      );
+
+      if (!res.ok) {
+        logAiCameraDebug("evidence frame upload rejected", { status: res.status, integrityEventId });
+      }
+    } catch (err) {
+      logAiCameraDebug("evidence frame capture/upload threw", {
+        integrityEventId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // On-Device AI Camera Integrity Detection v1 — runs entirely against
@@ -1205,6 +1299,7 @@ export default function TakeExamPage({
   const requireCamera = secureSettings?.requireCamera ?? false;
   const requireStudentVerification = secureSettings?.requireStudentVerification ?? false;
   const enableAiCameraIntegrityChecks = secureSettings?.enableAiCameraIntegrityChecks ?? false;
+  const captureAiViolationEvidence = secureSettings?.captureAiViolationEvidence ?? false;
   const verificationGateSatisfied = !requireStudentVerification || verificationConfirmed;
   const cameraGateSatisfied =
     (!requireCamera || cameraStatus === "granted") && verificationGateSatisfied;
@@ -1255,6 +1350,13 @@ export default function TakeExamPage({
                 whether a phone or another person may be visible. Video is not recorded, streamed,
                 or stored. Any signals are indicators for lecturer review, not automatic misconduct
                 decisions.
+              </li>
+            )}
+            {enableAiCameraIntegrityChecks && captureAiViolationEvidence && (
+              <li>
+                This exam may save a single low-resolution camera evidence frame if a possible
+                phone or second person is detected. No video is recorded. Evidence is available
+                only to authorised reviewers.
               </li>
             )}
             <li>

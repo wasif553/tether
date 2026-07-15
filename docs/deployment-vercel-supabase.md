@@ -55,6 +55,23 @@ configured" rather than failing core readiness.
 Without it, those two features return a safe "not configured" error.
 Nothing else in the app is affected.
 
+### Optional — Evidence Frames v1 (AI camera integrity evidence)
+
+See `docs/on-device-ai-integrity-detection-v1.md`, "Evidence Frames v1", for the full feature description — a privacy-minimised, single low-resolution webcam still frame, opt-in per exam, captured only for a possible-phone or possible-second-person signal.
+
+| Variable | Required for | Notes |
+|---|---|---|
+| `EVIDENCE_STORAGE_PROVIDER` | Where evidence frame images are stored | `local_dev` (the default outside production) is filesystem-only and **must never be set in production** — Vercel serverless instances do not share a persistent filesystem. `vercel_blob` / `supabase_storage` / `s3` are defined as an interface in `src/lib/evidenceStorage.ts` but are NOT yet implemented (they throw a clear "not configured" error) — implement one and install its SDK before enabling this feature in production. |
+
+**Before enabling `captureAiViolationEvidence` on any exam in production:**
+
+- [ ] Implement and test a real `EvidenceStorageAdapter` (`src/lib/evidenceStorage.ts`) for whichever provider your institution uses, and set `EVIDENCE_STORAGE_PROVIDER` accordingly
+- [ ] Apply the `IntegrityEvidenceAsset` table migration (`docs/evidence-frame-migration.sql`) via the Supabase SQL Editor
+- [ ] Confirm the student pre-exam notice (`/privacy/student-exam-notice`) describes evidence frames, and that the per-exam checklist shows the disclosure when the setting is on
+- [ ] Decide and document a retention window (suggested default: 30–90 days after exam finalization) and who is responsible for deletion, since no automated retention job exists yet
+
+Leaving `EVIDENCE_STORAGE_PROVIDER` unset (or `local_dev`) in production is safe — it simply means `captureAiViolationEvidence` cannot be turned on for any exam (the upload route will fail loudly with a 503 rather than silently losing images), while every other feature in this app is unaffected.
+
 ## Supabase connection strings
 
 Supabase exposes two Postgres connection strings for the same database:

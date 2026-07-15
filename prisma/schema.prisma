@@ -184,6 +184,9 @@ model Exam {
   integrityEvents  IntegrityEvent[]
   ltiExamLinks     LtiExamLink[]
   networkEvidence  NetworkEvidence[]
+  // On-Device AI Camera Integrity Detection v1 — Evidence Frames
+  // (additive, opt-in). See docs/on-device-ai-integrity-detection-v1.md.
+  evidenceAssets   IntegrityEvidenceAsset[]
   // Secure Exam Mode v1 settings (see src/lib/secureExam.ts for shape/defaults).
   // A single JSON column rather than ~10 booleans/ints, since this app has no
   // other multi-flag settings model and these are read/written together.
@@ -255,6 +258,9 @@ model Submission {
   integrityEvents IntegrityEvent[]
   gradePassback   CanvasGradePassback?
   networkEvidence NetworkEvidence[]
+  // On-Device AI Camera Integrity Detection v1 — Evidence Frames
+  // (additive, opt-in). See docs/on-device-ai-integrity-detection-v1.md.
+  evidenceAssets  IntegrityEvidenceAsset[]
 
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])
@@ -296,6 +302,11 @@ model IntegrityEvent {
   resolvedById   String?
   resolvedBy     User?              @relation("IntegrityEventResolver", fields: [resolvedById], references: [id])
   resolutionNote String?
+  // On-Device AI Camera Integrity Detection v1 — Evidence Frames
+  // (additive, opt-in). See docs/on-device-ai-integrity-detection-v1.md.
+  // At most one per event in v1 (enforced by @unique on the asset's
+  // integrityEventId below).
+  evidenceAsset  IntegrityEvidenceAsset?
 
   @@index([submissionId])
   @@index([examId])
@@ -497,6 +508,52 @@ model NetworkEvidence {
   @@index([studentId])
   @@index([institutionId])
   @@index([createdAt])
+}
+
+// On-Device AI Camera Integrity Detection v1 — Evidence Frames (additive,
+// opt-in) — see docs/on-device-ai-integrity-detection-v1.md. A single,
+// privacy-minimised webcam still frame, captured only when the exam's
+// secureSettings.captureAiViolationEvidence is enabled AND a
+// POSSIBLE_PHONE_VISIBLE or POSSIBLE_SECOND_PERSON_VISIBLE event is
+// backend-logged — never on every overlay redisplay, never a video,
+// never the exam screen/desktop, never used for face recognition or any
+// biometric identification. Image bytes are never stored inline here or
+// in IntegrityEvent.metadataJson — only a storageKey pointing into
+// src/lib/evidenceStorage.ts, resolved server-side only through the
+// authenticated, audited GET /api/integrity-evidence/[evidenceAssetId]
+// route. institutionId is a plain scoping column, not a navigated
+// relation — mirrors NetworkEvidence.institutionId above.
+model IntegrityEvidenceAsset {
+  id               String                 @id @default(cuid())
+  integrityEventId String                 @unique
+  integrityEvent   IntegrityEvent         @relation(fields: [integrityEventId], references: [id], onDelete: Cascade)
+  submissionId     String
+  submission       Submission             @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  examId           String
+  exam             Exam                   @relation(fields: [examId], references: [id], onDelete: Cascade)
+  institutionId    String
+
+  kind      String // "AI_CAMERA_EVIDENCE_FRAME" in v1 — see src/lib/aiCameraEvidenceFrame.ts
+  eventType String // "POSSIBLE_PHONE_VISIBLE" | "POSSIBLE_SECOND_PERSON_VISIBLE" in v1
+
+  storageProvider String // "local_dev" | "vercel_blob" | "supabase_storage" | "s3" — see src/lib/evidenceStorage.ts
+  storageKey      String // Opaque; never returned to any client — resolved server-side only.
+  contentType     String
+  byteSize        Int
+  sha256          String?
+
+  width         Int?
+  height        Int?
+  redactionMode String   @default("LOW_RES_FULL_FRAME")
+  capturedAt    DateTime @default(now())
+
+  createdAt DateTime @default(now())
+
+  @@index([integrityEventId])
+  @@index([submissionId])
+  @@index([examId])
+  @@index([institutionId])
+  @@index([capturedAt])
 }
 
 model QuestionBank {

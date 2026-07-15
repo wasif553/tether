@@ -15,6 +15,7 @@ type EvidenceReport = {
   riskScore: number;
   riskLevel: "CLEAN" | "LOW" | "MEDIUM" | "HIGH";
   events: Array<{
+    id: string;
     eventType: string;
     eventLabel: string;
     severity: string;
@@ -24,6 +25,7 @@ type EvidenceReport = {
     resolvedByName: string | null;
     resolutionNote: string | null;
     confidenceBand: string | null;
+    evidenceAssetId: string | null;
   }>;
   aiCameraIntegritySummary: {
     possiblePhoneCount: number;
@@ -111,6 +113,19 @@ export default function EvidenceReportPage({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // On-Device AI Camera Integrity Detection v1 — Evidence Frames (additive,
+  // opt-in). The modal only ever fetches the authenticated, audited
+  // GET /api/integrity-evidence/[evidenceAssetId] route — never a raw
+  // storage URL, which this page never even receives.
+  const [viewingEvidence, setViewingEvidence] = useState<{
+    evidenceAssetId: string;
+    eventLabel: string;
+    occurredAt: string;
+    objectUrl: string | null;
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
+
   useEffect(() => {
     fetch(`/api/lecturer/submissions/${id}/evidence`).then(async (res) => {
       if (!res.ok) {
@@ -126,6 +141,25 @@ export default function EvidenceReportPage({
       setLoading(false);
     });
   }, [id]);
+
+  async function openEvidenceFrame(evidenceAssetId: string, eventLabel: string, occurredAt: string) {
+    setViewingEvidence({ evidenceAssetId, eventLabel, occurredAt, objectUrl: null, loading: true, error: null });
+    const res = await fetch(`/api/integrity-evidence/${evidenceAssetId}`).catch(() => null);
+    if (!res || !res.ok) {
+      setViewingEvidence((prev) =>
+        prev ? { ...prev, loading: false, error: "Evidence frame could not be loaded." } : prev,
+      );
+      return;
+    }
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    setViewingEvidence((prev) => (prev ? { ...prev, objectUrl, loading: false } : prev));
+  }
+
+  function closeEvidenceFrame() {
+    if (viewingEvidence?.objectUrl) URL.revokeObjectURL(viewingEvidence.objectUrl);
+    setViewingEvidence(null);
+  }
 
   if (loading) return <p className="text-gray-500">Loading evidence report...</p>;
   if (error) return <p className="text-red-600">{error}</p>;
@@ -353,6 +387,20 @@ export default function EvidenceReportPage({
                       {e.confidenceBand} confidence
                     </span>
                   )}
+                  {e.evidenceAssetId && (
+                    <div className="mt-1">
+                      <span className="mr-2 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-700">
+                        Evidence frame available
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => openEvidenceFrame(e.evidenceAssetId!, e.eventLabel, e.occurredAt)}
+                        className="rounded border border-gray-300 px-1.5 py-0.5 text-xs"
+                      >
+                        View evidence frame
+                      </button>
+                    </div>
+                  )}
                 </td>
                 <td className="p-2">
                   {e.resolvedAt ? (
@@ -371,6 +419,43 @@ export default function EvidenceReportPage({
           </tbody>
         </table>
       </div>
+
+      {viewingEvidence && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded border border-gray-300 bg-white p-5 shadow-lg">
+            <div className="flex items-center justify-between">
+              <p className="text-base font-semibold">Evidence frame</p>
+              <button
+                type="button"
+                onClick={closeEvidenceFrame}
+                className="rounded border border-gray-300 px-2 py-1 text-xs"
+              >
+                Close
+              </button>
+            </div>
+            <p className="mt-1 text-sm text-gray-700">{viewingEvidence.eventLabel}</p>
+            <p className="text-xs text-gray-500">
+              {new Date(viewingEvidence.occurredAt).toLocaleString()}
+            </p>
+            <div className="mt-3 flex min-h-[120px] items-center justify-center rounded border border-gray-200 bg-gray-50">
+              {viewingEvidence.loading && <p className="text-sm text-gray-500">Loading...</p>}
+              {viewingEvidence.error && <p className="p-3 text-sm text-red-600">{viewingEvidence.error}</p>}
+              {viewingEvidence.objectUrl && (
+                // eslint-disable-next-line @next/next/no-img-element -- authenticated blob: URL, not a static asset
+                <img
+                  src={viewingEvidence.objectUrl}
+                  alt="Camera evidence frame"
+                  className="max-h-80 w-full rounded object-contain"
+                />
+              )}
+            </div>
+            <p className="mt-3 rounded border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">
+              A single, low-resolution camera evidence frame — a review signal, not proof of
+              misconduct. No video was recorded.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

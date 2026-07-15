@@ -50,3 +50,8 @@ yarn-error.log*
 next-env.d.ts
 
 /src/generated/prisma
+
+# On-Device AI Camera Integrity Detection v1 — Evidence Frames, local dev
+# storage only (see src/lib/evidenceStorage.ts). Never used in production —
+# a real object storage provider must be configured there.
+/.evidence-storage

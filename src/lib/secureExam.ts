@@ -42,6 +42,16 @@ export const secureExamSettingsSchema = z.object({
   // against the same camera stream already used for the preview.
   requireStudentVerification: z.boolean().default(false),
   enableAiCameraIntegrityChecks: z.boolean().default(false),
+
+  // --- On-Device AI Camera Integrity Detection v1 — Evidence Frames
+  // (additive, opt-in) — see docs/on-device-ai-integrity-detection-v1.md.
+  // Defaults to false — never silently enabled for existing exams. When
+  // true, a single low-resolution webcam still frame is captured only for
+  // a backend-logged POSSIBLE_PHONE_VISIBLE or
+  // POSSIBLE_SECOND_PERSON_VISIBLE event (never for no-person/blocked/
+  // dark/unavailable in v1, never a video, never the exam screen). Has no
+  // effect at all unless enableAiCameraIntegrityChecks is also true.
+  captureAiViolationEvidence: z.boolean().default(false),
 });
 
 export type SecureExamSettings = z.infer<typeof secureExamSettingsSchema>;

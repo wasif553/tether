@@ -41,6 +41,7 @@ export type EvidenceReport = {
   riskScore: number;
   riskLevel: RiskLevel;
   events: Array<{
+    id: string;
     eventType: string;
     eventLabel: string;
     severity: string;
@@ -50,6 +51,14 @@ export type EvidenceReport = {
     resolvedByName: string | null;
     resolutionNote: string | null;
     confidenceBand: string | null;
+    // On-Device AI Camera Integrity Detection v1 — Evidence Frames
+    // (additive, opt-in) — see docs/on-device-ai-integrity-detection-v1.md.
+    // Present only for POSSIBLE_PHONE_VISIBLE/POSSIBLE_SECOND_PERSON_VISIBLE
+    // events that actually have a captured frame (captureAiViolationEvidence
+    // enabled at the time this event fired). Never includes the image
+    // itself — only its id, resolved via the authenticated, audited
+    // GET /api/integrity-evidence/[evidenceAssetId] route.
+    evidenceAssetId: string | null;
   }>;
   aiCameraIntegritySummary: {
     possiblePhoneCount: number;
@@ -113,7 +122,10 @@ export async function buildEvidenceReport(
       student: { select: { name: true, email: true } },
       exam: { select: { id: true, title: true, createdById: true, institutionId: true } },
       integrityEvents: {
-        include: { resolvedBy: { select: { name: true } } },
+        include: {
+          resolvedBy: { select: { name: true } },
+          evidenceAsset: { select: { id: true } },
+        },
         orderBy: { occurredAt: "asc" },
       },
       gradePassback: true,
@@ -180,6 +192,7 @@ export async function buildEvidenceReport(
       const confidenceBand =
         metadata && typeof metadata.confidenceBand === "string" ? metadata.confidenceBand : null;
       return {
+        id: e.id,
         eventType: e.eventType,
         eventLabel: labelForEventType(e.eventType),
         severity: e.severity,
@@ -189,6 +202,7 @@ export async function buildEvidenceReport(
         resolvedByName: e.resolvedBy?.name ?? null,
         resolutionNote: e.resolutionNote,
         confidenceBand,
+        evidenceAssetId: e.evidenceAsset?.id ?? null,
       };
     }),
     aiCameraIntegritySummary,

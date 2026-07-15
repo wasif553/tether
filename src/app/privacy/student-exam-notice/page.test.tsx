@@ -26,4 +26,21 @@ describe("student exam notice page", () => {
     expect(text).toContain("block copy, cut, and paste inside the exam page");
     expect(text).toContain("cannot close other browser tabs");
   });
+
+  it("renders the camera evidence frames section with required privacy wording", () => {
+    const text = collectText(StudentExamNoticePage());
+
+    expect(text).toContain("Camera evidence frames");
+    expect(text).toContain(
+      "This exam may save a single low-resolution camera evidence frame if a possible phone or",
+    );
+    expect(text).toContain("second person is detected. No video is recorded.");
+    expect(text).toContain("available only to");
+    expect(text.toLowerCase()).toContain("never a video");
+    expect(text.toLowerCase()).toContain("never capture your exam screen");
+    expect(text.toLowerCase()).toContain("facial recognition");
+    expect(text.toLowerCase()).toContain("biometric identifier");
+    expect(text.toLowerCase()).not.toContain("cheating");
+    expect(text.toLowerCase()).not.toContain("misconduct detected");
+  });
 });

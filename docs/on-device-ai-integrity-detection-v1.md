@@ -2,23 +2,25 @@
 
 **Status:** Implemented locally, not yet deployed to production. One additive schema migration required (see "Production DDL" below).
 
-This document covers two lecturer-optional, independently-toggleable features layered on top of the existing Camera Monitoring v1 / Persistent Camera Preview v1:
+This document covers three lecturer-optional, independently-toggleable features layered on top of the existing Camera Monitoring v1 / Persistent Camera Preview v1:
 
 1. **Student verification** — a one-time, pre-exam self-confirmation step.
 2. **On-device AI camera integrity checks** — local, in-browser checks for a possible phone, a possible additional person, no visible person, or a blocked/dark camera view.
+3. **Evidence frames** (additive, opt-in — see "Evidence Frames v1" below) — a single, privacy-minimised webcam still frame saved only for a possible-phone or possible-second-person signal, and only when a lecturer/institution has explicitly enabled it in addition to feature 2 above.
 
-**This is not live proctoring.** No one — lecturer, institution, or SES — ever sees the student's camera live. Nothing is recorded, streamed, or stored. See `docs/live-proctoring-v1-design-audit.md` for the (separate, not-implemented) design audit of what live proctoring would require.
+**This is not live proctoring.** No one — lecturer, institution, or SES — ever sees the student's camera live, and nothing is streamed. By default, nothing is recorded or stored either — feature 3 above is the one deliberate, opt-in, clearly-disclosed exception, and even then it is a single low-resolution still image, never a video. See `docs/live-proctoring-v1-design-audit.md` for the (separate, not-implemented) design audit of what live proctoring would require.
 
 ---
 
 ## Lecturer opt-in
 
-Both features are off by default and controlled independently on the exam edit page, under "Student verification and AI integrity checks":
+All three features are off by default and controlled independently on the exam edit page, under "Student verification and AI integrity checks":
 
 - **Require student verification before exam** (`requireStudentVerification`)
 - **Enable AI-assisted camera integrity checks** (`enableAiCameraIntegrityChecks`)
+- **Save evidence frame for phone or second-person warnings** (`captureAiViolationEvidence`) — has no effect unless `enableAiCameraIntegrityChecks` is also enabled; the checkbox is disabled in the UI until then
 
-Both are stored in the existing `Exam.secureSettings` JSON column (`src/lib/secureExam.ts`) — no schema change was needed for the settings themselves, only for the new `IntegrityEventType` values the features can produce (see "Production DDL" below). Neither setting is inferred from or replaces `requireCamera` — a lecturer can require a local camera preview without either of these, exactly as before.
+`requireStudentVerification`/`enableAiCameraIntegrityChecks`/`captureAiViolationEvidence` are all stored in the existing `Exam.secureSettings` JSON column (`src/lib/secureExam.ts`) — no schema change was needed for the settings themselves, only for the new `IntegrityEventType` values features 1-2 can produce, and the new `IntegrityEvidenceAsset` table feature 3 needs (see "Production DDL" below). None of these settings is inferred from or replaces `requireCamera` — a lecturer can require a local camera preview without any of them, exactly as before. **Enabling `captureAiViolationEvidence` never retroactively applies to an exam already in progress or already taken** — settings are read fresh per exam, and existing exams are never silently opted in.
 
 ## Student verification (v1)
 
@@ -148,7 +150,52 @@ To help tune the interval and confidence threshold against real hardware without
 
 **Confidence threshold tuning is expected before broad institutional rollout.** The current thresholds (phone ≥0.45, person ≥0.6) are defaults and have not been calibrated against real-world lighting/camera/distance conditions. The phone threshold was deliberately lowered from its original 0.65 alongside removing the consecutive-check requirement (see "Phone detection is high-priority" above) — use `sesAiCameraDebug` to collect real confidence scores on representative hardware before deciding whether to raise it back toward 0.5; avoid going far below 0.4.
 
-**Structural guardrail, not just convention:** `POST /api/submissions/[id]/integrity-events` rejects any request whose metadata contains a key matching `image|frame|screenshot|thumbnail|snapshot|base64|blob|dataurl` (case-insensitive), or any string value that looks like a `data:` URL or a long base64 blob — with a 400 response, before anything is written. The same check is mirrored client-side as `assertSafeIntegrityMetadata()` for defense-in-depth. **No API endpoint anywhere in this feature accepts an uploaded image, video, or file** — there is no upload endpoint, no storage bucket, and no code path that could accept one.
+**Structural guardrail, not just convention:** `POST /api/submissions/[id]/integrity-events` rejects any request whose metadata contains a key matching `image|frame|screenshot|thumbnail|snapshot|base64|blob|dataurl` (case-insensitive), or any string value that looks like a `data:` URL or a long base64 blob — with a 400 response, before anything is written. The same check is mirrored client-side as `assertSafeIntegrityMetadata()` for defense-in-depth. This endpoint itself never accepts an uploaded image, video, or file, and image bytes are never stored inline in `IntegrityEvent.metadataJson` — the only endpoint that accepts image bytes at all is the separate, purpose-built evidence-frame upload route described next, which writes to its own dedicated storage layer, never to an `IntegrityEvent` row.
+
+---
+
+## Evidence Frames v1 (additive, opt-in)
+
+**Off by default.** Evidence frames only exist for an exam where the lecturer/institution has explicitly enabled `captureAiViolationEvidence` (in addition to `enableAiCameraIntegrityChecks`) — see "Lecturer opt-in" above. Enabling it never retroactively applies to exams already taken, and existing exams are never silently opted in.
+
+### What gets captured, and when
+
+- **Only two event types trigger a capture in v1**: `POSSIBLE_PHONE_VISIBLE` and `POSSIBLE_SECOND_PERSON_VISIBLE` (`EVIDENCE_CAPTURE_EVENT_TYPES` in `src/lib/aiCameraEvidenceFrame.ts`). `NO_PERSON_VISIBLE`, `CAMERA_VIEW_BLOCKED`, `CAMERA_TOO_DARK`, and `AI_CAMERA_CHECK_UNAVAILABLE` never capture a frame in v1 — this is a deliberate scope limit, not an oversight, and any future addition needs its own explicit review.
+- **One capture per backend-logged event, not per overlay redisplay.** Capture is wired into the SAME code path as backend integrity-event logging in `src/app/student/exams/[id]/page.tsx` — it only runs once the backend `POST /api/submissions/[id]/integrity-events` call has actually created (or returned) an event, and only fires again the next time that same 45-second backend cooldown allows a NEW event to be logged. The local overlay itself can reopen far more often (see "Local overlay vs. backend logging" above) — that reopening never triggers a new capture on its own.
+- **A single still image, never a video.** One canvas draw from the existing hidden `detectionVideoRef` `<video>` element — the exact same source already used for on-device detection — at the moment the event is created. No new `getUserMedia()` call, and no `getDisplayMedia()`/screen-capture call anywhere in this feature.
+- **Downscaled and re-encoded client-side** to at most 640×360 (preserving aspect ratio if smaller), as JPEG at ~0.6 quality, before upload — both to keep the file small and because re-encoding through canvas implicitly strips any embedded metadata from the original frame.
+- **Never blocks anything.** The overlay is already showing (see the overlay-first design above) before capture even starts; upload happens after the backend event is created, never before, and a failed capture/upload never blocks the overlay, never blocks exam continuation, and is never retried indefinitely — at most a dev-only diagnostic log via `sesAiCameraDebug`.
+
+### What this does NOT do
+
+- **No video recording, no streaming** — a single still frame, captured once per qualifying event.
+- **No screen or desktop capture** — only the webcam frame; the exam question content is never captured.
+- **No facial recognition, no biometric template, no identity matching** — the frame is stored as an opaque image for a human to look at; nothing in this feature analyses, encodes, or compares faces.
+- **Not proof of misconduct** — exactly like the text-only signal it accompanies, an evidence frame is a review aid for a human reviewer, worded and treated the same as every other AI camera signal in this document.
+
+### Storage
+
+No object-storage SDK (Vercel Blob, Supabase Storage, S3, etc.) was already installed in this repo, so `src/lib/evidenceStorage.ts` defines a small `EvidenceStorageAdapter` interface with:
+
+- a fully-working `local_dev` adapter (plain filesystem under `.evidence-storage/` at the repo root — gitignored, never under `public/`, never served statically) for local development and tests;
+- clearly-stubbed `vercel_blob` / `supabase_storage` / `s3` adapters that throw a descriptive `EvidenceStorageNotConfiguredError` until a real implementation (plus the provider's SDK) is added.
+
+**`local_dev` storage must never be used in production** — Vercel serverless function instances do not share a persistent, writable filesystem across invocations, so a file written during one request would not reliably be readable from another. `resolveEvidenceStorageAdapter()` fails closed (throws) in production unless `EVIDENCE_STORAGE_PROVIDER` names a real provider — see docs/deployment-vercel-supabase.md for what production needs before `captureAiViolationEvidence` may be enabled for any real exam.
+
+Image bytes are never stored inline in the database. The `IntegrityEvidenceAsset` Prisma model (see "Production DDL" below) only holds a `storageKey` — an opaque pointer resolved server-side only, through `src/lib/evidenceStorage.ts` — and that key is never returned to any client, in any response, at any time.
+
+### Upload and access-control routes
+
+1. `POST /api/submissions/[id]/integrity-events/[eventId]/evidence-frame` — student only, only for their own submission, only for an event that belongs to that submission and is one of the two eligible types, only when `captureAiViolationEvidence` is enabled for the exam. Validates content type (`image/jpeg` or `image/webp` only — rejects SVG, HTML, and anything else) and size (300 KB ceiling). One asset per event in v1, enforced by a database unique constraint on `integrityEventId`, not just application logic. Returns only `{ ok, evidenceAssetId }` — never a storage key.
+2. `GET /api/integrity-evidence/[evidenceAssetId]` — the ONLY way to view a frame's bytes. Lecturer (owner of the exam) or `PLATFORM_ADMIN`, same institution — the same rule `buildEvidenceReport()` already enforces for the rest of a submission's evidence. A student can never reach this route. Every successful view is recorded to `PlatformAuditLog` (`action: "VIEW_AI_CAMERA_EVIDENCE_FRAME"`, actor, role, submission/exam ids, evidence asset id) — never the image itself.
+
+### Retention
+
+`IntegrityEvidenceAsset.capturedAt`/`createdAt` are recorded, and a per-institution retention window (suggested default: 30–90 days after the exam is finalized) is the intended policy — a scheduled deletion job is not implemented in v1 (no scheduler exists in this repo yet) but the schema supports it: deleting an `IntegrityEvidenceAsset` row (and its corresponding storage object via `EvidenceStorageAdapter.delete()`) is a well-defined, self-contained operation that a future scheduled job or manual admin action can perform without touching any other table. `onDelete: Cascade` from `Submission`/`Exam`/`IntegrityEvent` means evidence assets are also cleaned up automatically if any of those parent rows are ever deleted.
+
+### Lecturer review UI
+
+The evidence report page (`/lecturer/submissions/[id]/evidence`) shows an "Evidence frame available" badge and a "View evidence frame" button next to any event that has one; clicking it opens a modal that fetches the image via the authenticated `GET /api/integrity-evidence/[evidenceAssetId]` route (never a raw storage URL) and shows the event time, event type, and the same privacy note as everywhere else in this feature. Events with no captured frame render exactly as before — no visible change.
 
 ---
 
@@ -158,6 +205,7 @@ The lecturer evidence report (`src/lib/evidenceReport.ts`) gained:
 
 - A `confidenceBand` field on each event (from metadata, when present).
 - A dedicated `aiCameraIntegritySummary` section: counts of possible-phone, possible-second-person, no-person, and blocked/dark events, plus the disclaimer *"AI camera signals are indicators for review. They are not automatic misconduct decisions."* Rendered as its own "AI-assisted camera integrity signals" section on the evidence page, and included in the CSV export.
+- Each event in `EvidenceReport.events` now also carries its own `id` and an `evidenceAssetId` (`null` unless a frame was actually captured for that specific event) — this is what drives the "Evidence frame available" badge described in "Evidence Frames v1" above. Never the image itself, never a storage key — just the id needed to call `GET /api/integrity-evidence/[evidenceAssetId]`.
 
 **Risk scoring required no code changes to `src/lib/integrityRisk.ts`.** Risk is a simple sum of `SEVERITY_WEIGHTS` (`INFO:0, LOW:1, MEDIUM:3, HIGH:7`) across a submission's events, so the conservative-by-construction behavior falls out of severity choice alone:
 
@@ -201,4 +249,8 @@ ALTER TYPE "IntegrityEventType" ADD VALUE 'CAMERA_TOO_DARK';
 ALTER TYPE "IntegrityEventType" ADD VALUE 'AI_CAMERA_CHECK_UNAVAILABLE';
 ```
 
-Generate/verify the exact statements via `prisma migrate diff` before applying, per the existing production-DDL pattern in `docs/network-evidence-and-ip-location.md`. No `prisma db push` against production. No other schema changes were required — `requireStudentVerification`/`enableAiCameraIntegrityChecks` live in the existing `Exam.secureSettings` JSON column.
+Generate/verify the exact statements via `prisma migrate diff` before applying, per the existing production-DDL pattern in `docs/network-evidence-and-ip-location.md`. No `prisma db push` against production. `requireStudentVerification`/`enableAiCameraIntegrityChecks`/`captureAiViolationEvidence` all live in the existing `Exam.secureSettings` JSON column — no schema change needed for the settings themselves.
+
+**Evidence Frames v1 additionally requires a new table**, `IntegrityEvidenceAsset` — additive only, no existing table/column/enum changed or removed. The full `CREATE TABLE`/index/foreign-key statements plus post-migration verification queries are in `docs/evidence-frame-migration.sql`, generated the same way (`npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script`, hand-extracted to just this table). Apply via the Supabase SQL Editor; do not `prisma db push` against production.
+
+**Set `EVIDENCE_STORAGE_PROVIDER` in production before enabling `captureAiViolationEvidence` for any real exam** — see "Storage" under "Evidence Frames v1" above and docs/deployment-vercel-supabase.md. There is no working production storage provider wired up in this codebase yet; only local filesystem storage for development, which must never be used in production.

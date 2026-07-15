@@ -49,6 +49,7 @@ type SecureSettings = {
   enforceFullscreenReturn: boolean;
   requireStudentVerification: boolean;
   enableAiCameraIntegrityChecks: boolean;
+  captureAiViolationEvidence: boolean;
 };
 
 type Exam = {
@@ -1073,10 +1074,38 @@ export default function LecturerExamPage({
                   disabled={!secureForm.secureModeEnabled}
                   checked={secureForm.enableAiCameraIntegrityChecks}
                   onChange={(e) =>
-                    setSecureForm({ ...secureForm, enableAiCameraIntegrityChecks: e.target.checked })
+                    setSecureForm({
+                      ...secureForm,
+                      enableAiCameraIntegrityChecks: e.target.checked,
+                      // Evidence capture has no effect without AI camera
+                      // checks enabled — turn it off too rather than leave
+                      // a silently-inert setting checked.
+                      captureAiViolationEvidence: e.target.checked
+                        ? secureForm.captureAiViolationEvidence
+                        : false,
+                    })
                   }
                 />
                 Enable AI-assisted camera integrity checks
+              </label>
+              <label className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  disabled={!secureForm.secureModeEnabled || !secureForm.enableAiCameraIntegrityChecks}
+                  checked={secureForm.captureAiViolationEvidence}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, captureAiViolationEvidence: e.target.checked })
+                  }
+                />
+                <span>
+                  Save evidence frame for phone or second-person warnings
+                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                    When enabled, the system saves a single low-resolution camera frame only when
+                    a possible phone or second person is detected. No video is recorded. Off by
+                    default.
+                  </span>
+                </span>
               </label>
             </div>
           </div>

@@ -111,10 +111,10 @@ export default function StudentExamNoticePage() {
           <p className="mt-2">This does <strong>not</strong>:</p>
           <ul className="mt-1 list-disc space-y-1 pl-5">
             <li>record, stream, or store your camera video</li>
-            <li>store any image, frame, or screenshot</li>
-            <li>use facial recognition or compare your face to anything</li>
+            <li>use facial recognition, compare your face to anything, or create a biometric template</li>
             <li>track your eye gaze</li>
             <li>detect your emotions</li>
+            <li>record or capture your screen or desktop</li>
             <li>make an automatic misconduct decision</li>
           </ul>
           <p className="mt-2">
@@ -122,6 +122,40 @@ export default function StudentExamNoticePage() {
             &quot;possible mobile phone visible&quot; — and is reviewed by your lecturer, who makes
             the final academic decision. This is not live proctoring: no one watches your camera in
             real time.
+          </p>
+          <p className="mt-2">
+            <strong>By default, no image, frame, or screenshot is ever stored</strong> — only the
+            numeric signal itself (e.g. &quot;possible phone visible&quot;) is recorded.
+          </p>
+        </section>
+
+        <section>
+          <h2 className="font-medium text-gray-900">Camera evidence frames, if separately enabled</h2>
+          <p className="mt-1">
+            Some lecturers additionally enable a further, separate opt-in setting: saving a single
+            <strong> camera evidence frame</strong> when a possible phone or possible second person
+            is detected. If your lecturer has enabled this for your exam, you will see it named
+            explicitly in the checklist before you start.
+          </p>
+          <p className="mt-1">
+            This exam may save a single low-resolution camera evidence frame if a possible phone or
+            second person is detected. No video is recorded. Evidence is available only to
+            authorised reviewers.
+          </p>
+          <p className="mt-2">Camera evidence frames:</p>
+          <ul className="mt-1 list-disc space-y-1 pl-5">
+            <li>are captured only for a possible phone or possible second person signal — never for other signals</li>
+            <li>are a single still image, never a video or a recording</li>
+            <li>never capture your exam screen or desktop</li>
+            <li>are low-resolution and compressed, not full quality</li>
+            <li>are never analysed with facial recognition and never used to create a biometric identifier</li>
+            <li>are stored privately and are visible only to your lecturer and authorised institution staff, never to other students</li>
+            <li>are not created for every check — only once per recorded signal, not continuously</li>
+          </ul>
+          <p className="mt-2">
+            An evidence frame is a review aid for a human reviewer, exactly like the text-only
+            signal it accompanies — it is not proof of misconduct, and does not by itself change
+            any grade or academic outcome.
           </p>
         </section>
 
