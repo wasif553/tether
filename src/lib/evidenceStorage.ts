@@ -71,11 +71,11 @@ export class LocalDevEvidenceStorageAdapter implements EvidenceStorageAdapter {
   }
 
   private resolvePath(key: string): string {
-    // Keys are namespaced with "/" as a path separator (see
-    // generateEvidenceFrameStorageKey in aiCameraEvidenceFrame.ts, e.g.
-    // "institution/x/exam/y/submission/z/event/w/abc123.jpg") — allowed
-    // here, but ".." traversal and a leading "/" (which would escape
-    // rootDir via path.join) are rejected.
+    // Keys are a single flat folder (see generateEvidenceFrameStorageKey in
+    // aiCameraEvidenceFrame.ts, e.g. "ai-camera-evidence/sub123-evt456-abc123.jpg")
+    // — the one "/" folder separator is allowed here, but ".." traversal
+    // and a leading "/" (which would escape rootDir via path.join) are
+    // rejected.
     if (!/^[A-Za-z0-9._/-]+$/.test(key) || key.includes("..") || key.startsWith("/")) {
       throw new Error(`Unsafe evidence storage key: "${key}"`);
     }
@@ -145,8 +145,19 @@ class SupabaseStorageEvidenceAdapter implements EvidenceStorageAdapter {
     });
   }
 
+  // Supabase Storage's `upload()` takes the OBJECT KEY only — never the
+  // bucket name (that's `.from(this.bucket)`, kept separate) and never a
+  // leading "/" (Supabase rejects that with "Invalid path specified in
+  // request URL", which is what a prior deeply-nested key format hit —
+  // see the comment on generateEvidenceFrameStorageKey in
+  // aiCameraEvidenceFrame.ts). The key is never manually URL-encoded
+  // here — the supabase-js client handles that internally.
+  private objectKey(key: string): string {
+    return key.startsWith("/") ? key.slice(1) : key;
+  }
+
   async put(key: string, bytes: Buffer, contentType?: string): Promise<void> {
-    const { error } = await this.client.storage.from(this.bucket).upload(key, bytes, {
+    const { error } = await this.client.storage.from(this.bucket).upload(this.objectKey(key), bytes, {
       contentType,
       upsert: false,
     });
@@ -154,14 +165,14 @@ class SupabaseStorageEvidenceAdapter implements EvidenceStorageAdapter {
   }
 
   async get(key: string): Promise<Buffer | null> {
-    const { data, error } = await this.client.storage.from(this.bucket).download(key);
+    const { data, error } = await this.client.storage.from(this.bucket).download(this.objectKey(key));
     if (error || !data) return null;
     const arrayBuffer = await data.arrayBuffer();
     return Buffer.from(arrayBuffer);
   }
 
   async delete(key: string): Promise<void> {
-    await this.client.storage.from(this.bucket).remove([key]);
+    await this.client.storage.from(this.bucket).remove([this.objectKey(key)]);
   }
 }
 

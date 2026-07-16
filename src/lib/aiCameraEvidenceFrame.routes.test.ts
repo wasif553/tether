@@ -126,9 +126,11 @@ describe("POST /api/submissions/[id]/integrity-events/[eventId]/evidence-frame",
     expect(body.ok).toBe(true);
     expect(typeof body.evidenceAssetId).toBe("string");
 
-    // 7. Raw storage key is never returned.
-    expect(JSON.stringify(body)).not.toMatch(/ai-camera-evidence\//);
+    // 7/9. Raw storage key is never returned — the response body is only
+    // { ok, evidenceAssetId }, never the ai-camera-evidence/... path.
+    expect(Object.keys(body).sort()).toEqual(["evidenceAssetId", "ok"]);
     expect(body.storageKey).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("ai-camera-evidence/");
   });
 
   it("2. upload rejected if event belongs to another submission", async () => {

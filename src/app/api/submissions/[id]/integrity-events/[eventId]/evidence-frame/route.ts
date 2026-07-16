@@ -104,8 +104,6 @@ export async function POST(
 
   const storageKey = generateEvidenceFrameStorageKey(
     {
-      institutionId,
-      examId: submission.examId,
       submissionId: submission.id,
       integrityEventId: eventId,
       contentType,

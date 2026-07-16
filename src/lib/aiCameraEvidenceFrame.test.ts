@@ -115,39 +115,67 @@ describe("isEvidenceFrameSourceReady", () => {
 });
 
 describe("generateEvidenceFrameStorageKey", () => {
-  it("5. the generated key never contains a student name or email — only opaque IDs", () => {
+  it("1. returns the simplified ai-camera-evidence/{submissionId}-{integrityEventId}-{random}.jpg format", () => {
     const key = generateEvidenceFrameStorageKey(
-      {
-        institutionId: "inst_xyz000",
-        examId: "exam_abc123",
-        submissionId: "sub_def456",
-        integrityEventId: "evt_ghi789",
-        contentType: "image/jpeg",
-      },
+      { submissionId: "sub_def456", integrityEventId: "evt_ghi789", contentType: "image/jpeg" },
+      "randomsuffix1",
+    );
+    expect(key).toBe("ai-camera-evidence/sub_def456-evt_ghi789-randomsuffix1.jpg");
+  });
+
+  it("2. the generated key never contains a student name or email — only opaque IDs", () => {
+    const key = generateEvidenceFrameStorageKey(
+      { submissionId: "sub_def456", integrityEventId: "evt_ghi789", contentType: "image/jpeg" },
       "randomsuffix1",
     );
     expect(key).not.toMatch(/@/); // no email
     expect(key).not.toContain(" "); // no "Firstname Lastname"-style name
-    expect(key).toContain("inst_xyz000");
-    expect(key).toContain("exam_abc123");
     expect(key).toContain("sub_def456");
     expect(key).toContain("evt_ghi789");
     expect(key.toLowerCase()).not.toContain("student");
   });
 
-  it("uses the correct extension per content type", () => {
-    const base = { institutionId: "i1", examId: "e1", submissionId: "s1", integrityEventId: "ev1" };
+  it("3. has no leading slash", () => {
+    const key = generateEvidenceFrameStorageKey(
+      { submissionId: "s1", integrityEventId: "ev1", contentType: "image/jpeg" },
+      "x",
+    );
+    expect(key.startsWith("/")).toBe(false);
+  });
+
+  it("4. has no double slash", () => {
+    const key = generateEvidenceFrameStorageKey(
+      { submissionId: "s1", integrityEventId: "ev1", contentType: "image/jpeg" },
+      "x",
+    );
+    expect(key).not.toContain("//");
+  });
+
+  it("5. has only one folder prefix (a single '/')", () => {
+    const key = generateEvidenceFrameStorageKey(
+      { submissionId: "s1", integrityEventId: "ev1", contentType: "image/jpeg" },
+      "x",
+    );
+    expect(key.split("/").length).toBe(2);
+    expect(key.startsWith("ai-camera-evidence/")).toBe(true);
+  });
+
+  it("6. uses the correct extension per content type (jpg and webp)", () => {
+    const base = { submissionId: "s1", integrityEventId: "ev1" };
     expect(generateEvidenceFrameStorageKey({ ...base, contentType: "image/jpeg" }, "x")).toMatch(/\.jpg$/);
     expect(generateEvidenceFrameStorageKey({ ...base, contentType: "image/webp" }, "x")).toMatch(/\.webp$/);
   });
 
-  it("is namespaced institution/{id}/exam/{id}/submission/{id}/event/{id}/...", () => {
+  it("only contains lowercase letters, digits, hyphens, one slash, and a dot before the extension (real cuid-shaped ids)", () => {
     const key = generateEvidenceFrameStorageKey(
-      { institutionId: "i1", examId: "e1", submissionId: "s1", integrityEventId: "ev1", contentType: "image/jpeg" },
-      "x",
+      {
+        submissionId: "cmrng95oq000104jvaw8dnnma",
+        integrityEventId: "cmrngigkw000j04jrjpwjcvft",
+        contentType: "image/jpeg",
+      },
+      "154b0679500bcb3e",
     );
-    expect(key).toBe("institution/i1/exam/e1/submission/s1/event/ev1/x.jpg");
-    expect(key.startsWith("institution/")).toBe(true);
+    expect(key).toMatch(/^[a-z0-9-]+\/[a-z0-9-]+\.(jpg|webp)$/);
   });
 });
 

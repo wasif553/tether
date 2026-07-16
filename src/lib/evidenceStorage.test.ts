@@ -13,7 +13,20 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { mockUpload, mockDownload, mockRemove, mockFrom } = vi.hoisted(() => {
+  const mockUpload = vi.fn().mockResolvedValue({ data: { path: "x" }, error: null });
+  const mockDownload = vi.fn().mockResolvedValue({ data: new Blob(["x"]), error: null });
+  const mockRemove = vi.fn().mockResolvedValue({ data: null, error: null });
+  const mockFrom = vi.fn(() => ({ upload: mockUpload, download: mockDownload, remove: mockRemove }));
+  return { mockUpload, mockDownload, mockRemove, mockFrom };
+});
+
+vi.mock("@supabase/supabase-js", () => ({
+  createClient: vi.fn(() => ({ storage: { from: mockFrom } })),
+}));
+
 import {
   EvidenceStorageNotConfiguredError,
   LocalDevEvidenceStorageAdapter,
@@ -91,6 +104,66 @@ describe("resolveEvidenceStorageAdapter — supabase_storage", () => {
   });
 });
 
+describe("SupabaseStorageEvidenceAdapter — object key only, never bucket/key", () => {
+  afterEach(() => {
+    mockUpload.mockClear();
+    mockDownload.mockClear();
+    mockRemove.mockClear();
+    mockFrom.mockClear();
+  });
+
+  function makeSupabaseAdapter() {
+    return resolveEvidenceStorageAdapter({
+      EVIDENCE_STORAGE_PROVIDER: "supabase_storage",
+      SUPABASE_URL: "https://example.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "fake-service-role-key",
+      EVIDENCE_STORAGE_BUCKET: "safe-exam-evidence",
+    });
+  }
+
+  it("8. put() calls storage.from(bucket).upload() with the bare object key — never bucket-prefixed", async () => {
+    const adapter = makeSupabaseAdapter();
+    const key = "ai-camera-evidence/sub1-evt1-abc123.jpg";
+
+    await adapter.put(key, Buffer.from("fake-jpeg-bytes"), "image/jpeg");
+
+    expect(mockFrom).toHaveBeenCalledWith("safe-exam-evidence");
+    expect(mockUpload).toHaveBeenCalledWith(
+      key,
+      expect.anything(),
+      expect.objectContaining({ contentType: "image/jpeg" }),
+    );
+    // Never bucket/key concatenated into the path itself.
+    expect(mockUpload.mock.calls[0][0]).not.toContain("safe-exam-evidence/");
+  });
+
+  it("8. strips a leading slash before calling upload() (defensive — generateEvidenceFrameStorageKey never produces one)", async () => {
+    const adapter = makeSupabaseAdapter();
+    await adapter.put("/ai-camera-evidence/sub1-evt1-abc123.jpg", Buffer.from("x"), "image/jpeg");
+    expect(mockUpload.mock.calls[0][0]).toBe("ai-camera-evidence/sub1-evt1-abc123.jpg");
+    expect(mockUpload.mock.calls[0][0].startsWith("/")).toBe(false);
+  });
+
+  it("get() and delete() also pass the bare object key only", async () => {
+    const adapter = makeSupabaseAdapter();
+    const key = "ai-camera-evidence/sub1-evt1-abc123.jpg";
+
+    await adapter.get(key);
+    expect(mockDownload).toHaveBeenCalledWith(key);
+
+    await adapter.delete(key);
+    expect(mockRemove).toHaveBeenCalledWith([key]);
+  });
+
+  it("upload failure surfaces a non-sensitive error message including the key but no path traversal/internal details", async () => {
+    mockUpload.mockResolvedValueOnce({ data: null, error: { message: "Invalid path specified in request URL" } });
+    const adapter = makeSupabaseAdapter();
+    await expect(
+      adapter.put("ai-camera-evidence/sub1-evt1-abc123.jpg", Buffer.from("x"), "image/jpeg"),
+    ).rejects.toThrow(/Invalid path specified in request URL/);
+  });
+});
+
 describe("resolveEvidenceStorageAdapter — unsupported provider", () => {
   it("3. throws for an unknown/unsupported provider name", () => {
     expect(() => resolveEvidenceStorageAdapter({ EVIDENCE_STORAGE_PROVIDER: "azure_blob" })).toThrow(
@@ -164,9 +237,9 @@ describe("LocalDevEvidenceStorageAdapter", () => {
     tempDirs = [];
   });
 
-  it("round-trips put/get/delete for a nested key with slashes (the real path shape)", async () => {
+  it("7. round-trips put/get/delete for the new flat ai-camera-evidence/{key}.jpg shape", async () => {
     const adapter = await makeAdapter();
-    const key = "institution/inst1/exam/exam1/submission/sub1/event/evt1/abc123.jpg";
+    const key = "ai-camera-evidence/sub1-evt1-abc123.jpg";
     const bytes = Buffer.from("fake-jpeg-bytes");
 
     await adapter.put(key, bytes);
@@ -180,13 +253,13 @@ describe("LocalDevEvidenceStorageAdapter", () => {
 
   it("get() returns null for a key that was never written", async () => {
     const adapter = await makeAdapter();
-    const missing = await adapter.get("institution/x/exam/y/submission/z/event/w/nonexistent.jpg");
+    const missing = await adapter.get("ai-camera-evidence/nonexistent-key.jpg");
     expect(missing).toBeNull();
   });
 
   it("rejects a key containing '..' path traversal", async () => {
     const adapter = await makeAdapter();
-    await expect(adapter.put("institution/../../etc/passwd", Buffer.from("x"))).rejects.toThrow(
+    await expect(adapter.put("ai-camera-evidence/../../etc/passwd", Buffer.from("x"))).rejects.toThrow(
       /Unsafe evidence storage key/,
     );
   });

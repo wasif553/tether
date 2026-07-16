@@ -98,8 +98,6 @@ export const ALLOWED_EVIDENCE_FRAME_CONTENT_TYPES = Object.keys(CONTENT_TYPE_EXT
 export const MAX_EVIDENCE_FRAME_BYTES = 300 * 1024;
 
 export type EvidenceFrameKeyParams = {
-  institutionId: string;
-  examId: string;
   submissionId: string;
   integrityEventId: string;
   contentType: string;
@@ -108,24 +106,22 @@ export type EvidenceFrameKeyParams = {
 /**
  * Builds an opaque storage key from IDs the system already generates
  * (cuids) — never from anything identity-revealing like the student's
- * name or email. Namespaced `institution/{institutionId}/exam/{examId}/
- * submission/{submissionId}/event/{eventId}/{random}.{ext}` so a reviewer
- * inspecting the storage layout directly (e.g. an ops engineer debugging
- * the storage bucket, or browsing the Supabase Storage dashboard) cannot
- * infer who a frame belongs to without cross-referencing the database —
- * and so per-institution access/lifecycle policies (e.g. a future
- * retention job, or a bucket-level policy scoped by prefix) can operate
- * on the `institution/{institutionId}/` prefix directly. `randomSuffix`
- * is caller-supplied (e.g. `randomStorageSuffix()` from
- * evidenceStorage.ts) so this stays a pure function — the same inputs
- * always produce the same key.
+ * name or email. Deliberately a single flat folder,
+ * `ai-camera-evidence/{submissionId}-{integrityEventId}-{random}.{ext}` —
+ * a prior version nested institution/exam/submission/event as separate
+ * path segments, which Supabase Storage rejected with "Invalid path
+ * specified in request URL" (see docs/on-device-ai-integrity-detection-v1.md,
+ * "Evidence Frames v1"). institutionId/examId remain the source of truth
+ * for scoping and access control — they're stored as columns on
+ * IntegrityEvidenceAsset (see the Prisma `create` call in the upload
+ * route), never encoded into the storage path itself. `randomSuffix` is
+ * caller-supplied (e.g. `randomStorageSuffix()` from evidenceStorage.ts)
+ * so this stays a pure function — the same inputs always produce the
+ * same key.
  */
 export function generateEvidenceFrameStorageKey(params: EvidenceFrameKeyParams, randomSuffix: string): string {
   const ext = CONTENT_TYPE_EXTENSIONS[params.contentType] ?? "bin";
-  return (
-    `institution/${params.institutionId}/exam/${params.examId}/submission/${params.submissionId}` +
-    `/event/${params.integrityEventId}/${randomSuffix}.${ext}`
-  );
+  return `ai-camera-evidence/${params.submissionId}-${params.integrityEventId}-${randomSuffix}.${ext}`;
 }
 
 export type EvidenceFrameUploadValidationResult = { ok: true } | { ok: false; error: string };
