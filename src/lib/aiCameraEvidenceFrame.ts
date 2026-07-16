@@ -131,6 +131,30 @@ export function isEvidenceFrameSourceReady(
   return Boolean(video) && video!.readyState >= 2 && video!.videoWidth !== 0;
 }
 
+/**
+ * Pure UI-facing predicate for "does this event have a viewable evidence
+ * frame" — used by the lecturer evidence report page to decide whether to
+ * render the "Evidence frame available" badge/"View evidence frame"
+ * button. Deliberately lives in this dependency-free module (rather than
+ * evidenceReport.ts, which imports Prisma) so it can be imported from a
+ * "use client" page without pulling server-only code into the browser
+ * bundle, and so it's unit-testable without rendering the component
+ * (this repo has no jsdom/testing-library dependency yet).
+ */
+export function hasEvidenceFrame(event: { evidenceFrame: unknown }): boolean {
+  return event.evidenceFrame != null;
+}
+
+/**
+ * Builds the URL the lecturer evidence report page's "View evidence
+ * frame" button fetches — the authenticated, audited
+ * GET /api/integrity-evidence/[id] route. Never the raw storageKey or a
+ * Supabase URL, neither of which the client ever has access to.
+ */
+export function buildEvidenceFrameViewPath(evidenceAssetId: string): string {
+  return `/api/integrity-evidence/${evidenceAssetId}`;
+}
+
 const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
   "image/jpeg": "jpg",
   "image/webp": "webp",

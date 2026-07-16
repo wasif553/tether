@@ -29,6 +29,13 @@ const AI_CAMERA_EVENT_TYPES = [
 export class EvidenceNotFoundError extends Error {}
 export class EvidenceForbiddenError extends Error {}
 
+export type EvidenceReportEventEvidenceFrame = {
+  id: string;
+  contentType: string;
+  byteSize: number;
+  capturedAt: string;
+} | null;
+
 export type EvidenceReport = {
   submissionId: string;
   student: { name: string; email: string };
@@ -56,9 +63,10 @@ export type EvidenceReport = {
     // Present only for POSSIBLE_PHONE_VISIBLE/POSSIBLE_SECOND_PERSON_VISIBLE
     // events that actually have a captured frame (captureAiViolationEvidence
     // enabled at the time this event fired). Never includes the image
-    // itself — only its id, resolved via the authenticated, audited
-    // GET /api/integrity-evidence/[evidenceAssetId] route.
-    evidenceAssetId: string | null;
+    // itself or the raw storageKey — only display-safe metadata; the
+    // image bytes are resolved separately via the authenticated, audited
+    // GET /api/integrity-evidence/[id] route, using evidenceFrame.id.
+    evidenceFrame: EvidenceReportEventEvidenceFrame;
   }>;
   aiCameraIntegritySummary: {
     possiblePhoneCount: number;
@@ -124,7 +132,7 @@ export async function buildEvidenceReport(
       integrityEvents: {
         include: {
           resolvedBy: { select: { name: true } },
-          evidenceAsset: { select: { id: true } },
+          evidenceAsset: { select: { id: true, contentType: true, byteSize: true, capturedAt: true } },
         },
         orderBy: { occurredAt: "asc" },
       },
@@ -202,7 +210,14 @@ export async function buildEvidenceReport(
         resolvedByName: e.resolvedBy?.name ?? null,
         resolutionNote: e.resolutionNote,
         confidenceBand,
-        evidenceAssetId: e.evidenceAsset?.id ?? null,
+        evidenceFrame: e.evidenceAsset
+          ? {
+              id: e.evidenceAsset.id,
+              contentType: e.evidenceAsset.contentType,
+              byteSize: e.evidenceAsset.byteSize,
+              capturedAt: e.evidenceAsset.capturedAt.toISOString(),
+            }
+          : null,
       };
     }),
     aiCameraIntegritySummary,

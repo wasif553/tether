@@ -20,6 +20,7 @@ const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
 const uploadRoute = await import("../app/api/submissions/[id]/integrity-events/[eventId]/evidence-frame/route");
 const viewRoute = await import("../app/api/integrity-evidence/[evidenceAssetId]/route");
+const { buildEvidenceReport } = await import("./evidenceReport");
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT" | "PLATFORM_ADMIN", institutionId: string) {
   return {
@@ -355,5 +356,90 @@ describe("GET /api/integrity-evidence/[evidenceAssetId]", () => {
       params: Promise.resolve({ evidenceAssetId: "nonexistent-id" }),
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("buildEvidenceReport — evidenceFrame mapping (lecturer evidence report)", () => {
+  it("1/3. includes evidenceFrame with the event id when an IntegrityEvidenceAsset exists for POSSIBLE_PHONE_VISIBLE", async () => {
+    const exam = await createExam({ captureEnabled: true });
+    const { submission, event } = await createSubmissionAndEvent(exam.id, studentA.id, "POSSIBLE_PHONE_VISIBLE");
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const uploadRes = await uploadRoute.POST(uploadRequest(makeJpegFile(2048)), {
+      params: Promise.resolve({ id: submission.id, eventId: event.id }),
+    });
+    expect(uploadRes.status).toBe(201);
+    const { evidenceAssetId } = await uploadRes.json();
+
+    const report = await buildEvidenceReport(submission.id, {
+      user: { id: lecturerA.id, role: "LECTURER", institutionId: instA },
+    } as never);
+
+    const reportedEvent = report.events.find((e) => e.id === event.id);
+    expect(reportedEvent).toBeDefined();
+    expect(reportedEvent?.eventType).toBe("POSSIBLE_PHONE_VISIBLE");
+    expect(reportedEvent?.evidenceFrame).toEqual({
+      id: evidenceAssetId,
+      contentType: "image/jpeg",
+      byteSize: 2048,
+      capturedAt: expect.any(String),
+    });
+  });
+
+  it("2. never returns a storageKey anywhere in the report", async () => {
+    const exam = await createExam({ captureEnabled: true });
+    const { submission, event } = await createSubmissionAndEvent(
+      exam.id,
+      studentA.id,
+      "POSSIBLE_SECOND_PERSON_VISIBLE",
+    );
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    await uploadRoute.POST(uploadRequest(makeJpegFile()), {
+      params: Promise.resolve({ id: submission.id, eventId: event.id }),
+    });
+
+    const report = await buildEvidenceReport(submission.id, {
+      user: { id: lecturerA.id, role: "LECTURER", institutionId: instA },
+    } as never);
+
+    expect(JSON.stringify(report)).not.toMatch(/ai-camera-evidence\//);
+    const reportedEvent = report.events.find((e) => e.id === event.id);
+    expect((reportedEvent?.evidenceFrame as Record<string, unknown> | null)?.storageKey).toBeUndefined();
+  });
+
+  it("8. Possible second person visible event with an asset is displayed correctly", async () => {
+    const exam = await createExam({ captureEnabled: true });
+    const { submission, event } = await createSubmissionAndEvent(
+      exam.id,
+      studentA.id,
+      "POSSIBLE_SECOND_PERSON_VISIBLE",
+    );
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    await uploadRoute.POST(uploadRequest(makeJpegFile()), {
+      params: Promise.resolve({ id: submission.id, eventId: event.id }),
+    });
+
+    const report = await buildEvidenceReport(submission.id, {
+      user: { id: lecturerA.id, role: "LECTURER", institutionId: instA },
+    } as never);
+
+    const reportedEvent = report.events.find((e) => e.id === event.id);
+    expect(reportedEvent?.eventType).toBe("POSSIBLE_SECOND_PERSON_VISIBLE");
+    expect(reportedEvent?.evidenceFrame).not.toBeNull();
+  });
+
+  it("9. NO_PERSON_VISIBLE (never eligible for evidence capture) has no evidenceFrame", async () => {
+    const exam = await createExam({ captureEnabled: true });
+    const { submission, event } = await createSubmissionAndEvent(exam.id, studentA.id, "NO_PERSON_VISIBLE");
+
+    const report = await buildEvidenceReport(submission.id, {
+      user: { id: lecturerA.id, role: "LECTURER", institutionId: instA },
+    } as never);
+
+    const reportedEvent = report.events.find((e) => e.id === event.id);
+    expect(reportedEvent?.eventType).toBe("NO_PERSON_VISIBLE");
+    expect(reportedEvent?.evidenceFrame).toBeNull();
   });
 });

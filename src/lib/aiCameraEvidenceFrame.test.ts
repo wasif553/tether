@@ -11,8 +11,10 @@ import {
   EVIDENCE_CAPTURE_EVENT_TYPES,
   MAX_EVIDENCE_FRAME_BYTES,
   buildEvidenceFrameUploadPath,
+  buildEvidenceFrameViewPath,
   evidenceUploadSkipReason,
   generateEvidenceFrameStorageKey,
+  hasEvidenceFrame,
   isEvidenceCaptureEligibleEventType,
   isEvidenceFrameSourceReady,
   shouldAttemptEvidenceUpload,
@@ -153,6 +155,39 @@ describe("buildEvidenceFrameUploadPath", () => {
     const path = buildEvidenceFrameUploadPath("sub_123", "evt_456");
     expect(path.endsWith("/evidence-frame")).toBe(true);
     expect(path).not.toMatch(/\/evidence$/);
+  });
+});
+
+describe("hasEvidenceFrame (lecturer evidence report UI)", () => {
+  it("4/7. returns true for a POSSIBLE_PHONE_VISIBLE event with an evidence frame", () => {
+    expect(
+      hasEvidenceFrame({
+        evidenceFrame: { id: "asset_1", contentType: "image/jpeg", byteSize: 12_345, capturedAt: "2026-01-01T00:00:00.000Z" },
+      }),
+    ).toBe(true);
+  });
+
+  it("8. returns true for a POSSIBLE_SECOND_PERSON_VISIBLE event with an evidence frame", () => {
+    expect(
+      hasEvidenceFrame({
+        evidenceFrame: { id: "asset_2", contentType: "image/webp", byteSize: 9_000, capturedAt: "2026-01-01T00:00:00.000Z" },
+      }),
+    ).toBe(true);
+  });
+
+  it("5/9. returns false when there is no evidence frame (e.g. NO_PERSON_VISIBLE, which never captures one)", () => {
+    expect(hasEvidenceFrame({ evidenceFrame: null })).toBe(false);
+  });
+});
+
+describe("buildEvidenceFrameViewPath (lecturer evidence report UI)", () => {
+  it("6. returns /api/integrity-evidence/{evidenceAssetId}", () => {
+    expect(buildEvidenceFrameViewPath("asset_123")).toBe("/api/integrity-evidence/asset_123");
+  });
+
+  it("never includes a storageKey, bucket name, or Supabase URL", () => {
+    const path = buildEvidenceFrameViewPath("asset_123");
+    expect(path).not.toMatch(/supabase|storage|ai-camera-evidence\//i);
   });
 });
 

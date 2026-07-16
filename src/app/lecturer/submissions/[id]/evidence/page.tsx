@@ -2,6 +2,7 @@
 
 import { useEffect, useState, use as usePromise } from "react";
 import Link from "next/link";
+import { buildEvidenceFrameViewPath, hasEvidenceFrame } from "@/lib/aiCameraEvidenceFrame";
 
 type EvidenceReport = {
   submissionId: string;
@@ -25,7 +26,12 @@ type EvidenceReport = {
     resolvedByName: string | null;
     resolutionNote: string | null;
     confidenceBand: string | null;
-    evidenceAssetId: string | null;
+    evidenceFrame: {
+      id: string;
+      contentType: string;
+      byteSize: number;
+      capturedAt: string;
+    } | null;
   }>;
   aiCameraIntegritySummary: {
     possiblePhoneCount: number;
@@ -144,7 +150,7 @@ export default function EvidenceReportPage({
 
   async function openEvidenceFrame(evidenceAssetId: string, eventLabel: string, occurredAt: string) {
     setViewingEvidence({ evidenceAssetId, eventLabel, occurredAt, objectUrl: null, loading: true, error: null });
-    const res = await fetch(`/api/integrity-evidence/${evidenceAssetId}`).catch(() => null);
+    const res = await fetch(buildEvidenceFrameViewPath(evidenceAssetId)).catch(() => null);
     if (!res || !res.ok) {
       setViewingEvidence((prev) =>
         prev ? { ...prev, loading: false, error: "Evidence frame could not be loaded." } : prev,
@@ -387,14 +393,14 @@ export default function EvidenceReportPage({
                       {e.confidenceBand} confidence
                     </span>
                   )}
-                  {e.evidenceAssetId && (
+                  {hasEvidenceFrame(e) && (
                     <div className="mt-1">
                       <span className="mr-2 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-700">
                         Evidence frame available
                       </span>
                       <button
                         type="button"
-                        onClick={() => openEvidenceFrame(e.evidenceAssetId!, e.eventLabel, e.occurredAt)}
+                        onClick={() => openEvidenceFrame(e.evidenceFrame!.id, e.eventLabel, e.occurredAt)}
                         className="rounded border border-gray-300 px-1.5 py-0.5 text-xs"
                       >
                         View evidence frame
