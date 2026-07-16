@@ -10,13 +10,20 @@ import {
   ALLOWED_EVIDENCE_FRAME_CONTENT_TYPES,
   EVIDENCE_CAPTURE_EVENT_TYPES,
   MAX_EVIDENCE_FRAME_BYTES,
+  buildEvidenceFrameUploadPath,
+  evidenceUploadSkipReason,
   generateEvidenceFrameStorageKey,
   isEvidenceCaptureEligibleEventType,
   isEvidenceFrameSourceReady,
   shouldAttemptEvidenceUpload,
   shouldCaptureEvidenceFrame,
+  shouldLogEvidenceUploadDebug,
   validateEvidenceFrameUpload,
 } from "./aiCameraEvidenceFrame";
+
+const captureOn = { enableAiCameraIntegrityChecks: true, captureAiViolationEvidence: true };
+const captureOffSetting = { enableAiCameraIntegrityChecks: true, captureAiViolationEvidence: false };
+const aiChecksOff = { enableAiCameraIntegrityChecks: false, captureAiViolationEvidence: true };
 
 describe("isEvidenceCaptureEligibleEventType", () => {
   it("1. allows only POSSIBLE_PHONE_VISIBLE and POSSIBLE_SECOND_PERSON_VISIBLE", () => {
@@ -78,18 +85,87 @@ describe("shouldCaptureEvidenceFrame", () => {
 });
 
 describe("shouldAttemptEvidenceUpload", () => {
-  it("attempts the upload when eligible and the backend returned an event id", () => {
-    expect(shouldAttemptEvidenceUpload(true, "evt_123")).toBe(true);
+  it("1. returns true for POSSIBLE_PHONE_VISIBLE with an event id and captureAiViolationEvidence true", () => {
+    expect(shouldAttemptEvidenceUpload("POSSIBLE_PHONE_VISIBLE", captureOn, "evt_123")).toBe(true);
   });
 
-  it("skips the upload when no event id was returned (e.g. response body didn't parse)", () => {
-    expect(shouldAttemptEvidenceUpload(true, undefined)).toBe(false);
-    expect(shouldAttemptEvidenceUpload(true, null)).toBe(false);
-    expect(shouldAttemptEvidenceUpload(true, "")).toBe(false);
+  it("2. returns true for POSSIBLE_SECOND_PERSON_VISIBLE with an event id and captureAiViolationEvidence true", () => {
+    expect(shouldAttemptEvidenceUpload("POSSIBLE_SECOND_PERSON_VISIBLE", captureOn, "evt_123")).toBe(true);
   });
 
-  it("skips the upload when the event type/settings were not eligible, even with an id", () => {
-    expect(shouldAttemptEvidenceUpload(false, "evt_123")).toBe(false);
+  it("3. returns false for NO_PERSON_VISIBLE", () => {
+    expect(shouldAttemptEvidenceUpload("NO_PERSON_VISIBLE", captureOn, "evt_123")).toBe(false);
+  });
+
+  it("returns false for CAMERA_TOO_DARK, CAMERA_VIEW_BLOCKED, AI_CAMERA_CHECK_UNAVAILABLE, and WINDOW_BLUR", () => {
+    expect(shouldAttemptEvidenceUpload("CAMERA_TOO_DARK", captureOn, "evt_123")).toBe(false);
+    expect(shouldAttemptEvidenceUpload("CAMERA_VIEW_BLOCKED", captureOn, "evt_123")).toBe(false);
+    expect(shouldAttemptEvidenceUpload("AI_CAMERA_CHECK_UNAVAILABLE", captureOn, "evt_123")).toBe(false);
+    expect(shouldAttemptEvidenceUpload("WINDOW_BLUR", captureOn, "evt_123")).toBe(false);
+  });
+
+  it("4. returns false when captureAiViolationEvidence is false", () => {
+    expect(shouldAttemptEvidenceUpload("POSSIBLE_PHONE_VISIBLE", captureOffSetting, "evt_123")).toBe(false);
+  });
+
+  it("returns false when enableAiCameraIntegrityChecks is false, even if captureAiViolationEvidence is true", () => {
+    expect(shouldAttemptEvidenceUpload("POSSIBLE_PHONE_VISIBLE", aiChecksOff, "evt_123")).toBe(false);
+  });
+
+  it("5. returns false when the event id is missing (e.g. response body didn't parse)", () => {
+    expect(shouldAttemptEvidenceUpload("POSSIBLE_PHONE_VISIBLE", captureOn, undefined)).toBe(false);
+    expect(shouldAttemptEvidenceUpload("POSSIBLE_PHONE_VISIBLE", captureOn, null)).toBe(false);
+    expect(shouldAttemptEvidenceUpload("POSSIBLE_PHONE_VISIBLE", captureOn, "")).toBe(false);
+  });
+});
+
+describe("evidenceUploadSkipReason", () => {
+  it("returns null (proceed) when everything is eligible and an id was returned", () => {
+    expect(evidenceUploadSkipReason("POSSIBLE_PHONE_VISIBLE", captureOn, "evt_123")).toBeNull();
+  });
+
+  it("returns 'ineligible-event-type' for an event type evidence is never captured for", () => {
+    expect(evidenceUploadSkipReason("NO_PERSON_VISIBLE", captureOn, "evt_123")).toBe("ineligible-event-type");
+    expect(evidenceUploadSkipReason("WINDOW_BLUR", captureOn, "evt_123")).toBe("ineligible-event-type");
+  });
+
+  it("returns 'setting-disabled' when the event type is eligible but a setting is off", () => {
+    expect(evidenceUploadSkipReason("POSSIBLE_PHONE_VISIBLE", captureOffSetting, "evt_123")).toBe(
+      "setting-disabled",
+    );
+    expect(evidenceUploadSkipReason("POSSIBLE_PHONE_VISIBLE", aiChecksOff, "evt_123")).toBe("setting-disabled");
+  });
+
+  it("returns 'missing-event-id' when everything else is eligible but no id was returned", () => {
+    expect(evidenceUploadSkipReason("POSSIBLE_PHONE_VISIBLE", captureOn, undefined)).toBe("missing-event-id");
+    expect(evidenceUploadSkipReason("POSSIBLE_PHONE_VISIBLE", captureOn, null)).toBe("missing-event-id");
+  });
+});
+
+describe("buildEvidenceFrameUploadPath", () => {
+  it("6. returns /api/submissions/{submissionId}/integrity-events/{eventId}/evidence-frame", () => {
+    expect(buildEvidenceFrameUploadPath("sub_123", "evt_456")).toBe(
+      "/api/submissions/sub_123/integrity-events/evt_456/evidence-frame",
+    );
+  });
+
+  it("never uses a stale /evidence path or the eventType in place of the event id", () => {
+    const path = buildEvidenceFrameUploadPath("sub_123", "evt_456");
+    expect(path.endsWith("/evidence-frame")).toBe(true);
+    expect(path).not.toMatch(/\/evidence$/);
+  });
+});
+
+describe("shouldLogEvidenceUploadDebug", () => {
+  it("8. is enabled only by the exact opt-in flag value, independent of NODE_ENV (Preview-safe)", () => {
+    expect(shouldLogEvidenceUploadDebug("true")).toBe(true);
+  });
+
+  it("is disabled for any other flag value, including falsy/unset", () => {
+    expect(shouldLogEvidenceUploadDebug("false")).toBe(false);
+    expect(shouldLogEvidenceUploadDebug(null)).toBe(false);
+    expect(shouldLogEvidenceUploadDebug(undefined)).toBe(false);
+    expect(shouldLogEvidenceUploadDebug("1")).toBe(false);
   });
 });
 

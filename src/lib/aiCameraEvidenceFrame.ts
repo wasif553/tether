@@ -56,16 +56,61 @@ export function shouldCaptureEvidenceFrame(
 }
 
 /**
- * Whether the created backend event actually carries an id evidence can be
- * attached to. Extracted as a pure decision (rather than inlined in the
- * student exam page) so the "no id in the response -> no upload attempt"
- * behavior is independently unit-testable without a browser/React.
+ * Whether an evidence upload should actually be attempted for a
+ * just-backend-logged event: combines `shouldCaptureEvidenceFrame`
+ * (event type + settings) with the one additional requirement that the
+ * backend response actually carried an id evidence can be attached to.
+ * Extracted as a single pure decision (rather than inlined in the student
+ * exam page) so the whole gate — "wrong event type" / "capture disabled"
+ * / "no id in the response" — is independently unit-testable without a
+ * browser/React.
  */
 export function shouldAttemptEvidenceUpload(
-  eligible: boolean,
+  eventType: string,
+  settings: EvidenceCaptureSettings,
   createdEventId: string | null | undefined,
 ): boolean {
-  return eligible && typeof createdEventId === "string" && createdEventId.length > 0;
+  if (!shouldCaptureEvidenceFrame(eventType, settings)) return false;
+  return typeof createdEventId === "string" && createdEventId.length > 0;
+}
+
+export type EvidenceUploadSkipReason =
+  | "setting-disabled"
+  | "ineligible-event-type"
+  | "missing-event-id";
+
+/**
+ * Pinpoints WHY `shouldAttemptEvidenceUpload` returned false, for
+ * diagnostics only (never used to gate behavior — the boolean above is
+ * still the single source of truth). Checked in the same order a human
+ * would debug it: is this even an eligible event type, then is the
+ * setting on, then did the backend actually return an id. Returns null
+ * when the upload should proceed.
+ */
+export function evidenceUploadSkipReason(
+  eventType: string,
+  settings: EvidenceCaptureSettings,
+  createdEventId: string | null | undefined,
+): EvidenceUploadSkipReason | null {
+  if (!isEvidenceCaptureEligibleEventType(eventType)) return "ineligible-event-type";
+  if (!settings.enableAiCameraIntegrityChecks || !settings.captureAiViolationEvidence) {
+    return "setting-disabled";
+  }
+  if (typeof createdEventId !== "string" || createdEventId.length === 0) return "missing-event-id";
+  return null;
+}
+
+/**
+ * Builds the evidence-frame upload URL for a given submission/event —
+ * the single source of truth for this path so the client and any test
+ * agree on it, rather than the URL being hand-built inline (where a typo
+ * like using `event.eventType` instead of the event id, or `/evidence`
+ * instead of `/evidence-frame`, would silently 404). Matches the actual
+ * route file at
+ * src/app/api/submissions/[id]/integrity-events/[eventId]/evidence-frame/route.ts.
+ */
+export function buildEvidenceFrameUploadPath(submissionId: string, integrityEventId: string): string {
+  return `/api/submissions/${submissionId}/integrity-events/${integrityEventId}/evidence-frame`;
 }
 
 export type EvidenceFrameVideoSource = {
@@ -158,6 +203,22 @@ export function validateEvidenceFrameUpload(
     };
   }
   return { ok: true };
+}
+
+/**
+ * Gate for evidence-upload diagnostic logging. Deliberately does NOT
+ * require `NODE_ENV === "development"` — unlike the on-device detection
+ * tick's debug logging (`shouldLogAiCameraDebug` in
+ * cameraIntegrityDetection.ts), this needs to work in a Vercel Preview
+ * deployment, which is a production build. The opt-in
+ * `localStorage.sesAiCameraDebug === "true"` flag alone is the gate, so a
+ * tester can enable it in Preview without a code change. Never logs
+ * anything itself — callers still only pass non-sensitive fields (ids,
+ * dimensions, byte counts, status codes, path — never image/blob/base64
+ * data or a storage key).
+ */
+export function shouldLogEvidenceUploadDebug(debugFlagValue: string | null | undefined): boolean {
+  return debugFlagValue === "true";
 }
 
 export const EVIDENCE_FRAME_KIND = "AI_CAMERA_EVIDENCE_FRAME";

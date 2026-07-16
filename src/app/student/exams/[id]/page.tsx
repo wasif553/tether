@@ -32,9 +32,12 @@ import {
   type AiCameraViolationOverlayState,
 } from "@/lib/aiCameraViolationOverlay";
 import {
+  buildEvidenceFrameUploadPath,
+  evidenceUploadSkipReason,
   isEvidenceFrameSourceReady,
+  isEvidenceCaptureEligibleEventType,
   shouldAttemptEvidenceUpload,
-  shouldCaptureEvidenceFrame,
+  shouldLogEvidenceUploadDebug,
 } from "@/lib/aiCameraEvidenceFrame";
 
 type Question = {
@@ -424,35 +427,45 @@ export default function TakeExamPage({
       // captureAiViolationEvidence, and only once per backend-logged
       // event — this function body only runs past the debounce guard
       // above when a NEW event is actually being reported, never on an
-      // overlay redisplay of an already-debounced signal. Capture/upload
-      // never blocks the overlay or the backend event above, and a
-      // failure here never blocks exam continuation.
-      const evidenceEligible = shouldCaptureEvidenceFrame(eventType, secureSettings);
-      logAiCameraDebug("evidence: eligibility check", {
+      // overlay redisplay of an already-debounced signal (see
+      // computeLocalAiCameraOverlay below, which reopens the overlay
+      // independently of this function ever running again). Capture/
+      // upload never blocks the overlay or the backend event above, and
+      // a failure here never blocks exam continuation.
+      const eventTypeEligible = isEvidenceCaptureEligibleEventType(eventType);
+      logEvidenceDebug("evidence: eligibility check", {
         eventType,
+        eventTypeEligible,
         captureAiViolationEvidence: secureSettings.captureAiViolationEvidence,
-        evidenceEligible,
+        enableAiCameraIntegrityChecks: secureSettings.enableAiCameraIntegrityChecks,
       });
-      if (evidenceEligible) {
+      if (eventTypeEligible) {
         backendPromise
           .then((res) => {
-            logAiCameraDebug("evidence: integrity event POST result", { status: res.status, ok: res.ok });
-            return res.ok ? (res.json() as Promise<{ id?: string }>) : null;
+            logEvidenceDebug("evidence: integrity event POST result", { status: res.status, ok: res.ok });
+            return res.ok ? (res.json() as Promise<{ id?: string; eventType?: string }>) : null;
           })
           .then((created) => {
-            const uploadAttempted = shouldAttemptEvidenceUpload(evidenceEligible, created?.id);
-            logAiCameraDebug("evidence: integrity event id", {
+            const createdEventType = created?.eventType ?? eventType;
+            const shouldAttempt = shouldAttemptEvidenceUpload(createdEventType, secureSettings, created?.id);
+            const skipReason = shouldAttempt
+              ? null
+              : evidenceUploadSkipReason(createdEventType, secureSettings, created?.id);
+            logEvidenceDebug("evidence: integrity event response", {
               eventId: created?.id ?? null,
-              uploadAttempted,
+              eventType: created?.eventType ?? null,
+              shouldAttempt,
+              skipReason,
             });
-            if (uploadAttempted && created?.id) {
+            if (shouldAttempt && created?.id) {
               void captureAndUploadEvidenceFrame(created.id);
             }
           })
           .catch((err) => {
             // Backend logging failure is already handled above; without a
             // created event id there is nothing to attach a frame to.
-            logAiCameraDebug("evidence: integrity event POST threw", {
+            logEvidenceDebug("evidence: integrity event POST threw", {
+              skipReason: "upload-fetch-failed",
               error: err instanceof Error ? err.message : String(err),
             });
           });
@@ -824,6 +837,20 @@ export default function TakeExamPage({
     console.log(`[sesAiCameraDebug] ${message}`, data);
   }
 
+  // Evidence-upload diagnostic logging — deliberately Preview-safe: unlike
+  // logAiCameraDebug above (which requires NODE_ENV === "development" and
+  // so never logs anything in a Vercel Preview build), this only requires
+  // the same opt-in localStorage.sesAiCameraDebug flag, so a tester can
+  // diagnose a missing evidence-frame upload directly in Preview without
+  // a code change. Never logs image/blob/base64 data, a storage key, or
+  // student personal details — only ids, dimensions, byte counts, status
+  // codes, and the request path (never the full URL/origin).
+  function logEvidenceDebug(message: string, data: Record<string, unknown>) {
+    if (typeof window === "undefined") return;
+    if (!shouldLogEvidenceUploadDebug(window.localStorage.getItem("sesAiCameraDebug"))) return;
+    console.log(`[sesAiCameraDebug] ${message}`, data);
+  }
+
   // On-Device AI Camera Integrity Detection v1 — Evidence Frames (opt-in,
   // off by default). Draws the CURRENT frame from the same hidden
   // detectionVideoRef used for on-device detection (never a new
@@ -837,14 +864,17 @@ export default function TakeExamPage({
   async function captureAndUploadEvidenceFrame(integrityEventId: string) {
     try {
       const video = detectionVideoRef.current;
-      logAiCameraDebug("evidence: video state at capture time", {
+      logEvidenceDebug("evidence: video state at capture time", {
         integrityEventId,
         hasVideo: Boolean(video),
         readyState: video?.readyState ?? null,
         videoWidth: video?.videoWidth ?? null,
         videoHeight: video?.videoHeight ?? null,
       });
-      if (!isEvidenceFrameSourceReady(video)) return;
+      if (!isEvidenceFrameSourceReady(video)) {
+        logEvidenceDebug("evidence: skipped", { integrityEventId, skipReason: "video-not-ready" });
+        return;
+      }
 
       if (!evidenceCanvasRef.current) {
         evidenceCanvasRef.current = document.createElement("canvas");
@@ -858,40 +888,56 @@ export default function TakeExamPage({
       canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
 
       const ctx = canvas.getContext("2d");
-      if (!ctx) return;
+      if (!ctx) {
+        logEvidenceDebug("evidence: skipped", { integrityEventId, skipReason: "blob-create-failed" });
+        return;
+      }
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
       const blob = await new Promise<Blob | null>((resolve) => {
         canvas.toBlob(resolve, "image/jpeg", 0.6);
       });
-      logAiCameraDebug("evidence: blob encoded", {
+      logEvidenceDebug("evidence: blob encoded", {
         integrityEventId,
         hasBlob: Boolean(blob),
         contentType: blob?.type ?? null,
         byteSize: blob?.size ?? null,
       });
-      if (!blob) return;
+      if (!blob) {
+        logEvidenceDebug("evidence: skipped", { integrityEventId, skipReason: "blob-create-failed" });
+        return;
+      }
 
       const formData = new FormData();
       formData.append("file", blob, "evidence.jpg");
 
-      const res = await fetch(
-        `/api/submissions/${id}/integrity-events/${integrityEventId}/evidence-frame`,
-        { method: "POST", body: formData },
-      );
+      const uploadPath = buildEvidenceFrameUploadPath(id, integrityEventId);
+      let res: Response;
+      try {
+        res = await fetch(uploadPath, { method: "POST", body: formData });
+      } catch (err) {
+        logEvidenceDebug("evidence: skipped", {
+          integrityEventId,
+          skipReason: "upload-fetch-failed",
+          path: uploadPath,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
 
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        logAiCameraDebug("evidence frame upload rejected", {
+        logEvidenceDebug("evidence frame upload rejected", {
+          path: uploadPath,
           status: res.status,
           integrityEventId,
           error: typeof body?.error === "string" ? body.error : null,
         });
       } else {
-        logAiCameraDebug("evidence: upload succeeded", { status: res.status, integrityEventId });
+        logEvidenceDebug("evidence: upload succeeded", { path: uploadPath, status: res.status, integrityEventId });
       }
     } catch (err) {
-      logAiCameraDebug("evidence frame capture/upload threw", {
+      logEvidenceDebug("evidence frame capture/upload threw", {
         integrityEventId,
         error: err instanceof Error ? err.message : String(err),
       });
