@@ -36,6 +36,16 @@ export type EvidenceReportEventEvidenceFrame = {
   capturedAt: string;
 } | null;
 
+export type EvidenceReportEvidenceFrame = {
+  id: string;
+  eventId: string;
+  eventType: string;
+  occurredAt: string;
+  contentType: string;
+  byteSize: number;
+  capturedAt: string;
+};
+
 export type EvidenceReport = {
   submissionId: string;
   student: { name: string; email: string };
@@ -68,6 +78,13 @@ export type EvidenceReport = {
     // GET /api/integrity-evidence/[id] route, using evidenceFrame.id.
     evidenceFrame: EvidenceReportEventEvidenceFrame;
   }>;
+  // Top-level, denormalized list of every saved camera evidence frame for
+  // this submission — lets the lecturer evidence report page surface a
+  // dedicated "Camera evidence frames" section above the (potentially
+  // hundreds-of-rows-long) event timeline, rather than requiring a
+  // lecturer to scan the whole timeline to find them. Newest first. Never
+  // includes storageKey or any raw storage reference.
+  evidenceFrames: EvidenceReportEvidenceFrame[];
   aiCameraIntegritySummary: {
     possiblePhoneCount: number;
     possibleSecondPersonCount: number;
@@ -134,7 +151,11 @@ export async function buildEvidenceReport(
           resolvedBy: { select: { name: true } },
           evidenceAsset: { select: { id: true, contentType: true, byteSize: true, capturedAt: true } },
         },
-        orderBy: { occurredAt: "asc" },
+        // Newest first — a lecturer reviewing a submission cares most
+        // about the most recent signals, not the oldest; also matches the
+        // "Camera evidence frames" section below, which is naturally
+        // newest-first from the same underlying query.
+        orderBy: { occurredAt: "desc" },
       },
       gradePassback: true,
       answers: { include: { question: { select: { type: true } } } },
@@ -220,6 +241,17 @@ export async function buildEvidenceReport(
           : null,
       };
     }),
+    evidenceFrames: submission.integrityEvents
+      .filter((e) => e.evidenceAsset != null)
+      .map((e) => ({
+        id: e.evidenceAsset!.id,
+        eventId: e.id,
+        eventType: e.eventType,
+        occurredAt: e.occurredAt.toISOString(),
+        contentType: e.evidenceAsset!.contentType,
+        byteSize: e.evidenceAsset!.byteSize,
+        capturedAt: e.evidenceAsset!.capturedAt.toISOString(),
+      })),
     aiCameraIntegritySummary,
     canvasPassback: submission.gradePassback
       ? {

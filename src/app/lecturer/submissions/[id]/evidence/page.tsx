@@ -1,8 +1,13 @@
 "use client";
 
-import { useEffect, useState, use as usePromise } from "react";
+import { useEffect, useMemo, useState, use as usePromise } from "react";
 import Link from "next/link";
-import { buildEvidenceFrameViewPath, hasEvidenceFrame } from "@/lib/aiCameraEvidenceFrame";
+import { buildEvidenceFrameViewPath, evidenceFrameEventLabel, hasEvidenceFrame } from "@/lib/aiCameraEvidenceFrame";
+import {
+  categoryForEventType,
+  INTEGRITY_EVENT_CATEGORY_LABELS,
+  type IntegrityEventCategory,
+} from "@/lib/integrityEventLabels";
 
 type EvidenceReport = {
   submissionId: string;
@@ -32,6 +37,15 @@ type EvidenceReport = {
       byteSize: number;
       capturedAt: string;
     } | null;
+  }>;
+  evidenceFrames: Array<{
+    id: string;
+    eventId: string;
+    eventType: string;
+    occurredAt: string;
+    contentType: string;
+    byteSize: number;
+    capturedAt: string;
   }>;
   aiCameraIntegritySummary: {
     possiblePhoneCount: number;
@@ -95,6 +109,13 @@ const RISK_LEVEL_LABELS: Record<string, string> = {
   HIGH: "High integrity risk",
 };
 
+function formatByteSize(byteSize: number): string {
+  if (byteSize < 1024) return `${byteSize} B`;
+  return `${(byteSize / 1024).toFixed(1)} KB`;
+}
+
+const CATEGORY_FILTER_ORDER: IntegrityEventCategory[] = ["evidence", "camera", "window", "info"];
+
 function severityBadge(severity: string) {
   const styles: Record<string, string> = {
     HIGH: "bg-red-100 text-red-700",
@@ -118,6 +139,10 @@ export default function EvidenceReportPage({
   const [data, setData] = useState<EvidenceReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Timeline category filter — lets a lecturer collapse hundreds of rows
+  // down to just the category they care about (e.g. "Evidence events")
+  // instead of scrolling through the whole thing. "all" shows everything.
+  const [categoryFilter, setCategoryFilter] = useState<IntegrityEventCategory | "all">("all");
 
   // On-Device AI Camera Integrity Detection v1 — Evidence Frames (additive,
   // opt-in). The modal only ever fetches the authenticated, audited
@@ -166,6 +191,20 @@ export default function EvidenceReportPage({
     if (viewingEvidence?.objectUrl) URL.revokeObjectURL(viewingEvidence.objectUrl);
     setViewingEvidence(null);
   }
+
+  // Compact per-category counts for the timeline filter bar, and the
+  // filtered row list — computed unconditionally (before the early
+  // returns below) so hook order stays stable across renders.
+  const events = useMemo(() => data?.events ?? [], [data]);
+  const categoryCounts = useMemo(() => {
+    const counts: Record<IntegrityEventCategory, number> = { evidence: 0, camera: 0, window: 0, info: 0 };
+    for (const e of events) counts[categoryForEventType(e.eventType)]++;
+    return counts;
+  }, [events]);
+  const filteredEvents = useMemo(() => {
+    if (categoryFilter === "all") return events;
+    return events.filter((e) => categoryForEventType(e.eventType) === categoryFilter);
+  }, [events, categoryFilter]);
 
   if (loading) return <p className="text-gray-500">Loading evidence report...</p>;
   if (error) return <p className="text-red-600">{error}</p>;
@@ -361,7 +400,71 @@ export default function EvidenceReportPage({
         </div>
       )}
 
+      {/* Main review area — surfaced above the (potentially long) timeline
+          below so a lecturer never has to scroll through hundreds of rows
+          to find a saved camera evidence frame. */}
+      <h2 className="mt-8 text-lg font-medium">Camera evidence frames</h2>
+      <p className="mt-1 text-sm text-gray-600">
+        Low-resolution camera evidence frames saved for review. These are review signals, not
+        automatic misconduct decisions.
+      </p>
+      {data.evidenceFrames.length === 0 ? (
+        <p className="mt-3 rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-500">
+          No camera evidence frames were saved for this submission.
+        </p>
+      ) : (
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {data.evidenceFrames.map((frame) => (
+            <div key={frame.id} className="rounded border border-gray-200 p-3 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
+                  {evidenceFrameEventLabel(frame.eventType)}
+                </span>
+                <span className="text-xs text-gray-400">{formatByteSize(frame.byteSize)}</span>
+              </div>
+              <p className="mt-2 text-xs text-gray-500">{new Date(frame.occurredAt).toLocaleString()}</p>
+              <p className="text-xs text-gray-400">{frame.contentType}</p>
+              <button
+                type="button"
+                onClick={() =>
+                  openEvidenceFrame(frame.id, evidenceFrameEventLabel(frame.eventType), frame.occurredAt)
+                }
+                className="mt-3 rounded border border-gray-300 px-2 py-1 text-xs"
+              >
+                View evidence frame
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <h2 className="mt-8 text-lg font-medium">Integrity event timeline</h2>
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+        <button
+          type="button"
+          onClick={() => setCategoryFilter("all")}
+          className={`rounded px-2 py-1 ${
+            categoryFilter === "all" ? "bg-black text-white" : "border border-gray-300 text-gray-600"
+          }`}
+        >
+          All ({events.length})
+        </button>
+        {CATEGORY_FILTER_ORDER.map((category) => (
+          <button
+            key={category}
+            type="button"
+            onClick={() => setCategoryFilter(category)}
+            className={`rounded px-2 py-1 ${
+              categoryFilter === category ? "bg-black text-white" : "border border-gray-300 text-gray-600"
+            }`}
+          >
+            {INTEGRITY_EVENT_CATEGORY_LABELS[category]} ({categoryCounts[category]})
+          </button>
+        ))}
+      </div>
+      <p className="mt-2 text-xs text-gray-500">
+        Showing {filteredEvents.length} of {events.length} event(s), newest first.
+      </p>
       <div className="mt-3 overflow-x-auto rounded border border-gray-200">
         <table className="w-full text-sm">
           <thead>
@@ -374,14 +477,16 @@ export default function EvidenceReportPage({
             </tr>
           </thead>
           <tbody>
-            {data.events.length === 0 && (
+            {filteredEvents.length === 0 && (
               <tr>
                 <td colSpan={5} className="p-4 text-center text-gray-500">
-                  No integrity events recorded
+                  {events.length === 0
+                    ? "No integrity events recorded"
+                    : "No events in this category"}
                 </td>
               </tr>
             )}
-            {data.events.map((e, i) => (
+            {filteredEvents.map((e, i) => (
               <tr key={i} className="border-b border-gray-100 align-top">
                 <td className="whitespace-nowrap p-2">{new Date(e.occurredAt).toLocaleString()}</td>
                 <td className="p-2">{e.eventLabel}</td>

@@ -12,6 +12,7 @@ import {
   MAX_EVIDENCE_FRAME_BYTES,
   buildEvidenceFrameUploadPath,
   buildEvidenceFrameViewPath,
+  evidenceFrameEventLabel,
   evidenceUploadSkipReason,
   generateEvidenceFrameStorageKey,
   hasEvidenceFrame,
@@ -177,6 +178,31 @@ describe("hasEvidenceFrame (lecturer evidence report UI)", () => {
 
   it("5/9. returns false when there is no evidence frame (e.g. NO_PERSON_VISIBLE, which never captures one)", () => {
     expect(hasEvidenceFrame({ evidenceFrame: null })).toBe(false);
+  });
+});
+
+describe("evidenceFrameEventLabel (Camera evidence frames section wording)", () => {
+  it("uses the short neutral label for the two evidence-eligible event types", () => {
+    expect(evidenceFrameEventLabel("POSSIBLE_PHONE_VISIBLE")).toBe("Possible phone visible");
+    expect(evidenceFrameEventLabel("POSSIBLE_SECOND_PERSON_VISIBLE")).toBe("Possible second person visible");
+  });
+
+  it("never contains banned words", () => {
+    const labels = [
+      evidenceFrameEventLabel("POSSIBLE_PHONE_VISIBLE"),
+      evidenceFrameEventLabel("POSSIBLE_SECOND_PERSON_VISIBLE"),
+    ];
+    for (const label of labels) {
+      const lower = label.toLowerCase();
+      expect(lower).not.toContain("cheating");
+      expect(lower).not.toContain("misconduct");
+      expect(lower).not.toContain("caught");
+      expect(lower).not.toContain("proof");
+    }
+  });
+
+  it("falls back to the raw event type for a non-eligible type", () => {
+    expect(evidenceFrameEventLabel("NO_PERSON_VISIBLE")).toBe("NO_PERSON_VISIBLE");
   });
 });
 

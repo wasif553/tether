@@ -31,6 +31,23 @@ export function isEvidenceCaptureEligibleEventType(eventType: string): eventType
   return (EVIDENCE_CAPTURE_EVENT_TYPES as readonly string[]).includes(eventType);
 }
 
+/**
+ * Short, neutral labels for the lecturer evidence report's dedicated
+ * "Camera evidence frames" section — deliberately distinct from the
+ * longer "— needs review" wording used in the general integrity event
+ * timeline (see labelForEventType in integrityEventLabels.ts), since this
+ * section's whole purpose is already "this needs review." Never
+ * "cheating," "misconduct proven," "caught," or "proof."
+ */
+const EVIDENCE_FRAME_EVENT_LABELS: Record<EvidenceCaptureEventType, string> = {
+  POSSIBLE_PHONE_VISIBLE: "Possible phone visible",
+  POSSIBLE_SECOND_PERSON_VISIBLE: "Possible second person visible",
+};
+
+export function evidenceFrameEventLabel(eventType: string): string {
+  return isEvidenceCaptureEligibleEventType(eventType) ? EVIDENCE_FRAME_EVENT_LABELS[eventType] : eventType;
+}
+
 export type EvidenceCaptureSettings = {
   /** Master on/off for AI camera checks at all — evidence capture has no effect if this is off. */
   enableAiCameraIntegrityChecks: boolean;

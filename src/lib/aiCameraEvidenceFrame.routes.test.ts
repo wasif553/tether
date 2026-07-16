@@ -442,4 +442,62 @@ describe("buildEvidenceReport — evidenceFrame mapping (lecturer evidence repor
     expect(reportedEvent?.eventType).toBe("NO_PERSON_VISIBLE");
     expect(reportedEvent?.evidenceFrame).toBeNull();
   });
+
+  it("exposes a top-level evidenceFrames array so the lecturer report can surface a dedicated section", async () => {
+    const exam = await createExam({ captureEnabled: true });
+    const { submission, event } = await createSubmissionAndEvent(exam.id, studentA.id, "POSSIBLE_PHONE_VISIBLE");
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const uploadRes = await uploadRoute.POST(uploadRequest(makeJpegFile(4096)), {
+      params: Promise.resolve({ id: submission.id, eventId: event.id }),
+    });
+    const { evidenceAssetId } = await uploadRes.json();
+
+    const report = await buildEvidenceReport(submission.id, {
+      user: { id: lecturerA.id, role: "LECTURER", institutionId: instA },
+    } as never);
+
+    expect(report.evidenceFrames).toHaveLength(1);
+    expect(report.evidenceFrames[0]).toEqual({
+      id: evidenceAssetId,
+      eventId: event.id,
+      eventType: "POSSIBLE_PHONE_VISIBLE",
+      occurredAt: expect.any(String),
+      contentType: "image/jpeg",
+      byteSize: 4096,
+      capturedAt: expect.any(String),
+    });
+  });
+
+  it("evidenceFrames is empty when no evidence was ever captured for the submission", async () => {
+    const exam = await createExam({ captureEnabled: true });
+    const { submission } = await createSubmissionAndEvent(exam.id, studentA.id, "NO_PERSON_VISIBLE");
+
+    const report = await buildEvidenceReport(submission.id, {
+      user: { id: lecturerA.id, role: "LECTURER", institutionId: instA },
+    } as never);
+
+    expect(report.evidenceFrames).toEqual([]);
+  });
+
+  it("evidenceFrames never includes a storageKey or raw storage path", async () => {
+    const exam = await createExam({ captureEnabled: true });
+    const { submission, event } = await createSubmissionAndEvent(
+      exam.id,
+      studentA.id,
+      "POSSIBLE_SECOND_PERSON_VISIBLE",
+    );
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    await uploadRoute.POST(uploadRequest(makeJpegFile()), {
+      params: Promise.resolve({ id: submission.id, eventId: event.id }),
+    });
+
+    const report = await buildEvidenceReport(submission.id, {
+      user: { id: lecturerA.id, role: "LECTURER", institutionId: instA },
+    } as never);
+
+    expect(JSON.stringify(report.evidenceFrames)).not.toMatch(/ai-camera-evidence\//);
+    expect((report.evidenceFrames[0] as Record<string, unknown>).storageKey).toBeUndefined();
+  });
 });

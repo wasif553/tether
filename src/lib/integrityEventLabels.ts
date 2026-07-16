@@ -30,3 +30,52 @@ const EVENT_TYPE_LABELS: Partial<Record<string, string>> = {
 export function labelForEventType(eventType: string): string {
   return EVENT_TYPE_LABELS[eventType] ?? eventType;
 }
+
+/**
+ * Coarse grouping used to visually separate the lecturer evidence
+ * report's integrity event timeline into "Evidence", "Camera",
+ * "Window/focus", and "Info" — so a lecturer isn't stuck scanning
+ * hundreds of undifferentiated rows to find the signals that matter.
+ * Deliberately conservative: only the two event types that can ever have
+ * a captured camera evidence frame count as "evidence" here; everything
+ * camera-related but never evidence-eligible (no-person/blocked/dark/
+ * unavailable/heartbeat/etc.) is "camera".
+ */
+export type IntegrityEventCategory = "evidence" | "camera" | "window" | "info";
+
+const EVIDENCE_EVENT_TYPES = new Set(["POSSIBLE_PHONE_VISIBLE", "POSSIBLE_SECOND_PERSON_VISIBLE"]);
+
+const CAMERA_EVENT_TYPES = new Set([
+  "CAMERA_PERMISSION_GRANTED",
+  "CAMERA_PERMISSION_DENIED",
+  "CAMERA_STARTED",
+  "CAMERA_STOPPED",
+  "CAMERA_UNAVAILABLE",
+  "CAMERA_HEARTBEAT_MISSED",
+  "CAMERA_PRECHECK_FAILED",
+  "NO_PERSON_VISIBLE",
+  "CAMERA_VIEW_BLOCKED",
+  "CAMERA_TOO_DARK",
+  "AI_CAMERA_CHECK_UNAVAILABLE",
+]);
+
+const WINDOW_FOCUS_EVENT_TYPES = new Set([
+  "FULLSCREEN_EXIT",
+  "FULLSCREEN_FORCED_RETURN",
+  "WINDOW_BLUR",
+  "WINDOW_FOCUS_RETURN",
+]);
+
+export function categoryForEventType(eventType: string): IntegrityEventCategory {
+  if (EVIDENCE_EVENT_TYPES.has(eventType)) return "evidence";
+  if (CAMERA_EVENT_TYPES.has(eventType)) return "camera";
+  if (WINDOW_FOCUS_EVENT_TYPES.has(eventType)) return "window";
+  return "info";
+}
+
+export const INTEGRITY_EVENT_CATEGORY_LABELS: Record<IntegrityEventCategory, string> = {
+  evidence: "Evidence events",
+  camera: "Camera events",
+  window: "Window/focus events",
+  info: "Info events",
+};
