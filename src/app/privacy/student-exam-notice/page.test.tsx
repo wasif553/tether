@@ -59,4 +59,15 @@ describe("student exam notice page", () => {
     // only "cheating" (never used anywhere on this page) is checked here.
     expect(text.toLowerCase()).not.toContain("cheating");
   });
+
+  it("6. mentions one-question-at-a-time delivery, back-navigation, and stable ordering as a deterrent (not a guarantee)", () => {
+    const text = collectText(StudentExamNoticePage());
+
+    expect(text).toContain("One question at a time");
+    expect(text).toContain("This exam shows one question at a time. Your answers are saved as you move between");
+    expect(text.toLowerCase()).toContain("may not be able to return to previous questions");
+    expect(text.toLowerCase()).toContain("does not affect how your answers are graded");
+    expect(text.toLowerCase()).toContain("deterrent");
+    expect(text.toLowerCase()).not.toContain("cheating");
+  });
 });

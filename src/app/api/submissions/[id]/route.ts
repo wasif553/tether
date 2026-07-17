@@ -41,15 +41,28 @@ export async function GET(
   const canViewQuestionPoints =
     isExamOwner || submission.status === "IN_PROGRESS" || studentCanViewMarks;
 
-  const questions = submission.exam.questions.map((q) => ({
-    id: q.id,
-    type: q.type,
-    text: q.text,
-    options: q.options,
-    points: canViewQuestionPoints ? q.points : undefined,
-    order: q.order,
-    correctAnswer: isExamOwner ? q.correctAnswer : undefined,
-  }));
+  const settings = parseSecureSettings(submission.exam.secureSettings);
+  // One-Question-At-A-Time Exam Delivery v1 — see
+  // docs/one-question-delivery-v1.md. Only ever applies to the STUDENT's
+  // own in-progress view — the lecturer's grading view (isExamOwner)
+  // always gets the full question list regardless of this setting, since
+  // it's a student-delivery concern, not a grading concern. The student
+  // page instead fetches one question at a time from
+  // GET/POST /api/submissions/[id]/question(-progress).
+  const deliverOneQuestionAtATime =
+    isOwner && !isExamOwner && settings.oneQuestionAtATime && submission.status === "IN_PROGRESS";
+
+  const questions = deliverOneQuestionAtATime
+    ? []
+    : submission.exam.questions.map((q) => ({
+        id: q.id,
+        type: q.type,
+        text: q.text,
+        options: q.options,
+        points: canViewQuestionPoints ? q.points : undefined,
+        order: q.order,
+        correctAnswer: isExamOwner ? q.correctAnswer : undefined,
+      }));
 
   const canvasPassback =
     isExamOwner && submission.gradePassback
@@ -91,7 +104,11 @@ export async function GET(
       id: submission.exam.id,
       title: submission.exam.title,
       questions,
-      secureSettings: parseSecureSettings(submission.exam.secureSettings),
+      // Present even when `questions` is empty (one-question mode) so the
+      // student page can render "Question X of N" without needing the
+      // full question list.
+      totalQuestions: submission.exam.questions.length,
+      secureSettings: settings,
     },
     answers: submission.answers.map((a) => ({
       questionId: a.questionId,

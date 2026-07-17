@@ -61,6 +61,11 @@ enum IntegrityEventType {
   CAMERA_VIEW_BLOCKED
   CAMERA_TOO_DARK
   AI_CAMERA_CHECK_UNAVAILABLE
+  // One-Question-At-A-Time Exam Delivery v1 (additive — see
+  // docs/one-question-delivery-v1.md).
+  QUESTION_NAVIGATED_NEXT
+  QUESTION_NAVIGATED_PREVIOUS
+  QUESTION_BACK_NAVIGATION_BLOCKED
 }
 
 enum IntegritySeverity {
@@ -261,6 +266,18 @@ model Submission {
   // On-Device AI Camera Integrity Detection v1 — Evidence Frames
   // (additive, opt-in). See docs/on-device-ai-integrity-detection-v1.md.
   evidenceAssets  IntegrityEvidenceAsset[]
+
+  // One-Question-At-A-Time Exam Delivery v1 (additive, opt-in) — see
+  // docs/one-question-delivery-v1.md. questionOrderJson stores the
+  // stable per-submission question order (and, if randomiseMcqOptionOrder
+  // is on, per-question MCQ option order) generated once at attempt
+  // start — never recomputed, so it survives refresh. Null when
+  // randomiseQuestionOrder was off at attempt start (falls back to the
+  // exam's original Question.order at read time). currentQuestionIndex
+  // is the student's furthest/current position when
+  // oneQuestionAtATime is enabled; unused (stays 0) otherwise.
+  questionOrderJson    Json?
+  currentQuestionIndex Int   @default(0)
 
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])

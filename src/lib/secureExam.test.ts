@@ -232,3 +232,69 @@ describe("safe exam mode UI helpers", () => {
     expect(secureSettingsChanged(saved, { ...saved })).toBe(false);
   });
 });
+
+describe("One-Question-At-A-Time Exam Delivery v1", () => {
+  it("1. oneQuestionAtATime defaults to false", () => {
+    expect(DEFAULT_SECURE_SETTINGS.oneQuestionAtATime).toBe(false);
+    expect(parseSecureSettings(null).oneQuestionAtATime).toBe(false);
+    expect(parseSecureSettings({}).oneQuestionAtATime).toBe(false);
+  });
+
+  it("2. allowBackNavigation defaults to true", () => {
+    expect(DEFAULT_SECURE_SETTINGS.allowBackNavigation).toBe(true);
+    expect(parseSecureSettings({}).allowBackNavigation).toBe(true);
+  });
+
+  it("3. randomiseQuestionOrder defaults to false", () => {
+    expect(DEFAULT_SECURE_SETTINGS.randomiseQuestionOrder).toBe(false);
+  });
+
+  it("4. randomiseMcqOptionOrder defaults to false", () => {
+    expect(DEFAULT_SECURE_SETTINGS.randomiseMcqOptionOrder).toBe(false);
+  });
+
+  it("5. parses all four new fields when a lecturer sets them explicitly", () => {
+    const result = parseSecureSettings({
+      oneQuestionAtATime: true,
+      allowBackNavigation: false,
+      randomiseQuestionOrder: true,
+      randomiseMcqOptionOrder: true,
+    });
+    expect(result.oneQuestionAtATime).toBe(true);
+    expect(result.allowBackNavigation).toBe(false);
+    expect(result.randomiseQuestionOrder).toBe(true);
+    expect(result.randomiseMcqOptionOrder).toBe(true);
+  });
+
+  it("has no effect on other, unrelated settings", () => {
+    const result = parseSecureSettings({ oneQuestionAtATime: true });
+    expect(result.blockCopyPaste).toBe(DEFAULT_SECURE_SETTINGS.blockCopyPaste);
+    expect(result.requireCamera).toBe(DEFAULT_SECURE_SETTINGS.requireCamera);
+  });
+
+  it("appears in activeSafeExamControlLabels only when both secureModeEnabled and oneQuestionAtATime are true", () => {
+    expect(
+      activeSafeExamControlLabels({
+        ...DEFAULT_SECURE_SETTINGS,
+        secureModeEnabled: true,
+        oneQuestionAtATime: true,
+      }),
+    ).toContain("One question at a time");
+    expect(
+      activeSafeExamControlLabels({
+        ...DEFAULT_SECURE_SETTINGS,
+        secureModeEnabled: false,
+        oneQuestionAtATime: true,
+      }),
+    ).not.toContain("One question at a time");
+  });
+
+  it("QUESTION_NAVIGATED_NEXT/PREVIOUS are INFO severity (never raise risk)", () => {
+    expect(severityFor("QUESTION_NAVIGATED_NEXT", DEFAULT_SECURE_SETTINGS)).toBe("INFO");
+    expect(severityFor("QUESTION_NAVIGATED_PREVIOUS", DEFAULT_SECURE_SETTINGS)).toBe("INFO");
+  });
+
+  it("QUESTION_BACK_NAVIGATION_BLOCKED is LOW severity (minimum non-zero weight)", () => {
+    expect(severityFor("QUESTION_BACK_NAVIGATION_BLOCKED", DEFAULT_SECURE_SETTINGS)).toBe("LOW");
+  });
+});

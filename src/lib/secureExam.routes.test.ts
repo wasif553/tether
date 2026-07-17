@@ -13,6 +13,8 @@ const submitRoute = await import("../app/api/submissions/[id]/submit/route");
 const submissionRoute = await import("../app/api/submissions/[id]/route");
 const evidenceRoute = await import("../app/api/lecturer/submissions/[id]/evidence/route");
 const marksReleaseRoute = await import("../app/api/lecturer/exams/[examId]/marks-release/route");
+const questionRoute = await import("../app/api/submissions/[id]/question/route");
+const questionProgressRoute = await import("../app/api/submissions/[id]/question-progress/route");
 
 let testInstitution: { id: string };
 
@@ -613,5 +615,277 @@ describe("marks release gates student-visible scores", () => {
       params: Promise.resolve({ examId: exam.id }),
     });
     expect(res.status).toBe(200);
+  });
+});
+
+// One-Question-At-A-Time Exam Delivery v1 — see
+// docs/one-question-delivery-v1.md.
+describe("One-Question-At-A-Time Exam Delivery v1", () => {
+  async function createExamWithQuestions(secureSettings: Record<string, unknown>) {
+    const exam = await prisma.exam.create({
+      data: {
+        title: `One-Question Exam ${Date.now()}-${Math.random()}`,
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: { secureModeEnabled: true, ...secureSettings },
+      },
+    });
+    const q1 = await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Q1", points: 1, correctAnswer: "a1", order: 0 },
+    });
+    const q2 = await prisma.question.create({
+      data: {
+        examId: exam.id,
+        type: "MULTIPLE_CHOICE",
+        text: "Q2",
+        points: 1,
+        correctAnswer: "B",
+        order: 1,
+        options: ["A", "B", "C"],
+      },
+    });
+    const q3 = await prisma.question.create({
+      data: { examId: exam.id, type: "ESSAY", text: "Q3", points: 1, order: 2 },
+    });
+    return { exam, questions: [q1, q2, q3] };
+  }
+
+  async function startAsStudent(examId: string, studentUser: { id: string } = student) {
+    mockAuth.mockResolvedValue(sessionFor(studentUser.id, "STUDENT"));
+    const res = await startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: examId }) });
+    return res.json();
+  }
+
+  it("6. normal exam mode (oneQuestionAtATime false) still returns the full question list unchanged", async () => {
+    const { exam } = await createExamWithQuestions({ oneQuestionAtATime: false });
+    const submission = await startAsStudent(exam.id);
+
+    const res = await submissionRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    const body = await res.json();
+    expect(body.exam.questions).toHaveLength(3);
+  });
+
+  it("7/8. one-question mode returns only the current question, never correctAnswer or other questions", async () => {
+    const { exam } = await createExamWithQuestions({ oneQuestionAtATime: true });
+    const submission = await startAsStudent(exam.id);
+
+    const submissionRes = await submissionRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    const submissionBody = await submissionRes.json();
+    expect(submissionBody.exam.questions).toEqual([]);
+    expect(submissionBody.exam.totalQuestions).toBe(3);
+
+    const res = await questionRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.totalQuestions).toBe(3);
+    expect(body.currentIndex).toBe(0);
+    expect(body.question).toBeDefined();
+    expect(body.question.correctAnswer).toBeUndefined();
+    expect(JSON.stringify(body)).not.toMatch(/correctAnswer|"a1"|"B"/);
+  });
+
+  it("returns 400 from the question routes when oneQuestionAtATime is not enabled for the exam", async () => {
+    const { exam } = await createExamWithQuestions({ oneQuestionAtATime: false });
+    const submission = await startAsStudent(exam.id);
+
+    const res = await questionRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("9/15. stable question order persists across repeated GETs for the same submission (refresh)", async () => {
+    const { exam } = await createExamWithQuestions({
+      oneQuestionAtATime: true,
+      randomiseQuestionOrder: true,
+    });
+    const submission = await startAsStudent(exam.id);
+
+    const first = await (
+      await questionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    const second = await (
+      await questionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    expect(second.question.id).toBe(first.question.id);
+    expect(second.currentIndex).toBe(first.currentIndex);
+  });
+
+  it("10. random question order can differ across different submissions", async () => {
+    const { exam } = await createExamWithQuestions({
+      oneQuestionAtATime: true,
+      randomiseQuestionOrder: true,
+    });
+
+    // Start several attempts (different students) and collect the first
+    // question each one sees — with 3 questions and enough attempts, at
+    // least one should differ from the others if shuffling is real.
+    const firstQuestionIds = new Set<string>();
+    for (let i = 0; i < 6; i++) {
+      const extraStudent = await prisma.user.create({
+        data: {
+          name: `OneQ Student ${i}`,
+          email: `oneq-stud-${Date.now()}-${i}@test.local`,
+          passwordHash: "x",
+          role: "STUDENT",
+          institutionId: testInstitution.id,
+        },
+      });
+      const submission = await startAsStudent(exam.id, extraStudent);
+      const payload = await (
+        await questionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+      ).json();
+      firstQuestionIds.add(payload.question.id);
+      await prisma.submission.deleteMany({ where: { studentId: extraStudent.id } });
+      await prisma.user.delete({ where: { id: extraStudent.id } });
+    }
+    expect(firstQuestionIds.size).toBeGreaterThan(1);
+  });
+
+  it("11. non-randomised order preserves the lecturer/original Question.order", async () => {
+    const { exam, questions } = await createExamWithQuestions({
+      oneQuestionAtATime: true,
+      randomiseQuestionOrder: false,
+    });
+    const submission = await startAsStudent(exam.id);
+
+    const payload = await (
+      await questionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    expect(payload.question.id).toBe(questions[0].id);
+  });
+
+  it("12. Next navigation saves the current answer before advancing", async () => {
+    const { exam, questions } = await createExamWithQuestions({ oneQuestionAtATime: true });
+    const submission = await startAsStudent(exam.id);
+
+    const first = await (
+      await questionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    await answersRoute.PATCH(jsonRequest("PATCH", { questionId: first.question.id, response: "my answer" }), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+
+    const next = await questionProgressRoute.POST(jsonRequest("POST", { currentIndex: 1 }), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    expect(next.status).toBe(200);
+    const nextBody = await next.json();
+    expect(nextBody.currentIndex).toBe(1);
+
+    const savedAnswer = await prisma.answer.findUnique({
+      where: { submissionId_questionId: { submissionId: submission.id, questionId: questions[0].id } },
+    });
+    expect(savedAnswer?.response).toBe("my answer");
+  });
+
+  it("13. Previous navigation also saves the current answer first, and existingResponse is returned on return", async () => {
+    const { exam } = await createExamWithQuestions({ oneQuestionAtATime: true, allowBackNavigation: true });
+    const submission = await startAsStudent(exam.id);
+
+    const first = await (
+      await questionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    await answersRoute.PATCH(jsonRequest("PATCH", { questionId: first.question.id, response: "answer 1" }), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    await questionProgressRoute.POST(jsonRequest("POST", { currentIndex: 1 }), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+
+    const back = await questionProgressRoute.POST(jsonRequest("POST", { currentIndex: 0 }), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    expect(back.status).toBe(200);
+    const backBody = await back.json();
+    expect(backBody.currentIndex).toBe(0);
+    expect(backBody.existingResponse).toBe("answer 1");
+  });
+
+  it("14. Previous is blocked (index never moves backward) when allowBackNavigation is false, even via direct API call", async () => {
+    const { exam } = await createExamWithQuestions({
+      oneQuestionAtATime: true,
+      allowBackNavigation: false,
+    });
+    const submission = await startAsStudent(exam.id);
+
+    await questionProgressRoute.POST(jsonRequest("POST", { currentIndex: 1 }), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    const blocked = await questionProgressRoute.POST(jsonRequest("POST", { currentIndex: 0 }), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    expect(blocked.status).toBe(200);
+    const blockedBody = await blocked.json();
+    // Stays at index 1 — the requested backward move to 0 is ignored.
+    expect(blockedBody.currentIndex).toBe(1);
+    expect(blockedBody.canGoPrevious).toBe(false);
+
+    const events = await prisma.integrityEvent.findMany({
+      where: { submissionId: submission.id, eventType: "QUESTION_BACK_NAVIGATION_BLOCKED" },
+    });
+    expect(events.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("14. Previous is not offered (canGoPrevious false) at question 1 even when allowBackNavigation is true", async () => {
+    const { exam } = await createExamWithQuestions({ oneQuestionAtATime: true, allowBackNavigation: true });
+    const submission = await startAsStudent(exam.id);
+
+    const payload = await (
+      await questionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    expect(payload.canGoPrevious).toBe(false);
+    expect(payload.canGoNext).toBe(true);
+  });
+
+  it("15. refresh (a plain GET with no navigation) restores the current question after moving forward", async () => {
+    const { exam, questions } = await createExamWithQuestions({ oneQuestionAtATime: true });
+    const submission = await startAsStudent(exam.id);
+
+    await questionProgressRoute.POST(jsonRequest("POST", { currentIndex: 2 }), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+
+    const refreshed = await (
+      await questionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    expect(refreshed.currentIndex).toBe(2);
+    expect(refreshed.question.id).toBe(questions[2].id);
+  });
+
+  it("16. submit still works normally when oneQuestionAtATime is enabled", async () => {
+    const { exam, questions } = await createExamWithQuestions({ oneQuestionAtATime: true });
+    const submission = await startAsStudent(exam.id);
+
+    await answersRoute.PATCH(
+      jsonRequest("PATCH", { questionId: questions[0].id, response: "a1" }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+
+    const res = await submitRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("SUBMITTED");
+  });
+
+  it("18. evidence-frame/lecturer evidence report behaviour is unaffected by one-question mode", async () => {
+    const { exam } = await createExamWithQuestions({ oneQuestionAtATime: true });
+    const submission = await startAsStudent(exam.id);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const res = await evidenceRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body.evidenceFrames)).toBe(true);
   });
 });

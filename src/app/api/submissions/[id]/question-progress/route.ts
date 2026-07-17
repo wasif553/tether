@@ -1,0 +1,110 @@
+/**
+ * One-Question-At-A-Time Exam Delivery v1. See
+ * docs/one-question-delivery-v1.md.
+ *
+ * POST /api/submissions/[id]/question-progress
+ *
+ * The only way a student's current-question position actually advances.
+ * Validates the requested index against allowBackNavigation server-side
+ * (never trusts the client's disabled Previous button alone — a direct
+ * API call is clamped exactly the same way) and persists the result, then
+ * returns the resolved question payload for the new position in the same
+ * round trip. Also creates the QUESTION_NAVIGATED_NEXT/PREVIOUS or
+ * QUESTION_BACK_NAVIGATION_BLOCKED integrity event directly (rather than
+ * relying on the client to separately call the generic integrity-events
+ * route), since this route is the single source of truth for whether a
+ * requested move was actually a next, a previous, or a blocked
+ * back-navigation attempt.
+ */
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { auth } from "@/auth";
+import { prisma } from "@/lib/prisma";
+import { severityFor } from "@/lib/secureExam";
+import { isBlockedBackNavigation, nextAllowedIndex } from "@/lib/questionDelivery";
+import { buildOneQuestionPayload, loadOneQuestionSubmission, OneQuestionModeError } from "@/lib/submissionQuestionPayload";
+
+const bodySchema = z.object({
+  currentIndex: z.number().int().min(0),
+});
+
+export async function POST(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const session = await auth();
+  if (!session || session.user.role !== "STUDENT") {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { id } = await params;
+
+  const body = await req.json().catch(() => ({}));
+  const parsed = bodySchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+  }
+  const requestedIndex = parsed.data.currentIndex;
+
+  try {
+    const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id);
+    const storedIndex = submission.currentQuestionIndex;
+    const total = submission.exam.questions.length;
+
+    const blocked = isBlockedBackNavigation(requestedIndex, storedIndex, settings.allowBackNavigation);
+    const finalIndex = nextAllowedIndex(requestedIndex, storedIndex, settings.allowBackNavigation, total);
+
+    if (finalIndex !== storedIndex) {
+      await prisma.submission.update({
+        where: { id: submission.id },
+        data: { currentQuestionIndex: finalIndex },
+      });
+      submission.currentQuestionIndex = finalIndex;
+    }
+
+    // Lightweight navigation logging — INFO/LOW severity (see
+    // severityFor in secureExam.ts), never blocks the response.
+    const eventType = blocked
+      ? "QUESTION_BACK_NAVIGATION_BLOCKED"
+      : finalIndex > storedIndex
+        ? "QUESTION_NAVIGATED_NEXT"
+        : finalIndex < storedIndex
+          ? "QUESTION_NAVIGATED_PREVIOUS"
+          : null;
+    if (eventType) {
+      prisma.integrityEvent
+        .create({
+          data: {
+            submissionId: submission.id,
+            examId: submission.examId,
+            studentId: submission.studentId,
+            eventType,
+            severity: severityFor(eventType, settings),
+            message:
+              eventType === "QUESTION_BACK_NAVIGATION_BLOCKED"
+                ? "A request to return to an earlier question was blocked (back navigation disabled)."
+                : eventType === "QUESTION_NAVIGATED_NEXT"
+                  ? "Moved to the next question."
+                  : "Moved to a previous question.",
+            occurredAt: new Date(),
+          },
+        })
+        .catch(() => {
+          // Navigation logging is best-effort — never blocks the student.
+        });
+    }
+
+    const payload = buildOneQuestionPayload(submission, settings, finalIndex);
+    if (!payload) {
+      return NextResponse.json({ error: "This exam has no questions" }, { status: 404 });
+    }
+    return NextResponse.json(payload);
+  } catch (err) {
+    if (err instanceof OneQuestionModeError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    throw err;
+  }
+}
+
+export const dynamic = "force-dynamic";

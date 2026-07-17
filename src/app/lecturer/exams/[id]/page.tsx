@@ -51,6 +51,10 @@ type SecureSettings = {
   enableAiCameraIntegrityChecks: boolean;
   captureAiViolationEvidence: boolean;
   enableExamWatermark: boolean;
+  oneQuestionAtATime: boolean;
+  allowBackNavigation: boolean;
+  randomiseQuestionOrder: boolean;
+  randomiseMcqOptionOrder: boolean;
 };
 
 type Exam = {
@@ -1135,6 +1139,83 @@ export default function LecturerExamPage({
                 </span>
               </span>
             </label>
+          </div>
+
+          <div className="border-t border-gray-200 pt-3">
+            <h3 className="text-sm font-medium">Question delivery</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Reduces exposure of the full exam paper. A low-friction control, not a guarantee —
+              it does not make cheating impossible, and works alongside the other controls above.
+            </p>
+            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                disabled={!secureForm.secureModeEnabled}
+                checked={secureForm.oneQuestionAtATime}
+                onChange={(e) => setSecureForm({ ...secureForm, oneQuestionAtATime: e.target.checked })}
+              />
+              <span>
+                Show one question at a time
+                <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  Students see one question at a time instead of the full exam paper.
+                </span>
+              </span>
+            </label>
+            <div className="mt-2 space-y-2 pl-6">
+              <label className="flex items-start gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  disabled={!secureForm.secureModeEnabled || !secureForm.oneQuestionAtATime}
+                  checked={secureForm.allowBackNavigation}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, allowBackNavigation: e.target.checked })
+                  }
+                />
+                <span>
+                  Allow students to go back to previous questions
+                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                    If disabled, students cannot return to earlier questions after moving forward.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  disabled={!secureForm.secureModeEnabled || !secureForm.oneQuestionAtATime}
+                  checked={secureForm.randomiseQuestionOrder}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, randomiseQuestionOrder: e.target.checked })
+                  }
+                />
+                <span>
+                  Randomise question order
+                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                    Each student receives a stable question order for their attempt.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  disabled={!secureForm.secureModeEnabled || !secureForm.oneQuestionAtATime}
+                  checked={secureForm.randomiseMcqOptionOrder}
+                  onChange={(e) =>
+                    setSecureForm({ ...secureForm, randomiseMcqOptionOrder: e.target.checked })
+                  }
+                />
+                <span>
+                  Randomise MCQ option order
+                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                    Multiple-choice options are shown in a stable random order for each student
+                    attempt.
+                  </span>
+                </span>
+              </label>
+            </div>
           </div>
 
           <button

@@ -117,6 +117,21 @@ guarantee any AI tool will refuse to answer, and is not itself proof of
 misconduct. It captures or uploads nothing; it is a purely client-side
 rendered overlay.
 
+## One-Question-At-A-Time Exam Delivery v1
+
+A separate, independent opt-in — see docs/one-question-delivery-v1.md
+for the full design. When `oneQuestionAtATime` is enabled, a student
+receives only the current question from the server (never the full exam
+paper in one response), optionally in a stable per-attempt randomised
+question/MCQ-option order, with configurable forward-only or free
+back-navigation. Reduces exposure of the full exam paper at any one
+time — it is a low-friction deterrent, not a guarantee that copying or
+sharing is impossible, and it deliberately does not hide or blur question
+content based on camera/integrity uncertainty. Works alongside, and does
+not replace, the exam watermark, camera monitoring, AI camera integrity
+checks, evidence frames, and post-exam lecturer review described
+elsewhere in this document.
+
 ## Future controls (explicitly out of scope for v1)
 
 - Electron-based lockdown browser (blocks OS-level app switching).

@@ -186,6 +186,30 @@ export default function StudentExamNoticePage() {
         </section>
 
         <section>
+          <h2 className="font-medium text-gray-900">One question at a time, if enabled</h2>
+          <p className="mt-1">
+            This exam shows one question at a time. Your answers are saved as you move between
+            questions.
+          </p>
+          <p className="mt-1">
+            You may not be able to return to previous questions after moving forward, if your
+            lecturer has disabled going back. If so, you will see this in the checklist before you
+            start.
+          </p>
+          <p className="mt-1">
+            Some exams also show questions (and, for multiple-choice questions, the answer options)
+            in a stable order chosen for your attempt specifically. This order does not change if
+            you refresh the page, and does not affect how your answers are graded.
+          </p>
+          <p className="mt-2">
+            <strong>
+              This reduces exposure of the full exam paper at any one time — it is a deterrent, not
+              a guarantee that copying or sharing is impossible.
+            </strong>
+          </p>
+        </section>
+
+        <section>
           <h2 className="font-medium text-gray-900">Browser secure mode</h2>
           <p className="mt-1">When Secure Exam Mode is active, SES may:</p>
           <ul className="mt-1 list-disc space-y-1 pl-5">

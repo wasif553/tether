@@ -78,6 +78,10 @@ type SecureSettings = {
   enableAiCameraIntegrityChecks: boolean;
   captureAiViolationEvidence: boolean;
   enableExamWatermark: boolean;
+  oneQuestionAtATime: boolean;
+  allowBackNavigation: boolean;
+  randomiseQuestionOrder: boolean;
+  randomiseMcqOptionOrder: boolean;
 };
 
 type SubmissionData = {
@@ -88,9 +92,33 @@ type SubmissionData = {
   totalScore: number | null;
   marksReleased: boolean;
   marksReleasedAt: string | null;
-  exam: { id: string; title: string; questions: Question[]; secureSettings: SecureSettings };
+  exam: {
+    id: string;
+    title: string;
+    questions: Question[];
+    totalQuestions: number;
+    secureSettings: SecureSettings;
+  };
   answers: Answer[];
   student: { id: string; name: string; email: string; institutionStudentId: string | null };
+};
+
+// One-Question-At-A-Time Exam Delivery v1 — the payload shape returned by
+// GET/POST /api/submissions/[id]/question(-progress). Never includes
+// other questions, correctAnswer, or the raw questionOrderJson.
+type OneQuestionPayload = {
+  currentIndex: number;
+  totalQuestions: number;
+  canGoPrevious: boolean;
+  canGoNext: boolean;
+  question: {
+    id: string;
+    type: "MULTIPLE_CHOICE" | "SHORT_ANSWER" | "ESSAY";
+    text: string;
+    options: string[] | null;
+    points: number;
+  };
+  existingResponse: string | null;
 };
 
 type IntegrityEventType =
@@ -255,6 +283,17 @@ export default function TakeExamPage({
   const [gateAcknowledged, setGateAcknowledged] = useState(false);
   const [fullscreenDenied, setFullscreenDenied] = useState(false);
   const [fullscreenReturnNeeded, setFullscreenReturnNeeded] = useState(false);
+  // One-Question-At-A-Time Exam Delivery v1 — see
+  // docs/one-question-delivery-v1.md. Only ever populated when
+  // oneQuestionAtATime is enabled; the full data.exam.questions array is
+  // empty in that case (the server never sends the full paper), so this
+  // is the sole source of question content for that mode.
+  const [oneQuestion, setOneQuestion] = useState<{
+    loading: boolean;
+    error: string | null;
+    payload: OneQuestionPayload | null;
+  }>({ loading: true, error: null, payload: null });
+  const [navigatingQuestion, setNavigatingQuestion] = useState(false);
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const lastEventAt = useRef<Partial<Record<IntegrityEventType, number>>>({});
   const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -363,10 +402,130 @@ export default function TakeExamPage({
     return d;
   }, [id, applySubmissionData]);
 
+  // One-Question-At-A-Time Exam Delivery v1 — see
+  // docs/one-question-delivery-v1.md. Declared early (ahead of
+  // secureSettings/secureModeEnabled below, which are also derived from
+  // `data`) since the fetch effect right below needs them.
+  const oneQuestionAtATime = data?.exam.secureSettings.oneQuestionAtATime ?? false;
+  const allowBackNavigation = data?.exam.secureSettings.allowBackNavigation ?? true;
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadSubmission();
   }, [loadSubmission]);
+
+  // One-Question-At-A-Time Exam Delivery v1 — see
+  // docs/one-question-delivery-v1.md. Fetches only the CURRENT question
+  // (never the full paper) once the exam is actually in progress and the
+  // pre-exam gate has been passed — including on a plain refresh, which
+  // restores exactly the last allowed/current question via the server's
+  // stored currentQuestionIndex (GET never accepts a client-supplied
+  // index, so there's nothing for the client to get wrong here).
+  useEffect(() => {
+    if (!oneQuestionAtATime || !gateAcknowledged || data?.status !== "IN_PROGRESS") return;
+    let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setOneQuestion((prev) => ({ ...prev, loading: true, error: null }));
+    fetch(`/api/submissions/${id}/question`)
+      .then((res) => (res.ok ? (res.json() as Promise<OneQuestionPayload>) : Promise.reject(res)))
+      .then((payload) => {
+        if (cancelled) return;
+        setOneQuestion({ loading: false, error: null, payload });
+        if (payload.existingResponse != null) {
+          setResponses((prev) =>
+            prev[payload.question.id] !== undefined
+              ? prev
+              : { ...prev, [payload.question.id]: payload.existingResponse! },
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setOneQuestion({
+            loading: false,
+            error: "Could not load the current question. Please refresh the page.",
+            payload: null,
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [oneQuestionAtATime, gateAcknowledged, data?.status, id]);
+
+  // Clears any pending debounced autosave for one question and saves it
+  // immediately — used before every one-question-mode navigation so
+  // "Next"/"Previous" always saves the current answer first, per
+  // docs/one-question-delivery-v1.md. Returns false (without throwing) on
+  // failure so the caller can show an error and refuse to navigate,
+  // rather than silently losing the answer.
+  async function flushAnswerNow(questionId: string): Promise<boolean> {
+    clearTimeout(saveTimers.current[questionId]);
+    const response = responses[questionId];
+    if (response === undefined) return true;
+    try {
+      const res = await fetch(`/api/submissions/${id}/answers`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ questionId, response }),
+      });
+      if (!res.ok) {
+        if (secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
+        return false;
+      }
+      return true;
+    } catch {
+      if (secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
+      return false;
+    }
+  }
+
+  // One-Question-At-A-Time Exam Delivery v1 — the only place the current
+  // question index actually changes. Always flushes the current answer
+  // first (per the navigation rules); never advances if that save fails,
+  // so a student is never trapped by a transient autosave failure but
+  // also never silently loses an answer by moving on regardless.
+  // allowBackNavigation is enforced server-side in the question-progress
+  // route regardless of what this sends — this is UX only, not the
+  // source of truth.
+  async function navigateQuestion(requestedIndex: number) {
+    if (!oneQuestion.payload || navigatingQuestion) return;
+    setNavigatingQuestion(true);
+    setOneQuestion((prev) => ({ ...prev, error: null }));
+    const saved = await flushAnswerNow(oneQuestion.payload.question.id);
+    if (!saved) {
+      setOneQuestion((prev) => ({
+        ...prev,
+        error: "Your answer could not be saved. Please try again before moving on.",
+      }));
+      setNavigatingQuestion(false);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/submissions/${id}/question-progress`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentIndex: requestedIndex }),
+      });
+      if (!res.ok) throw new Error("navigation failed");
+      const payload: OneQuestionPayload = await res.json();
+      setOneQuestion({ loading: false, error: null, payload });
+      if (payload.existingResponse != null) {
+        setResponses((prev) =>
+          prev[payload.question.id] !== undefined
+            ? prev
+            : { ...prev, [payload.question.id]: payload.existingResponse! },
+        );
+      }
+    } catch {
+      setOneQuestion((prev) => ({
+        ...prev,
+        error: "Could not load the next question. Please try again.",
+      }));
+    } finally {
+      setNavigatingQuestion(false);
+    }
+  }
 
   // Lets the Electron Lockdown Browser (if present) know which
   // submission to attach queued OS-level integrity events to. This is a
@@ -1458,6 +1617,13 @@ export default function TakeExamPage({
                 content to AI tools.
               </li>
             )}
+            {oneQuestionAtATime && (
+              <li>
+                This exam shows one question at a time. Your answers are saved as you move between
+                questions.
+                {!allowBackNavigation && " You may not be able to return to previous questions after moving forward."}
+              </li>
+            )}
             <li>
               Your lecturer and institution make the final academic integrity decision — recorded
               signals are evidence for human review, not an automatic judgment.
@@ -1738,67 +1904,158 @@ export default function TakeExamPage({
           className={aiCameraViolationOverlay ? "pointer-events-none select-none blur-sm" : undefined}
           aria-hidden={aiCameraViolationOverlay ? true : undefined}
         >
-          <div className="mt-6 space-y-4">
-            {data.exam.questions.map((q, i) => (
-              <div key={q.id} className="rounded border border-gray-200 p-4">
-                <p
-                  className="text-sm text-gray-500"
-                  style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
-                >
-                  Q{i + 1} · {q.points} pt(s)
-                </p>
-                <p
-                  className="mt-1"
-                  style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
-                >
-                  {q.text}
-                </p>
+          {oneQuestionAtATime ? (
+            // One-Question-At-A-Time Exam Delivery v1 — see
+            // docs/one-question-delivery-v1.md. Renders only
+            // oneQuestion.payload.question (from GET/POST
+            // .../question(-progress)) — data.exam.questions is empty in
+            // this mode, the server never sends the full paper.
+            <div className="mt-6">
+              {oneQuestion.loading && <p className="text-gray-500">Loading question...</p>}
+              {!oneQuestion.loading && oneQuestion.payload && (
+                <div className="rounded border border-gray-200 p-4">
+                  <p className="text-sm text-gray-500">
+                    Question {oneQuestion.payload.currentIndex + 1} of {oneQuestion.payload.totalQuestions}{" "}
+                    · {oneQuestion.payload.question.points} pt(s)
+                  </p>
+                  <p
+                    className="mt-1"
+                    style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
+                  >
+                    {oneQuestion.payload.question.text}
+                  </p>
 
-                {q.type === "MULTIPLE_CHOICE" && q.options && (
-                  <div className="mt-2 space-y-1">
-                    {q.options.map((opt) => (
-                      <label
-                        key={opt}
-                        className="flex items-center gap-2 text-sm"
-                        style={
-                          secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined
-                        }
+                  {oneQuestion.payload.question.type === "MULTIPLE_CHOICE" &&
+                    oneQuestion.payload.question.options && (
+                      <div className="mt-2 space-y-1">
+                        {oneQuestion.payload.question.options.map((opt) => (
+                          <label key={opt} className="flex items-center gap-2 text-sm">
+                            <input
+                              type="radio"
+                              name={oneQuestion.payload!.question.id}
+                              value={opt}
+                              checked={responses[oneQuestion.payload!.question.id] === opt}
+                              onChange={(e) => handleChange(oneQuestion.payload!.question.id, e.target.value)}
+                              disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
+                            />
+                            {opt}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+
+                  {oneQuestion.payload.question.type === "SHORT_ANSWER" && (
+                    <input
+                      className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
+                      value={responses[oneQuestion.payload.question.id] ?? ""}
+                      onChange={(e) => handleChange(oneQuestion.payload!.question.id, e.target.value)}
+                      disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
+                    />
+                  )}
+
+                  {oneQuestion.payload.question.type === "ESSAY" && (
+                    <textarea
+                      rows={5}
+                      className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
+                      value={responses[oneQuestion.payload.question.id] ?? ""}
+                      onChange={(e) => handleChange(oneQuestion.payload!.question.id, e.target.value)}
+                      disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
+                    />
+                  )}
+
+                  <div className="mt-4 flex items-center gap-2">
+                    {oneQuestion.payload.canGoPrevious && (
+                      <button
+                        type="button"
+                        onClick={() => navigateQuestion(oneQuestion.payload!.currentIndex - 1)}
+                        disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
+                        className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
                       >
-                        <input
-                          type="radio"
-                          name={q.id}
-                          value={opt}
-                          checked={responses[q.id] === opt}
-                          onChange={(e) => handleChange(q.id, e.target.value)}
-                          disabled={submitting || autoSubmitLocked || timerStopped}
-                        />
-                        {opt}
-                      </label>
-                    ))}
+                        Previous
+                      </button>
+                    )}
+                    {oneQuestion.payload.canGoNext && (
+                      <button
+                        type="button"
+                        onClick={() => navigateQuestion(oneQuestion.payload!.currentIndex + 1)}
+                        disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
+                        className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+                      >
+                        Next
+                      </button>
+                    )}
+                    {navigatingQuestion && <span className="text-xs text-gray-500">Saving...</span>}
                   </div>
-                )}
+                  {oneQuestion.error && <p className="mt-2 text-sm text-red-600">{oneQuestion.error}</p>}
+                </div>
+              )}
+              {!oneQuestion.loading && !oneQuestion.payload && oneQuestion.error && (
+                <p className="text-red-600">{oneQuestion.error}</p>
+              )}
+            </div>
+          ) : (
+            <div className="mt-6 space-y-4">
+              {data.exam.questions.map((q, i) => (
+                <div key={q.id} className="rounded border border-gray-200 p-4">
+                  <p
+                    className="text-sm text-gray-500"
+                    style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
+                  >
+                    Q{i + 1} · {q.points} pt(s)
+                  </p>
+                  <p
+                    className="mt-1"
+                    style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
+                  >
+                    {q.text}
+                  </p>
 
-                {q.type === "SHORT_ANSWER" && (
-                  <input
-                    className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
-                    value={responses[q.id] ?? ""}
-                    onChange={(e) => handleChange(q.id, e.target.value)}
-                    disabled={submitting || autoSubmitLocked || timerStopped}
-                  />
-                )}
+                  {q.type === "MULTIPLE_CHOICE" && q.options && (
+                    <div className="mt-2 space-y-1">
+                      {q.options.map((opt) => (
+                        <label
+                          key={opt}
+                          className="flex items-center gap-2 text-sm"
+                          style={
+                            secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined
+                          }
+                        >
+                          <input
+                            type="radio"
+                            name={q.id}
+                            value={opt}
+                            checked={responses[q.id] === opt}
+                            onChange={(e) => handleChange(q.id, e.target.value)}
+                            disabled={submitting || autoSubmitLocked || timerStopped}
+                          />
+                          {opt}
+                        </label>
+                      ))}
+                    </div>
+                  )}
 
-                {q.type === "ESSAY" && (
-                  <textarea
-                    rows={5}
-                    className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
-                    value={responses[q.id] ?? ""}
-                    onChange={(e) => handleChange(q.id, e.target.value)}
-                    disabled={submitting || autoSubmitLocked || timerStopped}
-                  />
-                )}
-              </div>
-            ))}
-          </div>
+                  {q.type === "SHORT_ANSWER" && (
+                    <input
+                      className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
+                      value={responses[q.id] ?? ""}
+                      onChange={(e) => handleChange(q.id, e.target.value)}
+                      disabled={submitting || autoSubmitLocked || timerStopped}
+                    />
+                  )}
+
+                  {q.type === "ESSAY" && (
+                    <textarea
+                      rows={5}
+                      className="mt-2 w-full rounded border border-gray-300 px-3 py-2"
+                      value={responses[q.id] ?? ""}
+                      onChange={(e) => handleChange(q.id, e.target.value)}
+                      disabled={submitting || autoSubmitLocked || timerStopped}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
 
           <button
             onClick={() =>

@@ -7,6 +7,7 @@ import { assertSameInstitution, institutionErrorResponse, requireInstitutionId }
 import { captureNetworkEvidence } from "@/lib/networkEvidence";
 import { canCreateAttempt, nextAttemptNumber } from "@/lib/assessmentLifecycle";
 import { parseSecureSettings } from "@/lib/secureExam";
+import { buildOptionOrders, buildQuestionOrder, type StoredQuestionOrder } from "@/lib/questionDelivery";
 
 export async function POST(
   req: Request,
@@ -18,7 +19,10 @@ export async function POST(
   }
 
   const { id } = await params;
-  const exam = await prisma.exam.findUnique({ where: { id } });
+  const exam = await prisma.exam.findUnique({
+    where: { id },
+    include: { questions: { orderBy: { order: "asc" } } },
+  });
   if (!exam || !exam.published) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
@@ -114,9 +118,43 @@ export async function POST(
   // before either has created a row. The @@unique([examId, studentId])
   // constraint then rejects the loser — recover by returning the winner's
   // submission instead of a 500, so starting is idempotent under races.
+  // One-Question-At-A-Time Exam Delivery v1 — see
+  // docs/one-question-delivery-v1.md. The stable per-submission
+  // question/option order is generated exactly once, here, at attempt
+  // creation — using real crypto-backed randomness (Math.random is fine
+  // server-side for this; not security-sensitive, just needs to differ
+  // per submission), then persisted. It is never recomputed on
+  // subsequent requests — "stable across refresh" is a property of this
+  // persisted value, not of a reproducible seed, so there is no seed to
+  // ever expose to the client. Left null when both randomisation
+  // settings are off, in which case the original Question.order is used
+  // at read time (see resolveQuestionOrder in questionDelivery.ts).
+  const questionOrderJson: StoredQuestionOrder | null =
+    settings.randomiseQuestionOrder || settings.randomiseMcqOptionOrder
+      ? {
+          questionIds: buildQuestionOrder({
+            questionIds: exam.questions.map((q) => q.id),
+            randomiseQuestionOrder: settings.randomiseQuestionOrder,
+          }),
+          optionOrders: buildOptionOrders({
+            questions: exam.questions.map((q) => ({
+              id: q.id,
+              type: q.type,
+              options: q.options as string[] | null,
+            })),
+            randomiseMcqOptionOrder: settings.randomiseMcqOptionOrder,
+          }),
+        }
+      : null;
+
   try {
     const submission = await prisma.submission.create({
-      data: { examId: id, studentId: session.user.id, attemptNumber },
+      data: {
+        examId: id,
+        studentId: session.user.id,
+        attemptNumber,
+        questionOrderJson: questionOrderJson ?? Prisma.DbNull,
+      },
     });
 
     // Academic Integrity Network Evidence v1 — captured fire-and-forget

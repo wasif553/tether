@@ -69,6 +69,33 @@ export const secureExamSettingsSchema = z.object({
   // secureModeEnabled is also true (see the student exam page, which
   // never renders the watermark outside Secure Exam Mode).
   enableExamWatermark: z.boolean().default(false),
+
+  // --- One-Question-At-A-Time Exam Delivery v1 (additive, opt-in) — see
+  // docs/one-question-delivery-v1.md. When oneQuestionAtATime is true, the
+  // student receives only the current question from the server, not the
+  // full exam paper — see src/lib/questionDelivery.ts and the
+  // GET/POST /api/submissions/[id]/question(-progress) routes. The three
+  // fields below only take effect when oneQuestionAtATime is true.
+  // Defaults to false — this is a delivery-mode change, not a passive
+  // logging feature, so it must never silently change how an existing
+  // exam is presented to students.
+  oneQuestionAtATime: z.boolean().default(false),
+  // Defaults to true: most lecturers expect students to be able to
+  // review/change earlier answers, exactly like the existing (non-
+  // one-question) exam experience already allows. A lecturer who wants
+  // forward-only navigation must explicitly turn this off.
+  allowBackNavigation: z.boolean().default(true),
+  // A stable (not re-shuffled on refresh) per-submission question order,
+  // generated once at attempt start and persisted in
+  // Submission.questionOrderJson.
+  randomiseQuestionOrder: z.boolean().default(false),
+  // A stable per-submission, per-question MCQ option display order.
+  // Safe to randomise independently of grading: the stored Answer.response
+  // is always the option's text value (see the submit route's
+  // case-insensitive string comparison against Question.correctAnswer),
+  // never a positional index, so shuffling display order never affects
+  // scoring.
+  randomiseMcqOptionOrder: z.boolean().default(false),
 });
 
 export type SecureExamSettings = z.infer<typeof secureExamSettingsSchema>;
@@ -98,6 +125,7 @@ export function activeSafeExamControlLabels(
     | "requireStudentVerification"
     | "enableAiCameraIntegrityChecks"
     | "enableExamWatermark"
+    | "oneQuestionAtATime"
   >,
 ): string[] {
   if (!settings.secureModeEnabled) return [];
@@ -107,6 +135,7 @@ export function activeSafeExamControlLabels(
     settings.requireStudentVerification ? "Student verification required" : null,
     settings.enableAiCameraIntegrityChecks ? "AI camera checks enabled" : null,
     settings.enableExamWatermark ? "Exam watermark enabled" : null,
+    settings.oneQuestionAtATime ? "One question at a time" : null,
   ].filter((label): label is string => label != null);
 }
 
@@ -150,7 +179,12 @@ export type IntegrityEventTypeName =
   | "NO_PERSON_VISIBLE"
   | "CAMERA_VIEW_BLOCKED"
   | "CAMERA_TOO_DARK"
-  | "AI_CAMERA_CHECK_UNAVAILABLE";
+  | "AI_CAMERA_CHECK_UNAVAILABLE"
+  // --- One-Question-At-A-Time Exam Delivery v1 — see
+  // docs/one-question-delivery-v1.md.
+  | "QUESTION_NAVIGATED_NEXT"
+  | "QUESTION_NAVIGATED_PREVIOUS"
+  | "QUESTION_BACK_NAVIGATION_BLOCKED";
 
 export function severityFor(
   eventType: IntegrityEventTypeName,
@@ -220,5 +254,16 @@ export function severityFor(
       return "LOW";
     case "AI_CAMERA_CHECK_UNAVAILABLE":
       return "INFO";
+    // --- One-Question-At-A-Time Exam Delivery v1 — see
+    // docs/one-question-delivery-v1.md. Routine, expected navigation
+    // never raises risk; a blocked back-navigation attempt is a mild,
+    // non-zero signal (mirrors FULLSCREEN_FORCED_RETURN's LOW) but must
+    // never dominate risk on its own — a student clicking a disabled
+    // control is not itself suspicious.
+    case "QUESTION_NAVIGATED_NEXT":
+    case "QUESTION_NAVIGATED_PREVIOUS":
+      return "INFO";
+    case "QUESTION_BACK_NAVIGATION_BLOCKED":
+      return "LOW";
   }
 }

@@ -38,6 +38,11 @@ const INTEGRITY_EVENT_TYPES = [
   "CAMERA_VIEW_BLOCKED",
   "CAMERA_TOO_DARK",
   "AI_CAMERA_CHECK_UNAVAILABLE",
+  // One-Question-At-A-Time Exam Delivery v1 — see
+  // docs/one-question-delivery-v1.md.
+  "QUESTION_NAVIGATED_NEXT",
+  "QUESTION_NAVIGATED_PREVIOUS",
+  "QUESTION_BACK_NAVIGATION_BLOCKED",
 ] as const;
 
 const INTEGRITY_SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH"] as const;
@@ -85,6 +90,10 @@ const DEBOUNCE_WINDOWS_MS: Partial<Record<(typeof INTEGRITY_EVENT_TYPES)[number]
   CAMERA_VIEW_BLOCKED: 60_000,
   CAMERA_TOO_DARK: 60_000,
   AI_CAMERA_CHECK_UNAVAILABLE: 60_000,
+  // A student can only click a disabled/hidden Previous button through
+  // direct API manipulation, but debounce anyway against accidental
+  // rapid-fire duplicates.
+  QUESTION_BACK_NAVIGATION_BLOCKED: 3_000,
 };
 
 export async function POST(
