@@ -39,6 +39,7 @@ import {
   shouldAttemptEvidenceUpload,
   shouldLogEvidenceUploadDebug,
 } from "@/lib/aiCameraEvidenceFrame";
+import { ExamWatermark } from "@/components/ExamWatermark";
 
 type Question = {
   id: string;
@@ -76,6 +77,7 @@ type SecureSettings = {
   requireStudentVerification: boolean;
   enableAiCameraIntegrityChecks: boolean;
   captureAiViolationEvidence: boolean;
+  enableExamWatermark: boolean;
 };
 
 type SubmissionData = {
@@ -88,7 +90,7 @@ type SubmissionData = {
   marksReleasedAt: string | null;
   exam: { id: string; title: string; questions: Question[]; secureSettings: SecureSettings };
   answers: Answer[];
-  student: { name: string; email: string; institutionStudentId: string | null };
+  student: { id: string; name: string; email: string; institutionStudentId: string | null };
 };
 
 type IntegrityEventType =
@@ -1389,6 +1391,7 @@ export default function TakeExamPage({
   const requireStudentVerification = secureSettings?.requireStudentVerification ?? false;
   const enableAiCameraIntegrityChecks = secureSettings?.enableAiCameraIntegrityChecks ?? false;
   const captureAiViolationEvidence = secureSettings?.captureAiViolationEvidence ?? false;
+  const enableExamWatermark = secureSettings?.enableExamWatermark ?? false;
   const verificationGateSatisfied = !requireStudentVerification || verificationConfirmed;
   const cameraGateSatisfied =
     (!requireCamera || cameraStatus === "granted") && verificationGateSatisfied;
@@ -1446,6 +1449,13 @@ export default function TakeExamPage({
                 This exam may save a single low-resolution camera evidence frame if a possible
                 phone or second person is detected. No video is recorded. Evidence is available
                 only to authorised reviewers.
+              </li>
+            )}
+            {enableExamWatermark && (
+              <li>
+                This exam may display a watermark containing your student identifier, attempt ID,
+                and timestamp to discourage copying, sharing, screenshots, and uploading assessment
+                content to AI tools.
               </li>
             )}
             <li>
@@ -1711,6 +1721,14 @@ export default function TakeExamPage({
       )}
 
       <div className="relative">
+        {/* Exam Watermark v1 — see docs/exam-watermark-v1.md. A visible,
+            low-opacity, non-disruptive deterrent overlay, never a
+            blur/hide — explicitly not the "hide question content when
+            integrity is uncertain" approach this feature deliberately
+            avoids. Always on top (rendered after the question content
+            below) but pointer-events: none and aria-hidden, so it never
+            blocks typing, reading, or assistive tech. */}
+        {enableExamWatermark && <ExamWatermark student={data.student} submissionId={data.id} />}
         {/* On-Device AI Camera Integrity Detection v1 — local exam-content
             blur, distinct from browser/window blur. Blurred and made
             non-interactive only while an AI camera violation overlay is

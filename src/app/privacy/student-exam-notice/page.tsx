@@ -160,6 +160,32 @@ export default function StudentExamNoticePage() {
         </section>
 
         <section>
+          <h2 className="font-medium text-gray-900">Exam watermark, if enabled</h2>
+          <p className="mt-1">
+            This exam may display a watermark containing your student identifier, attempt ID, and
+            timestamp to discourage copying, sharing, screenshots, and uploading assessment content
+            to AI tools.
+          </p>
+          <p className="mt-1">
+            The watermark identifier prefers your institution-assigned student ID, then the first
+            part of your email address, and only falls back to a short, truncated portion of your
+            account ID if neither is available. It never shows your full name, phone number,
+            address, or date of birth.
+          </p>
+          <p className="mt-2">
+            <strong>
+              The watermark is a deterrent and traceability aid, not a guarantee — it discourages
+              copying and does not guarantee AI tools will refuse to answer shared content, and it
+              does not by itself prove or determine misconduct.
+            </strong>
+          </p>
+          <p className="mt-1">
+            The watermark is purely visual — it does not capture, record, or upload anything by
+            itself, and it never blocks you from reading questions or typing your answers.
+          </p>
+        </section>
+
+        <section>
           <h2 className="font-medium text-gray-900">Browser secure mode</h2>
           <p className="mt-1">When Secure Exam Mode is active, SES may:</p>
           <ul className="mt-1 list-disc space-y-1 pl-5">

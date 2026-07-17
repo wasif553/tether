@@ -139,6 +139,56 @@ describe("secure settings additions (camera + browser-friction)", () => {
   });
 });
 
+describe("Exam Watermark v1 (enableExamWatermark)", () => {
+  it("1/2. parses enableExamWatermark and defaults to false", () => {
+    expect(DEFAULT_SECURE_SETTINGS.enableExamWatermark).toBe(false);
+    expect(parseSecureSettings(null).enableExamWatermark).toBe(false);
+    expect(parseSecureSettings({}).enableExamWatermark).toBe(false);
+  });
+
+  it("2. defaults to false uniformly for both a brand-new exam and a pre-existing exam missing the key", () => {
+    // Simulates an exam saved before this setting existed — the raw JSON
+    // simply has no enableExamWatermark key at all.
+    const legacySettings = { secureModeEnabled: true, requireCamera: true };
+    expect(parseSecureSettings(legacySettings).enableExamWatermark).toBe(false);
+  });
+
+  it("3. a lecturer can explicitly enable it via parseSecureSettings", () => {
+    const result = parseSecureSettings({ secureModeEnabled: true, enableExamWatermark: true });
+    expect(result.enableExamWatermark).toBe(true);
+  });
+
+  it("has no effect on other settings when toggled", () => {
+    const result = parseSecureSettings({ enableExamWatermark: true });
+    expect(result.blockCopyPaste).toBe(DEFAULT_SECURE_SETTINGS.blockCopyPaste);
+    expect(result.requireCamera).toBe(DEFAULT_SECURE_SETTINGS.requireCamera);
+  });
+
+  it("appears in activeSafeExamControlLabels only when both secureModeEnabled and enableExamWatermark are true", () => {
+    expect(
+      activeSafeExamControlLabels({
+        ...DEFAULT_SECURE_SETTINGS,
+        secureModeEnabled: true,
+        enableExamWatermark: true,
+      }),
+    ).toContain("Exam watermark enabled");
+    expect(
+      activeSafeExamControlLabels({
+        ...DEFAULT_SECURE_SETTINGS,
+        secureModeEnabled: false,
+        enableExamWatermark: true,
+      }),
+    ).not.toContain("Exam watermark enabled");
+    expect(
+      activeSafeExamControlLabels({
+        ...DEFAULT_SECURE_SETTINGS,
+        secureModeEnabled: true,
+        enableExamWatermark: false,
+      }),
+    ).not.toContain("Exam watermark enabled");
+  });
+});
+
 describe("safe exam mode UI helpers", () => {
   it("labels safe mode status clearly as enabled or disabled", () => {
     expect(safeExamModeStatusLabel({ ...DEFAULT_SECURE_SETTINGS, secureModeEnabled: true })).toBe(

@@ -101,6 +101,22 @@ remains scoped narrowly:
   events carry zero weight; a single low-confidence signal cannot reach
   high risk on its own).
 
+## Exam Watermark v1
+
+A separate, independent opt-in — see docs/exam-watermark-v1.md for the
+full design. A visible, low-opacity, diagonal watermark (student
+identifier + attempt id + timestamp + AI-aware wording) is overlaid on
+the question content area to deter screenshots/photos/sharing and to
+discourage AI tools from answering shared exam content, and to add
+traceability if content is shared anyway. It is deliberately the
+low-friction alternative to hiding/blurring question content when
+integrity is uncertain, which v1 does not do (and does not plan to) since
+that risks frustrating genuine students. It is a deterrent and
+traceability aid, not a guarantee — it does not prevent copying, does not
+guarantee any AI tool will refuse to answer, and is not itself proof of
+misconduct. It captures or uploads nothing; it is a purely client-side
+rendered overlay.
+
 ## Future controls (explicitly out of scope for v1)
 
 - Electron-based lockdown browser (blocks OS-level app switching).

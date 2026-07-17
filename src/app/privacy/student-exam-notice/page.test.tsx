@@ -43,4 +43,20 @@ describe("student exam notice page", () => {
     expect(text.toLowerCase()).not.toContain("cheating");
     expect(text.toLowerCase()).not.toContain("misconduct detected");
   });
+
+  it("6. mentions the exam watermark, its identifier priority, and that it is a deterrent (not a guarantee)", () => {
+    const text = collectText(StudentExamNoticePage());
+
+    expect(text).toContain("Exam watermark");
+    expect(text).toContain(
+      "This exam may display a watermark containing your student identifier, attempt ID, and",
+    );
+    expect(text).toContain("timestamp to discourage copying, sharing, screenshots, and uploading");
+    expect(text.toLowerCase()).toContain("deterrent");
+    expect(text.toLowerCase()).toContain("does not guarantee ai tools will refuse");
+    // The notice explains what is NOT shown (reassurance) and elsewhere
+    // legitimately says "not proof of misconduct" as neutral framing, so
+    // only "cheating" (never used anywhere on this page) is checked here.
+    expect(text.toLowerCase()).not.toContain("cheating");
+  });
 });

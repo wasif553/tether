@@ -50,6 +50,7 @@ type SecureSettings = {
   requireStudentVerification: boolean;
   enableAiCameraIntegrityChecks: boolean;
   captureAiViolationEvidence: boolean;
+  enableExamWatermark: boolean;
 };
 
 type Exam = {
@@ -1108,6 +1109,32 @@ export default function LecturerExamPage({
                 </span>
               </label>
             </div>
+          </div>
+
+          <div className="border-t border-gray-200 pt-3">
+            <h3 className="text-sm font-medium">Exam watermark</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              A low-friction deterrent, not an access control. It discourages screenshots, photos,
+              sharing, and uploading exam content to AI tools, and adds traceability if content is
+              shared — it does not guarantee AI tools will refuse to answer, and does not prevent
+              copying on its own.
+            </p>
+            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                disabled={!secureForm.secureModeEnabled}
+                checked={secureForm.enableExamWatermark}
+                onChange={(e) => setSecureForm({ ...secureForm, enableExamWatermark: e.target.checked })}
+              />
+              <span>
+                Show exam watermark
+                <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  Displays a low-opacity watermark with student and attempt details to discourage
+                  copying, screenshots, sharing, and uploading exam content to AI tools.
+                </span>
+              </span>
+            </label>
           </div>
 
           <button

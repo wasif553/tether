@@ -52,6 +52,23 @@ export const secureExamSettingsSchema = z.object({
   // dark/unavailable in v1, never a video, never the exam screen). Has no
   // effect at all unless enableAiCameraIntegrityChecks is also true.
   captureAiViolationEvidence: z.boolean().default(false),
+
+  // --- Exam Watermark v1 (additive, opt-in) — see
+  // docs/exam-watermark-v1.md. A visible, low-opacity, non-disruptive
+  // deterrent overlay on the question content area (student identifier +
+  // attempt id + timestamp + AI-aware wording) to discourage screenshots/
+  // photos/sharing and discourage AI tools from answering shared exam
+  // content. Deliberately defaults to false uniformly, exactly like
+  // captureAiViolationEvidence/enableAiCameraIntegrityChecks above —
+  // parseSecureSettings() merges this same default in for both a
+  // brand-new exam and a pre-existing exam saved before this setting
+  // existed, so there is no way to distinguish "new" from "old" at parse
+  // time; forcing it on for new exams only would require exam-creation-
+  // specific logic this schema/merge pattern doesn't have. A lecturer
+  // must explicitly opt in either way. Has no effect unless
+  // secureModeEnabled is also true (see the student exam page, which
+  // never renders the watermark outside Secure Exam Mode).
+  enableExamWatermark: z.boolean().default(false),
 });
 
 export type SecureExamSettings = z.infer<typeof secureExamSettingsSchema>;
@@ -75,7 +92,12 @@ export function safeExamModeStatusLabel(settings: Pick<SecureExamSettings, "secu
 export function activeSafeExamControlLabels(
   settings: Pick<
     SecureExamSettings,
-    "secureModeEnabled" | "requireCamera" | "requireFullscreen" | "requireStudentVerification" | "enableAiCameraIntegrityChecks"
+    | "secureModeEnabled"
+    | "requireCamera"
+    | "requireFullscreen"
+    | "requireStudentVerification"
+    | "enableAiCameraIntegrityChecks"
+    | "enableExamWatermark"
   >,
 ): string[] {
   if (!settings.secureModeEnabled) return [];
@@ -84,6 +106,7 @@ export function activeSafeExamControlLabels(
     settings.requireFullscreen ? "Full screen required" : null,
     settings.requireStudentVerification ? "Student verification required" : null,
     settings.enableAiCameraIntegrityChecks ? "AI camera checks enabled" : null,
+    settings.enableExamWatermark ? "Exam watermark enabled" : null,
   ].filter((label): label is string => label != null);
 }
 

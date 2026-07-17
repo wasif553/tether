@@ -10,6 +10,8 @@ This document covers three lecturer-optional, independently-toggleable features 
 
 **This is not live proctoring.** No one — lecturer, institution, or SES — ever sees the student's camera live, and nothing is streamed. By default, nothing is recorded or stored either — feature 3 above is the one deliberate, opt-in, clearly-disclosed exception, and even then it is a single low-resolution still image, never a video. See `docs/live-proctoring-v1-design-audit.md` for the (separate, not-implemented) design audit of what live proctoring would require.
 
+A separate, independent opt-in — **Exam Watermark v1** — works alongside these camera-based features but captures/uploads nothing itself; see `docs/exam-watermark-v1.md`.
+
 ---
 
 ## Lecturer opt-in

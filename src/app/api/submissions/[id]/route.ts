@@ -18,7 +18,7 @@ export async function GET(
       exam: { include: { questions: { orderBy: { order: "asc" } } } },
       answers: true,
       gradePassback: true,
-      student: { select: { name: true, email: true, institutionStudentId: true } },
+      student: { select: { id: true, name: true, email: true, institutionStudentId: true } },
     },
   });
 
@@ -78,6 +78,11 @@ export async function GET(
     // docs/on-device-ai-integrity-detection-v1.md. Never includes
     // passwordHash or any other sensitive field.
     student: {
+      // id is included only for the Exam Watermark v1 fallback identifier
+      // (see src/lib/examWatermark.ts) — used only when institutionStudentId
+      // and email are both unavailable, and only ever shown truncated to 8
+      // characters, never the raw id.
+      id: submission.student.id,
       name: submission.student.name,
       email: submission.student.email,
       institutionStudentId: submission.student.institutionStudentId,
