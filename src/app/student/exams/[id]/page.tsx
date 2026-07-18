@@ -272,6 +272,7 @@ export default function TakeExamPage({
   const router = useRouter();
 
   const [data, setData] = useState<SubmissionData | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [responses, setResponses] = useState<Record<string, string>>({});
   const [remainingSecs, setRemainingSecs] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -395,11 +396,29 @@ export default function TakeExamPage({
   }, []);
 
   const loadSubmission = useCallback(async () => {
-    const res = await fetch(`/api/submissions/${id}`);
-    if (!res.ok) return null;
-    const d: SubmissionData = await res.json();
-    applySubmissionData(d);
-    return d;
+    try {
+      const res = await fetch(`/api/submissions/${id}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setLoadError(
+          res.status === 404
+            ? "This exam submission could not be found."
+            : res.status === 403
+              ? "You don't have access to this exam submission."
+              : typeof body?.error === "string"
+                ? body.error
+                : `Could not load this exam (status ${res.status}). Try refreshing the page.`,
+        );
+        return null;
+      }
+      const d: SubmissionData = await res.json();
+      setLoadError(null);
+      applySubmissionData(d);
+      return d;
+    } catch {
+      setLoadError("Could not load this exam — check your connection and try refreshing the page.");
+      return null;
+    }
   }, [id, applySubmissionData]);
 
   // One-Question-At-A-Time Exam Delivery v1 — see
@@ -1467,6 +1486,18 @@ export default function TakeExamPage({
     saveAnswer(questionId, value);
   }
 
+  if (!data && loadError) {
+    return (
+      <div className="mx-auto max-w-lg">
+        <div className="rounded border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          <p>{loadError}</p>
+          <button onClick={() => loadSubmission()} className="mt-2 text-sm underline">
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (!data) return <p className="text-gray-500">Loading...</p>;
 
   if (data.status !== "IN_PROGRESS") {

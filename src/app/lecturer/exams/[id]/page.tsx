@@ -134,6 +134,7 @@ export default function LecturerExamPage({
 
   const [exam, setExam] = useState<Exam | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [secureForm, setSecureForm] = useState<SecureSettings | null>(null);
 
@@ -252,29 +253,43 @@ export default function LecturerExamPage({
 
   async function loadExam(options: { preserveSecureForm?: boolean } = {}) {
     setLoading(true);
-    const res = await fetch(`/api/exams/${id}`);
-    if (res.ok) {
-      const data: Exam = await res.json();
-      // Temporary dev-only diagnostic for the production secureSettings
-      // display investigation — never fires outside NODE_ENV=development,
-      // and only when explicitly opted in via localStorage. Remove once
-      // the production/local mismatch is resolved.
-      if (
-        process.env.NODE_ENV === "development" &&
-        typeof window !== "undefined" &&
-        window.localStorage.getItem("sesSecureSettingsDebug") === "true"
-      ) {
-        console.log("[sesSecureSettingsDebug] raw exam.secureSettings from GET /api/exams/[id]:", data.secureSettings);
-      }
-      setExam(data);
-      if (!options.preserveSecureForm) {
-        setSecureForm(data.secureSettings);
-      }
-      setCourseId(data.courseId ?? "");
-      setAssignmentMode(data.assignmentMode ?? "COURSE");
-      setAvailableFrom(data.availableFrom ? data.availableFrom.slice(0, 16) : "");
-      setAvailableUntil(data.availableUntil ? data.availableUntil.slice(0, 16) : "");
+    const res = await fetch(`/api/exams/${id}`).catch(() => null);
+    if (!res) {
+      setLoadError("Could not load this exam — check your connection and try refreshing the page.");
+      setLoading(false);
+      return;
     }
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      setLoadError(
+        typeof body?.error === "string"
+          ? body.error
+          : `Could not load this exam (status ${res.status}). Try refreshing the page.`,
+      );
+      setLoading(false);
+      return;
+    }
+    setLoadError(null);
+    const data: Exam = await res.json();
+    // Temporary dev-only diagnostic for the production secureSettings
+    // display investigation — never fires outside NODE_ENV=development,
+    // and only when explicitly opted in via localStorage. Remove once
+    // the production/local mismatch is resolved.
+    if (
+      process.env.NODE_ENV === "development" &&
+      typeof window !== "undefined" &&
+      window.localStorage.getItem("sesSecureSettingsDebug") === "true"
+    ) {
+      console.log("[sesSecureSettingsDebug] raw exam.secureSettings from GET /api/exams/[id]:", data.secureSettings);
+    }
+    setExam(data);
+    if (!options.preserveSecureForm) {
+      setSecureForm(data.secureSettings);
+    }
+    setCourseId(data.courseId ?? "");
+    setAssignmentMode(data.assignmentMode ?? "COURSE");
+    setAvailableFrom(data.availableFrom ? data.availableFrom.slice(0, 16) : "");
+    setAvailableUntil(data.availableUntil ? data.availableUntil.slice(0, 16) : "");
     setLoading(false);
   }
 
@@ -772,7 +787,21 @@ export default function LecturerExamPage({
   }
 
   if (loading) return <p className="text-gray-500">Loading...</p>;
-  if (!exam) return <p className="text-red-600">Exam not found</p>;
+  if (!exam) {
+    return (
+      <div className="mx-auto max-w-lg">
+        <p className="text-red-600">{loadError ?? "Exam not found"}</p>
+        {loadError && (
+          <button
+            onClick={() => loadExam()}
+            className="mt-2 rounded border border-gray-300 px-3 py-1.5 text-sm"
+          >
+            Try again
+          </button>
+        )}
+      </div>
+    );
+  }
 
   const hasUnsavedSecureChanges =
     secureForm != null && secureSettingsChanged(exam.secureSettings, secureForm);

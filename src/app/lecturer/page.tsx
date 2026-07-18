@@ -30,12 +30,28 @@ export default function LecturerDashboard() {
   const [title, setTitle] = useState("");
   const [durationMins, setDurationMins] = useState(60);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   async function loadExams() {
     setLoading(true);
-    const res = await fetch("/api/exams");
-    if (res.ok) setExams(await res.json());
-    setLoading(false);
+    setLoadError(null);
+    try {
+      const res = await fetch("/api/exams");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setLoadError(
+          typeof body?.error === "string"
+            ? body.error
+            : `Could not load your exams (status ${res.status}). Try refreshing the page.`,
+        );
+        return;
+      }
+      setExams(await res.json());
+    } catch {
+      setLoadError("Could not load your exams — check your connection and try refreshing the page.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -108,7 +124,15 @@ export default function LecturerDashboard() {
 
       <div className="mt-6 space-y-3">
         {loading && <p className="text-gray-500">Loading exams...</p>}
-        {!loading && exams.length === 0 && (
+        {!loading && loadError && (
+          <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <p>{loadError}</p>
+            <button onClick={() => loadExams()} className="mt-2 text-sm underline">
+              Try again
+            </button>
+          </div>
+        )}
+        {!loading && !loadError && exams.length === 0 && (
           <p className="text-gray-500">No exams yet. Create one above.</p>
         )}
         {exams.map((exam) => (

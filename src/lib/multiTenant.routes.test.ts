@@ -232,3 +232,71 @@ describe("17. GET /api/exams/[id] — assertSameInstitution never matches null i
     await prisma.exam.delete({ where: { id: orphanExam.id } });
   });
 });
+
+// Question Pools v1 runtime regression check — see
+// docs/question-pools-v1.md. GET /api/exams (the lecturer exam list) has
+// no question-pool-related filtering at all; these tests exist to prove
+// that directly, so a future change to that route can't silently
+// reintroduce a query/relation that excludes exams based on their pools.
+describe("18. GET /api/exams (lecturer list) is never affected by question pools", () => {
+  it("an exam with no question pools appears in the list", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: "No Pools Exam", durationMins: 30, createdById: lecturerA.id, institutionId: instA.id },
+    });
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA.id));
+    const res = await examsRoute.GET();
+    expect(res.status).toBe(200);
+    const ids = (await res.json()).map((e: { id: string }) => e.id);
+    expect(ids).toContain(exam.id);
+    await prisma.exam.delete({ where: { id: exam.id } });
+  });
+
+  it("an exam with a question pool (and questions in it) still appears in the list", async () => {
+    const exam = await prisma.exam.create({
+      data: {
+        title: "Pool Exam",
+        durationMins: 30,
+        createdById: lecturerA.id,
+        institutionId: instA.id,
+        secureSettings: { enableQuestionPools: true, questionPoolSelectionMode: "DRAW_FROM_POOLS" },
+      },
+    });
+    const pool = await prisma.questionPool.create({
+      data: { examId: exam.id, name: "Programming basics", drawCount: 2 },
+    });
+    await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Q1", points: 1, questionPoolId: pool.id },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA.id));
+    const res = await examsRoute.GET();
+    expect(res.status).toBe(200);
+    const ids = (await res.json()).map((e: { id: string }) => e.id);
+    expect(ids).toContain(exam.id);
+
+    await prisma.question.deleteMany({ where: { examId: exam.id } });
+    await prisma.questionPool.delete({ where: { id: pool.id } });
+    await prisma.exam.delete({ where: { id: exam.id } });
+  });
+
+  it("an exam with an EMPTY question pool (no questions assigned yet) still appears in the list", async () => {
+    const exam = await prisma.exam.create({
+      data: {
+        title: "Empty Pool Exam",
+        durationMins: 30,
+        createdById: lecturerA.id,
+        institutionId: instA.id,
+        secureSettings: { enableQuestionPools: true },
+      },
+    });
+    await prisma.questionPool.create({ data: { examId: exam.id, name: "Empty pool", drawCount: null } });
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA.id));
+    const res = await examsRoute.GET();
+    expect(res.status).toBe(200);
+    const ids = (await res.json()).map((e: { id: string }) => e.id);
+    expect(ids).toContain(exam.id);
+
+    await prisma.exam.delete({ where: { id: exam.id } });
+  });
+});
