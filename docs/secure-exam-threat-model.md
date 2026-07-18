@@ -100,6 +100,17 @@ remains scoped narrowly:
   event severities were chosen conservatively (verification/unavailable
   events carry zero weight; a single low-confidence signal cannot reach
   high risk on its own).
+- **Camera startup readiness** — see
+  docs/on-device-ai-integrity-detection-v1.md ("Camera startup
+  readiness"). A short (3s) warm-up grace period after the camera's
+  first ready frame, plus a 15s startup timeout, prevents false
+  CAMERA_VIEW_BLOCKED/CAMERA_TOO_DARK/NO_PERSON_VISIBLE/
+  POSSIBLE_PHONE_VISIBLE/POSSIBLE_SECOND_PERSON_VISIBLE events while a
+  webcam's auto-exposure/auto-focus are still settling on first exam
+  start. Detection thresholds and confirmation rules are unchanged —
+  only when emission is allowed to begin; once warm-up ends, detection
+  behaves exactly as before, including recovering normally if the
+  camera becomes genuinely blocked/dark/absent later in the exam.
 
 ## Exam Watermark v1
 

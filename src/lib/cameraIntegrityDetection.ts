@@ -342,6 +342,91 @@ export function decideFrameQualityEmission(
 }
 
 /**
+ * Camera Startup Readiness v1 — see docs/on-device-ai-integrity-detection-v1.md
+ * ("Camera startup readiness"). Many webcams deliver a few transiently
+ * black/dark/artifacted frames while auto-exposure/auto-focus settle,
+ * even after `readyState`/`videoWidth`/`videoHeight` already report the
+ * video element as playable — that gap is exactly what produced false
+ * CAMERA_VIEW_BLOCKED events on first exam start. A plain readiness
+ * check alone (see isVideoFrameReady below) is necessary but not
+ * sufficient; the grace period below is the additional fix.
+ */
+
+export type VideoFrameLike = {
+  readyState: number;
+  videoWidth: number;
+  videoHeight: number;
+};
+
+/**
+ * True once the video element has a real, non-zero-dimension current
+ * frame — HTMLMediaElement.HAVE_CURRENT_DATA (2) or higher, and both
+ * dimensions non-zero. This alone does NOT mean the frame content is
+ * meaningful yet (see shouldSuppressCameraIntegrityDuringStartup) — only
+ * that there is a frame to draw at all.
+ */
+export function isVideoFrameReady(
+  video: VideoFrameLike | null | undefined,
+): video is VideoFrameLike {
+  return Boolean(video) && video!.readyState >= 2 && video!.videoWidth > 0 && video!.videoHeight > 0;
+}
+
+/** How long after the first ready frame to suppress blocked/dark/no-person/phone/second-person emission, to let camera auto-exposure/auto-focus settle. */
+export const CAMERA_STARTUP_GRACE_PERIOD_MS = 3_000;
+
+/** If no ready frame is observed within this long after the stream starts, camera startup is considered failed (shown as a clear setup error, never an indefinite spinner). */
+export const CAMERA_READY_TIMEOUT_MS = 15_000;
+
+/**
+ * Whether AI camera integrity events (CAMERA_VIEW_BLOCKED, CAMERA_TOO_DARK,
+ * NO_PERSON_VISIBLE, POSSIBLE_PHONE_VISIBLE, POSSIBLE_SECOND_PERSON_VISIBLE)
+ * must be suppressed right now because the camera is still starting up:
+ * either no ready frame has been observed yet (`firstReadyFrameAt` is
+ * null), or one has but the warm-up grace period since then hasn't
+ * elapsed. `firstReadyFrameAt` must be reset to null whenever the camera
+ * stream (re)starts, so a lost-and-restarted stream gets its own fresh
+ * warm-up window (see docs/on-device-ai-integrity-detection-v1.md,
+ * "Camera recovery").
+ */
+export function shouldSuppressCameraIntegrityDuringStartup(
+  firstReadyFrameAt: number | null,
+  now: number,
+  gracePeriodMs: number = CAMERA_STARTUP_GRACE_PERIOD_MS,
+): boolean {
+  if (firstReadyFrameAt == null) return true;
+  return now - firstReadyFrameAt < gracePeriodMs;
+}
+
+export type CameraStartupPhase = "waiting_for_first_frame" | "warming_up" | "ready" | "timed_out";
+
+/**
+ * Derives the user-facing camera startup phase from raw timing state —
+ * pure, so both the UI copy and tests can rely on the same derivation.
+ * `streamStartedAt` should be set the moment getUserMedia resolves (not
+ * when the video element becomes ready), so a camera that never
+ * delivers a frame at all is still caught by the timeout rather than
+ * waiting forever.
+ */
+export function cameraStartupPhase(params: {
+  firstReadyFrameAt: number | null;
+  now: number;
+  streamStartedAt: number | null;
+  gracePeriodMs?: number;
+  readyTimeoutMs?: number;
+}): CameraStartupPhase {
+  const gracePeriodMs = params.gracePeriodMs ?? CAMERA_STARTUP_GRACE_PERIOD_MS;
+  const readyTimeoutMs = params.readyTimeoutMs ?? CAMERA_READY_TIMEOUT_MS;
+  if (params.firstReadyFrameAt == null) {
+    if (params.streamStartedAt != null && params.now - params.streamStartedAt > readyTimeoutMs) {
+      return "timed_out";
+    }
+    return "waiting_for_first_frame";
+  }
+  if (params.now - params.firstReadyFrameAt < gracePeriodMs) return "warming_up";
+  return "ready";
+}
+
+/**
  * Backend integrity-event logging should happen only when the on-device
  * detection condition is currently met AND the spam-prevention cooldown
  * has elapsed — this is exactly the `shouldEmit` field each decide*
