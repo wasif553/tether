@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, use as usePromise } from "react";
+import { useCallback, useEffect, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
@@ -80,6 +80,32 @@ const CONFIDENCE_STYLES: Record<EssayMarkingResult["confidence"], string> = {
   LOW: "bg-red-100 text-red-700",
 };
 
+// Oral Verification Workflow v1 — see docs/oral-verification-workflow-v1.md.
+// Lecturer-controlled: an OralVerification record is only ever created by
+// the explicit "Require oral verification" action below, never
+// automatically. Private lecturer notes here are never shown to students.
+type OralVerification = {
+  id: string;
+  status: string;
+  reason: string;
+  scheduledAt: string | null;
+  completedAt: string | null;
+  outcome: string | null;
+  lecturerNotes: string | null;
+  generatedQuestionsJson: string[] | null;
+  requestedBy: { name: string } | null;
+  completedBy: { name: string } | null;
+};
+
+const ORAL_VERIFICATION_STATUS_LABELS: Record<string, string> = {
+  NOT_REQUIRED: "Not required",
+  REQUIRED: "Oral verification recommended",
+  SCHEDULED: "Scheduled",
+  COMPLETED_NO_CONCERN: "Reviewed — no concern",
+  COMPLETED_CONCERN_REMAINS: "Concern remains",
+  CANCELLED: "Cancelled",
+};
+
 export default function GradeSubmissionPage({
   params,
 }: {
@@ -95,6 +121,67 @@ export default function GradeSubmissionPage({
   const [pushingGrade, setPushingGrade] = useState(false);
   const [pushGradeMessage, setPushGradeMessage] = useState<string | null>(null);
   const [expandedAiDraft, setExpandedAiDraft] = useState<string | null>(null);
+
+  // Oral Verification Workflow v1 state — see
+  // docs/oral-verification-workflow-v1.md.
+  const [oralVerifications, setOralVerifications] = useState<OralVerification[]>([]);
+  const [requestReason, setRequestReason] = useState("");
+  const [requestingVerification, setRequestingVerification] = useState(false);
+  const [editingQuestions, setEditingQuestions] = useState<Record<string, string[]>>({});
+  const [savingVerificationId, setSavingVerificationId] = useState<string | null>(null);
+
+  const loadOralVerifications = useCallback(() => {
+    fetch(`/api/lecturer/submissions/${submissionId}/oral-verification`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((list: OralVerification[]) => {
+        setOralVerifications(list);
+        const drafts: Record<string, string[]> = {};
+        list.forEach((v) => {
+          drafts[v.id] = v.generatedQuestionsJson ?? [];
+        });
+        setEditingQuestions(drafts);
+      })
+      .catch(() => {});
+  }, [submissionId]);
+
+  useEffect(() => {
+    loadOralVerifications();
+  }, [loadOralVerifications]);
+
+  async function requireOralVerification() {
+    if (!requestReason.trim()) return;
+    setRequestingVerification(true);
+    try {
+      const res = await fetch(`/api/lecturer/submissions/${submissionId}/oral-verification`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: requestReason.trim() }),
+      });
+      if (res.ok) {
+        setRequestReason("");
+        loadOralVerifications();
+      }
+    } finally {
+      setRequestingVerification(false);
+    }
+  }
+
+  async function updateOralVerification(
+    verificationId: string,
+    patch: { status?: string; outcome?: string; lecturerNotes?: string; questions?: string[] },
+  ) {
+    setSavingVerificationId(verificationId);
+    try {
+      const res = await fetch(`/api/lecturer/oral-verifications/${verificationId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (res.ok) loadOralVerifications();
+    } finally {
+      setSavingVerificationId(null);
+    }
+  }
 
   useEffect(() => {
     fetch(`/api/submissions/${submissionId}`)
@@ -341,6 +428,117 @@ export default function GradeSubmissionPage({
           {pushGradeMessage && <p className="mt-2 text-sm text-gray-600">{pushGradeMessage}</p>}
         </div>
       )}
+
+      {/* Oral Verification Workflow v1 — see
+          docs/oral-verification-workflow-v1.md. Lecturer-controlled only:
+          an OralVerification record is created ONLY when the lecturer
+          clicks "Require oral verification" below — never automatically.
+          Internal risk scores/comparison details are never shown here to
+          students, and lecturerNotes are private to staff. */}
+      <div className="mt-6 rounded border border-gray-200 p-4">
+        <h2 className="text-lg font-medium">Oral verification</h2>
+        <p className="mt-1 text-xs text-gray-500">
+          A lecturer-controlled follow-up discussion, if you want one for this attempt. This is a review
+          workflow, not an accusation — the student sees only a neutral notice, never an internal risk
+          score or comparison detail.
+        </p>
+
+        {oralVerifications.map((v) => (
+          <div key={v.id} className="mt-3 rounded border border-gray-100 bg-gray-50 p-3 text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
+                {ORAL_VERIFICATION_STATUS_LABELS[v.status] ?? v.status}
+              </span>
+              {v.requestedBy && <span className="text-xs text-gray-500">Requested by {v.requestedBy.name}</span>}
+            </div>
+            <p className="mt-2 text-gray-700">Reason: {v.reason}</p>
+
+            {(v.generatedQuestionsJson ?? []).length > 0 && (
+              <div className="mt-2">
+                <p className="text-xs font-medium text-gray-600">Follow-up questions (editable):</p>
+                <div className="mt-1 space-y-1">
+                  {(editingQuestions[v.id] ?? []).map((q, i) => (
+                    <input
+                      key={i}
+                      value={q}
+                      onChange={(e) => {
+                        const next = [...(editingQuestions[v.id] ?? [])];
+                        next[i] = e.target.value;
+                        setEditingQuestions((prev) => ({ ...prev, [v.id]: next }));
+                      }}
+                      className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                    />
+                  ))}
+                </div>
+                <button
+                  onClick={() => updateOralVerification(v.id, { questions: editingQuestions[v.id] })}
+                  disabled={savingVerificationId === v.id}
+                  className="mt-1 rounded border border-gray-300 px-2 py-1 text-xs disabled:opacity-50"
+                >
+                  Save question edits
+                </button>
+              </div>
+            )}
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              {v.status !== "SCHEDULED" && v.status !== "CANCELLED" && !v.completedAt && (
+                <button
+                  onClick={() => updateOralVerification(v.id, { status: "SCHEDULED" })}
+                  className="rounded border border-gray-300 px-2 py-1 text-xs"
+                >
+                  Mark scheduled
+                </button>
+              )}
+              {!v.completedAt && v.status !== "CANCELLED" && (
+                <>
+                  <button
+                    onClick={() => updateOralVerification(v.id, { status: "COMPLETED_NO_CONCERN" })}
+                    className="rounded border border-gray-300 px-2 py-1 text-xs"
+                  >
+                    Complete — no concern
+                  </button>
+                  <button
+                    onClick={() => updateOralVerification(v.id, { status: "COMPLETED_CONCERN_REMAINS" })}
+                    className="rounded border border-gray-300 px-2 py-1 text-xs"
+                  >
+                    Complete — concern remains
+                  </button>
+                  <button
+                    onClick={() => updateOralVerification(v.id, { status: "CANCELLED" })}
+                    className="rounded border border-gray-300 px-2 py-1 text-xs"
+                  >
+                    Cancel
+                  </button>
+                </>
+              )}
+            </div>
+            {v.completedAt && (
+              <p className="mt-2 text-xs text-gray-500">
+                Completed {new Date(v.completedAt).toLocaleString()}
+                {v.completedBy ? ` by ${v.completedBy.name}` : ""}
+              </p>
+            )}
+          </div>
+        ))}
+
+        <div className="mt-3 border-t border-gray-200 pt-3">
+          <label className="block text-xs font-medium text-gray-600">Require oral verification — reason</label>
+          <textarea
+            rows={2}
+            className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+            value={requestReason}
+            onChange={(e) => setRequestReason(e.target.value)}
+            placeholder="Why is a follow-up discussion recommended for this attempt?"
+          />
+          <button
+            onClick={requireOralVerification}
+            disabled={requestingVerification || !requestReason.trim()}
+            className="mt-2 rounded bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
+          >
+            {requestingVerification ? "Requesting..." : "Require oral verification"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -29,6 +29,11 @@ import {
   DetectionCooldownTracker,
   PHONE_CONFIDENCE_THRESHOLD,
   assertSafeIntegrityMetadata,
+  isVideoFrameReady,
+  shouldSuppressCameraIntegrityDuringStartup,
+  cameraStartupPhase,
+  CAMERA_STARTUP_GRACE_PERIOD_MS,
+  CAMERA_READY_TIMEOUT_MS,
 } from "./cameraIntegrityDetection";
 
 describe("shouldLogAiCameraDebug", () => {
@@ -544,5 +549,135 @@ describe("assertSafeIntegrityMetadata", () => {
         detectionIntervalSeconds: 3,
       }),
     ).not.toThrow();
+  });
+});
+
+// Camera Startup Readiness v1 — see
+// docs/on-device-ai-integrity-detection-v1.md ("Camera startup
+// readiness"). Fixes false CAMERA_VIEW_BLOCKED/CAMERA_TOO_DARK/
+// NO_PERSON_VISIBLE on first exam start, caused by transiently black/
+// dark/artifacted frames while the camera's auto-exposure/auto-focus
+// settle, even after readyState/videoWidth/videoHeight already report
+// the video as playable.
+describe("isVideoFrameReady", () => {
+  it("1. is false when videoWidth or videoHeight is 0", () => {
+    expect(isVideoFrameReady({ readyState: 4, videoWidth: 0, videoHeight: 480 })).toBe(false);
+    expect(isVideoFrameReady({ readyState: 4, videoWidth: 640, videoHeight: 0 })).toBe(false);
+  });
+
+  it("2. is false when readyState is below HAVE_CURRENT_DATA (2)", () => {
+    expect(isVideoFrameReady({ readyState: 0, videoWidth: 640, videoHeight: 480 })).toBe(false);
+    expect(isVideoFrameReady({ readyState: 1, videoWidth: 640, videoHeight: 480 })).toBe(false);
+  });
+
+  it("3. is true when readyState >= 2 and both dimensions are non-zero", () => {
+    expect(isVideoFrameReady({ readyState: 2, videoWidth: 640, videoHeight: 480 })).toBe(true);
+    expect(isVideoFrameReady({ readyState: 4, videoWidth: 320, videoHeight: 240 })).toBe(true);
+  });
+
+  it("is false when there is no video element at all", () => {
+    expect(isVideoFrameReady(null)).toBe(false);
+    expect(isVideoFrameReady(undefined)).toBe(false);
+  });
+});
+
+describe("shouldSuppressCameraIntegrityDuringStartup", () => {
+  it("suppresses when no ready frame has ever been observed", () => {
+    expect(shouldSuppressCameraIntegrityDuringStartup(null, Date.now())).toBe(true);
+  });
+
+  it("suppresses within the grace period after the first ready frame", () => {
+    const firstReadyFrameAt = 1_000;
+    expect(shouldSuppressCameraIntegrityDuringStartup(firstReadyFrameAt, 1_000, 3_000)).toBe(true);
+    expect(shouldSuppressCameraIntegrityDuringStartup(firstReadyFrameAt, 3_999, 3_000)).toBe(true);
+  });
+
+  it("9/10. allows emission once the grace period has elapsed", () => {
+    const firstReadyFrameAt = 1_000;
+    expect(shouldSuppressCameraIntegrityDuringStartup(firstReadyFrameAt, 4_000, 3_000)).toBe(false);
+    expect(shouldSuppressCameraIntegrityDuringStartup(firstReadyFrameAt, 10_000, 3_000)).toBe(false);
+  });
+
+  it("uses the default 3000ms grace period when none is given", () => {
+    expect(CAMERA_STARTUP_GRACE_PERIOD_MS).toBe(3_000);
+    expect(shouldSuppressCameraIntegrityDuringStartup(0, 2_999)).toBe(true);
+    expect(shouldSuppressCameraIntegrityDuringStartup(0, 3_000)).toBe(false);
+  });
+
+  it("11. re-suppresses after a restart resets firstReadyFrameAt to null", () => {
+    // Simulates: camera was ready and past its grace period, then the
+    // stream was lost and restarted (caller resets firstReadyFrameAt).
+    expect(shouldSuppressCameraIntegrityDuringStartup(1_000, 10_000, 3_000)).toBe(false);
+    expect(shouldSuppressCameraIntegrityDuringStartup(null, 10_001, 3_000)).toBe(true);
+  });
+});
+
+describe("cameraStartupPhase", () => {
+  it("is 'waiting_for_first_frame' before any ready frame and before the timeout", () => {
+    expect(
+      cameraStartupPhase({ firstReadyFrameAt: null, now: 5_000, streamStartedAt: 1_000 }),
+    ).toBe("waiting_for_first_frame");
+  });
+
+  it("is 'warming_up' during the grace period after the first ready frame", () => {
+    expect(
+      cameraStartupPhase({ firstReadyFrameAt: 1_000, now: 2_000, streamStartedAt: 500, gracePeriodMs: 3_000 }),
+    ).toBe("warming_up");
+  });
+
+  it("is 'ready' once the grace period has elapsed", () => {
+    expect(
+      cameraStartupPhase({ firstReadyFrameAt: 1_000, now: 5_000, streamStartedAt: 500, gracePeriodMs: 3_000 }),
+    ).toBe("ready");
+  });
+
+  it("is 'timed_out' if no ready frame ever arrives within the timeout", () => {
+    expect(CAMERA_READY_TIMEOUT_MS).toBe(15_000);
+    expect(
+      cameraStartupPhase({
+        firstReadyFrameAt: null,
+        now: 20_000,
+        streamStartedAt: 1_000,
+        readyTimeoutMs: 15_000,
+      }),
+    ).toBe("timed_out");
+  });
+
+  it("never times out once a ready frame has actually arrived, even much later", () => {
+    expect(
+      cameraStartupPhase({
+        firstReadyFrameAt: 1_000,
+        now: 100_000,
+        streamStartedAt: 500,
+        gracePeriodMs: 3_000,
+        readyTimeoutMs: 15_000,
+      }),
+    ).toBe("ready");
+  });
+});
+
+describe("camera startup suppression combined with phone/second-person decisions", () => {
+  it("12. decidePhoneEmission's emit-on-first-frame rule is unaffected by the readiness gate itself — the caller (student page) is what forces the decision to 'not detected' during suppression, this function stays fast either way", () => {
+    // decidePhoneEmission has no knowledge of camera startup at all — it
+    // always emits on the very first qualifying detection, exactly as
+    // before this fix. The student page is responsible for not calling
+    // it with a real phone detection during suppression (it substitutes
+    // a forced { conditionMet: false, shouldEmit: false } instead — see
+    // src/app/student/exams/[id]/page.tsx). This test pins that
+    // decidePhoneEmission's own behavior — the fast, no-consecutive-wait
+    // rule phone detection depends on — never regresses.
+    const decision = decidePhoneEmission({ detected: true, confidence: 0.9 }, true);
+    expect(decision.conditionMet).toBe(true);
+    expect(decision.shouldEmit).toBe(true);
+  });
+
+  it("13. once suppression ends (grace period elapsed), a real detection is no longer suppressed", () => {
+    const firstReadyFrameAt = 1_000;
+    const now = firstReadyFrameAt + CAMERA_STARTUP_GRACE_PERIOD_MS + 1;
+    expect(shouldSuppressCameraIntegrityDuringStartup(firstReadyFrameAt, now)).toBe(false);
+    // With suppression false, the student page uses the real decision —
+    // confirm decidePhoneEmission emits immediately once actually called.
+    const decision = decidePhoneEmission({ detected: true, confidence: 0.9 }, true);
+    expect(decision.shouldEmit).toBe(true);
   });
 });

@@ -170,6 +170,13 @@ model User {
   // is deferred to a future release rather than enforced here.
   institutionStudentId String?
 
+  // Answer Similarity Review + Oral Verification v1 (additive) — see
+  // docs/answer-similarity-review-v1.md and
+  // docs/oral-verification-workflow-v1.md.
+  reviewedSimilarityMatches  SubmissionSimilarityMatch[] @relation("SimilarityMatchReviewer")
+  oralVerificationsRequested OralVerification[]          @relation("OralVerificationRequestedBy")
+  oralVerificationsCompleted OralVerification[]          @relation("OralVerificationCompletedBy")
+
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
 }
@@ -233,6 +240,10 @@ model Exam {
   // Question Pools v1 (additive, opt-in) — see docs/question-pools-v1.md.
   questionPools QuestionPool[]
 
+  // Answer Similarity Review v1 (additive) — see
+  // docs/answer-similarity-review-v1.md.
+  similarityAnalyses SubmissionSimilarityAnalysis[]
+
   @@index([institutionId])
   @@index([courseId])
 }
@@ -280,6 +291,97 @@ model Question {
   questionPoolId String?
   questionPool   QuestionPool? @relation(fields: [questionPoolId], references: [id], onDelete: SetNull)
   answers       Answer[]
+  // Answer Similarity Review v1 (additive) — see
+  // docs/answer-similarity-review-v1.md.
+  similarityMatches SubmissionSimilarityMatch[]
+}
+
+// Answer Similarity Review v1 (additive) — see
+// docs/answer-similarity-review-v1.md. One row per analysis run of one
+// exam's submitted cohort. Status/risk fields are validated strings, not
+// Prisma enums, following the IntegrityEvidenceAsset convention (plain
+// String columns keep the production migration purely additive with no
+// enum-alteration risk); validation lives in src/lib/answerSimilarity.ts.
+// Everything here is a REVIEW SIGNAL for a human lecturer — never an
+// automatic misconduct finding, never a grade input.
+model SubmissionSimilarityAnalysis {
+  id     String @id @default(cuid())
+  examId String
+  exam   Exam   @relation(fields: [examId], references: [id], onDelete: Cascade)
+  // Set when the run was scoped to a single submission; null for a
+  // whole-exam run (the v1 default).
+  submissionId     String?
+  status           String    @default("PENDING") // PENDING | PROCESSING | COMPLETE | FAILED
+  overallRisk      String    @default("NONE") // NONE | LOW | MEDIUM | HIGH
+  analysedAt       DateTime?
+  algorithmVersion String
+  summaryJson      Json?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  matches          SubmissionSimilarityMatch[]
+
+  @@index([examId])
+  @@index([status])
+}
+
+// One flagged pair (source vs compared submission, optionally scoped to
+// one question) with an explainable signal — see
+// docs/answer-similarity-review-v1.md. Pair ordering is canonical
+// (sourceSubmissionId < comparedSubmissionId lexicographically) so A-vs-B
+// and B-vs-A never produce duplicate rows.
+model SubmissionSimilarityMatch {
+  id                   String                       @id @default(cuid())
+  analysisId           String
+  analysis             SubmissionSimilarityAnalysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  sourceSubmissionId   String
+  sourceSubmission     Submission                   @relation("SimilarityMatchSource", fields: [sourceSubmissionId], references: [id], onDelete: Cascade)
+  comparedSubmissionId String
+  comparedSubmission   Submission                   @relation("SimilarityMatchCompared", fields: [comparedSubmissionId], references: [id], onDelete: Cascade)
+  questionId           String?
+  question             Question?                    @relation(fields: [questionId], references: [id], onDelete: SetNull)
+  signalType           String // IDENTICAL_SHORT_ANSWER | HIGH_TEXT_SIMILARITY | SAME_WRONG_MCQ_PATTERN
+  score                Float
+  matchedDetailJson    Json?
+  reviewStatus         String                       @default("NEEDS_REVIEW") // NEEDS_REVIEW | REVIEWED_NO_CONCERN | REVIEWED_CONCERN_REMAINS | ESCALATED | RESOLVED
+  reviewedAt           DateTime?
+  reviewedById         String?
+  reviewedBy           User?                        @relation("SimilarityMatchReviewer", fields: [reviewedById], references: [id])
+  reviewNote           String?
+  createdAt            DateTime                     @default(now())
+  updatedAt            DateTime                     @updatedAt
+
+  @@index([analysisId])
+  @@index([sourceSubmissionId])
+  @@index([comparedSubmissionId])
+  @@index([questionId])
+  @@index([reviewStatus])
+}
+
+// Oral Verification Workflow v1 (additive) — see
+// docs/oral-verification-workflow-v1.md. Only ever created by an
+// explicit lecturer action ("Require oral verification") — never
+// automatically. lecturerNotes are private to staff and never exposed to
+// any student-facing route.
+model OralVerification {
+  id                     String     @id @default(cuid())
+  submissionId           String
+  submission             Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  requestedById          String
+  requestedBy            User       @relation("OralVerificationRequestedBy", fields: [requestedById], references: [id])
+  status                 String     @default("REQUIRED") // NOT_REQUIRED | REQUIRED | SCHEDULED | COMPLETED_NO_CONCERN | COMPLETED_CONCERN_REMAINS | CANCELLED
+  reason                 String
+  scheduledAt            DateTime?
+  completedAt            DateTime?
+  completedById          String?
+  completedBy            User?      @relation("OralVerificationCompletedBy", fields: [completedById], references: [id])
+  outcome                String?
+  lecturerNotes          String?
+  generatedQuestionsJson Json?
+  createdAt              DateTime   @default(now())
+  updatedAt              DateTime   @updatedAt
+
+  @@index([submissionId])
+  @@index([status])
 }
 
 model Submission {
@@ -313,6 +415,13 @@ model Submission {
   // oneQuestionAtATime is enabled; unused (stays 0) otherwise.
   questionOrderJson    Json?
   currentQuestionIndex Int   @default(0)
+
+  // Answer Similarity Review + Oral Verification v1 (additive) — see
+  // docs/answer-similarity-review-v1.md and
+  // docs/oral-verification-workflow-v1.md.
+  similarityMatchesAsSource   SubmissionSimilarityMatch[] @relation("SimilarityMatchSource")
+  similarityMatchesAsCompared SubmissionSimilarityMatch[] @relation("SimilarityMatchCompared")
+  oralVerifications           OralVerification[]
 
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])

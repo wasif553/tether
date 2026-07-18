@@ -22,6 +22,10 @@ import {
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   PHONE_CONFIDENCE_THRESHOLD,
+  isVideoFrameReady,
+  shouldSuppressCameraIntegrityDuringStartup,
+  cameraStartupPhase,
+  type CameraStartupPhase,
   type DetectedObject,
 } from "@/lib/cameraIntegrityDetection";
 import { loadCameraObjectDetector, type CameraObjectDetector } from "@/lib/cameraObjectDetector";
@@ -272,6 +276,7 @@ export default function TakeExamPage({
   const router = useRouter();
 
   const [data, setData] = useState<SubmissionData | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [responses, setResponses] = useState<Record<string, string>>({});
   const [remainingSecs, setRemainingSecs] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -346,6 +351,24 @@ export default function TakeExamPage({
   const [aiCheckStatus, setAiCheckStatus] = useState<"idle" | "loading" | "active" | "unavailable">(
     "idle",
   );
+  // Camera Startup Readiness v1 — see
+  // docs/on-device-ai-integrity-detection-v1.md ("Camera startup
+  // readiness"). Fixes false CAMERA_VIEW_BLOCKED/CAMERA_TOO_DARK/
+  // NO_PERSON_VISIBLE/POSSIBLE_PHONE_VISIBLE/POSSIBLE_SECOND_PERSON_VISIBLE
+  // on first exam start: many webcams deliver a few transiently black/
+  // dark/artifacted frames while auto-exposure/auto-focus settle, even
+  // after the video element already reports itself as playable.
+  // cameraStreamStartedAtRef is set the moment getUserMedia resolves;
+  // firstReadyFrameAtRef is set on the first detection tick where the
+  // video actually has a ready frame. Both are reset to null whenever a
+  // NEW camera stream is acquired (see startCamera/stopCamera below), so
+  // a lost-and-restarted stream gets its own fresh warm-up window rather
+  // than being permanently suppressed or permanently un-suppressed.
+  const cameraStreamStartedAtRef = useRef<number | null>(null);
+  const firstReadyFrameAtRef = useRef<number | null>(null);
+  const [cameraStartupPhaseState, setCameraStartupPhaseState] = useState<CameraStartupPhase>(
+    "waiting_for_first_frame",
+  );
   // Local exam-content blur/overlay driven by AI camera violation events
   // (distinct from browser/window blur — see aiCameraViolationOverlay.ts).
   // Purely local UI state: acknowledging it clears this back to null but
@@ -395,11 +418,29 @@ export default function TakeExamPage({
   }, []);
 
   const loadSubmission = useCallback(async () => {
-    const res = await fetch(`/api/submissions/${id}`);
-    if (!res.ok) return null;
-    const d: SubmissionData = await res.json();
-    applySubmissionData(d);
-    return d;
+    try {
+      const res = await fetch(`/api/submissions/${id}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setLoadError(
+          res.status === 404
+            ? "This exam submission could not be found."
+            : res.status === 403
+              ? "You don't have access to this exam submission."
+              : typeof body?.error === "string"
+                ? body.error
+                : `Could not load this exam (status ${res.status}). Try refreshing the page.`,
+        );
+        return null;
+      }
+      const d: SubmissionData = await res.json();
+      setLoadError(null);
+      applySubmissionData(d);
+      return d;
+    } catch {
+      setLoadError("Could not load this exam — check your connection and try refreshing the page.");
+      return null;
+    }
   }, [id, applySubmissionData]);
 
   // One-Question-At-A-Time Exam Delivery v1 — see
@@ -876,6 +917,12 @@ export default function TakeExamPage({
       cameraStreamRef.current.getTracks().forEach((t) => t.stop());
       cameraStreamRef.current = null;
     }
+    // Camera Startup Readiness v1 — a stopped stream has no readiness
+    // state at all; the next startCamera() call gets a completely fresh
+    // warm-up window, never an inherited one.
+    cameraStreamStartedAtRef.current = null;
+    firstReadyFrameAtRef.current = null;
+    setCameraStartupPhaseState("waiting_for_first_frame");
   }
 
   async function startCamera(): Promise<boolean> {
@@ -885,6 +932,14 @@ export default function TakeExamPage({
       cameraStreamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
       setCameraStatus("granted");
+      // Camera Startup Readiness v1 — see
+      // docs/on-device-ai-integrity-detection-v1.md. Reset on every
+      // successful (re)acquisition, including a restart after the stream
+      // was lost, so that attempt gets its own fresh warm-up window
+      // rather than reusing timing from a previous stream.
+      cameraStreamStartedAtRef.current = Date.now();
+      firstReadyFrameAtRef.current = null;
+      setCameraStartupPhaseState("waiting_for_first_frame");
       reportIntegrityEvent("CAMERA_PERMISSION_GRANTED");
       reportIntegrityEvent("CAMERA_STARTED");
       return true;
@@ -1157,7 +1212,51 @@ export default function TakeExamPage({
       logAiCameraDebug("tick: start", { tickTimestamp: now, cadenceMs: currentDetectionDelayMs });
 
       try {
-        if (!video || video.readyState < 2 || video.videoWidth === 0) return;
+        if (!isVideoFrameReady(video)) return;
+
+        // Camera Startup Readiness v1 — see
+        // docs/on-device-ai-integrity-detection-v1.md ("Camera startup
+        // readiness"). This is the fix for false CAMERA_VIEW_BLOCKED/
+        // CAMERA_TOO_DARK/NO_PERSON_VISIBLE/POSSIBLE_PHONE_VISIBLE/
+        // POSSIBLE_SECOND_PERSON_VISIBLE on first exam start: passing
+        // isVideoFrameReady above only means the video element has SOME
+        // frame, not that the camera's auto-exposure/auto-focus have
+        // settled yet. Detection/inference still runs every tick from
+        // here on (so the model warms up and the local overlay/quality
+        // pipeline stay exercised) — only EMISSION (backend logging and
+        // the local violation overlay) is suppressed until the grace
+        // period since the first ready frame has elapsed.
+        if (firstReadyFrameAtRef.current == null) {
+          firstReadyFrameAtRef.current = now;
+          logAiCameraDebug("camera startup: first ready frame observed", {
+            readyState: video!.readyState,
+            videoWidth: video!.videoWidth,
+            videoHeight: video!.videoHeight,
+            warmUpStartedAt: now,
+          });
+        }
+        const suppressStartup = shouldSuppressCameraIntegrityDuringStartup(firstReadyFrameAtRef.current, now);
+        const nextStartupPhase = cameraStartupPhase({
+          firstReadyFrameAt: firstReadyFrameAtRef.current,
+          now,
+          streamStartedAt: cameraStreamStartedAtRef.current,
+        });
+        if (nextStartupPhase !== cameraStartupPhaseState) {
+          logAiCameraDebug("camera startup: phase changed", {
+            previousPhase: cameraStartupPhaseState,
+            nextPhase: nextStartupPhase,
+            firstReadyFrameAt: firstReadyFrameAtRef.current,
+            warmUpEndedAt: nextStartupPhase === "ready" ? now : null,
+          });
+          setCameraStartupPhaseState(nextStartupPhase);
+        }
+        if (suppressStartup) {
+          logAiCameraDebug("tick: suppressed — camera starting up", {
+            reason: firstReadyFrameAtRef.current === now ? "no-video-dimensions-yet" : "warm-up-period",
+            firstReadyFrameAt: firstReadyFrameAtRef.current,
+            msSinceFirstReadyFrame: now - firstReadyFrameAtRef.current,
+          });
+        }
 
         if (!detectionCanvasRef.current) {
           detectionCanvasRef.current = document.createElement("canvas");
@@ -1188,17 +1287,24 @@ export default function TakeExamPage({
         // overlay) is independent of the backend cooldown; `shouldEmit`
         // (drives backend logging) additionally requires it. See
         // shouldShowLocalAiOverlay / shouldLogAiIntegrityEvent in
-        // cameraIntegrityDetection.ts.
-        const blockedDecision = decideFrameQualityEmission(
+        // cameraIntegrityDetection.ts. Both are forced false during
+        // camera startup (see suppressStartup above) — a transiently
+        // black/artifacted warm-up frame must never log an event or show
+        // the violation overlay.
+        const blockedDecisionRaw = decideFrameQualityEmission(
           quality === "blocked",
           blockedCount,
           cooldown.canEmit("CAMERA_VIEW_BLOCKED", now, 60_000),
         );
-        const darkDecision = decideFrameQualityEmission(
+        const darkDecisionRaw = decideFrameQualityEmission(
           quality === "dark",
           darkCount,
           cooldown.canEmit("CAMERA_TOO_DARK", now, 60_000),
         );
+        const blockedDecision = suppressStartup
+          ? { conditionMet: false, shouldEmit: false }
+          : blockedDecisionRaw;
+        const darkDecision = suppressStartup ? { conditionMet: false, shouldEmit: false } : darkDecisionRaw;
 
         if (blockedDecision.shouldEmit) {
           cooldown.markEmitted("CAMERA_VIEW_BLOCKED", now);
@@ -1279,15 +1385,26 @@ export default function TakeExamPage({
             // events — but the local overlay, driven by `conditionMet`
             // below, is not held back by that same cooldown.
             const phoneCooldownOk = cooldown.canEmit("POSSIBLE_PHONE_VISIBLE", now, 45_000);
-            phoneDecision = decidePhoneEmission(phone, phoneCooldownOk);
-
             const secondPersonCount = cooldown.recordObservation("secondPerson", person.multiplePersons);
             const secondPersonCooldownOk = cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000);
-            secondPersonDecision = decideSecondPersonEmission(person, secondPersonCount, secondPersonCooldownOk);
-
             const noPersonCount = cooldown.recordObservation("noPerson", person.noPersonDetected);
             const noPersonCooldownOk = cooldown.canEmit("NO_PERSON_VISIBLE", now, 45_000);
-            noPersonDecision = decideNoPersonEmission(person, noPersonCount, noPersonCooldownOk);
+
+            // Camera Startup Readiness v1 — counters above keep tracking
+            // consecutive observations even during warm-up (so a signal
+            // that's still true once warm-up ends can confirm quickly),
+            // but the decisions themselves are forced to "nothing
+            // detected" while suppressStartup is true — never emits an
+            // event or shows the local overlay for a warm-up frame.
+            phoneDecision = suppressStartup
+              ? { conditionMet: false, shouldEmit: false, confidenceBand: null }
+              : decidePhoneEmission(phone, phoneCooldownOk);
+            secondPersonDecision = suppressStartup
+              ? { conditionMet: false, shouldEmit: false, confidenceBand: null }
+              : decideSecondPersonEmission(person, secondPersonCount, secondPersonCooldownOk);
+            noPersonDecision = suppressStartup
+              ? { conditionMet: false, shouldEmit: false }
+              : decideNoPersonEmission(person, noPersonCount, noPersonCooldownOk);
 
             logAiCameraDebug("tick: phone decision", {
               phoneDetected: phone.detected,
@@ -1467,6 +1584,18 @@ export default function TakeExamPage({
     saveAnswer(questionId, value);
   }
 
+  if (!data && loadError) {
+    return (
+      <div className="mx-auto max-w-lg">
+        <div className="rounded border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          <p>{loadError}</p>
+          <button onClick={() => loadSubmission()} className="mt-2 text-sm underline">
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (!data) return <p className="text-gray-500">Loading...</p>;
 
   if (data.status !== "IN_PROGRESS") {
@@ -1803,14 +1932,20 @@ export default function TakeExamPage({
           {enableAiCameraIntegrityChecks && cameraStatus === "granted" && (
             <span
               className={
-                aiCheckStatus === "unavailable"
+                aiCheckStatus === "unavailable" || cameraStartupPhaseState === "timed_out"
                   ? "rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600"
-                  : "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
+                  : cameraStartupPhaseState !== "ready"
+                    ? "rounded bg-yellow-100 px-2 py-0.5 text-xs text-yellow-700"
+                    : "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
               }
             >
               {aiCheckStatus === "unavailable"
                 ? "Camera integrity checks unavailable"
-                : "Camera integrity checks active"}
+                : cameraStartupPhaseState === "timed_out"
+                  ? "Camera setup issue — checks unavailable"
+                  : cameraStartupPhaseState !== "ready"
+                    ? "Starting camera checks..."
+                    : "Camera integrity checks active"}
             </span>
           )}
           <a href="/privacy/student-exam-notice" target="_blank" rel="noreferrer" className="text-xs underline">
@@ -1872,6 +2007,23 @@ export default function TakeExamPage({
                 playsInline
                 className="w-40 rounded border border-gray-200"
               />
+              {/* Camera Startup Readiness v1 — a calm, non-alarming
+                  status message during the brief warm-up window, never
+                  the violation overlay (see
+                  docs/on-device-ai-integrity-detection-v1.md). */}
+              {enableAiCameraIntegrityChecks &&
+                (cameraStartupPhaseState === "waiting_for_first_frame" ||
+                  cameraStartupPhaseState === "warming_up") && (
+                  <p className="mt-1 text-xs text-gray-500">
+                    Camera is starting. Please keep your face visible.
+                  </p>
+                )}
+              {enableAiCameraIntegrityChecks && cameraStartupPhaseState === "timed_out" && (
+                <p className="mt-1 text-xs text-amber-700">
+                  Camera checks could not start. You can continue your exam — try refreshing the
+                  camera if this persists.
+                </p>
+              )}
             </div>
           )}
         </div>
