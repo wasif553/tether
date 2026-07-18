@@ -2,10 +2,11 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
-import { parseSecureSettings, severityFor } from "@/lib/secureExam";
+import { parseSecureSettings, questionPoolsActive, severityFor } from "@/lib/secureExam";
 import { Prisma } from "@/generated/prisma/client";
 import { captureNetworkEvidence, getClientIpFromRequest } from "@/lib/networkEvidence";
 import { canAcceptSubmit, submissionDeadline } from "@/lib/assessmentLifecycle";
+import { resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
 
 function studentSubmitResponse(submission: {
   id: string;
@@ -86,11 +87,27 @@ export async function POST(
 
     const answersByQuestion = new Map(submission.answers.map((a) => [a.questionId, a]));
 
+    // Question Pools v1 — see docs/question-pools-v1.md. Grade only the
+    // question set this submission was actually given: when pools are
+    // active, that's the persisted selected subset, not every question
+    // in the exam/pools. A student is never penalised for a pool
+    // question they were never shown, and totalScore/max-possible-marks
+    // only ever reflect their own selected set. Falls back to the full
+    // exam question set unchanged when pools aren't active.
+    const effectiveQuestionIds = new Set(
+      resolveEffectiveQuestionIds({
+        examQuestionIds: submission.exam.questions.map((q) => q.id),
+        stored: submission.questionOrderJson,
+        questionPoolsActive: questionPoolsActive(settings),
+      }),
+    );
+    const questionsToGrade = submission.exam.questions.filter((q) => effectiveQuestionIds.has(q.id));
+
     let autoScore = 0;
     let hasEssay = false;
     const answerOps: Prisma.PrismaPromise<unknown>[] = [];
 
-    for (const question of submission.exam.questions) {
+    for (const question of questionsToGrade) {
       if (question.type === "ESSAY") {
         hasEssay = true;
         continue;

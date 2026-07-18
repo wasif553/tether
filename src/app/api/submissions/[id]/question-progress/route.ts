@@ -20,8 +20,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { severityFor } from "@/lib/secureExam";
-import { isBlockedBackNavigation, nextAllowedIndex } from "@/lib/questionDelivery";
+import { questionPoolsActive, severityFor } from "@/lib/secureExam";
+import { isBlockedBackNavigation, nextAllowedIndex, resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
 import { buildOneQuestionPayload, loadOneQuestionSubmission, OneQuestionModeError } from "@/lib/submissionQuestionPayload";
 
 const bodySchema = z.object({
@@ -49,7 +49,14 @@ export async function POST(
   try {
     const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id);
     const storedIndex = submission.currentQuestionIndex;
-    const total = submission.exam.questions.length;
+    // Question Pools v1 — total is the SELECTED question count for this
+    // submission when pools are active, never the full exam question
+    // count. See docs/question-pools-v1.md.
+    const total = resolveEffectiveQuestionIds({
+      examQuestionIds: submission.exam.questions.map((q) => q.id),
+      stored: submission.questionOrderJson,
+      questionPoolsActive: questionPoolsActive(settings),
+    }).length;
 
     const blocked = isBlockedBackNavigation(requestedIndex, storedIndex, settings.allowBackNavigation);
     const finalIndex = nextAllowedIndex(requestedIndex, storedIndex, settings.allowBackNavigation, total);

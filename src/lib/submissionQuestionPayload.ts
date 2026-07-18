@@ -9,13 +9,13 @@
  * never be imported from a "use client" component.
  */
 import { prisma } from "@/lib/prisma";
-import { parseSecureSettings, type SecureExamSettings } from "@/lib/secureExam";
+import { parseSecureSettings, questionPoolsActive, type SecureExamSettings } from "@/lib/secureExam";
 import {
   canNavigateNext,
   canNavigatePrevious,
   clampQuestionIndex,
+  resolveEffectiveQuestionIds,
   resolveOptionOrder,
-  resolveQuestionOrder,
 } from "@/lib/questionDelivery";
 
 export class OneQuestionModeError extends Error {
@@ -83,11 +83,18 @@ export type OneQuestionPayload = {
  */
 export function buildOneQuestionPayload(
   submission: SubmissionWithQuestions,
-  settings: Pick<SecureExamSettings, "allowBackNavigation">,
+  settings: Pick<
+    SecureExamSettings,
+    "allowBackNavigation" | "enableQuestionPools" | "questionPoolSelectionMode"
+  >,
   index: number,
 ): OneQuestionPayload | null {
   const originalIds = submission.exam.questions.map((q) => q.id);
-  const orderedIds = resolveQuestionOrder(originalIds, submission.questionOrderJson);
+  const orderedIds = resolveEffectiveQuestionIds({
+    examQuestionIds: originalIds,
+    stored: submission.questionOrderJson,
+    questionPoolsActive: questionPoolsActive(settings),
+  });
   const total = orderedIds.length;
   const clampedIndex = clampQuestionIndex(index, total);
   const questionId = orderedIds[clampedIndex];

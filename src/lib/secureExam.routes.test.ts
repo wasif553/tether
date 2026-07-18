@@ -15,6 +15,8 @@ const evidenceRoute = await import("../app/api/lecturer/submissions/[id]/evidenc
 const marksReleaseRoute = await import("../app/api/lecturer/exams/[examId]/marks-release/route");
 const questionRoute = await import("../app/api/submissions/[id]/question/route");
 const questionProgressRoute = await import("../app/api/submissions/[id]/question-progress/route");
+const questionPoolsRoute = await import("../app/api/exams/[id]/question-pools/route");
+const questionPoolRoute = await import("../app/api/exams/[id]/question-pools/[poolId]/route");
 
 let testInstitution: { id: string };
 
@@ -887,5 +889,316 @@ describe("One-Question-At-A-Time Exam Delivery v1", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(Array.isArray(body.evidenceFrames)).toBe(true);
+  });
+});
+
+// Question Pools v1 — see docs/question-pools-v1.md.
+describe("Question Pools v1", () => {
+  async function createPoolExam() {
+    return prisma.exam.create({
+      data: {
+        title: `Question Pool Exam ${Date.now()}-${Math.random()}`,
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: {
+          secureModeEnabled: true,
+          enableQuestionPools: true,
+          questionPoolSelectionMode: "DRAW_FROM_POOLS",
+        },
+      },
+    });
+  }
+
+  async function createPool(examId: string, drawCount: number | null) {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const res = await questionPoolsRoute.POST(
+      jsonRequest("POST", { name: "Programming basics", drawCount }),
+      { params: Promise.resolve({ id: examId }) },
+    );
+    return res.json();
+  }
+
+  async function createPoolQuestions(examId: string, poolId: string, count: number) {
+    const questions = [];
+    for (let i = 0; i < count; i++) {
+      questions.push(
+        await prisma.question.create({
+          data: {
+            examId,
+            type: "SHORT_ANSWER",
+            text: `Pool question ${i}`,
+            points: 1,
+            correctAnswer: `answer-${i}`,
+            order: i,
+            questionPoolId: poolId,
+          },
+        }),
+      );
+    }
+    return questions;
+  }
+
+  async function startAsStudent(examId: string, studentUser: { id: string } = student) {
+    mockAuth.mockResolvedValue(sessionFor(studentUser.id, "STUDENT"));
+    const res = await startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: examId }) });
+    return res.json();
+  }
+
+  it("2/9. selects only drawCount questions and never exposes non-selected pool questions", async () => {
+    const exam = await createPoolExam();
+    const pool = await createPool(exam.id, 3);
+    await createPoolQuestions(exam.id, pool.id, 8);
+
+    const submission = await startAsStudent(exam.id);
+    const res = await submissionRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    const body = await res.json();
+    expect(body.exam.questions).toHaveLength(3);
+    expect(body.exam.totalQuestions).toBe(3);
+  });
+
+  it("10. correct answers are never exposed to the student", async () => {
+    const exam = await createPoolExam();
+    const pool = await createPool(exam.id, 2);
+    await createPoolQuestions(exam.id, pool.id, 5);
+
+    const submission = await startAsStudent(exam.id);
+    const res = await submissionRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    const body = await res.json();
+    expect(JSON.stringify(body)).not.toMatch(/answer-\d/);
+  });
+
+  it("3/4. selected questions are persisted per submission and stable across refresh", async () => {
+    const exam = await createPoolExam();
+    const pool = await createPool(exam.id, 3);
+    await createPoolQuestions(exam.id, pool.id, 10);
+
+    const submission = await startAsStudent(exam.id);
+    const first = await (
+      await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    const second = await (
+      await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    expect(second.exam.questions.map((q: { id: string }) => q.id)).toEqual(
+      first.exam.questions.map((q: { id: string }) => q.id),
+    );
+  });
+
+  it("5. different submissions usually receive different selected sets", async () => {
+    const exam = await createPoolExam();
+    const pool = await createPool(exam.id, 3);
+    await createPoolQuestions(exam.id, pool.id, 10);
+
+    const selections = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      const extraStudent = await prisma.user.create({
+        data: {
+          name: `Pool Student ${i}`,
+          email: `pool-stud-${Date.now()}-${i}@test.local`,
+          passwordHash: "x",
+          role: "STUDENT",
+          institutionId: testInstitution.id,
+        },
+      });
+      const submission = await startAsStudent(exam.id, extraStudent);
+      const body = await (
+        await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+      ).json();
+      selections.add(body.exam.questions.map((q: { id: string }) => q.id).sort().join(","));
+      await prisma.submission.deleteMany({ where: { studentId: extraStudent.id } });
+      await prisma.user.delete({ where: { id: extraStudent.id } });
+    }
+    expect(selections.size).toBeGreaterThan(1);
+  });
+
+  it("6. drawCount greater than available questions includes all available questions", async () => {
+    const exam = await createPoolExam();
+    const pool = await createPool(exam.id, 100);
+    await createPoolQuestions(exam.id, pool.id, 4);
+
+    const submission = await startAsStudent(exam.id);
+    const body = await (
+      await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    expect(body.exam.questions).toHaveLength(4);
+  });
+
+  it("7. unpooled questions are always included alongside a pool draw", async () => {
+    const exam = await createPoolExam();
+    const pool = await createPool(exam.id, 2);
+    await createPoolQuestions(exam.id, pool.id, 5);
+    const unpooled = await prisma.question.create({
+      data: { examId: exam.id, type: "ESSAY", text: "Unpooled essay", points: 2, order: 99 },
+    });
+
+    const submission = await startAsStudent(exam.id);
+    const body = await (
+      await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    expect(body.exam.questions).toHaveLength(3);
+    expect(body.exam.questions.some((q: { id: string }) => q.id === unpooled.id)).toBe(true);
+  });
+
+  it("8. one-question mode serves only the selected questions", async () => {
+    const exam = await prisma.exam.create({
+      data: {
+        title: `Pool One-Question Exam ${Date.now()}`,
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: {
+          secureModeEnabled: true,
+          enableQuestionPools: true,
+          questionPoolSelectionMode: "DRAW_FROM_POOLS",
+          oneQuestionAtATime: true,
+        },
+      },
+    });
+    const pool = await createPool(exam.id, 2);
+    await createPoolQuestions(exam.id, pool.id, 6);
+
+    const submission = await startAsStudent(exam.id);
+    const res = await questionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    const body = await res.json();
+    expect(body.totalQuestions).toBe(2);
+  });
+
+  it("11/12. grading total uses only the selected question set; a student is not penalised for unselected questions", async () => {
+    const exam = await createPoolExam();
+    const pool = await createPool(exam.id, 2);
+    const questions = await createPoolQuestions(exam.id, pool.id, 6);
+
+    const submission = await startAsStudent(exam.id);
+    const submissionBody = await (
+      await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    const selectedIds: string[] = submissionBody.exam.questions.map((q: { id: string }) => q.id);
+    expect(selectedIds).toHaveLength(2);
+
+    // Answer every selected question correctly.
+    for (const qid of selectedIds) {
+      const question = questions.find((q) => q.id === qid)!;
+      await answersRoute.PATCH(jsonRequest("PATCH", { questionId: qid, response: question.correctAnswer }), {
+        params: Promise.resolve({ id: submission.id }),
+      });
+    }
+
+    const submitRes = await submitRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
+    expect(submitRes.status).toBe(200);
+    const submitBody = await submitRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    await marksReleaseRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const finalRes = await submissionRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    const finalBody = await finalRes.json();
+    // Full marks for the 2 selected (and correctly answered) questions —
+    // never penalised for the 4 unselected pool questions.
+    expect(finalBody.totalScore).toBe(2);
+    expect(submitBody.status).toBe("GRADED");
+  });
+
+  it("13. randomiseQuestionOrder still works on the selected set", async () => {
+    const exam = await prisma.exam.create({
+      data: {
+        title: `Pool Randomised Order Exam ${Date.now()}`,
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: {
+          secureModeEnabled: true,
+          enableQuestionPools: true,
+          questionPoolSelectionMode: "DRAW_FROM_POOLS",
+          randomiseQuestionOrder: true,
+        },
+      },
+    });
+    const pool = await createPool(exam.id, 5);
+    await createPoolQuestions(exam.id, pool.id, 5);
+
+    const submission = await startAsStudent(exam.id);
+    const body = await (
+      await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    expect(body.exam.questions).toHaveLength(5);
+  });
+
+  it("15. lecturer can see the selected questions for a submission via the grading view", async () => {
+    const exam = await createPoolExam();
+    const pool = await createPool(exam.id, 2);
+    await createPoolQuestions(exam.id, pool.id, 8);
+
+    const submission = await startAsStudent(exam.id);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const res = await submissionRoute.GET(jsonRequest("GET"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    const body = await res.json();
+    expect(body.exam.questions).toHaveLength(2);
+  });
+
+  it("a student never sees pool metadata via GET /api/exams/[id]", async () => {
+    const exam = await createPoolExam();
+    const pool = await createPool(exam.id, 2);
+    await createPoolQuestions(exam.id, pool.id, 5);
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const res = await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    const body = await res.json();
+    expect(body.questionPools).toBeUndefined();
+    expect(body.questions.every((q: { questionPoolId?: unknown }) => q.questionPoolId === undefined)).toBe(true);
+  });
+
+  it("deleting a pool unpools its questions rather than deleting them", async () => {
+    const exam = await createPoolExam();
+    const pool = await createPool(exam.id, 2);
+    const questions = await createPoolQuestions(exam.id, pool.id, 3);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const delRes = await questionPoolRoute.DELETE(jsonRequest("DELETE"), {
+      params: Promise.resolve({ id: exam.id, poolId: pool.id }),
+    });
+    expect(delRes.status).toBe(200);
+
+    const remaining = await prisma.question.findMany({ where: { id: { in: questions.map((q) => q.id) } } });
+    expect(remaining).toHaveLength(3);
+    expect(remaining.every((q) => q.questionPoolId === null)).toBe(true);
+  });
+
+  it("6. an exam with pools disabled preserves existing full-paper behaviour", async () => {
+    const exam = await prisma.exam.create({
+      data: {
+        title: `Pools Disabled Exam ${Date.now()}`,
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: { secureModeEnabled: true },
+      },
+    });
+    await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Q1", points: 1, order: 0 },
+    });
+    await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Q2", points: 1, order: 1 },
+    });
+
+    const submission = await startAsStudent(exam.id);
+    const body = await (
+      await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    expect(body.exam.questions).toHaveLength(2);
   });
 });

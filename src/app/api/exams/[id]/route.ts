@@ -65,7 +65,14 @@ export async function GET(
   try {
     const exam = await prisma.exam.findUnique({
       where: { id },
-      include: { questions: { orderBy: { order: "asc" } } },
+      include: {
+        questions: { orderBy: { order: "asc" } },
+        // Question Pools v1 — see docs/question-pools-v1.md. Lecturer-only
+        // (stripped from the student-facing response below) — a student
+        // must never see pool names/draw counts/which questions are in a
+        // pool.
+        questionPools: { orderBy: { order: "asc" } },
+      },
     });
 
     if (!exam) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -88,10 +95,15 @@ export async function GET(
       if (!exam.published) {
         return NextResponse.json({ error: "Forbidden" }, { status: 403 });
       }
+      // Question Pools v1 — a student must never see pool names, draw
+      // counts, or which pool a question belongs to (see
+      // docs/question-pools-v1.md, "What students see").
+      const examWithoutPools = { ...omitAccessCodeHash(exam) } as Partial<typeof exam>;
+      delete examWithoutPools.questionPools;
       const sanitized = {
-        ...omitAccessCodeHash(exam),
+        ...examWithoutPools,
         secureSettings,
-        questions: exam.questions.map((q) => ({ ...q, correctAnswer: undefined })),
+        questions: exam.questions.map((q) => ({ ...q, correctAnswer: undefined, questionPoolId: undefined })),
       };
       return NextResponse.json(sanitized);
     }

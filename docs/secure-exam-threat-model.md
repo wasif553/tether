@@ -132,6 +132,22 @@ not replace, the exam watermark, camera monitoring, AI camera integrity
 checks, evidence frames, and post-exam lecturer review described
 elsewhere in this document.
 
+## Question Pools v1
+
+A separate, independent opt-in — see docs/question-pools-v1.md for the
+full design. A lecturer can group interchangeable questions into pools
+and have each student attempt draw a smaller, random, per-attempt-stable
+subset (plus every unpooled question), so students do not all see an
+identical paper. Reduces answer sharing without making it impossible —
+two students can still be drawn overlapping sets, and a student can
+still share the individual questions they received. Grading, marks
+release, and the lecturer's per-submission grading view all operate on
+each student's own selected question set, never penalising a student for
+a pool question they were never shown. Works alongside, and reuses
+infrastructure from, One-Question-At-A-Time Exam Delivery v1 (the same
+`Submission.questionOrderJson` column stores the selected set) — neither
+feature requires the other.
+
 ## Future controls (explicitly out of scope for v1)
 
 - Electron-based lockdown browser (blocks OS-level app switching).

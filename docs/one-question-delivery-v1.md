@@ -1,8 +1,11 @@
 # One-Question-At-A-Time Exam Delivery v1
 
 See also docs/secure-exam-threat-model.md ("One-Question-At-A-Time Exam
-Delivery v1") and docs/one-question-delivery-migration.sql for the
-production migration.
+Delivery v1"), docs/one-question-delivery-migration.sql for the
+production migration, and docs/question-pools-v1.md — a separate,
+independent opt-in that reuses this feature's `Submission.questionOrderJson`
+column and `resolveEffectiveQuestionIds()` resolution function to store
+each student's randomly-drawn question subset.
 
 ## What this is
 

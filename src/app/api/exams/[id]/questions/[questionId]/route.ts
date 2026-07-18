@@ -12,6 +12,9 @@ const updateQuestionSchema = z.object({
   correctAnswer: z.string().optional(),
   points: z.number().int().positive().optional(),
   order: z.number().int().optional(),
+  // Question Pools v1 — see docs/question-pools-v1.md. null unassigns
+  // the question from any pool ("No pool").
+  questionPoolId: z.string().min(1).nullable().optional(),
 });
 
 async function getOwnedQuestion(examId: string, questionId: string, lecturerId: string, session: Session) {
@@ -45,6 +48,15 @@ export async function PATCH(
     const parsed = updateQuestionSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+    }
+
+    // A pool id must belong to this same exam — never let a question be
+    // reassigned to another exam's pool.
+    if (parsed.data.questionPoolId) {
+      const pool = await prisma.questionPool.findFirst({
+        where: { id: parsed.data.questionPoolId, examId: id },
+      });
+      if (!pool) return NextResponse.json({ error: "Invalid question pool" }, { status: 400 });
     }
 
     const updated = await prisma.question.update({

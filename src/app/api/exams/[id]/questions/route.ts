@@ -10,6 +10,9 @@ const createQuestionSchema = z.object({
   options: z.array(z.string()).optional(),
   correctAnswer: z.string().optional(),
   points: z.number().int().positive().default(1),
+  // Question Pools v1 — see docs/question-pools-v1.md. Omitted/null means
+  // "no pool" — always included for every student.
+  questionPoolId: z.string().min(1).nullable().optional(),
 });
 
 export async function POST(
@@ -34,7 +37,14 @@ export async function POST(
       return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
     }
 
-    const { type, text, options, correctAnswer, points } = parsed.data;
+    const { type, text, options, correctAnswer, points, questionPoolId } = parsed.data;
+
+    // A pool id must belong to this same exam — never let a question be
+    // assigned to another exam's pool.
+    if (questionPoolId) {
+      const pool = await prisma.questionPool.findFirst({ where: { id: questionPoolId, examId: id } });
+      if (!pool) return NextResponse.json({ error: "Invalid question pool" }, { status: 400 });
+    }
 
     const lastQuestion = await prisma.question.findFirst({
       where: { examId: id },
@@ -50,6 +60,7 @@ export async function POST(
         correctAnswer,
         points,
         order: (lastQuestion?.order ?? -1) + 1,
+        questionPoolId: questionPoolId ?? undefined,
       },
     });
 

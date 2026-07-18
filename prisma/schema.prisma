@@ -230,8 +230,38 @@ model Exam {
   availableFrom    DateTime?
   availableUntil   DateTime?
 
+  // Question Pools v1 (additive, opt-in) — see docs/question-pools-v1.md.
+  questionPools QuestionPool[]
+
   @@index([institutionId])
   @@index([courseId])
+}
+
+// Question Pools v1 (additive, opt-in) — see docs/question-pools-v1.md.
+// A lecturer-defined group of interchangeable questions within one exam;
+// each student attempt draws `drawCount` questions at random from each
+// pool at attempt start (see buildSelectedQuestionIds() in
+// src/lib/questionDelivery.ts). Questions never assigned to a pool
+// (Question.questionPoolId null) are always included for every student —
+// see docs/question-pools-v1.md, "Unpooled questions."
+model QuestionPool {
+  id          String     @id @default(cuid())
+  examId      String
+  exam        Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  // Number of questions to draw from this pool per attempt. Null (or <= 0)
+  // means "include every question in this pool" — see
+  // docs/question-pools-v1.md. If greater than the number of questions
+  // actually in the pool, every available question is included instead
+  // of erroring.
+  drawCount Int?
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  questions Question[]
+
+  @@index([examId])
 }
 
 model Question {
@@ -244,6 +274,11 @@ model Question {
   correctAnswer String?
   points        Int          @default(1)
   order         Int          @default(0)
+  // Question Pools v1 (additive, opt-in, nullable) — see
+  // docs/question-pools-v1.md. Null means "not in any pool" — always
+  // included for every student regardless of pool settings.
+  questionPoolId String?
+  questionPool   QuestionPool? @relation(fields: [questionPoolId], references: [id], onDelete: SetNull)
   answers       Answer[]
 }
 

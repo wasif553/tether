@@ -96,9 +96,39 @@ export const secureExamSettingsSchema = z.object({
   // never a positional index, so shuffling display order never affects
   // scoring.
   randomiseMcqOptionOrder: z.boolean().default(false),
+
+  // --- Question Pools v1 (additive, opt-in) — see
+  // docs/question-pools-v1.md. When enabled with
+  // questionPoolSelectionMode "DRAW_FROM_POOLS", each student attempt
+  // draws a random, per-submission-stable subset of questions from each
+  // QuestionPool (plus every unpooled question) at attempt start — see
+  // buildSelectedQuestionIds() in src/lib/questionDelivery.ts. Defaults
+  // to false/"ALL_QUESTIONS" — never silently changes which questions an
+  // existing exam shows.
+  enableQuestionPools: z.boolean().default(false),
+  // A string enum rather than a second boolean: "has pools" and "is
+  // actually drawing a subset" are different questions (a lecturer may
+  // want to define pools without turning on drawing yet), and this keeps
+  // the two independently toggleable without a confusing
+  // enableQuestionPools-implies-nothing-until-a-second-flag-is-also-true
+  // relationship.
+  questionPoolSelectionMode: z.enum(["ALL_QUESTIONS", "DRAW_FROM_POOLS"]).default("ALL_QUESTIONS"),
 });
 
 export type SecureExamSettings = z.infer<typeof secureExamSettingsSchema>;
+
+/**
+ * Single source of truth for "is question-pool drawing actually active"
+ * — used by every server route that needs to decide whether to resolve a
+ * submission's question set via the pool-selection path
+ * (resolveSelectedQuestionIds) or the plain path (resolveQuestionOrder).
+ * See docs/question-pools-v1.md.
+ */
+export function questionPoolsActive(
+  settings: Pick<SecureExamSettings, "enableQuestionPools" | "questionPoolSelectionMode">,
+): boolean {
+  return settings.enableQuestionPools && settings.questionPoolSelectionMode === "DRAW_FROM_POOLS";
+}
 
 export const DEFAULT_SECURE_SETTINGS: SecureExamSettings = secureExamSettingsSchema.parse({});
 

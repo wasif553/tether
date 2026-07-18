@@ -27,6 +27,18 @@ type Question = {
   correctAnswer: string | null;
   points: number;
   order: number;
+  // Question Pools v1 — see docs/question-pools-v1.md. Null means "no pool."
+  questionPoolId?: string | null;
+};
+
+// Question Pools v1 — see docs/question-pools-v1.md.
+type QuestionPool = {
+  id: string;
+  name: string;
+  description: string | null;
+  drawCount: number | null;
+  order: number;
+  questionCount: number;
 };
 
 type SecureSettings = {
@@ -55,6 +67,8 @@ type SecureSettings = {
   allowBackNavigation: boolean;
   randomiseQuestionOrder: boolean;
   randomiseMcqOptionOrder: boolean;
+  enableQuestionPools: boolean;
+  questionPoolSelectionMode: "ALL_QUESTIONS" | "DRAW_FROM_POOLS";
 };
 
 type Exam = {
@@ -148,6 +162,12 @@ export default function LecturerExamPage({
     graded: number;
   } | null>(null);
   const [unresolvedHighRisk, setUnresolvedHighRisk] = useState<number | null>(null);
+
+  // Question Pools v1 — see docs/question-pools-v1.md.
+  const [pools, setPools] = useState<QuestionPool[]>([]);
+  const [newPoolName, setNewPoolName] = useState("");
+  const [newPoolDrawCount, setNewPoolDrawCount] = useState("");
+  const [poolsMessage, setPoolsMessage] = useState<string | null>(null);
 
   // Course, Enrolment, Exam Assignment, Scheduling v1 — see
   // docs/course-enrolment-and-exam-assignment.md.
@@ -263,6 +283,58 @@ export default function LecturerExamPage({
     if (res.ok) setCourses(await res.json());
   }
 
+  // Question Pools v1 — see docs/question-pools-v1.md.
+  async function loadPools() {
+    const res = await fetch(`/api/exams/${id}/question-pools`);
+    if (res.ok) setPools(await res.json());
+  }
+
+  async function handleCreatePool() {
+    if (!newPoolName.trim()) return;
+    setPoolsMessage(null);
+    const res = await fetch(`/api/exams/${id}/question-pools`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: newPoolName.trim(),
+        drawCount: newPoolDrawCount ? Number(newPoolDrawCount) : null,
+      }),
+    });
+    if (res.ok) {
+      setNewPoolName("");
+      setNewPoolDrawCount("");
+      loadPools();
+    } else {
+      const body = await res.json().catch(() => null);
+      setPoolsMessage(typeof body?.error === "string" ? body.error : "Could not create pool.");
+    }
+  }
+
+  async function handleUpdatePoolDrawCount(poolId: string, drawCount: number | null) {
+    await fetch(`/api/exams/${id}/question-pools/${poolId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ drawCount }),
+    });
+    loadPools();
+  }
+
+  async function handleDeletePool(poolId: string) {
+    await fetch(`/api/exams/${id}/question-pools/${poolId}`, { method: "DELETE" });
+    loadPools();
+    loadExam({ preserveSecureForm: true });
+  }
+
+  async function handleAssignQuestionPool(questionId: string, questionPoolId: string | null) {
+    await fetch(`/api/exams/${id}/questions/${questionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ questionPoolId }),
+    });
+    loadExam({ preserveSecureForm: true });
+    loadPools();
+  }
+
   async function loadCourseStudents(selectedCourseId: string) {
     if (!selectedCourseId) {
       setCourseStudents([]);
@@ -340,6 +412,7 @@ export default function LecturerExamPage({
     loadLtiLinks();
     loadPlatforms();
     loadCourses();
+    loadPools();
   }, [id]);
 
   useEffect(() => {
@@ -1218,6 +1291,56 @@ export default function LecturerExamPage({
             </div>
           </div>
 
+          <div className="border-t border-gray-200 pt-3">
+            <h3 className="text-sm font-medium">Question pools</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Create a larger set of questions and draw a smaller random selection for each
+              student attempt.
+            </p>
+            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                disabled={!secureForm.secureModeEnabled}
+                checked={secureForm.enableQuestionPools}
+                onChange={(e) =>
+                  setSecureForm({
+                    ...secureForm,
+                    enableQuestionPools: e.target.checked,
+                    // Turning pools off also turns off drawing — a
+                    // silently-inert "drawing" setting with no pools UI
+                    // visible would be confusing.
+                    questionPoolSelectionMode: e.target.checked
+                      ? secureForm.questionPoolSelectionMode
+                      : "ALL_QUESTIONS",
+                  })
+                }
+              />
+              <span>Enable question pools</span>
+            </label>
+            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                disabled={!secureForm.secureModeEnabled || !secureForm.enableQuestionPools}
+                checked={secureForm.questionPoolSelectionMode === "DRAW_FROM_POOLS"}
+                onChange={(e) =>
+                  setSecureForm({
+                    ...secureForm,
+                    questionPoolSelectionMode: e.target.checked ? "DRAW_FROM_POOLS" : "ALL_QUESTIONS",
+                  })
+                }
+              />
+              <span>
+                Draw a random selection for each student attempt
+                <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  Each student receives a stable random selection from each pool. This is a
+                  deterrent, not a guarantee that answer sharing is impossible.
+                </span>
+              </span>
+            </label>
+          </div>
+
           <button
             onClick={handleSaveSecureSettings}
             disabled={savingSecure}
@@ -1484,6 +1607,87 @@ export default function LecturerExamPage({
         </div>
       </div>
 
+      {secureForm?.enableQuestionPools && (
+        <>
+          <h2 className="mt-8 text-lg font-medium">Question pools</h2>
+          <p className="mt-1 text-sm text-gray-500">
+            Create a larger set of questions and draw a smaller random selection for each student
+            attempt.
+          </p>
+          <div className="mt-3 space-y-2">
+            {pools.length === 0 && <p className="text-gray-500">No pools yet.</p>}
+            {pools.map((pool) => (
+              <div key={pool.id} className="rounded border border-gray-200 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium">{pool.name}</p>
+                    <p className="text-xs text-gray-500">{pool.questionCount} question(s) in pool</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-gray-600">Draw this many questions from this pool</label>
+                    <input
+                      type="number"
+                      min={0}
+                      defaultValue={pool.drawCount ?? ""}
+                      placeholder="all"
+                      className="w-16 rounded border border-gray-300 px-2 py-1 text-sm"
+                      onBlur={(e) =>
+                        handleUpdatePoolDrawCount(
+                          pool.id,
+                          e.target.value === "" ? null : Number(e.target.value),
+                        )
+                      }
+                    />
+                    <button
+                      onClick={() => handleDeletePool(pool.id)}
+                      className="text-sm text-red-600 underline"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+                {pool.drawCount != null && pool.drawCount > pool.questionCount && (
+                  <p className="mt-2 text-xs text-amber-700">
+                    This pool has fewer questions than the draw count. Students will receive all
+                    available questions from this pool.
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 flex flex-wrap items-end gap-2 rounded border border-gray-200 p-3">
+            <div>
+              <label className="block text-xs text-gray-600">Pool name</label>
+              <input
+                value={newPoolName}
+                onChange={(e) => setNewPoolName(e.target.value)}
+                className="rounded border border-gray-300 px-2 py-1 text-sm"
+                placeholder="e.g. Programming basics"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-600">Draw this many questions from this pool</label>
+              <input
+                type="number"
+                min={0}
+                value={newPoolDrawCount}
+                onChange={(e) => setNewPoolDrawCount(e.target.value)}
+                className="w-24 rounded border border-gray-300 px-2 py-1 text-sm"
+                placeholder="all"
+              />
+            </div>
+            <button
+              onClick={handleCreatePool}
+              disabled={!newPoolName.trim()}
+              className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+            >
+              Add pool
+            </button>
+          </div>
+          {poolsMessage && <p className="mt-2 text-sm text-red-600">{poolsMessage}</p>}
+        </>
+      )}
+
       <h2 className="mt-8 text-lg font-medium">Questions</h2>
       <div className="mt-3 space-y-3">
         {exam.questions.length === 0 && (
@@ -1508,6 +1712,23 @@ export default function LecturerExamPage({
                   <p className="mt-1 text-sm text-green-700">
                     Correct: {q.correctAnswer}
                   </p>
+                )}
+                {secureForm?.enableQuestionPools && pools.length > 0 && (
+                  <div className="mt-2">
+                    <label className="text-xs text-gray-600">Question pool</label>
+                    <select
+                      className="ml-2 rounded border border-gray-300 px-2 py-1 text-xs"
+                      value={q.questionPoolId ?? ""}
+                      onChange={(e) => handleAssignQuestionPool(q.id, e.target.value || null)}
+                    >
+                      <option value="">No pool</option>
+                      {pools.map((pool) => (
+                        <option key={pool.id} value={pool.id}>
+                          {pool.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 )}
               </div>
               <button

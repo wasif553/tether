@@ -6,8 +6,14 @@ import { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionErrorResponse, requireInstitutionId } from "@/lib/institutionScope";
 import { captureNetworkEvidence } from "@/lib/networkEvidence";
 import { canCreateAttempt, nextAttemptNumber } from "@/lib/assessmentLifecycle";
-import { parseSecureSettings } from "@/lib/secureExam";
-import { buildOptionOrders, buildQuestionOrder, type StoredQuestionOrder } from "@/lib/questionDelivery";
+import { parseSecureSettings, questionPoolsActive } from "@/lib/secureExam";
+import {
+  buildOptionOrders,
+  buildQuestionOrder,
+  buildSelectedQuestionIds,
+  type StoredQuestionOrder,
+} from "@/lib/questionDelivery";
+import { createPlatformAuditLog } from "@/lib/platformAdmin";
 
 export async function POST(
   req: Request,
@@ -21,7 +27,11 @@ export async function POST(
   const { id } = await params;
   const exam = await prisma.exam.findUnique({
     where: { id },
-    include: { questions: { orderBy: { order: "asc" } } },
+    include: {
+      questions: { orderBy: { order: "asc" } },
+      // Question Pools v1 — see docs/question-pools-v1.md.
+      questionPools: true,
+    },
   });
   if (!exam || !exam.published) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -129,8 +139,42 @@ export async function POST(
   // ever expose to the client. Left null when both randomisation
   // settings are off, in which case the original Question.order is used
   // at read time (see resolveQuestionOrder in questionDelivery.ts).
-  const questionOrderJson: StoredQuestionOrder | null =
-    settings.randomiseQuestionOrder || settings.randomiseMcqOptionOrder
+  // Question Pools v1 — see docs/question-pools-v1.md. When active, the
+  // selected/ordered question SUBSET is computed here (and only here,
+  // exactly once) and stored in `selectedQuestionIds`; `questionIds`
+  // (the plain full-exam reorder field) is left unused in this branch.
+  const poolsActive = questionPoolsActive(settings);
+  let poolDrawSummary: Array<{ poolId: string; drawCount: number | null; selectedCount: number }> | null = null;
+
+  const questionOrderJson: StoredQuestionOrder | null = poolsActive
+    ? (() => {
+        const selectedQuestionIds = buildSelectedQuestionIds({
+          questions: exam.questions.map((q) => ({
+            id: q.id,
+            questionPoolId: q.questionPoolId,
+            order: q.order,
+          })),
+          pools: exam.questionPools.map((p) => ({ id: p.id, drawCount: p.drawCount })),
+          randomiseQuestionOrder: settings.randomiseQuestionOrder,
+        });
+        const selectedSet = new Set(selectedQuestionIds);
+        poolDrawSummary = exam.questionPools.map((p) => ({
+          poolId: p.id,
+          drawCount: p.drawCount,
+          selectedCount: exam.questions.filter((q) => q.questionPoolId === p.id && selectedSet.has(q.id)).length,
+        }));
+        return {
+          questionIds: [],
+          selectedQuestionIds,
+          optionOrders: buildOptionOrders({
+            questions: exam.questions
+              .filter((q) => selectedSet.has(q.id))
+              .map((q) => ({ id: q.id, type: q.type, options: q.options as string[] | null })),
+            randomiseMcqOptionOrder: settings.randomiseMcqOptionOrder,
+          }),
+        };
+      })()
+    : settings.randomiseQuestionOrder || settings.randomiseMcqOptionOrder
       ? {
           questionIds: buildQuestionOrder({
             questionIds: exam.questions.map((q) => q.id),
@@ -168,6 +212,26 @@ export async function POST(
       institutionId,
       source: "EXAM_START",
     }).catch(() => {/* evidence capture is best-effort */});
+
+    // Question Pools v1 — lightweight, best-effort audit summary. Never
+    // includes question text — only ids, counts, and the per-pool draw
+    // summary computed above.
+    if (poolsActive && questionOrderJson?.selectedQuestionIds) {
+      createPlatformAuditLog({
+        actorId: session.user.id,
+        action: "QUESTION_POOL_SELECTION_GENERATED",
+        targetType: "Submission",
+        targetId: submission.id,
+        institutionId,
+        metadata: {
+          examId: id,
+          selectedCount: questionOrderJson.selectedQuestionIds.length,
+          poolDrawSummary,
+        },
+      }).catch(() => {
+        // Audit logging is best-effort — never blocks exam start.
+      });
+    }
 
     return NextResponse.json(submission, { status: 201 });
   } catch (err) {

@@ -8,13 +8,16 @@ import { describe, expect, it } from "vitest";
 import {
   buildOptionOrders,
   buildQuestionOrder,
+  buildSelectedQuestionIds,
   canNavigateNext,
   canNavigatePrevious,
   clampQuestionIndex,
   isBlockedBackNavigation,
   nextAllowedIndex,
+  resolveEffectiveQuestionIds,
   resolveOptionOrder,
   resolveQuestionOrder,
+  resolveSelectedQuestionIds,
   shuffleWithRng,
 } from "./questionDelivery";
 
@@ -186,5 +189,148 @@ describe("nextAllowedIndex / isBlockedBackNavigation", () => {
     expect(isBlockedBackNavigation(1, 3, false)).toBe(true);
     expect(isBlockedBackNavigation(4, 3, false)).toBe(false);
     expect(isBlockedBackNavigation(1, 3, true)).toBe(false);
+  });
+});
+
+// Question Pools v1 — see docs/question-pools-v1.md.
+describe("buildSelectedQuestionIds", () => {
+  const q = (id: string, questionPoolId: string | null, order: number) => ({ id, questionPoolId, order });
+
+  it("7. unpooled questions are always included", () => {
+    const result = buildSelectedQuestionIds({
+      questions: [q("u1", null, 0), q("u2", null, 1)],
+      pools: [],
+      randomiseQuestionOrder: false,
+    });
+    expect(result.sort()).toEqual(["u1", "u2"]);
+  });
+
+  it("2. selects exactly drawCount questions from a pool", () => {
+    const questions = [
+      q("u1", null, 0),
+      q("p1", "poolA", 1),
+      q("p2", "poolA", 2),
+      q("p3", "poolA", 3),
+      q("p4", "poolA", 4),
+    ];
+    const result = buildSelectedQuestionIds({
+      questions,
+      pools: [{ id: "poolA", drawCount: 2 }],
+      randomiseQuestionOrder: false,
+      rng: fakeRng([0.9, 0.1, 0.5]),
+    });
+    // 1 unpooled + 2 drawn from the pool of 4.
+    expect(result).toHaveLength(3);
+    expect(result).toContain("u1");
+    const drawnFromPool = result.filter((id) => id !== "u1");
+    expect(drawnFromPool).toHaveLength(2);
+    for (const id of drawnFromPool) expect(["p1", "p2", "p3", "p4"]).toContain(id);
+  });
+
+  it("6. drawCount greater than available questions includes all available questions, no error", () => {
+    const questions = [q("p1", "poolA", 0), q("p2", "poolA", 1)];
+    const result = buildSelectedQuestionIds({
+      questions,
+      pools: [{ id: "poolA", drawCount: 100 }],
+      randomiseQuestionOrder: false,
+    });
+    expect(result.sort()).toEqual(["p1", "p2"]);
+  });
+
+  it("drawCount null or 0 includes every question in the pool", () => {
+    const questions = [q("p1", "poolA", 0), q("p2", "poolA", 1), q("p3", "poolA", 2)];
+    expect(
+      buildSelectedQuestionIds({ questions, pools: [{ id: "poolA", drawCount: null }], randomiseQuestionOrder: false }).sort(),
+    ).toEqual(["p1", "p2", "p3"]);
+    expect(
+      buildSelectedQuestionIds({ questions, pools: [{ id: "poolA", drawCount: 0 }], randomiseQuestionOrder: false }).sort(),
+    ).toEqual(["p1", "p2", "p3"]);
+  });
+
+  it("preserves original Question.order for the selected set when randomiseQuestionOrder is false", () => {
+    const questions = [q("q3", null, 2), q("q1", null, 0), q("q2", null, 1)];
+    const result = buildSelectedQuestionIds({ questions, pools: [], randomiseQuestionOrder: false });
+    expect(result).toEqual(["q1", "q2", "q3"]);
+  });
+
+  it("13. shuffles the combined selected set when randomiseQuestionOrder is true", () => {
+    const questions = [q("q1", null, 0), q("q2", null, 1), q("q3", null, 2), q("q4", null, 3)];
+    const result = buildSelectedQuestionIds({
+      questions,
+      pools: [],
+      randomiseQuestionOrder: true,
+      rng: fakeRng([0.9, 0.1, 0.5, 0.2]),
+    });
+    expect(result.sort()).toEqual(["q1", "q2", "q3", "q4"]);
+  });
+
+  it("never selects a question from a pool that isn't listed in pools (orphaned pool reference)", () => {
+    const questions = [q("p1", "poolA", 0)];
+    const result = buildSelectedQuestionIds({ questions, pools: [], randomiseQuestionOrder: false });
+    expect(result).toEqual([]);
+  });
+
+  it("5. two independently-generated draws (simulating different submissions) usually differ", () => {
+    const questions = Array.from({ length: 10 }, (_, i) => q(`p${i}`, "poolA", i));
+    const drawA = buildSelectedQuestionIds({
+      questions,
+      pools: [{ id: "poolA", drawCount: 4 }],
+      randomiseQuestionOrder: false,
+      rng: fakeRng([0.9, 0.1, 0.5, 0.2, 0.7]),
+    });
+    const drawB = buildSelectedQuestionIds({
+      questions,
+      pools: [{ id: "poolA", drawCount: 4 }],
+      randomiseQuestionOrder: false,
+      rng: fakeRng([0.1, 0.9, 0.05, 0.8, 0.3]),
+    });
+    expect(drawA.sort()).not.toEqual(drawB.sort());
+  });
+});
+
+describe("resolveSelectedQuestionIds", () => {
+  const examQuestionIds = ["q1", "q2", "q3", "q4", "q5"];
+
+  it("4/9. returns the stored selection when valid (a genuine subset of exam questions)", () => {
+    const stored = { questionIds: [], selectedQuestionIds: ["q3", "q1"] };
+    expect(resolveSelectedQuestionIds(examQuestionIds, stored)).toEqual(["q3", "q1"]);
+  });
+
+  it("falls back to every exam question when nothing is stored (pools enabled after attempt start)", () => {
+    expect(resolveSelectedQuestionIds(examQuestionIds, null)).toEqual(examQuestionIds);
+    expect(resolveSelectedQuestionIds(examQuestionIds, { questionIds: [] })).toEqual(examQuestionIds);
+  });
+
+  it("filters out any stored id that is no longer a valid exam question", () => {
+    const stored = { questionIds: [], selectedQuestionIds: ["q1", "deleted-question", "q2"] };
+    expect(resolveSelectedQuestionIds(examQuestionIds, stored)).toEqual(["q1", "q2"]);
+  });
+
+  it("falls back if every stored id is now invalid", () => {
+    const stored = { questionIds: [], selectedQuestionIds: ["gone1", "gone2"] };
+    expect(resolveSelectedQuestionIds(examQuestionIds, stored)).toEqual(examQuestionIds);
+  });
+
+  it("deduplicates stored ids", () => {
+    const stored = { questionIds: [], selectedQuestionIds: ["q1", "q1", "q2"] };
+    expect(resolveSelectedQuestionIds(examQuestionIds, stored)).toEqual(["q1", "q2"]);
+  });
+});
+
+describe("resolveEffectiveQuestionIds", () => {
+  const examQuestionIds = ["q1", "q2", "q3"];
+
+  it("uses the pool-selection resolver when questionPoolsActive is true", () => {
+    const stored = { questionIds: ["irrelevant"], selectedQuestionIds: ["q2"] };
+    expect(
+      resolveEffectiveQuestionIds({ examQuestionIds, stored, questionPoolsActive: true }),
+    ).toEqual(["q2"]);
+  });
+
+  it("uses the plain full-exam resolver when questionPoolsActive is false (existing behavior unchanged)", () => {
+    const stored = { questionIds: ["q3", "q1", "q2"] };
+    expect(
+      resolveEffectiveQuestionIds({ examQuestionIds, stored, questionPoolsActive: false }),
+    ).toEqual(["q3", "q1", "q2"]);
   });
 });

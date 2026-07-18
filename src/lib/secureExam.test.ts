@@ -3,6 +3,7 @@ import {
   activeSafeExamControlLabels,
   DEFAULT_SECURE_SETTINGS,
   parseSecureSettings,
+  questionPoolsActive,
   safeExamModeStatusLabel,
   secureSettingsChanged,
   severityFor,
@@ -296,5 +297,44 @@ describe("One-Question-At-A-Time Exam Delivery v1", () => {
 
   it("QUESTION_BACK_NAVIGATION_BLOCKED is LOW severity (minimum non-zero weight)", () => {
     expect(severityFor("QUESTION_BACK_NAVIGATION_BLOCKED", DEFAULT_SECURE_SETTINGS)).toBe("LOW");
+  });
+});
+
+describe("Question Pools v1", () => {
+  it("1. enableQuestionPools defaults to false", () => {
+    expect(DEFAULT_SECURE_SETTINGS.enableQuestionPools).toBe(false);
+    expect(parseSecureSettings(null).enableQuestionPools).toBe(false);
+  });
+
+  it("questionPoolSelectionMode defaults to ALL_QUESTIONS", () => {
+    expect(DEFAULT_SECURE_SETTINGS.questionPoolSelectionMode).toBe("ALL_QUESTIONS");
+    expect(parseSecureSettings({}).questionPoolSelectionMode).toBe("ALL_QUESTIONS");
+  });
+
+  it("parses both fields when a lecturer sets them explicitly", () => {
+    const result = parseSecureSettings({
+      enableQuestionPools: true,
+      questionPoolSelectionMode: "DRAW_FROM_POOLS",
+    });
+    expect(result.enableQuestionPools).toBe(true);
+    expect(result.questionPoolSelectionMode).toBe("DRAW_FROM_POOLS");
+  });
+
+  it("rejects an invalid questionPoolSelectionMode value and falls back to defaults", () => {
+    expect(parseSecureSettings({ questionPoolSelectionMode: "SOMETHING_ELSE" })).toEqual(
+      DEFAULT_SECURE_SETTINGS,
+    );
+  });
+
+  it("questionPoolsActive is true only when both enableQuestionPools and mode are set", () => {
+    expect(
+      questionPoolsActive({ enableQuestionPools: true, questionPoolSelectionMode: "DRAW_FROM_POOLS" }),
+    ).toBe(true);
+    expect(
+      questionPoolsActive({ enableQuestionPools: true, questionPoolSelectionMode: "ALL_QUESTIONS" }),
+    ).toBe(false);
+    expect(
+      questionPoolsActive({ enableQuestionPools: false, questionPoolSelectionMode: "DRAW_FROM_POOLS" }),
+    ).toBe(false);
   });
 });
