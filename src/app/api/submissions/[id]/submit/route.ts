@@ -7,6 +7,8 @@ import { Prisma } from "@/generated/prisma/client";
 import { captureNetworkEvidence, getClientIpFromRequest } from "@/lib/networkEvidence";
 import { canAcceptSubmit, submissionDeadline } from "@/lib/assessmentLifecycle";
 import { resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
+import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
+import { endExamAttemptSessionsForSubmission } from "@/lib/examAttemptSessionRunner";
 
 function studentSubmitResponse(submission: {
   id: string;
@@ -159,6 +161,11 @@ export async function POST(
     if (!hasEssay) {
       pushGradeToCanvas(id).catch(console.error);
     }
+
+    // Exam Session Binding + Time Anomaly Review v1 — best-effort,
+    // fire-and-forget: never blocks or affects the submission itself.
+    recordSimpleActivityEvent({ submissionId: id, eventType: "ATTEMPT_SUBMITTED" }).catch(() => {});
+    endExamAttemptSessionsForSubmission(id).catch(() => {});
 
     // Academic Integrity Network Evidence v1 — compare IP with EXAM_START
     // to detect network change. Fire-and-forget; never blocks submission.

@@ -4,6 +4,8 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { parseSecureSettings } from "@/lib/secureExam";
 import { submissionDeadline } from "@/lib/assessmentLifecycle";
+import { recordAnswerSavedActivity } from "@/lib/answerActivityTelemetry";
+import { findMostRecentSessionId } from "@/lib/examAttemptSessionRunner";
 
 const answerSchema = z.object({
   questionId: z.string(),
@@ -64,6 +66,16 @@ export async function PATCH(
   });
 
   if (!answer) return NextResponse.json({ error: "Invalid question" }, { status: 400 });
+
+  // Exam Session Binding + Time Anomaly Review v1 — coarse telemetry only
+  // (length/hash/delta, never the full response text duplicated). Never
+  // blocks the answer save: both calls are fire-and-forget and swallow
+  // their own errors internally.
+  findMostRecentSessionId(id)
+    .then((examAttemptSessionId) =>
+      recordAnswerSavedActivity({ submissionId: id, questionId, examAttemptSessionId, response }),
+    )
+    .catch(() => {});
 
   return NextResponse.json({ questionId: answer.questionId, response: answer.response });
 }

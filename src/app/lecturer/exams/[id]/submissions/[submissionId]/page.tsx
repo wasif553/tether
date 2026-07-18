@@ -106,12 +106,129 @@ const ORAL_VERIFICATION_STATUS_LABELS: Record<string, string> = {
   CANCELLED: "Cancelled",
 };
 
+// AI-Use Answer Review v1 — see docs/ai-use-answer-review-v1.md. THIS IS
+// NOT AN AI DETECTOR: every card rendered below is an explainable review
+// signal about an observable answer characteristic, never a claim that an
+// answer was written by AI, never an automatic misconduct finding. The
+// lecturer/institution makes the final decision — analysis never changes
+// marks, blocks marks release, creates misconduct cases, requires oral
+// verification, or notifies the student on its own.
+type AiUseReviewSignalCard = {
+  id: string;
+  signalType: string;
+  headline: string;
+  label: string;
+  signalLevel: "NONE" | "LOW" | "MEDIUM" | "HIGH";
+  explanation: string;
+  evidence: string[] | null;
+  question: { id: string; order: number; text: string } | null;
+  reviewStatus: string;
+  reviewStatusLabel: string;
+  reviewedAt: string | null;
+  reviewedByName: string | null;
+  reviewNote: string | null;
+};
+
+type AiUseReviewAnalysisData = {
+  id: string;
+  status: "PENDING" | "PROCESSING" | "COMPLETE" | "FAILED" | "NOT_CONFIGURED";
+  overallSignalLevel: "NONE" | "LOW" | "MEDIUM" | "HIGH";
+  provider: string;
+  modelIdentifier: string | null;
+  algorithmVersion: string;
+  analysedAt: string | null;
+  failureCode: string | null;
+  recommendation: string;
+  recommendationLabel: string;
+  reasonCodes: string[] | null;
+  summary: {
+    writtenAnswersAnalysed?: number;
+    deterministicSignalCount?: number;
+    aiAssistedSignalCount?: number;
+    aiAssisted?: { status: string; message: string | null };
+    recommendationSummary?: string;
+    error?: string;
+  } | null;
+  signals: AiUseReviewSignalCard[];
+};
+
+const AI_USE_SIGNAL_LEVEL_STYLES: Record<string, string> = {
+  NONE: "bg-gray-100 text-gray-600",
+  LOW: "bg-blue-100 text-blue-700",
+  MEDIUM: "bg-yellow-100 text-yellow-700",
+  HIGH: "bg-red-100 text-red-700",
+};
+
+const AI_USE_REVIEW_ACTIONS: Array<{ status: string; label: string }> = [
+  { status: "REVIEWED_NO_CONCERN", label: "Reviewed — no concern" },
+  { status: "REVIEWED_CONCERN_REMAINS", label: "Concern remains" },
+  { status: "ESCALATED", label: "Escalate" },
+  { status: "RESOLVED", label: "Resolve" },
+];
+
+// Exam Session Binding + Time Anomaly Review v1 — see
+// docs/exam-session-binding-v1.md and docs/time-anomaly-review-v1.md.
+// Session/timing signals are review signals only — never automatic
+// misconduct findings. Session data accumulates from the exam page's own
+// heartbeats (no "run" button); timing analysis is lecturer-triggered.
+type SessionSummary = {
+  id: string;
+  browserFamily: string | null;
+  operatingSystemFamily: string | null;
+  deviceCategory: string | null;
+  ipVersion: string | null;
+  cameraPermissionState: string;
+  startedAt: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  endedAt: string | null;
+  status: string;
+};
+
+type SessionOrTimingSignal = {
+  id: string;
+  signalType: string;
+  headline?: string;
+  signalLevel: "LOW" | "MEDIUM" | "HIGH";
+  explanation: string;
+  evidence: string[] | null;
+  reviewStatus: string;
+  reviewStatusLabel: string;
+  reviewedAt: string | null;
+  reviewedByName: string | null;
+  reviewNote: string | null;
+};
+
+type TimingAnalysisData = {
+  id: string;
+  status: "PENDING" | "PROCESSING" | "COMPLETE" | "FAILED";
+  overallSignalLevel: "NONE" | "LOW" | "MEDIUM" | "HIGH";
+  analysedAt: string | null;
+  recommendation: string;
+  recommendationLabel: string;
+  signals: SessionOrTimingSignal[];
+};
+
+const SESSION_TIMING_LEVEL_STYLES: Record<string, string> = {
+  NONE: "bg-gray-100 text-gray-600",
+  LOW: "bg-blue-100 text-blue-700",
+  MEDIUM: "bg-yellow-100 text-yellow-700",
+  HIGH: "bg-red-100 text-red-700",
+};
+
+const SESSION_TIMING_REVIEW_ACTIONS: Array<{ status: string; label: string }> = [
+  { status: "REVIEWED_NO_CONCERN", label: "Reviewed — no concern" },
+  { status: "REVIEWED_CONCERN_REMAINS", label: "Concern remains" },
+  { status: "ESCALATED", label: "Escalate" },
+  { status: "RESOLVED", label: "Resolve" },
+];
+
 export default function GradeSubmissionPage({
   params,
 }: {
   params: Promise<{ id: string; submissionId: string }>;
 }) {
-  const { submissionId } = usePromise(params);
+  const { id: examId, submissionId } = usePromise(params);
   const router = useRouter();
 
   const [data, setData] = useState<SubmissionData | null>(null);
@@ -147,6 +264,151 @@ export default function GradeSubmissionPage({
   useEffect(() => {
     loadOralVerifications();
   }, [loadOralVerifications]);
+
+  // AI-Use Answer Review v1 state — see docs/ai-use-answer-review-v1.md.
+  const [aiUseReview, setAiUseReview] = useState<AiUseReviewAnalysisData | null>(null);
+  const [aiUseReviewLoading, setAiUseReviewLoading] = useState(false);
+  const [aiUseReviewRunning, setAiUseReviewRunning] = useState(false);
+  const [aiUseReviewRunError, setAiUseReviewRunError] = useState<string | null>(null);
+  const [aiUseReviewNoteDrafts, setAiUseReviewNoteDrafts] = useState<Record<string, string>>({});
+
+  const loadAiUseReview = useCallback(async () => {
+    setAiUseReviewLoading(true);
+    try {
+      const res = await fetch(`/api/lecturer/submissions/${submissionId}/ai-use-review`);
+      if (res.ok) {
+        const body = await res.json();
+        setAiUseReview(body.analysis);
+      }
+    } catch {
+      // Non-fatal — the section shows "Not yet run" and the button remains usable.
+    } finally {
+      setAiUseReviewLoading(false);
+    }
+  }, [submissionId]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadAiUseReview();
+  }, [loadAiUseReview]);
+
+  async function runAiUseReview() {
+    setAiUseReviewRunning(true);
+    setAiUseReviewRunError(null);
+    try {
+      const res = await fetch(`/api/lecturer/submissions/${submissionId}/ai-use-review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setAiUseReviewRunError(
+          typeof body?.error === "string" ? body.error : "AI-use review failed. This submission's grade and status are unaffected.",
+        );
+        return;
+      }
+      await loadAiUseReview();
+    } catch {
+      setAiUseReviewRunError("Could not reach the server. This submission's grade and status are unaffected — try again.");
+    } finally {
+      setAiUseReviewRunning(false);
+    }
+  }
+
+  async function submitAiUseReviewSignalReview(signalId: string, reviewStatus: string) {
+    const reviewNote = aiUseReviewNoteDrafts[signalId];
+    const res = await fetch(`/api/lecturer/ai-use-review-signals/${signalId}/review`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reviewStatus, reviewNote: reviewNote || undefined }),
+    });
+    if (res.ok) await loadAiUseReview();
+  }
+
+  // Exam Session Binding + Time Anomaly Review v1 state — see
+  // docs/exam-session-binding-v1.md and docs/time-anomaly-review-v1.md.
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionSignals, setSessionSignals] = useState<SessionOrTimingSignal[]>([]);
+  const [sessionReviewLoading, setSessionReviewLoading] = useState(false);
+  const [timingAnalysis, setTimingAnalysis] = useState<TimingAnalysisData | null>(null);
+  const [timingRunning, setTimingRunning] = useState(false);
+  const [timingRunError, setTimingRunError] = useState<string | null>(null);
+  const [sessionTimingNoteDrafts, setSessionTimingNoteDrafts] = useState<Record<string, string>>({});
+
+  const loadSessionReview = useCallback(async () => {
+    setSessionReviewLoading(true);
+    try {
+      const res = await fetch(`/api/lecturer/submissions/${submissionId}/session-review`);
+      if (res.ok) {
+        const body = await res.json();
+        setSessions(body.sessions ?? []);
+        setSessionSignals(body.signals ?? []);
+      }
+    } catch {
+      // Non-fatal — section shows "no data yet".
+    } finally {
+      setSessionReviewLoading(false);
+    }
+  }, [submissionId]);
+
+  const loadTimingAnalysis = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/lecturer/submissions/${submissionId}/timing-analysis`);
+      if (res.ok) {
+        const body = await res.json();
+        setTimingAnalysis(body.analysis);
+      }
+    } catch {
+      // Non-fatal.
+    }
+  }, [submissionId]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadSessionReview();
+    loadTimingAnalysis();
+  }, [loadSessionReview, loadTimingAnalysis]);
+
+  async function runTimingAnalysis() {
+    setTimingRunning(true);
+    setTimingRunError(null);
+    try {
+      const res = await fetch(`/api/lecturer/submissions/${submissionId}/timing-analysis`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setTimingRunError(
+          typeof body?.error === "string" ? body.error : "Timing analysis failed. This submission's grade and status are unaffected.",
+        );
+        return;
+      }
+      await Promise.all([loadTimingAnalysis(), loadSessionReview()]);
+    } catch {
+      setTimingRunError("Could not reach the server. This submission's grade and status are unaffected — try again.");
+    } finally {
+      setTimingRunning(false);
+    }
+  }
+
+  async function submitSessionSignalReview(signalId: string, reviewStatus: string) {
+    const reviewNote = sessionTimingNoteDrafts[signalId];
+    const res = await fetch(`/api/lecturer/session-signals/${signalId}/review`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reviewStatus, reviewNote: reviewNote || undefined }),
+    });
+    if (res.ok) await loadSessionReview();
+  }
+
+  async function submitTimingSignalReview(signalId: string, reviewStatus: string) {
+    const reviewNote = sessionTimingNoteDrafts[signalId];
+    const res = await fetch(`/api/lecturer/timing-signals/${signalId}/review`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reviewStatus, reviewNote: reviewNote || undefined }),
+    });
+    if (res.ok) await loadTimingAnalysis();
+  }
 
   async function requireOralVerification() {
     if (!requestReason.trim()) return;
@@ -428,6 +690,322 @@ export default function GradeSubmissionPage({
           {pushGradeMessage && <p className="mt-2 text-sm text-gray-600">{pushGradeMessage}</p>}
         </div>
       )}
+
+      {/* AI-Use Answer Review v1 — see docs/ai-use-answer-review-v1.md.
+          THIS IS NOT AN AI DETECTOR. Every card here is an explainable
+          review signal about an observable answer characteristic — never
+          a claim that the answer was written by AI, never an automatic
+          misconduct finding. Analysis never changes marks, blocks marks
+          release, creates misconduct cases, or notifies the student. */}
+      <div className="mt-6 rounded border border-gray-200 p-4">
+        <h2 className="text-lg font-medium">AI-use answer review</h2>
+        <p className="mt-1 text-xs text-gray-500">
+          Review answer characteristics that may warrant closer academic review. These signals do not determine
+          whether AI was used — your lecturer or institution makes the final decision.
+        </p>
+
+        <div className="mt-3 grid grid-cols-2 gap-3 rounded border border-gray-100 bg-gray-50 p-3 text-xs sm:grid-cols-3">
+          <div>
+            <p className="uppercase text-gray-500">Analysis status</p>
+            <p className="mt-1 text-gray-800">{aiUseReviewLoading ? "Loading..." : (aiUseReview?.status ?? "Not yet run")}</p>
+          </div>
+          <div>
+            <p className="uppercase text-gray-500">Deterministic checks</p>
+            <p className="mt-1 text-gray-800">
+              {aiUseReview ? `${aiUseReview.summary?.deterministicSignalCount ?? 0} signal(s)` : "—"}
+            </p>
+          </div>
+          <div>
+            <p className="uppercase text-gray-500">AI-assisted checks</p>
+            <p className="mt-1 text-gray-800">
+              {aiUseReview?.summary?.aiAssisted?.status === "NOT_CONFIGURED"
+                ? "AI-assisted review is not configured."
+                : aiUseReview?.summary?.aiAssisted?.status === "FAILED"
+                  ? "Failed — deterministic results preserved. You may retry."
+                  : aiUseReview?.summary?.aiAssisted?.status === "COMPLETE"
+                    ? `${aiUseReview.summary?.aiAssistedSignalCount ?? 0} signal(s)`
+                    : "—"}
+            </p>
+          </div>
+          <div>
+            <p className="uppercase text-gray-500">Overall signal level</p>
+            <p className="mt-1 text-gray-800">{aiUseReview?.overallSignalLevel ?? "—"}</p>
+          </div>
+          <div>
+            <p className="uppercase text-gray-500">Last analysed</p>
+            <p className="mt-1 text-gray-800">
+              {aiUseReview?.analysedAt ? new Date(aiUseReview.analysedAt).toLocaleString() : "Never"}
+            </p>
+          </div>
+          <div>
+            <p className="uppercase text-gray-500">Recommended action</p>
+            <p className="mt-1 text-gray-800">{aiUseReview?.recommendationLabel ?? "—"}</p>
+          </div>
+        </div>
+
+        <div className="mt-3 rounded border border-gray-100 bg-gray-50 p-3 text-xs text-gray-600">
+          <p className="font-medium text-gray-700">Related evidence categories</p>
+          <p className="mt-1">
+            Answer similarity:{" "}
+            <Link href={`/lecturer/exams/${examId}/similarity`} className="underline">
+              View similarity review
+            </Link>
+          </p>
+          <p className="mt-1">Oral verification: see the section below.</p>
+        </div>
+
+        <div className="mt-3">
+          <button
+            onClick={runAiUseReview}
+            disabled={aiUseReviewRunning}
+            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+          >
+            {aiUseReviewRunning ? "Running..." : "Run AI-use review"}
+          </button>
+          {aiUseReviewRunError && <p className="mt-2 text-sm text-red-600">{aiUseReviewRunError}</p>}
+          {aiUseReview?.status === "FAILED" && (
+            <p className="mt-2 text-sm text-amber-700">
+              The last analysis run failed — this submission&apos;s grade and status are unaffected. Try running it again.
+            </p>
+          )}
+        </div>
+
+        <div className="mt-4 space-y-3">
+          {(!aiUseReview || aiUseReview.signals.length === 0) && (
+            <p className="text-xs text-gray-500">No AI-use review signals found yet. Run the analysis above.</p>
+          )}
+          {aiUseReview?.signals.map((s) => (
+            <div key={s.id} className="rounded border border-gray-100 p-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">{s.headline}</span>
+                <span className={`rounded px-2 py-0.5 text-xs ${AI_USE_SIGNAL_LEVEL_STYLES[s.signalLevel]}`}>
+                  {s.signalLevel}
+                </span>
+                <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{s.label}</span>
+                <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{s.reviewStatusLabel}</span>
+              </div>
+
+              {s.question && (
+                <p className="mt-2 text-xs text-gray-500">
+                  Question {s.question.order + 1}: {s.question.text}
+                </p>
+              )}
+              <p className="mt-2 text-gray-700">{s.explanation}</p>
+
+              {s.evidence && s.evidence.length > 0 && (
+                <div className="mt-2">
+                  <p className="text-xs font-medium text-gray-600">Evidence</p>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-gray-600">
+                    {s.evidence.map((e, i) => (
+                      <li key={i}>{e}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <p className="mt-2 text-xs text-amber-700">
+                This is a review signal and is not an automatic academic misconduct decision.
+              </p>
+
+              <div className="mt-3">
+                <input
+                  type="text"
+                  placeholder="Optional review note"
+                  className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                  value={aiUseReviewNoteDrafts[s.id] ?? s.reviewNote ?? ""}
+                  onChange={(e) => setAiUseReviewNoteDrafts((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                />
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {AI_USE_REVIEW_ACTIONS.map((action) => (
+                    <button
+                      key={action.status}
+                      onClick={() => submitAiUseReviewSignalReview(s.id, action.status)}
+                      className="rounded border border-gray-300 px-2 py-1 text-xs"
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+                {s.reviewedByName && (
+                  <p className="mt-1 text-xs text-gray-400">
+                    Reviewed by {s.reviewedByName}
+                    {s.reviewedAt ? ` on ${new Date(s.reviewedAt).toLocaleString()}` : ""}
+                  </p>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Exam Session Binding + Time Anomaly Review v1 — see
+          docs/exam-session-binding-v1.md and docs/time-anomaly-review-v1.md.
+          Session data accumulates from the exam page's own periodic
+          heartbeats — there is no "run" button for it. Timing analysis
+          (including the cross-submission timing-similarity comparison
+          and the combined recommendation) is lecturer-triggered below.
+          Every card here is a REVIEW SIGNAL only. */}
+      <div className="mt-6 rounded border border-gray-200 p-4">
+        <h2 className="text-lg font-medium">Session and timing review</h2>
+        <p className="mt-1 text-xs text-gray-500">
+          Review device/session continuity and answer-timing characteristics that may warrant closer academic
+          review. These signals do not determine misconduct — your lecturer or institution makes the final decision.
+        </p>
+
+        <div className="mt-3 grid grid-cols-2 gap-3 rounded border border-gray-100 bg-gray-50 p-3 text-xs sm:grid-cols-3">
+          <div>
+            <p className="uppercase text-gray-500">Active sessions observed</p>
+            <p className="mt-1 text-gray-800">{sessionReviewLoading ? "Loading..." : sessions.length}</p>
+          </div>
+          <div>
+            <p className="uppercase text-gray-500">Device/browser changes</p>
+            <p className="mt-1 text-gray-800">
+              {sessionSignals.filter((s) => s.signalType === "DEVICE_TOKEN_CHANGED" || s.signalType === "COARSE_DEVICE_PROFILE_CHANGED" || s.signalType === "USER_AGENT_CHANGED").length}
+            </p>
+          </div>
+          <div>
+            <p className="uppercase text-gray-500">Network changes</p>
+            <p className="mt-1 text-gray-800">
+              {sessionSignals.filter((s) => s.signalType === "NETWORK_PREFIX_CHANGED" || s.signalType === "REPEATED_NETWORK_CHANGES").length}
+            </p>
+          </div>
+          <div>
+            <p className="uppercase text-gray-500">Timing signals</p>
+            <p className="mt-1 text-gray-800">{timingAnalysis?.signals.filter((s) => s.signalType !== "INSUFFICIENT_TIMING_DATA").length ?? "—"}</p>
+          </div>
+          <div>
+            <p className="uppercase text-gray-500">Overall recommendation</p>
+            <p className="mt-1 text-gray-800">{timingAnalysis?.recommendationLabel ?? "—"}</p>
+          </div>
+          <div>
+            <p className="uppercase text-gray-500">Last analysed</p>
+            <p className="mt-1 text-gray-800">{timingAnalysis?.analysedAt ? new Date(timingAnalysis.analysedAt).toLocaleString() : "Never"}</p>
+          </div>
+        </div>
+
+        <div className="mt-3">
+          <button
+            onClick={runTimingAnalysis}
+            disabled={timingRunning}
+            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+          >
+            {timingRunning ? "Running..." : "Run timing analysis"}
+          </button>
+          {timingRunError && <p className="mt-2 text-sm text-red-600">{timingRunError}</p>}
+          {timingAnalysis?.status === "FAILED" && (
+            <p className="mt-2 text-sm text-amber-700">
+              The last timing analysis run failed — this submission&apos;s grade and status are unaffected. Try again.
+            </p>
+          )}
+        </div>
+
+        <h3 className="mt-5 text-sm font-medium">Session signals</h3>
+        <div className="mt-2 space-y-3">
+          {sessionSignals.length === 0 && <p className="text-xs text-gray-500">No session-binding signals recorded yet.</p>}
+          {sessionSignals.map((s) => (
+            <div key={s.id} className="rounded border border-gray-100 p-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">{s.headline ?? "Session review recommended"}</span>
+                <span className={`rounded px-2 py-0.5 text-xs ${SESSION_TIMING_LEVEL_STYLES[s.signalLevel]}`}>{s.signalLevel}</span>
+                <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{s.reviewStatusLabel}</span>
+              </div>
+              <p className="mt-2 text-gray-700">{s.explanation}</p>
+              {s.evidence && s.evidence.length > 0 && (
+                <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-gray-600">
+                  {s.evidence.map((e, i) => (
+                    <li key={i}>{e}</li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-2 text-xs text-amber-700">This is a review signal and is not an automatic academic misconduct decision.</p>
+              <div className="mt-3">
+                <input
+                  type="text"
+                  placeholder="Optional review note"
+                  className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                  value={sessionTimingNoteDrafts[s.id] ?? s.reviewNote ?? ""}
+                  onChange={(e) => setSessionTimingNoteDrafts((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                />
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {SESSION_TIMING_REVIEW_ACTIONS.map((action) => (
+                    <button
+                      key={action.status}
+                      onClick={() => submitSessionSignalReview(s.id, action.status)}
+                      className="rounded border border-gray-300 px-2 py-1 text-xs"
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+                {s.reviewedByName && (
+                  <p className="mt-1 text-xs text-gray-400">
+                    Reviewed by {s.reviewedByName}
+                    {s.reviewedAt ? ` on ${new Date(s.reviewedAt).toLocaleString()}` : ""}
+                  </p>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <h3 className="mt-5 text-sm font-medium">Timing signals</h3>
+        <div className="mt-2 space-y-3">
+          {(!timingAnalysis || timingAnalysis.signals.filter((s) => s.signalType !== "INSUFFICIENT_TIMING_DATA").length === 0) && (
+            <p className="text-xs text-gray-500">No timing signals found yet. Run the analysis above.</p>
+          )}
+          {timingAnalysis?.signals
+            .filter((s) => s.signalType !== "INSUFFICIENT_TIMING_DATA")
+            .map((s) => (
+              <div key={s.id} className="rounded border border-gray-100 p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">Timing review recommended</span>
+                  <span className={`rounded px-2 py-0.5 text-xs ${SESSION_TIMING_LEVEL_STYLES[s.signalLevel]}`}>{s.signalLevel}</span>
+                  <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{s.reviewStatusLabel}</span>
+                </div>
+                <p className="mt-2 text-gray-700">{s.explanation}</p>
+                {s.evidence && s.evidence.length > 0 && (
+                  <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-gray-600">
+                    {s.evidence.map((e, i) => (
+                      <li key={i}>{e}</li>
+                    ))}
+                  </ul>
+                )}
+                <p className="mt-2 text-xs text-amber-700">This is a review signal and is not an automatic academic misconduct decision.</p>
+                <div className="mt-3">
+                  <input
+                    type="text"
+                    placeholder="Optional review note"
+                    className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                    value={sessionTimingNoteDrafts[s.id] ?? s.reviewNote ?? ""}
+                    onChange={(e) => setSessionTimingNoteDrafts((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                  />
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {SESSION_TIMING_REVIEW_ACTIONS.map((action) => (
+                      <button
+                        key={action.status}
+                        onClick={() => submitTimingSignalReview(s.id, action.status)}
+                        className="rounded border border-gray-300 px-2 py-1 text-xs"
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
+                  {s.reviewedByName && (
+                    <p className="mt-1 text-xs text-gray-400">
+                      Reviewed by {s.reviewedByName}
+                      {s.reviewedAt ? ` on ${new Date(s.reviewedAt).toLocaleString()}` : ""}
+                    </p>
+                  )}
+                </div>
+              </div>
+            ))}
+        </div>
+
+        <p className="mt-4 text-xs text-gray-500">
+          Requiring oral verification for a session or timing concern uses the same Oral verification section below —
+          this feature never creates an oral-verification request automatically.
+        </p>
+      </div>
 
       {/* Oral Verification Workflow v1 — see
           docs/oral-verification-workflow-v1.md. Lecturer-controlled only:

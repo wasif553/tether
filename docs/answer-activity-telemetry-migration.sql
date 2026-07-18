@@ -1,0 +1,17 @@
+-- Answer Activity Telemetry v1 — see docs/exam-session-binding-v1.md
+-- (Part 7 of the task explicitly permits combining this migration with
+-- the session-binding one when the project's convention is a single
+-- additive SQL file per feature; this repo's existing convention is
+-- exactly that — see docs/answer-similarity-migration.sql,
+-- docs/ai-use-review-migration.sql).
+--
+-- The AnswerActivityEvent table (and the TimingAnalysis /
+-- TimingIntegritySignal tables that consume it) are defined in full,
+-- with verification SQL, in:
+--
+--   docs/exam-session-binding-migration.sql
+--
+-- This file is a pointer only — there is no separate DDL to run here.
+-- Apply docs/exam-session-binding-migration.sql via the Supabase SQL
+-- Editor (or `psql`) against production. Do NOT run `prisma db push`
+-- against production.

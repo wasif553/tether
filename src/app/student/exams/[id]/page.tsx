@@ -330,6 +330,20 @@ export default function TakeExamPage({
   const [verificationConfirmed, setVerificationConfirmed] = useState(false);
   const [verificationChecked, setVerificationChecked] = useState(false);
 
+  // --- Exam Session Binding v1 ---
+  // Periodic, best-effort heartbeat only — see
+  // docs/exam-session-binding-v1.md. Shows only NEUTRAL operational
+  // status to the student (never an accusatory warning); failure here
+  // never blocks the exam, never loses an answer, never affects
+  // submission. No canvas/WebGL/audio fingerprinting, no keystroke or
+  // clipboard capture — only coarse browser/OS/timezone/screen-bucket
+  // hints already visible to any website.
+  const sessionHeartbeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [sessionConnectionState, setSessionConnectionState] = useState<
+    "connecting" | "connected" | "unconfirmed"
+  >("connecting");
+  const [concurrentSessionNotice, setConcurrentSessionNotice] = useState(false);
+
   // --- On-Device AI Camera Integrity Detection v1 ---
   // Always samples from the same cameraStreamRef stream used for the
   // preview/heartbeat above — never a second getUserMedia call. A
@@ -454,6 +468,55 @@ export default function TakeExamPage({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadSubmission();
   }, [loadSubmission]);
+
+  // Exam Session Binding v1 — see docs/exam-session-binding-v1.md. Sends
+  // a lightweight heartbeat every 25s while the attempt is in progress.
+  // The server creates/resumes the session-binding cookies on the FIRST
+  // call; every call after that just confirms the session is still
+  // alive. Best-effort only: a failed heartbeat never blocks the exam,
+  // never loses an answer — it only shows a neutral "reconnecting"
+  // status. Existing camera-permission state (already tracked by Camera
+  // Monitoring v1 above) is reported coarsely; no new camera logic is
+  // added here.
+  const submissionId = data?.id;
+  const submissionStatus = data?.status;
+  useEffect(() => {
+    if (!submissionId || submissionStatus !== "IN_PROGRESS") return;
+
+    const mappedCameraPermission =
+      cameraStatus === "granted" ? "granted" : cameraStatus === "denied" ? "denied" : "prompt";
+
+    const sendHeartbeat = () => {
+      fetch(`/api/submissions/${submissionId}/session-heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          screenWidth: typeof window !== "undefined" ? window.screen.width : undefined,
+          cameraPermissionState: mappedCameraPermission,
+        }),
+      })
+        .then((res) => {
+          if (!res.ok) {
+            setSessionConnectionState("unconfirmed");
+            return null;
+          }
+          return res.json();
+        })
+        .then((body: { concurrentSessionDetected?: boolean } | null) => {
+          if (!body) return;
+          setSessionConnectionState("connected");
+          setConcurrentSessionNotice(Boolean(body.concurrentSessionDetected));
+        })
+        .catch(() => setSessionConnectionState("unconfirmed"));
+    };
+
+    sendHeartbeat();
+    sessionHeartbeatTimer.current = setInterval(sendHeartbeat, 25_000);
+    return () => {
+      if (sessionHeartbeatTimer.current) clearInterval(sessionHeartbeatTimer.current);
+    };
+  }, [submissionId, submissionStatus, cameraStatus]);
 
   // One-Question-At-A-Time Exam Delivery v1 — see
   // docs/one-question-delivery-v1.md. Fetches only the CURRENT question
@@ -1891,6 +1954,19 @@ export default function TakeExamPage({
           </span>
         )}
       </div>
+
+      {/* Exam Session Binding v1 — see docs/exam-session-binding-v1.md.
+          NEUTRAL operational status only — never an accusatory warning.
+          The concurrent-session notice is informational, not a block:
+          v1 never automatically terminates either session. */}
+      {sessionConnectionState === "unconfirmed" && (
+        <p className="mt-2 text-xs text-gray-500">Session connection could not be confirmed.</p>
+      )}
+      {concurrentSessionNotice && (
+        <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+          This exam is also active in another browser session. Close the other session to avoid answer conflicts.
+        </p>
+      )}
 
       {inLockdownBrowser && !secureModeEnabled && (
         <div className="mt-3 flex flex-wrap items-center gap-2 rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">

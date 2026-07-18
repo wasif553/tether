@@ -177,6 +177,17 @@ model User {
   oralVerificationsRequested OralVerification[]          @relation("OralVerificationRequestedBy")
   oralVerificationsCompleted OralVerification[]          @relation("OralVerificationCompletedBy")
 
+  // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+  aiUseReviewAnalysesRequested AiUseReviewAnalysis[] @relation("AiUseReviewRequestedBy")
+  reviewedAiUseReviewSignals   AiUseReviewSignal[]    @relation("AiUseReviewSignalReviewer")
+
+  // Exam Session Binding + Time Anomaly Review v1 (additive) — see
+  // docs/exam-session-binding-v1.md and docs/time-anomaly-review-v1.md.
+  examAttemptSessions              ExamAttemptSession[]      @relation("ExamAttemptSessionUser")
+  reviewedSessionIntegritySignals  SessionIntegritySignal[]  @relation("SessionIntegritySignalReviewer")
+  timingAnalysesRequested          TimingAnalysis[]          @relation("TimingAnalysisRequestedBy")
+  reviewedTimingIntegritySignals   TimingIntegritySignal[]   @relation("TimingIntegritySignalReviewer")
+
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
 }
@@ -244,6 +255,13 @@ model Exam {
   // docs/answer-similarity-review-v1.md.
   similarityAnalyses SubmissionSimilarityAnalysis[]
 
+  // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+  aiUseReviewAnalyses AiUseReviewAnalysis[]
+
+  // Exam Session Binding + Time Anomaly Review v1 (additive) — see
+  // docs/time-anomaly-review-v1.md.
+  timingAnalyses TimingAnalysis[]
+
   @@index([institutionId])
   @@index([courseId])
 }
@@ -294,6 +312,11 @@ model Question {
   // Answer Similarity Review v1 (additive) — see
   // docs/answer-similarity-review-v1.md.
   similarityMatches SubmissionSimilarityMatch[]
+  // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+  aiUseReviewSignals AiUseReviewSignal[]
+  // Exam Session Binding + Time Anomaly Review v1 (additive) — see
+  // docs/exam-session-binding-v1.md.
+  answerActivityEvents AnswerActivityEvent[]
 }
 
 // Answer Similarity Review v1 (additive) — see
@@ -423,6 +446,16 @@ model Submission {
   similarityMatchesAsCompared SubmissionSimilarityMatch[] @relation("SimilarityMatchCompared")
   oralVerifications           OralVerification[]
 
+  // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+  aiUseReviewAnalysis AiUseReviewAnalysis?
+
+  // Exam Session Binding + Time Anomaly Review v1 (additive) — see
+  // docs/exam-session-binding-v1.md and docs/time-anomaly-review-v1.md.
+  examAttemptSessions      ExamAttemptSession[]
+  sessionIntegritySignals  SessionIntegritySignal[]
+  answerActivityEvents     AnswerActivityEvent[]
+  timingAnalysis           TimingAnalysis?
+
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])
 }
@@ -441,6 +474,8 @@ model Answer {
   aiDraftScore      Float?
   aiReasoning       String?
   aiGradedAt        DateTime?
+  // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+  aiUseReviewSignals AiUseReviewSignal[]
 
   @@unique([submissionId, questionId])
 }
@@ -715,6 +750,262 @@ model IntegrityEvidenceAsset {
   @@index([examId])
   @@index([institutionId])
   @@index([capturedAt])
+}
+
+// AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+// This is NOT an AI detector: every row here is an explainable REVIEW
+// SIGNAL about observable answer characteristics for a human lecturer to
+// weigh — never a claim that an answer was written by AI, never an
+// automatic misconduct finding, never a grade input. Status/level/type/
+// review-status fields are plain validated String columns (not Prisma
+// enums), following the SubmissionSimilarityAnalysis convention — see
+// src/lib/aiUseReview.ts for the validators. One reusable row per
+// submission (a re-run replaces its prior signals, mirroring
+// runSimilarityAnalysisForExam's reuse pattern).
+model AiUseReviewAnalysis {
+  id           String     @id @default(cuid())
+  submissionId String     @unique
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  examId       String
+  exam         Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
+  status       String     @default("PENDING") // PENDING | PROCESSING | COMPLETE | FAILED | NOT_CONFIGURED
+  overallSignalLevel String @default("NONE") // NONE | LOW | MEDIUM | HIGH
+  // "deterministic" (Layer A only) or "anthropic" (Layer A + optional
+  // Layer B) — never a claim about who/what "detected" anything.
+  provider        String
+  modelIdentifier String?
+  algorithmVersion String
+  analysedAt      DateTime?
+  requestedById   String
+  requestedBy     User      @relation("AiUseReviewRequestedBy", fields: [requestedById], references: [id])
+  failureCode     String?
+  recommendation  String    @default("NO_IMMEDIATE_ACTION") // NO_IMMEDIATE_ACTION | LECTURER_REVIEW_RECOMMENDED | ORAL_VERIFICATION_RECOMMENDED
+  reasonCodesJson Json?
+  summaryJson     Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  signals         AiUseReviewSignal[]
+
+  @@index([examId])
+  @@index([status])
+}
+
+// One explainable signal produced by one analysis run — see
+// docs/ai-use-answer-review-v1.md. evidenceJson holds only short,
+// explainable observations (never the full answer text, never a hidden
+// AI-generated "chain of thought"). questionId is the question the
+// signal concerns; answerId is nullable because a signal may be derived
+// from comparing multiple answers (e.g. writing-style consistency) with
+// no single "the" answer it belongs to.
+model AiUseReviewSignal {
+  id           String              @id @default(cuid())
+  analysisId   String
+  analysis     AiUseReviewAnalysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  questionId   String
+  question     Question            @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  answerId     String?
+  answer       Answer?             @relation(fields: [answerId], references: [id], onDelete: SetNull)
+  signalType   String // WEAK_SCENARIO_GROUNDING | GENERIC_RESPONSE | STYLE_INCONSISTENCY | UNSUPPORTED_SPECIFIC_CLAIMS | REQUIRED_CONCEPTS_MISSING | POLISHED_BUT_SHALLOW_RESPONSE | GENERATED_RESPONSE_META_LANGUAGE
+  signalLevel  String // NONE | LOW | MEDIUM | HIGH
+  explanation  String
+  evidenceJson Json?
+  reviewStatus String    @default("NEEDS_REVIEW") // NEEDS_REVIEW | REVIEWED_NO_CONCERN | REVIEWED_CONCERN_REMAINS | ESCALATED | RESOLVED
+  reviewedAt   DateTime?
+  reviewedById String?
+  reviewedBy   User?     @relation("AiUseReviewSignalReviewer", fields: [reviewedById], references: [id])
+  reviewNote   String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([analysisId])
+  @@index([questionId])
+  @@index([answerId])
+  @@index([reviewStatus])
+}
+
+// Exam Session Binding + Time Anomaly Review v1 (additive) — see
+// docs/exam-session-binding-v1.md and docs/time-anomaly-review-v1.md.
+// THIS PRODUCES LECTURER REVIEW SIGNALS ONLY — never an automatic
+// misconduct finding, never a grade input, never an automatic attempt
+// termination. Only HMAC hashes, coarse categories, and IP network
+// PREFIXES are ever stored — never raw IP addresses, raw tokens, or raw
+// user-agent strings needed for display (userAgentHash exists purely for
+// server-side comparison). Status/type/level/review-status fields are
+// plain validated String columns (not Prisma enums), following the
+// SubmissionSimilarityAnalysis convention — see src/lib/sessionBinding.ts
+// and src/lib/sessionIntegrity.ts for the validators.
+model ExamAttemptSession {
+  id           String     @id @default(cuid())
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User       @relation("ExamAttemptSessionUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  // Server-issued, HMAC-hashed only — the raw token lives solely in a
+  // Secure/HttpOnly/SameSite cookie on the student's browser, never in
+  // the database and never returned by any API response.
+  browserSessionTokenHash String
+  deviceTokenHash         String
+
+  // Supporting signal only — never the primary binding mechanism. See
+  // Part 2 (allowed low-entropy inputs only: browser/OS family, device
+  // category, accepted language, timezone, screen-size bucket).
+  coarseFingerprintHash String?
+  userAgentHash         String?
+  browserFamily         String?
+  operatingSystemFamily String?
+  deviceCategory        String?
+
+  // Network prefix only (never a raw IP) — /24 for IPv4, /48 for IPv6,
+  // HMAC-hashed. See src/lib/sessionBinding.ts.
+  ipPrefixHash String?
+  ipVersion    String? // "v4" | "v6"
+
+  // granted | denied | prompt | unavailable | unknown — Permissions API
+  // absence is "unknown", never treated as a violation.
+  cameraPermissionState String @default("unknown")
+
+  startedAt DateTime  @default(now())
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  endedAt     DateTime?
+  status      String    @default("ACTIVE") // ACTIVE | STALE | ENDED | REPLACED
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  signals SessionIntegritySignal[]
+  activityEvents AnswerActivityEvent[]
+
+  @@index([submissionId])
+  @@index([userId])
+  @@index([status])
+  @@index([lastSeenAt])
+  @@index([deviceTokenHash])
+}
+
+// One explainable session-binding review signal — see
+// docs/exam-session-binding-v1.md. examAttemptSessionId is nullable
+// because a signal (e.g. CONCURRENT_ACTIVE_SESSIONS) may concern more
+// than one session with no single "the" session it belongs to.
+model SessionIntegritySignal {
+  id                   String              @id @default(cuid())
+  submissionId         String
+  submission           Submission          @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  examAttemptSessionId String?
+  examAttemptSession   ExamAttemptSession? @relation(fields: [examAttemptSessionId], references: [id], onDelete: SetNull)
+
+  signalType   String // CONCURRENT_ACTIVE_SESSIONS | DEVICE_TOKEN_CHANGED | COARSE_DEVICE_PROFILE_CHANGED | USER_AGENT_CHANGED | NETWORK_PREFIX_CHANGED | REPEATED_NETWORK_CHANGES | CAMERA_PERMISSION_CHANGED | SESSION_TOKEN_MISMATCH | SESSION_RESTARTED
+  signalLevel  String // LOW | MEDIUM | HIGH
+  explanation  String
+  evidenceJson Json?
+
+  reviewStatus String    @default("NEEDS_REVIEW") // NEEDS_REVIEW | REVIEWED_NO_CONCERN | REVIEWED_CONCERN_REMAINS | ESCALATED | RESOLVED
+  reviewedAt   DateTime?
+  reviewedById String?
+  reviewedBy   User?     @relation("SessionIntegritySignalReviewer", fields: [reviewedById], references: [id])
+  reviewNote   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([submissionId])
+  @@index([examAttemptSessionId])
+  @@index([reviewStatus])
+}
+
+// Coarse activity telemetry — see docs/exam-session-binding-v1.md. Never
+// stores keystrokes, clipboard content, or a duplicate of the full
+// answer text: only a length, an HMAC hash of the normalised response
+// (for change-detection, not reconstruction), and a length delta.
+// previousEventId is an advisory pointer only (no FK) to the prior
+// ANSWER_SAVED event for the same question, used to compute the delta —
+// deliberately not a Prisma relation, since it is never used for
+// cascade behaviour. serverReceivedAt is authoritative; clientElapsedMs
+// is supplementary only and never overrides it.
+model AnswerActivityEvent {
+  id                   String              @id @default(cuid())
+  submissionId         String
+  submission           Submission          @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  questionId           String?
+  question             Question?           @relation(fields: [questionId], references: [id], onDelete: SetNull)
+  examAttemptSessionId String?
+  examAttemptSession   ExamAttemptSession? @relation(fields: [examAttemptSessionId], references: [id], onDelete: SetNull)
+
+  eventType String // ATTEMPT_STARTED | QUESTION_OPENED | ANSWER_SAVED | QUESTION_NAVIGATED | HEARTBEAT | PAGE_HIDDEN | PAGE_VISIBLE | ATTEMPT_SUBMITTED
+
+  serverReceivedAt  DateTime @default(now())
+  clientElapsedMs   Int?
+  questionIndex     Int?
+  responseLength    Int?
+  responseHash      String?
+  responseLengthDelta Int?
+  previousEventId   String?
+  metadataJson      Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([submissionId])
+  @@index([questionId])
+  @@index([examAttemptSessionId])
+  @@index([eventType])
+  @@index([serverReceivedAt])
+}
+
+// One reusable timing-analysis row per submission — mirrors
+// AiUseReviewAnalysis's shape/reuse pattern. Added beyond the models
+// Part 3 enumerated because Part 13's separate
+// PATCH /api/lecturer/timing-signals/[signalId]/review route (distinct
+// from session-signals) requires its own signal storage — see
+// docs/time-anomaly-review-v1.md.
+model TimingAnalysis {
+  id           String     @id @default(cuid())
+  submissionId String     @unique
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  examId       String
+  exam         Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
+
+  status             String    @default("PENDING") // PENDING | PROCESSING | COMPLETE | FAILED
+  overallSignalLevel String    @default("NONE") // NONE | LOW | MEDIUM | HIGH
+  algorithmVersion   String
+  analysedAt         DateTime?
+  requestedById      String
+  requestedBy        User      @relation("TimingAnalysisRequestedBy", fields: [requestedById], references: [id])
+
+  recommendation  String @default("NO_IMMEDIATE_ACTION") // NO_IMMEDIATE_ACTION | LECTURER_REVIEW_RECOMMENDED | ORAL_VERIFICATION_RECOMMENDED | ESCALATION_RECOMMENDED
+  reasonCodesJson Json?
+  summaryJson     Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  signals TimingIntegritySignal[]
+
+  @@index([examId])
+  @@index([status])
+}
+
+model TimingIntegritySignal {
+  id         String         @id @default(cuid())
+  analysisId String
+  analysis   TimingAnalysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  signalType   String // EXTREMELY_FAST_ATTEMPT | RAPID_MULTI_QUESTION_COMPLETION | RAPID_LARGE_RESPONSE_APPEARANCE | LONG_INACTIVITY_THEN_LARGE_RESPONSE | VERY_FAST_CORRECT_RESPONSE_PATTERN | SIMILAR_RESPONSE_TIMING_PATTERN | ABRUPT_ACTIVITY_BURST | INSUFFICIENT_TIMING_DATA
+  signalLevel  String // LOW | MEDIUM | HIGH
+  explanation  String
+  evidenceJson Json?
+
+  reviewStatus String    @default("NEEDS_REVIEW")
+  reviewedAt   DateTime?
+  reviewedById String?
+  reviewedBy   User?     @relation("TimingIntegritySignalReviewer", fields: [reviewedById], references: [id])
+  reviewNote   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([analysisId])
+  @@index([reviewStatus])
 }
 
 model QuestionBank {

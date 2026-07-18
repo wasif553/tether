@@ -23,6 +23,7 @@ import { prisma } from "@/lib/prisma";
 import { questionPoolsActive, severityFor } from "@/lib/secureExam";
 import { isBlockedBackNavigation, nextAllowedIndex, resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
 import { buildOneQuestionPayload, loadOneQuestionSubmission, OneQuestionModeError } from "@/lib/submissionQuestionPayload";
+import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 
 const bodySchema = z.object({
   currentIndex: z.number().int().min(0),
@@ -99,6 +100,16 @@ export async function POST(
         .catch(() => {
           // Navigation logging is best-effort — never blocks the student.
         });
+
+      // Exam Session Binding + Time Anomaly Review v1 — coarse telemetry
+      // marker only, rate-limited so rapid repeat navigation calls don't
+      // flood the table. Never blocks navigation.
+      recordSimpleActivityEvent({
+        submissionId: submission.id,
+        eventType: "QUESTION_NAVIGATED",
+        questionIndex: finalIndex,
+        dedupeWindowMs: 2_000,
+      }).catch(() => {});
     }
 
     const payload = buildOneQuestionPayload(submission, settings, finalIndex);

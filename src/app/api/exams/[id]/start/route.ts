@@ -14,6 +14,7 @@ import {
   type StoredQuestionOrder,
 } from "@/lib/questionDelivery";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
+import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 
 export async function POST(
   req: Request,
@@ -212,6 +213,12 @@ export async function POST(
       institutionId,
       source: "EXAM_START",
     }).catch(() => {/* evidence capture is best-effort */});
+
+    // Exam Session Binding + Time Anomaly Review v1 — coarse telemetry
+    // marker only. Session BINDING itself (cookies, device token) is
+    // created on the exam page's first heartbeat, not here — see
+    // src/lib/examAttemptSessionRunner.ts.
+    recordSimpleActivityEvent({ submissionId: submission.id, eventType: "ATTEMPT_STARTED" }).catch(() => {});
 
     // Question Pools v1 — lightweight, best-effort audit summary. Never
     // includes question text — only ids, counts, and the per-pool draw
