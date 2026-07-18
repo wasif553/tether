@@ -177,6 +177,10 @@ model User {
   oralVerificationsRequested OralVerification[]          @relation("OralVerificationRequestedBy")
   oralVerificationsCompleted OralVerification[]          @relation("OralVerificationCompletedBy")
 
+  // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+  aiUseReviewAnalysesRequested AiUseReviewAnalysis[] @relation("AiUseReviewRequestedBy")
+  reviewedAiUseReviewSignals   AiUseReviewSignal[]    @relation("AiUseReviewSignalReviewer")
+
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
 }
@@ -244,6 +248,9 @@ model Exam {
   // docs/answer-similarity-review-v1.md.
   similarityAnalyses SubmissionSimilarityAnalysis[]
 
+  // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+  aiUseReviewAnalyses AiUseReviewAnalysis[]
+
   @@index([institutionId])
   @@index([courseId])
 }
@@ -294,6 +301,8 @@ model Question {
   // Answer Similarity Review v1 (additive) — see
   // docs/answer-similarity-review-v1.md.
   similarityMatches SubmissionSimilarityMatch[]
+  // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+  aiUseReviewSignals AiUseReviewSignal[]
 }
 
 // Answer Similarity Review v1 (additive) — see
@@ -423,6 +432,9 @@ model Submission {
   similarityMatchesAsCompared SubmissionSimilarityMatch[] @relation("SimilarityMatchCompared")
   oralVerifications           OralVerification[]
 
+  // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+  aiUseReviewAnalysis AiUseReviewAnalysis?
+
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])
 }
@@ -441,6 +453,8 @@ model Answer {
   aiDraftScore      Float?
   aiReasoning       String?
   aiGradedAt        DateTime?
+  // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+  aiUseReviewSignals AiUseReviewSignal[]
 
   @@unique([submissionId, questionId])
 }
@@ -715,6 +729,77 @@ model IntegrityEvidenceAsset {
   @@index([examId])
   @@index([institutionId])
   @@index([capturedAt])
+}
+
+// AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
+// This is NOT an AI detector: every row here is an explainable REVIEW
+// SIGNAL about observable answer characteristics for a human lecturer to
+// weigh — never a claim that an answer was written by AI, never an
+// automatic misconduct finding, never a grade input. Status/level/type/
+// review-status fields are plain validated String columns (not Prisma
+// enums), following the SubmissionSimilarityAnalysis convention — see
+// src/lib/aiUseReview.ts for the validators. One reusable row per
+// submission (a re-run replaces its prior signals, mirroring
+// runSimilarityAnalysisForExam's reuse pattern).
+model AiUseReviewAnalysis {
+  id           String     @id @default(cuid())
+  submissionId String     @unique
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  examId       String
+  exam         Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
+  status       String     @default("PENDING") // PENDING | PROCESSING | COMPLETE | FAILED | NOT_CONFIGURED
+  overallSignalLevel String @default("NONE") // NONE | LOW | MEDIUM | HIGH
+  // "deterministic" (Layer A only) or "anthropic" (Layer A + optional
+  // Layer B) — never a claim about who/what "detected" anything.
+  provider        String
+  modelIdentifier String?
+  algorithmVersion String
+  analysedAt      DateTime?
+  requestedById   String
+  requestedBy     User      @relation("AiUseReviewRequestedBy", fields: [requestedById], references: [id])
+  failureCode     String?
+  recommendation  String    @default("NO_IMMEDIATE_ACTION") // NO_IMMEDIATE_ACTION | LECTURER_REVIEW_RECOMMENDED | ORAL_VERIFICATION_RECOMMENDED
+  reasonCodesJson Json?
+  summaryJson     Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  signals         AiUseReviewSignal[]
+
+  @@index([examId])
+  @@index([status])
+}
+
+// One explainable signal produced by one analysis run — see
+// docs/ai-use-answer-review-v1.md. evidenceJson holds only short,
+// explainable observations (never the full answer text, never a hidden
+// AI-generated "chain of thought"). questionId is the question the
+// signal concerns; answerId is nullable because a signal may be derived
+// from comparing multiple answers (e.g. writing-style consistency) with
+// no single "the" answer it belongs to.
+model AiUseReviewSignal {
+  id           String              @id @default(cuid())
+  analysisId   String
+  analysis     AiUseReviewAnalysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  questionId   String
+  question     Question            @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  answerId     String?
+  answer       Answer?             @relation(fields: [answerId], references: [id], onDelete: SetNull)
+  signalType   String // WEAK_SCENARIO_GROUNDING | GENERIC_RESPONSE | STYLE_INCONSISTENCY | UNSUPPORTED_SPECIFIC_CLAIMS | REQUIRED_CONCEPTS_MISSING | POLISHED_BUT_SHALLOW_RESPONSE | GENERATED_RESPONSE_META_LANGUAGE
+  signalLevel  String // NONE | LOW | MEDIUM | HIGH
+  explanation  String
+  evidenceJson Json?
+  reviewStatus String    @default("NEEDS_REVIEW") // NEEDS_REVIEW | REVIEWED_NO_CONCERN | REVIEWED_CONCERN_REMAINS | ESCALATED | RESOLVED
+  reviewedAt   DateTime?
+  reviewedById String?
+  reviewedBy   User?     @relation("AiUseReviewSignalReviewer", fields: [reviewedById], references: [id])
+  reviewNote   String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([analysisId])
+  @@index([questionId])
+  @@index([answerId])
+  @@index([reviewStatus])
 }
 
 model QuestionBank {
