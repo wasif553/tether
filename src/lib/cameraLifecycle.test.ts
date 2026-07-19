@@ -21,6 +21,10 @@ import {
   CAMERA_MAX_AUTO_RETRIES,
   CAMERA_WARMUP_MS,
   DETECTION_SAMPLING_WARMUP_MS,
+  DETECTION_SAMPLING_STARTUP_TIMEOUT_MS,
+  DETECTION_SAMPLING_MAX_RETRIES,
+  DETECTION_SAMPLING_RETRY_DELAY_MS,
+  isDetectionFullyArmed,
   type RenderedFrameCheckInput,
 } from "./cameraLifecycle";
 import { normalizeCameraPermissionState } from "./sessionBinding";
@@ -178,10 +182,23 @@ describe("detection-sampling element readiness (fixes the second false CAMERA_VI
   });
 
   it("full arming requires BOTH the primary lifecycle to be READY and the detection-sampling element to independently reach its own readiness", () => {
-    const lifecycleReady = true;
-    const detectionVideoWarmedUp = false; // e.g. just attached, frames not yet stable
-    const armed = lifecycleReady && detectionVideoWarmedUp;
-    expect(armed).toBe(false);
+    expect(isDetectionFullyArmed(true, false)).toBe(false);
+    expect(isDetectionFullyArmed(false, true)).toBe(false);
+    expect(isDetectionFullyArmed(false, false)).toBe(false);
+    expect(isDetectionFullyArmed(true, true)).toBe(true);
+  });
+
+  it("sampling-video startup timeout is independent of, and shorter than, the primary camera timeout", () => {
+    expect(DETECTION_SAMPLING_STARTUP_TIMEOUT_MS).toBeGreaterThan(0);
+    expect(DETECTION_SAMPLING_STARTUP_TIMEOUT_MS).toBeLessThanOrEqual(10_000);
+    expect(DETECTION_SAMPLING_STARTUP_TIMEOUT_MS).toBeGreaterThanOrEqual(8_000);
+  });
+
+  it("sampling-sink retries are bounded, distinct from the primary camera's own retry bound", () => {
+    expect(shouldAutoRetry(0, DETECTION_SAMPLING_MAX_RETRIES)).toBe(true);
+    expect(shouldAutoRetry(1, DETECTION_SAMPLING_MAX_RETRIES)).toBe(true);
+    expect(shouldAutoRetry(DETECTION_SAMPLING_MAX_RETRIES, DETECTION_SAMPLING_MAX_RETRIES)).toBe(false);
+    expect(DETECTION_SAMPLING_RETRY_DELAY_MS).toBeGreaterThan(0);
   });
 });
 

@@ -34,10 +34,10 @@ import {
   isRenderedFrameValid,
   nextConsecutiveRenderedFrameCount,
   hasReachedFrameReadiness,
-  isWarmupComplete,
   resetCameraLifecycleTimers,
   initialCameraLifecycleTimers,
   isDetectionArmed,
+  isDetectionFullyArmed,
   shouldSuppressFocusEvent,
   shouldAutoRetry,
   isCurrentGeneration,
@@ -45,6 +45,9 @@ import {
   CAMERA_READY_TIMEOUT_MS,
   CAMERA_RETRY_DELAY_MS,
   DETECTION_SAMPLING_WARMUP_MS,
+  DETECTION_SAMPLING_STARTUP_TIMEOUT_MS,
+  DETECTION_SAMPLING_MAX_RETRIES,
+  DETECTION_SAMPLING_RETRY_DELAY_MS,
   type CameraLifecycleState,
   type CameraLifecycleTimers,
 } from "@/lib/cameraLifecycle";
@@ -599,6 +602,28 @@ export default function TakeExamPage({
   // elsewhere stay accurate without needing a second source of truth.
   const cameraStreamStartedAtRef = useRef<number | null>(null);
   const firstReadyFrameAtRef = useRef<number | null>(null);
+
+  // Detection-sampling sink (fixes "detection remains disabled until
+  // refresh" — see docs/on-device-ai-integrity-detection-v1.md,
+  // "Detection-sampling sink readiness"). detectionSamplingReadyRef is
+  // the SYNCHRONOUS source of truth the detection tick loop reads —
+  // owned entirely by startDetectionSamplingVideo() below, reset
+  // whenever a new camera generation starts (never carried across
+  // restarts, never left stuck at whatever a stale attempt last wrote).
+  // Persisted in refs (not effect-local `let`s) so a re-render or an
+  // unrelated effect restart can never discard in-progress readiness.
+  const detectionSamplingReadyRef = useRef(false);
+  const [detectionSamplingReady, setDetectionSamplingReady] = useState(false);
+  const detectionSamplingConsecutiveFramesRef = useRef(0);
+  const detectionSamplingFirstFrameAtRef = useRef<number | null>(null);
+  const detectionSamplingRetryAttemptRef = useRef(0);
+  const [detectionSamplingError, setDetectionSamplingError] = useState<string | null>(null);
+  // detectionArmed mirrors isDetectionFullyArmed(primary READY, sampling
+  // ready) purely for UI display — the detection tick loop itself always
+  // reads the two refs directly, never this state (never stale mid-tick).
+  // Derived on every render — no separate state/effect needed since both
+  // inputs are already React state.
+  const detectionArmed = isDetectionFullyArmed(cameraLifecycleState === "READY", detectionSamplingReady);
   // Local exam-content blur/overlay driven by AI camera violation events
   // (distinct from browser/window blur — see aiCameraViolationOverlay.ts).
   // Purely local UI state: acknowledging it clears this back to null but
@@ -1318,6 +1343,13 @@ export default function TakeExamPage({
     cameraTimersRef.current = initialCameraLifecycleTimers();
     cameraStreamStartedAtRef.current = null;
     firstReadyFrameAtRef.current = null;
+    // Detection-sampling sink is a consumer of the same stream — it goes
+    // away whenever the stream itself does, and must never carry stale
+    // readiness into whatever starts next.
+    detectionSamplingReadyRef.current = false;
+    setDetectionSamplingReady(false);
+    detectionSamplingConsecutiveFramesRef.current = 0;
+    detectionSamplingFirstFrameAtRef.current = null;
     logAiCameraDebug("stream: cleanup", { reason });
   }
 
@@ -1358,9 +1390,23 @@ export default function TakeExamPage({
    * overall startup timeout elapses. A single bad frame resets the
    * streak — never "banks" partial progress from before a dropout.
    */
-  function waitForRenderedFrames(video: HTMLVideoElement, stream: MediaStream, generation: number): Promise<boolean> {
+  /**
+   * Generic rendered-frame poller, shared by the primary camera lifecycle
+   * AND the detection-sampling sink below — same strict readiness bar for
+   * both, never a weaker one for the sampling sink. `label`/`onFrame` let
+   * each caller log and record progress into its own state without this
+   * function needing to know which one it's serving.
+   */
+  function waitForRenderedFrames(
+    video: HTMLVideoElement,
+    stream: MediaStream,
+    generation: number,
+    options: { timeoutMs?: number; label?: string; onFrame?: (consecutive: number) => void } = {},
+  ): Promise<boolean> {
+    const timeoutMs = options.timeoutMs ?? CAMERA_READY_TIMEOUT_MS;
+    const label = options.label ?? "primary";
     return new Promise((resolve) => {
-      const deadline = Date.now() + CAMERA_READY_TIMEOUT_MS;
+      const deadline = Date.now() + timeoutMs;
       let consecutive = 0;
       let rvfcHandle: number | null = null;
       let rafHandle: number | null = null;
@@ -1387,8 +1433,8 @@ export default function TakeExamPage({
           trackReadyState: track?.readyState,
         });
         consecutive = nextConsecutiveRenderedFrameCount(consecutive, valid);
-        cameraTimersRef.current = { ...cameraTimersRef.current, consecutiveRenderedFrames: consecutive };
-        logAiCameraDebug("frame: observed", { generation, valid, consecutive, readyState: video.readyState, width: video.videoWidth, height: video.videoHeight });
+        options.onFrame?.(consecutive);
+        logAiCameraDebug(`frame: observed (${label})`, { generation, valid, consecutive, readyState: video.readyState, width: video.videoWidth, height: video.videoHeight });
         if (hasReachedFrameReadiness(consecutive)) return finish(true);
         if (Date.now() > deadline) return finish(false);
         scheduleNext();
@@ -1448,6 +1494,25 @@ export default function TakeExamPage({
     cameraStreamStartedAtRef.current = cameraTimersRef.current.streamStartedAt;
     reportIntegrityEvent("CAMERA_PERMISSION_GRANTED");
 
+    // Detection-sampling sink — see docs/on-device-ai-integrity-detection-v1.md
+    // ("Detection-sampling sink readiness"). Started here, in PARALLEL
+    // with the primary preview's own readiness/warm-up below, using the
+    // SAME stream and the SAME generation — never gated behind
+    // gateAcknowledged or the primary reaching READY first, which
+    // previously created a second, unhandled cold start after the
+    // primary camera had already finished. Fire-and-forget: never
+    // awaited here, so it can never delay the primary lifecycle from
+    // reaching READY.
+    if (secureSettings?.enableAiCameraIntegrityChecks) {
+      detectionSamplingReadyRef.current = false;
+      setDetectionSamplingReady(false);
+      detectionSamplingConsecutiveFramesRef.current = 0;
+      detectionSamplingFirstFrameAtRef.current = null;
+      detectionSamplingRetryAttemptRef.current = 0;
+      setDetectionSamplingError(null);
+      void startDetectionSamplingWithRetry(stream, generation);
+    }
+
     setCameraLifecycleState("STREAM_RECEIVED", generation);
     const video = videoRef.current;
     if (!video) return { ok: false, reason: "readiness" };
@@ -1470,7 +1535,13 @@ export default function TakeExamPage({
     if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return { ok: false, reason: "readiness" };
 
     setCameraLifecycleState("WAITING_FOR_FIRST_FRAME", generation);
-    const reachedReadiness = await waitForRenderedFrames(video, stream, generation);
+    const reachedReadiness = await waitForRenderedFrames(video, stream, generation, {
+      timeoutMs: CAMERA_READY_TIMEOUT_MS,
+      label: "primary",
+      onFrame: (consecutive) => {
+        cameraTimersRef.current = { ...cameraTimersRef.current, consecutiveRenderedFrames: consecutive };
+      },
+    });
     if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return { ok: false, reason: "readiness" };
     if (!reachedReadiness) {
       logAiCameraDebug("readiness: timed out waiting for rendered frames", { generation });
@@ -1492,8 +1563,153 @@ export default function TakeExamPage({
     setCameraStatus("granted");
     setCameraStartupError(null);
     reportIntegrityEvent("CAMERA_STARTED");
-    logAiCameraDebug("lifecycle: detection armed", { generation, armed: true });
+    logAiCameraDebug("lifecycle: primary camera READY", {
+      generation,
+      detectionSamplingReady: detectionSamplingReadyRef.current,
+    });
     return { ok: true };
+  }
+
+  /**
+   * Explicit startup sequence for the hidden AI-detection sampling
+   * `<video>` — see docs/on-device-ai-integrity-detection-v1.md
+   * ("Detection-sampling sink readiness"). Mirrors the primary camera's
+   * own sequence (attach -> metadata -> explicit awaited play() -> N
+   * consecutive rendered frames -> settle warm-up) rather than relying
+   * on the `autoPlay` HTML attribute alone, which is not reliably
+   * sufficient for a second, initially off-screen (`display: none`)
+   * consumer of an already-live stream. Writes only to refs
+   * (detectionSamplingReadyRef and friends) — never effect-local `let`s
+   * — so a re-render or an unrelated effect restart can never discard
+   * in-progress readiness (Part 4). Every step checks `generation`
+   * before proceeding (Part 5), so a stale attempt can never arm
+   * detection for, or stop the stream of, a newer one.
+   */
+  /**
+   * The hidden detection `<video>` element only mounts once the pre-exam
+   * gate screen closes (secureModeEnabled && !gateAcknowledged is a
+   * separate early `return`, so this element cannot exist in that
+   * branch's tree — see Part 1 findings). startDetectionSamplingVideo()
+   * is started from inside startCameraAttempt(), which can run WHILE the
+   * student is still on the gate screen (camera is typically enabled
+   * there). Rather than depending on gateAcknowledged and treating "not
+   * mounted yet" as a hard failure (which the bounded retry budget could
+   * exhaust before the student even clicks "Begin exam"), this polls
+   * briefly for the ref to appear.
+   */
+  function waitForDetectionVideoRef(generation: number, timeoutMs = 20_000): Promise<HTMLVideoElement | null> {
+    return new Promise((resolve) => {
+      const deadline = Date.now() + timeoutMs;
+      function check() {
+        if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return resolve(null);
+        if (detectionVideoRef.current) return resolve(detectionVideoRef.current);
+        if (Date.now() > deadline) return resolve(null);
+        setTimeout(check, 150);
+      }
+      check();
+    });
+  }
+
+  async function startDetectionSamplingVideo(stream: MediaStream, generation: number): Promise<boolean> {
+    const video = await waitForDetectionVideoRef(generation);
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return false;
+    if (!video) {
+      logAiCameraDebug("detection sampling: no video element", { generation });
+      return false;
+    }
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return false;
+
+    // Clear any stale previous srcObject before reattaching — the same
+    // teardown-before-(re)attach discipline the primary lifecycle uses.
+    video.srcObject = null;
+    video.muted = true;
+    video.playsInline = true;
+    video.autoplay = true;
+    video.srcObject = stream;
+    logAiCameraDebug("detection sampling: stream attached", { generation });
+
+    await waitForVideoEvent(video, "loadedmetadata", 5_000);
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return false;
+
+    try {
+      await video.play();
+      logAiCameraDebug("detection sampling: play success", { generation });
+    } catch (err) {
+      logAiCameraDebug("detection sampling: play failed", { generation, error: err instanceof Error ? err.message : String(err) });
+    }
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return false;
+
+    const reachedReadiness = await waitForRenderedFrames(video, stream, generation, {
+      timeoutMs: DETECTION_SAMPLING_STARTUP_TIMEOUT_MS,
+      label: "detection-sampling",
+      onFrame: (consecutive) => {
+        detectionSamplingConsecutiveFramesRef.current = consecutive;
+      },
+    });
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return false;
+    if (!reachedReadiness) {
+      logAiCameraDebug("detection sampling: timed out waiting for rendered frames", { generation });
+      return false;
+    }
+
+    const firstFrameReadyAt = Date.now();
+    detectionSamplingFirstFrameAtRef.current = firstFrameReadyAt;
+    logAiCameraDebug("detection sampling: readiness confirmed (3 consecutive)", { generation, firstFrameReadyAt });
+
+    logAiCameraDebug("detection sampling: warmup start", { generation, warmupMs: DETECTION_SAMPLING_WARMUP_MS });
+    await delay(DETECTION_SAMPLING_WARMUP_MS);
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return false;
+    logAiCameraDebug("detection sampling: warmup end", { generation });
+
+    detectionSamplingReadyRef.current = true;
+    setDetectionSamplingReady(true);
+    setDetectionSamplingError(null);
+    logAiCameraDebug("detection sampling: ready", { generation });
+    return true;
+  }
+
+  /**
+   * Bounded retry (Part 6/9) — restarts ONLY the sampling sink (clear
+   * srcObject, reattach the SAME live stream, play again) on a timeout
+   * or failure. Never touches the primary stream/lifecycle, never
+   * restarts the submission, never discards answers or the current
+   * question — this is purely a second, independent consumer of the
+   * already-working camera stream.
+   */
+  async function startDetectionSamplingWithRetry(stream: MediaStream, generation: number): Promise<void> {
+    const ok = await startDetectionSamplingVideo(stream, generation);
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return;
+    if (ok) return;
+
+    if (shouldAutoRetry(detectionSamplingRetryAttemptRef.current, DETECTION_SAMPLING_MAX_RETRIES)) {
+      detectionSamplingRetryAttemptRef.current += 1;
+      logAiCameraDebug("detection sampling: automatic retry", {
+        generation,
+        attempt: detectionSamplingRetryAttemptRef.current,
+      });
+      await delay(DETECTION_SAMPLING_RETRY_DELAY_MS);
+      if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return;
+      await startDetectionSamplingWithRetry(stream, generation);
+      return;
+    }
+
+    logAiCameraDebug("detection sampling: retries exhausted", { generation });
+    setDetectionSamplingError("Camera preview is active, but camera integrity checks could not start.");
+  }
+
+  /**
+   * Manual "Retry camera checks" — restarts only the sampling sink using
+   * the CURRENT camera generation and the already-live primary stream.
+   * Requires the primary camera to already be READY; never re-requests
+   * getUserMedia() and never touches the submission.
+   */
+  async function retryDetectionSampling() {
+    const stream = cameraStreamRef.current;
+    if (!stream || cameraLifecycleRef.current !== "READY") return;
+    const generation = cameraStartGenerationRef.current;
+    detectionSamplingRetryAttemptRef.current = 0;
+    setDetectionSamplingError(null);
+    await startDetectionSamplingWithRetry(stream, generation);
   }
 
   /**
@@ -1614,14 +1830,16 @@ export default function TakeExamPage({
     setCameraPreviewMinimized((prev) => !prev);
   }
 
-  // Reattaches the same camera stream to the hidden detection video
-  // element regardless of the visible preview's minimized state, so AI
-  // camera checks (if enabled) keep running even while minimized.
-  useEffect(() => {
-    if (gateAcknowledged && detectionVideoRef.current && cameraStreamRef.current) {
-      detectionVideoRef.current.srcObject = cameraStreamRef.current;
-    }
-  }, [gateAcknowledged, cameraStatus]);
+  // The hidden detection video's stream attachment is no longer handled
+  // by a gateAcknowledged/cameraStatus-triggered effect — see
+  // docs/on-device-ai-integrity-detection-v1.md ("Detection-sampling
+  // sink readiness"). That reattachment ran only once cameraStatus was
+  // already "granted" AND gateAcknowledged was true, which is a strictly
+  // LATER point than when startDetectionSamplingVideo() now starts (in
+  // parallel with the primary camera, from inside startCameraAttempt) —
+  // keeping this effect around would just reattach the same stream a
+  // second time, restarting the sampling sink's own decode pipeline
+  // right as it (or its readiness poll) was settling.
 
   // Clean up the camera stream on unmount, regardless of how the page is left.
   useEffect(() => {
@@ -1783,18 +2001,28 @@ export default function TakeExamPage({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setAiCheckStatus("loading");
 
-    // Detection-sampling element readiness — see
+    // Detection-sampling sink readiness — see
     // docs/on-device-ai-integrity-detection-v1.md ("Detection-sampling
-    // element readiness"). detectionVideoRef is a SEPARATE hidden <video>
-    // from the one the camera lifecycle above warms up — its srcObject is
-    // only assigned right as the overall lifecycle reaches READY, so it
-    // is a brand-new decode pipeline with no warm-up of its own. These
-    // are local to this effect run (never a component-level ref) so a
-    // fresh attach — including a heartbeat-triggered restart — always
-    // starts this readiness tracking from zero, never carrying over a
-    // previous run's state.
-    let detectionVideoConsecutiveFrames = 0;
-    let detectionVideoFirstReadyFrameAt: number | null = null;
+    // sink readiness"). Ownership of readiness tracking moved OUT of
+    // this effect and into detectionSamplingReadyRef (a persistent,
+    // component-level ref written only by startDetectionSamplingVideo())
+    // — this effect only ever READS it. That fixes the earlier bug where
+    // readiness tracking lived in effect-local `let`s: any restart of
+    // THIS effect (its deps include cameraStatus, which flips on every
+    // camera restart) used to discard all in-progress readiness,
+    // permanently stalling detection until a full page refresh gave the
+    // whole flow a single, uninterrupted run.
+    //
+    // `previouslyArmed` guards against stale-counter carryover at the
+    // exact moment arming flips false -> true: the frame-QUALITY
+    // counters below (blocked/dark/second-person/no-person) keep
+    // recording every tick regardless of arming (so a persistent signal
+    // confirms quickly once armed), which means a couple of transient
+    // bad ticks recorded WHILE unarmed could otherwise satisfy a
+    // 2-consecutive-tick rule on the very first armed tick. Resetting
+    // the tracker at that exact transition guarantees post-arm counting
+    // always starts from zero.
+    let previouslyArmed = false;
 
     loadCameraObjectDetector().then((detector) => {
       if (cancelled) return;
@@ -1833,50 +2061,32 @@ export default function TakeExamPage({
       try {
         if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
 
-        // Detection-sampling element readiness — see
-        // docs/on-device-ai-integrity-detection-v1.md ("Detection-
-        // sampling element readiness"). detectionVideoRef is a SEPARATE
-        // <video> from the one the camera lifecycle warms up, first
-        // attached right as the lifecycle reaches READY — it has had NO
-        // warm-up of its own. Reuses the exact same strict rendered-frame
-        // check and consecutive-frame requirement as the primary
-        // lifecycle (never a weaker one), then its own short settle
-        // warm-up, before this element's frames are trusted for emission.
-        const detectionTrack = cameraStreamRef.current?.getVideoTracks()[0];
-        const detectionFrameValid = isRenderedFrameValid({
-          readyState: video.readyState,
-          videoWidth: video.videoWidth,
-          videoHeight: video.videoHeight,
-          currentTime: video.currentTime,
-          paused: video.paused,
-          trackReadyState: detectionTrack?.readyState,
-        });
-        detectionVideoConsecutiveFrames = nextConsecutiveRenderedFrameCount(detectionVideoConsecutiveFrames, detectionFrameValid);
-        if (detectionVideoFirstReadyFrameAt == null && hasReachedFrameReadiness(detectionVideoConsecutiveFrames)) {
-          detectionVideoFirstReadyFrameAt = now;
-          logAiCameraDebug("detection sampling: readiness reached", { firstReadyFrameAt: now });
-        }
-        const detectionVideoWarmedUp = isWarmupComplete(detectionVideoFirstReadyFrameAt, now, DETECTION_SAMPLING_WARMUP_MS);
-
         // Camera Startup Lifecycle v2 — see
         // docs/on-device-ai-integrity-detection-v1.md ("Camera startup
-        // lifecycle"). Detection/inference still runs every tick
-        // regardless of readiness (so the model warms up and the local
-        // overlay/quality pipeline stay exercised), but EMISSION (backend
-        // logging, the local violation overlay, and evidence-frame
-        // upload) is armed ONLY once BOTH the overall lifecycle has
-        // reached READY AND this detection-sampling element has
-        // independently reached its own frame readiness + warm-up —
-        // never merely because a frame exists on either element.
-        const armed = isDetectionArmed(cameraLifecycleRef.current) && detectionVideoWarmedUp;
+        // lifecycle" / "Detection-sampling sink readiness"). Detection/
+        // inference still runs every tick regardless of readiness (so the
+        // model warms up and the local overlay/quality pipeline stay
+        // exercised), but EMISSION (backend logging, the local violation
+        // overlay, and evidence-frame upload) is armed ONLY once BOTH the
+        // primary lifecycle has reached READY AND the detection-sampling
+        // sink has independently reached its own readiness — read
+        // directly from the persistent refs startDetectionSamplingVideo()
+        // owns, never recomputed here.
+        const armed = isDetectionFullyArmed(isDetectionArmed(cameraLifecycleRef.current), detectionSamplingReadyRef.current);
         const suppressStartup = !armed;
         if (suppressStartup) {
           logAiCameraDebug("tick: suppressed — not yet fully armed", {
             lifecycleState: cameraLifecycleRef.current,
-            detectionVideoConsecutiveFrames,
-            detectionVideoWarmedUp,
+            detectionSamplingReady: detectionSamplingReadyRef.current,
+            detectionSamplingConsecutiveFrames: detectionSamplingConsecutiveFramesRef.current,
           });
         }
+        // Stale-carryover guard — see the `previouslyArmed` comment above.
+        if (armed && !previouslyArmed) {
+          cooldown.reset();
+          logAiCameraDebug("tick: cooldown reset at arm transition", {});
+        }
+        previouslyArmed = armed;
 
         if (!detectionCanvasRef.current) {
           detectionCanvasRef.current = document.createElement("canvas");
@@ -2583,21 +2793,39 @@ export default function TakeExamPage({
           {enableAiCameraIntegrityChecks && (
             <span
               className={
-                aiCheckStatus === "unavailable" || cameraLifecycleState === "FAILED"
+                aiCheckStatus === "unavailable" || cameraLifecycleState === "FAILED" || detectionSamplingError
                   ? "rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600"
-                  : cameraLifecycleState !== "READY"
+                  : !detectionArmed
                     ? "rounded bg-yellow-100 px-2 py-0.5 text-xs text-yellow-700"
                     : "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
               }
             >
+              {/* Part 8 — the "active" state is never shown merely
+                  because the primary camera reached READY; it requires
+                  detectionArmed (primary READY AND the detection-
+                  sampling sink independently ready) — see
+                  docs/on-device-ai-integrity-detection-v1.md. */}
               {aiCheckStatus === "unavailable"
                 ? "Camera integrity checks unavailable"
                 : cameraLifecycleState === "FAILED"
                   ? "Camera setup issue — checks unavailable"
-                  : cameraLifecycleState !== "READY"
-                    ? "Preparing camera integrity checks…"
-                    : "Camera integrity checks active"}
+                  : detectionSamplingError
+                    ? "Camera preview is active, but camera integrity checks could not start."
+                    : cameraLifecycleState !== "READY"
+                      ? "Preparing camera integrity checks…"
+                      : !detectionArmed
+                        ? "Starting camera integrity checks…"
+                        : "Camera integrity checks active"}
             </span>
+          )}
+          {enableAiCameraIntegrityChecks && detectionSamplingError && (
+            <button
+              type="button"
+              onClick={retryDetectionSampling}
+              className="rounded border border-gray-300 bg-white px-2 py-0.5 text-xs"
+            >
+              Retry camera checks
+            </button>
           )}
           <a href="/privacy/student-exam-notice" target="_blank" rel="noreferrer" className="text-xs underline">
             What does this record?
@@ -2664,10 +2892,16 @@ export default function TakeExamPage({
               {enableAiCameraIntegrityChecks && cameraLifecycleState !== "READY" && cameraLifecycleState !== "FAILED" && (
                 <p className="mt-1 text-xs text-gray-500">{cameraLifecycleStatusMessage(cameraLifecycleState)}</p>
               )}
+              {enableAiCameraIntegrityChecks && cameraLifecycleState === "READY" && !detectionArmed && !detectionSamplingError && (
+                <p className="mt-1 text-xs text-gray-500">Starting camera integrity checks…</p>
+              )}
               {enableAiCameraIntegrityChecks && cameraLifecycleState === "FAILED" && (
                 <p className="mt-1 text-xs text-amber-700">
                   Camera could not start. Check browser permission and try again.
                 </p>
+              )}
+              {enableAiCameraIntegrityChecks && detectionSamplingError && (
+                <p className="mt-1 text-xs text-amber-700">{detectionSamplingError}</p>
               )}
             </div>
           )}
@@ -2679,7 +2913,17 @@ export default function TakeExamPage({
           Kept separate from the visible preview above so detection
           keeps running even while the preview is minimized. Never
           rendered visibly, never uploaded, never recorded. */}
-      {requireCamera && cameraStatus === "granted" && enableAiCameraIntegrityChecks && (
+      {/* Deliberately NOT gated on cameraStatus === "granted" (i.e. not
+          gated on the primary camera already being READY) — see
+          docs/on-device-ai-integrity-detection-v1.md ("Detection-
+          sampling sink readiness"): that used to force a second cold
+          start after the primary camera had already finished. Still
+          only reachable once past the pre-exam gate screen's own early
+          return (secureModeEnabled && !gateAcknowledged) — see
+          waitForDetectionVideoRef() in startDetectionSamplingVideo,
+          which tolerates that remaining gap by waiting for this element
+          to mount rather than failing immediately. */}
+      {requireCamera && enableAiCameraIntegrityChecks && (
         <video ref={detectionVideoRef} autoPlay muted playsInline style={{ display: "none" }} />
       )}
 

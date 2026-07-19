@@ -115,6 +115,28 @@ remains scoped narrowly:
   once `READY`, detection behaves exactly as before, including
   recovering normally (via a controlled restart) if the camera becomes
   genuinely blocked/dark/absent later in the exam.
+- **Detection-sampling sink readiness (v2.2)** — see
+  docs/on-device-ai-integrity-detection-v1.md ("Detection-sampling sink
+  readiness (v2.2)"). The visible camera preview and the hidden
+  AI-sampling video are two separate `<video>` elements with
+  independently tracked readiness (`primaryCameraReady` vs.
+  `detectionSamplingReady`); both are explicitly started — including an
+  explicitly awaited `video.play()` on the hidden sampling element,
+  never left to the `autoplay` attribute alone — in parallel from the
+  same stream, generation-guarded so a stale attempt can never affect a
+  newer one. AI-integrity checks (blocked/dark/no-person/phone/
+  second-person) do not become active (`detectionArmed`) until both
+  elements are independently ready — the "Camera integrity checks
+  active" status is never shown early, and no page refresh or re-login
+  is required for checks to start working on the first attempt. If the
+  sampling element alone fails to start, only that sink is retried (up
+  to 2 bounded automatic retries, then a manual "Retry camera checks"
+  button) — the visible preview, exam submission, and current answers
+  are never affected. No fallback to the primary preview element as an
+  alternate detection source is implemented; if the sampling sink
+  cannot start after retries, checks remain inactive and the status
+  banner says so rather than silently degrading to a different video
+  source.
 
 ## Exam Watermark v1
 

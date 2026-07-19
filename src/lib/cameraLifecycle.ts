@@ -106,6 +106,31 @@ export const DETECTION_SAMPLING_WARMUP_MS = 1_000;
 /** If READY is never reached within this long after the stream started, startup is considered failed (never an indefinite spinner). */
 export const CAMERA_READY_TIMEOUT_MS = 15_000;
 
+/**
+ * If the detection-sampling `<video>` sink never becomes ready within
+ * this long (from when its own startup attempt began — never from
+ * permission grant or the primary camera's own timing), that attempt is
+ * considered failed and eligible for the bounded sink-only retry below.
+ * Independent of, and shorter than, CAMERA_READY_TIMEOUT_MS — the
+ * primary camera may already be READY and the student already answering
+ * questions while this is still settling.
+ */
+export const DETECTION_SAMPLING_STARTUP_TIMEOUT_MS = 9_000;
+
+/** Bounded retries for the sampling SINK only — never the whole camera/submission. */
+export const DETECTION_SAMPLING_MAX_RETRIES = 2;
+export const DETECTION_SAMPLING_RETRY_DELAY_MS = 500;
+
+/**
+ * The hard arming rule (Part 9): both the primary camera lifecycle AND
+ * the detection-sampling sink must independently be ready. Named and
+ * exported so the rule is explicit and testable on its own, rather than
+ * inlined ad hoc at each call site.
+ */
+export function isDetectionFullyArmed(primaryLifecycleReady: boolean, detectionSamplingReady: boolean): boolean {
+  return primaryLifecycleReady && detectionSamplingReady;
+}
+
 export function isWarmupComplete(
   firstFrameReadyAt: number | null,
   now: number,
