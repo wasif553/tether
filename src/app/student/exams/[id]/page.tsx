@@ -86,6 +86,10 @@ type SecureSettings = {
   allowBackNavigation: boolean;
   randomiseQuestionOrder: boolean;
   randomiseMcqOptionOrder: boolean;
+  // Question Navigator v1 — see docs/question-navigator-v1.md.
+  showQuestionNavigator: boolean;
+  allowQuestionJumping: boolean;
+  allowFlagForReview: boolean;
 };
 
 type SubmissionData = {
@@ -123,6 +127,40 @@ type OneQuestionPayload = {
     points: number;
   };
   existingResponse: string | null;
+};
+
+// Question Navigator v1 — see docs/question-navigator-v1.md. Safe
+// metadata only — never question text, options, correct answers, answer
+// text, or unselected questions.
+type NavigatorQuestionState = "CURRENT" | "ANSWERED" | "SKIPPED" | "NOT_VISITED";
+
+type NavigatorQuestionTile = {
+  questionId: string;
+  index: number;
+  number: number;
+  state: NavigatorQuestionState;
+  flaggedForReview: boolean;
+  locked: boolean;
+  canNavigate: boolean;
+};
+
+type NavigatorResponseDto = {
+  submissionId: string;
+  currentQuestionIndex: number;
+  totalQuestions: number;
+  settings: {
+    showQuestionNavigator: boolean;
+    allowQuestionJumping: boolean;
+    allowBackNavigation: boolean;
+    allowFlagForReview: boolean;
+  };
+  progress: {
+    answeredCount: number;
+    unansweredCount: number;
+    flaggedCount: number;
+    visitedCount: number;
+  };
+  questions: NavigatorQuestionTile[];
 };
 
 type IntegrityEventType =
@@ -267,6 +305,121 @@ function isBlockableShortcut(e: KeyboardEvent): boolean {
   return false;
 }
 
+// Question Navigator v1 — see docs/question-navigator-v1.md. Presentation
+// only: every state shown here is exactly what the server already
+// authorised in `navigator.questions[].locked/canNavigate` — clicking a
+// tile never bypasses server policy, it only ever requests a move the
+// server may still reject.
+const NAVIGATOR_STATE_STYLES: Record<NavigatorQuestionState, string> = {
+  CURRENT: "border-2 border-black bg-white text-black",
+  ANSWERED: "border border-green-300 bg-green-50 text-green-800",
+  SKIPPED: "border border-amber-300 bg-amber-50 text-amber-800",
+  NOT_VISITED: "border border-gray-200 bg-gray-50 text-gray-500",
+};
+
+const NAVIGATOR_STATE_ICON: Record<NavigatorQuestionState, string> = {
+  CURRENT: "◆",
+  ANSWERED: "✓",
+  SKIPPED: "…",
+  NOT_VISITED: "",
+};
+
+/** First tile matching `predicate` that the server already marked navigable — never bypasses server policy (it only ever picks among what canNavigate already permits). */
+function findFirstNavigableIndex(nav: NavigatorResponseDto, predicate: (tile: { answered: boolean; flaggedForReview: boolean }) => boolean): number | null {
+  const match = nav.questions.find((t) => predicate({ answered: t.state === "ANSWERED", flaggedForReview: t.flaggedForReview }) && t.canNavigate);
+  return match ? match.index : null;
+}
+
+function navigatorTileLabel(tile: NavigatorQuestionTile): string {
+  const parts = [`Question ${tile.number}`];
+  if (tile.state === "CURRENT") parts.push("current question");
+  else if (tile.state === "ANSWERED") parts.push("answered");
+  else if (tile.state === "SKIPPED") parts.push("visited but unanswered");
+  else parts.push("not visited");
+  if (tile.flaggedForReview) parts.push("flagged for review");
+  if (tile.locked) parts.push("locked — navigation not available for this question");
+  return parts.join(", ");
+}
+
+function QuestionNavigatorPanel({
+  navigator,
+  open,
+  onToggleOpen,
+  disabled,
+  onSelectQuestion,
+}: {
+  navigator: NavigatorResponseDto;
+  open: boolean;
+  onToggleOpen: () => void;
+  disabled: boolean;
+  onSelectQuestion: (index: number) => void;
+}) {
+  return (
+    <div className="mb-4 rounded border border-gray-200">
+      {/* Mobile/tablet: collapsible section (Part 9). Desktop keeps it
+          expanded by default via the sm:block override below, without
+          needing separate markup. */}
+      <button
+        type="button"
+        onClick={onToggleOpen}
+        className="flex w-full items-center justify-between px-3 py-2 text-sm font-medium sm:cursor-default"
+        aria-expanded={open}
+      >
+        <span>
+          Question {navigator.currentQuestionIndex + 1} of {navigator.totalQuestions}
+        </span>
+        <span className="sm:hidden">{open ? "Hide" : "Show"} question navigator</span>
+      </button>
+      <div className={`${open ? "block" : "hidden"} border-t border-gray-100 p-3 sm:block sm:border-t-0`}>
+        <div className="flex flex-wrap gap-3 text-xs text-gray-600">
+          <span>{navigator.progress.answeredCount} answered</span>
+          <span>{navigator.progress.unansweredCount} unanswered</span>
+          {navigator.settings.allowFlagForReview && <span>{navigator.progress.flaggedCount} flagged</span>}
+        </div>
+        <div className="mt-2 grid grid-cols-5 gap-1.5 sm:grid-cols-6">
+          {navigator.questions.map((tile) => (
+            <button
+              key={tile.questionId}
+              type="button"
+              disabled={disabled || tile.locked}
+              onClick={() => onSelectQuestion(tile.index)}
+              aria-current={tile.state === "CURRENT" ? "step" : undefined}
+              aria-label={navigatorTileLabel(tile)}
+              title={navigatorTileLabel(tile)}
+              className={`relative flex h-9 w-9 items-center justify-center rounded text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black disabled:cursor-not-allowed disabled:opacity-60 ${NAVIGATOR_STATE_STYLES[tile.state]}`}
+            >
+              {tile.number}
+              {NAVIGATOR_STATE_ICON[tile.state] && (
+                <span aria-hidden="true" className="absolute -right-1 -top-1 text-[10px]">
+                  {NAVIGATOR_STATE_ICON[tile.state]}
+                </span>
+              )}
+              {tile.flaggedForReview && (
+                <span aria-hidden="true" className="absolute -left-1 -top-1 text-[10px]">
+                  🚩
+                </span>
+              )}
+              {tile.locked && (
+                <span aria-hidden="true" className="absolute -bottom-1 -right-1 text-[10px]">
+                  🔒
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+        <div className="mt-3 flex flex-wrap gap-3 border-t border-gray-100 pt-2 text-xs text-gray-500">
+          <span>◆ Current</span>
+          <span>✓ Answered</span>
+          <span>… Skipped</span>
+          {navigator.settings.allowFlagForReview && <span>🚩 Flagged</span>}
+          <span>Not visited</span>
+          <span>🔒 Locked</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function TakeExamPage({
   params,
 }: {
@@ -299,6 +452,12 @@ export default function TakeExamPage({
     payload: OneQuestionPayload | null;
   }>({ loading: true, error: null, payload: null });
   const [navigatingQuestion, setNavigatingQuestion] = useState(false);
+  // Question Navigator v1 — see docs/question-navigator-v1.md.
+  const [questionNav, setQuestionNav] = useState<NavigatorResponseDto | null>(null);
+  const [navigatorPanelOpen, setNavigatorPanelOpen] = useState(false);
+  const [navigatorAnnouncement, setNavigatorAnnouncement] = useState("");
+  const [flaggingQuestionId, setFlaggingQuestionId] = useState<string | null>(null);
+  const [showReviewModal, setShowReviewModal] = useState(false);
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const lastEventAt = useRef<Partial<Record<IntegrityEventType, number>>>({});
   const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -628,6 +787,87 @@ export default function TakeExamPage({
       }));
     } finally {
       setNavigatingQuestion(false);
+    }
+  }
+
+  // Question Navigator v1 — see docs/question-navigator-v1.md. Refreshed
+  // after every navigation, flag change, or answer save so counts/states
+  // never go stale. Silently no-ops on failure (progress display, not the
+  // source of truth for anything security-relevant).
+  const loadNavigator = useCallback(async () => {
+    const res = await fetch(`/api/submissions/${id}/question-navigator`).catch(() => null);
+    if (res && res.ok) setQuestionNav(await res.json());
+  }, [id]);
+
+  useEffect(() => {
+    if (oneQuestionAtATime && secureSettings?.showQuestionNavigator && gateAcknowledged) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      loadNavigator();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [oneQuestion.payload?.question.id, gateAcknowledged]);
+
+  /**
+   * Direct (GOTO) navigation via a grid tile — a DISTINCT, stricter
+   * server path from navigateQuestion() above (see
+   * canNavigateToQuestion in src/lib/questionNavigator.ts). Follows the
+   * same disable-controls -> save -> request -> load -> refresh ->
+   * re-enable flow to avoid double-click/overlapping-save races.
+   */
+  async function navigateQuestionDirect(targetIndex: number) {
+    if (!oneQuestion.payload || navigatingQuestion) return;
+    setNavigatingQuestion(true);
+    setOneQuestion((prev) => ({ ...prev, error: null }));
+    const saved = await flushAnswerNow(oneQuestion.payload.question.id);
+    if (!saved) {
+      setOneQuestion((prev) => ({ ...prev, error: "Your answer could not be saved. Please try again before moving on." }));
+      setNavigatingQuestion(false);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/submissions/${id}/question-progress`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "GOTO", targetIndex }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setOneQuestion((prev) => ({
+          ...prev,
+          error: typeof body?.error === "string" ? body.error : "Could not move to that question. Please try again.",
+        }));
+        return;
+      }
+      const payload: OneQuestionPayload = await res.json();
+      setOneQuestion({ loading: false, error: null, payload });
+      setNavigatorAnnouncement(`Moved to question ${payload.currentIndex + 1} of ${payload.totalQuestions}.`);
+      if (payload.existingResponse != null) {
+        setResponses((prev) => (prev[payload.question.id] !== undefined ? prev : { ...prev, [payload.question.id]: payload.existingResponse! }));
+      }
+    } catch {
+      setOneQuestion((prev) => ({ ...prev, error: "Could not reach the server. Please try again." }));
+    } finally {
+      setNavigatingQuestion(false);
+    }
+  }
+
+  async function toggleFlagCurrentQuestion() {
+    if (!oneQuestion.payload || flaggingQuestionId) return;
+    const questionId = oneQuestion.payload.question.id;
+    const currentlyFlagged = questionNav?.questions.find((t) => t.questionId === questionId)?.flaggedForReview ?? false;
+    setFlaggingQuestionId(questionId);
+    try {
+      const res = await fetch(`/api/submissions/${id}/question-state/${questionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ flaggedForReview: !currentlyFlagged }),
+      });
+      if (res.ok) {
+        setNavigatorAnnouncement(!currentlyFlagged ? "Question flagged for review." : "Question unflagged.");
+        await loadNavigator();
+      }
+    } finally {
+      setFlaggingQuestionId(null);
     }
   }
 
@@ -1632,13 +1872,17 @@ export default function TakeExamPage({
         })
           .then((res) => {
             if (!res.ok && secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
+            // Question Navigator v1 — Part 12: progress counts must
+            // update after every answer save, not only after
+            // navigation. Best-effort; never blocks/delays the save.
+            else if (oneQuestionAtATime && secureSettings?.showQuestionNavigator) loadNavigator();
           })
           .catch(() => {
             if (secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
           });
       }, 600);
     },
-    [id, secureModeEnabled, reportIntegrityEvent],
+    [id, secureModeEnabled, reportIntegrityEvent, oneQuestionAtATime, secureSettings?.showQuestionNavigator, loadNavigator],
   );
 
   function handleChange(questionId: string, value: string) {
@@ -2139,13 +2383,46 @@ export default function TakeExamPage({
             // .../question(-progress)) — data.exam.questions is empty in
             // this mode, the server never sends the full paper.
             <div className="mt-6">
+              {/* Question Navigator v1 — see docs/question-navigator-v1.md.
+                  An aria-live region so screen-reader users hear
+                  confirmation after a successful navigation or
+                  flag/unflag, without needing to find focus themselves. */}
+              <div aria-live="polite" className="sr-only">
+                {navigatorAnnouncement}
+              </div>
+              {secureSettings?.showQuestionNavigator && questionNav && (
+                <QuestionNavigatorPanel
+                  navigator={questionNav}
+                  open={navigatorPanelOpen}
+                  onToggleOpen={() => setNavigatorPanelOpen((v) => !v)}
+                  disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
+                  onSelectQuestion={navigateQuestionDirect}
+                />
+              )}
               {oneQuestion.loading && <p className="text-gray-500">Loading question...</p>}
               {!oneQuestion.loading && oneQuestion.payload && (
                 <div className="rounded border border-gray-200 p-4">
-                  <p className="text-sm text-gray-500">
-                    Question {oneQuestion.payload.currentIndex + 1} of {oneQuestion.payload.totalQuestions}{" "}
-                    · {oneQuestion.payload.question.points} pt(s)
-                  </p>
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm text-gray-500">
+                      Question {oneQuestion.payload.currentIndex + 1} of {oneQuestion.payload.totalQuestions}{" "}
+                      · {oneQuestion.payload.question.points} pt(s)
+                    </p>
+                    {secureSettings?.allowFlagForReview && (
+                      <button
+                        type="button"
+                        onClick={toggleFlagCurrentQuestion}
+                        disabled={flaggingQuestionId === oneQuestion.payload.question.id}
+                        aria-pressed={
+                          questionNav?.questions.find((t) => t.questionId === oneQuestion.payload!.question.id)?.flaggedForReview ?? false
+                        }
+                        className="rounded border border-gray-300 px-2 py-1 text-xs disabled:opacity-50"
+                      >
+                        {questionNav?.questions.find((t) => t.questionId === oneQuestion.payload!.question.id)?.flaggedForReview
+                          ? "🚩 Flagged for review"
+                          : "Flag for review"}
+                      </button>
+                    )}
+                  </div>
                   <p
                     className="mt-1"
                     style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
@@ -2286,11 +2563,20 @@ export default function TakeExamPage({
           )}
 
           <button
-            onClick={() =>
-              remainingSecs === 0 && data.exam.secureSettings.autoSubmitOnTimerEnd
-                ? handleSubmit({ systemAutoSubmit: true })
-                : handleSubmit()
-            }
+            onClick={() => {
+              if (remainingSecs === 0 && data.exam.secureSettings.autoSubmitOnTimerEnd) {
+                handleSubmit({ systemAutoSubmit: true });
+                return;
+              }
+              // Question Navigator v1 — Part 13: show the review panel
+              // only when the navigator is actually active for this
+              // exam; otherwise submission behaves exactly as before.
+              if (oneQuestionAtATime && secureSettings?.showQuestionNavigator && questionNav) {
+                setShowReviewModal(true);
+                return;
+              }
+              handleSubmit();
+            }}
             disabled={submitting || autoSubmitLocked || timerStopped}
             className="mt-6 rounded bg-black px-4 py-2 text-white disabled:opacity-50"
           >
@@ -2298,6 +2584,73 @@ export default function TakeExamPage({
           </button>
           {submitMessage && <p className="mt-2 text-sm text-red-600">{submitMessage}</p>}
         </div>
+
+        {/* Question Navigator v1 — Part 13 review-before-submit workflow.
+            See docs/question-navigator-v1.md. */}
+        {showReviewModal && questionNav && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby="review-exam-heading">
+            <div className="w-full max-w-sm rounded border border-gray-300 bg-white p-5 shadow-lg">
+              <p id="review-exam-heading" className="text-base font-semibold">
+                Review your exam
+              </p>
+              <div className="mt-3 space-y-1 text-sm text-gray-700">
+                <p>Answered: {questionNav.progress.answeredCount}</p>
+                <p>Unanswered: {questionNav.progress.unansweredCount}</p>
+                {questionNav.settings.allowFlagForReview && <p>Flagged for review: {questionNav.progress.flaggedCount}</p>}
+              </div>
+              {questionNav.progress.unansweredCount > 0 && (
+                <p className="mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                  You still have {questionNav.progress.unansweredCount} unanswered question
+                  {questionNav.progress.unansweredCount === 1 ? "" : "s"}. You may submit now, but unanswered
+                  questions may receive no marks.
+                </p>
+              )}
+              <div className="mt-4 flex flex-col gap-2">
+                {questionNav.progress.unansweredCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = findFirstNavigableIndex(questionNav, (t) => !t.answered);
+                      setShowReviewModal(false);
+                      if (target != null) navigateQuestionDirect(target);
+                      else setOneQuestion((prev) => ({ ...prev, error: "Unanswered questions cannot be reopened under this exam's navigation rules." }));
+                    }}
+                    className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+                  >
+                    Return to unanswered questions
+                  </button>
+                )}
+                {questionNav.settings.allowFlagForReview && questionNav.progress.flaggedCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = findFirstNavigableIndex(questionNav, (t) => t.flaggedForReview);
+                      setShowReviewModal(false);
+                      if (target != null) navigateQuestionDirect(target);
+                      else setOneQuestion((prev) => ({ ...prev, error: "Flagged questions cannot be reopened under this exam's navigation rules." }));
+                    }}
+                    className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+                  >
+                    Review flagged questions
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowReviewModal(false);
+                    handleSubmit();
+                  }}
+                  className="rounded bg-black px-3 py-1.5 text-sm text-white"
+                >
+                  Submit exam
+                </button>
+                <button type="button" onClick={() => setShowReviewModal(false)} className="rounded border border-gray-300 px-3 py-1.5 text-sm">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {aiCameraViolationOverlay && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">

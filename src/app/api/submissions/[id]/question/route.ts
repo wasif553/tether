@@ -15,6 +15,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { buildOneQuestionPayload, loadOneQuestionSubmission, OneQuestionModeError } from "@/lib/submissionQuestionPayload";
+import { markQuestionVisited } from "@/lib/questionNavigatorRunner";
 
 export async function GET(
   _req: Request,
@@ -33,6 +34,9 @@ export async function GET(
     if (!payload) {
       return NextResponse.json({ error: "This exam has no questions" }, { status: 404 });
     }
+    // Question Navigator v1 — covers "the attempt initially opens on the
+    // first question" and every subsequent refresh. Best-effort.
+    markQuestionVisited(id, payload.question.id).catch(() => {});
     return NextResponse.json(payload);
   } catch (err) {
     if (err instanceof OneQuestionModeError) {

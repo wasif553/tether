@@ -66,6 +66,12 @@ enum IntegrityEventType {
   QUESTION_NAVIGATED_NEXT
   QUESTION_NAVIGATED_PREVIOUS
   QUESTION_BACK_NAVIGATION_BLOCKED
+  // Question Navigator v1 (additive — see docs/question-navigator-v1.md).
+  // Only used when allowQuestionJumping is true and a request actually
+  // jumps more than one position; adjacent Next/Previous moves keep
+  // using the existing QUESTION_NAVIGATED_NEXT/PREVIOUS types above.
+  QUESTION_NAVIGATED_DIRECT
+  QUESTION_DIRECT_NAVIGATION_BLOCKED
 }
 
 enum IntegritySeverity {
@@ -323,6 +329,9 @@ model Question {
   // Exam Session Binding + Time Anomaly Review v1 (additive) — see
   // docs/exam-session-binding-v1.md.
   answerActivityEvents AnswerActivityEvent[]
+  // Question Navigator v1 (additive, opt-in) — see
+  // docs/question-navigator-v1.md.
+  submissionQuestionStates SubmissionQuestionState[]
 }
 
 // Answer Similarity Review v1 (additive) — see
@@ -476,8 +485,37 @@ model Submission {
   integrityReviewComments       IntegrityReviewComment[]
   integrityReviewStatusHistory  IntegrityReviewStatusHistory[]
 
+  // Question Navigator v1 (additive, opt-in) — see
+  // docs/question-navigator-v1.md.
+  questionStates SubmissionQuestionState[]
+
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])
+}
+
+// Question Navigator v1 (additive, opt-in) — see
+// docs/question-navigator-v1.md. Tracks ONLY visited/flagged state per
+// question per submission — never a copy of the answer text (that stays
+// solely in Answer.response; "answered" is always derived from there).
+// One row per question the student has visited and/or flagged; a
+// question with no row is simply "not visited, not flagged" — no row is
+// ever required to exist.
+model SubmissionQuestionState {
+  id             String     @id @default(cuid())
+  submissionId   String
+  submission     Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  questionId     String
+  question       Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  firstVisitedAt DateTime?
+  lastVisitedAt  DateTime?
+  flaggedForReview Boolean  @default(false)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  @@unique([submissionId, questionId])
+  @@index([submissionId])
+  @@index([questionId])
+  @@index([submissionId, flaggedForReview])
 }
 
 model Answer {

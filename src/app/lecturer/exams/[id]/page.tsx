@@ -83,6 +83,10 @@ type SecureSettings = {
   notesAllowed: boolean;
   internetAllowed: boolean;
   aiToolsAllowed: boolean;
+  // Question Navigator v1 — see docs/question-navigator-v1.md.
+  showQuestionNavigator: boolean;
+  allowQuestionJumping: boolean;
+  allowFlagForReview: boolean;
 };
 
 type Exam = {
@@ -1550,6 +1554,87 @@ export default function LecturerExamPage({
                 </span>
               </label>
             </div>
+          </div>
+
+          {/* Question Navigator v1 — see docs/question-navigator-v1.md. */}
+          <div className="border-t border-gray-200 pt-3">
+            <h3 className="text-sm font-medium">Question navigator</h3>
+            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                disabled={!secureForm.secureModeEnabled}
+                checked={secureForm.showQuestionNavigator}
+                onChange={(e) => setSecureForm({ ...secureForm, showQuestionNavigator: e.target.checked })}
+              />
+              <span>
+                Show question navigator
+                <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  Show students a numbered question grid with answered, skipped and flagged
+                  states.
+                </span>
+              </span>
+            </label>
+            <div className="mt-2 space-y-2 pl-6">
+              <label className="flex items-start gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.allowQuestionJumping}
+                  onChange={(e) => setSecureForm({ ...secureForm, allowQuestionJumping: e.target.checked })}
+                />
+                <span>
+                  Allow students to jump between questions
+                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                    Students may select a future question directly. Returning to earlier
+                    questions still depends on the back-navigation setting.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  disabled={!secureForm.secureModeEnabled}
+                  checked={secureForm.allowFlagForReview}
+                  onChange={(e) => setSecureForm({ ...secureForm, allowFlagForReview: e.target.checked })}
+                />
+                <span>
+                  Allow students to flag questions for review
+                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                    Students may mark questions to revisit before submitting.
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            {secureForm.showQuestionNavigator && (
+              <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+                <p className="font-medium">Question navigator: Shown</p>
+                <p>Direct jumping: {secureForm.allowQuestionJumping ? "Allowed" : "Not allowed"}</p>
+                <p>Back navigation: {secureForm.allowBackNavigation ? "Allowed" : "Not allowed"}</p>
+                <p>Flag for review: {secureForm.allowFlagForReview ? "Allowed" : "Not allowed"}</p>
+              </div>
+            )}
+
+            {secureForm.showQuestionNavigator && !secureForm.allowQuestionJumping && (
+              <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                The navigator will show progress, but students must use the existing Next and
+                Previous controls.
+              </p>
+            )}
+            {secureForm.allowQuestionJumping && !secureForm.allowBackNavigation && (
+              <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                Students may skip forward, but they cannot return to earlier questions.
+              </p>
+            )}
+            {secureForm.allowFlagForReview && !secureForm.allowBackNavigation && (
+              <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                Students may flag earlier questions, but they may not be able to reopen them
+                after moving forward.
+              </p>
+            )}
           </div>
 
           <div className="border-t border-gray-200 pt-3">

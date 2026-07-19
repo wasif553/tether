@@ -24,10 +24,23 @@ import { questionPoolsActive, severityFor } from "@/lib/secureExam";
 import { isBlockedBackNavigation, nextAllowedIndex, resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
 import { buildOneQuestionPayload, loadOneQuestionSubmission, OneQuestionModeError } from "@/lib/submissionQuestionPayload";
 import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
+import { authoriseDirectNavigation, markQuestionVisited, QuestionNavigatorError } from "@/lib/questionNavigatorRunner";
 
-const bodySchema = z.object({
-  currentIndex: z.number().int().min(0),
-});
+// Question Navigator v1 — see docs/question-navigator-v1.md. The GOTO
+// action is a DISTINCT navigation surface from the plain `currentIndex`
+// body (which is the pre-existing, unaffected sequential Next/Previous
+// path — see canNavigateSequential in src/lib/questionNavigator.ts).
+// GOTO always requires allowQuestionJumping, even for an adjacent index.
+const bodySchema = z
+  .object({
+    currentIndex: z.number().int().min(0).optional(),
+    action: z.literal("GOTO").optional(),
+    targetIndex: z.number().int().min(0).optional(),
+  })
+  .refine(
+    (data) => (data.action === "GOTO" ? typeof data.targetIndex === "number" : typeof data.currentIndex === "number"),
+    { message: "Provide either currentIndex, or { action: 'GOTO', targetIndex }" },
+  );
 
 export async function POST(
   req: Request,
@@ -45,7 +58,29 @@ export async function POST(
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
-  const requestedIndex = parsed.data.currentIndex;
+
+  // Question Navigator v1 — GOTO is authorised entirely by
+  // src/lib/questionNavigatorRunner.ts (a distinct, stricter path from
+  // the sequential Next/Previous handling below).
+  if (parsed.data.action === "GOTO") {
+    try {
+      const { finalIndex } = await authoriseDirectNavigation(id, session.user.id, parsed.data.targetIndex!);
+      const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id);
+      const payload = buildOneQuestionPayload(submission, settings, finalIndex);
+      if (!payload) return NextResponse.json({ error: "This exam has no questions" }, { status: 404 });
+      return NextResponse.json(payload);
+    } catch (err) {
+      if (err instanceof QuestionNavigatorError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
+      }
+      if (err instanceof OneQuestionModeError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
+      }
+      throw err;
+    }
+  }
+
+  const requestedIndex = parsed.data.currentIndex!;
 
   try {
     const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id);
@@ -111,6 +146,17 @@ export async function POST(
         dedupeWindowMs: 2_000,
       }).catch(() => {});
     }
+
+    // Question Navigator v1 — mark the resolved question visited
+    // whenever a sequential move actually lands on a (possibly new)
+    // question. Best-effort; never blocks the response.
+    const orderedIds = resolveEffectiveQuestionIds({
+      examQuestionIds: submission.exam.questions.map((q) => q.id),
+      stored: submission.questionOrderJson,
+      questionPoolsActive: questionPoolsActive(settings),
+    });
+    const visitedQuestionId = orderedIds[finalIndex];
+    if (visitedQuestionId) markQuestionVisited(submission.id, visitedQuestionId).catch(() => {});
 
     const payload = buildOneQuestionPayload(submission, settings, finalIndex);
     if (!payload) {

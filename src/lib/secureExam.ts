@@ -126,6 +126,16 @@ export const secureExamSettingsSchema = z.object({
   notesAllowed: z.boolean().default(false),
   internetAllowed: z.boolean().default(false),
   aiToolsAllowed: z.boolean().default(false),
+
+  // --- Question Navigator v1 (additive, opt-in) — see
+  // docs/question-navigator-v1.md. Defaults preserve the exact existing
+  // interface/behaviour for every current exam: no navigator shown, no
+  // direct jumping (only sequential Next/Previous, as today), flagging
+  // defaults ON since it is purely a student workflow convenience with
+  // no navigation-security implications.
+  showQuestionNavigator: z.boolean().default(false),
+  allowQuestionJumping: z.boolean().default(false),
+  allowFlagForReview: z.boolean().default(true),
 });
 
 export type SecureExamSettings = z.infer<typeof secureExamSettingsSchema>;
@@ -227,7 +237,10 @@ export type IntegrityEventTypeName =
   // docs/one-question-delivery-v1.md.
   | "QUESTION_NAVIGATED_NEXT"
   | "QUESTION_NAVIGATED_PREVIOUS"
-  | "QUESTION_BACK_NAVIGATION_BLOCKED";
+  | "QUESTION_BACK_NAVIGATION_BLOCKED"
+  // --- Question Navigator v1 — see docs/question-navigator-v1.md.
+  | "QUESTION_NAVIGATED_DIRECT"
+  | "QUESTION_DIRECT_NAVIGATION_BLOCKED";
 
 export function severityFor(
   eventType: IntegrityEventTypeName,
@@ -307,6 +320,16 @@ export function severityFor(
     case "QUESTION_NAVIGATED_PREVIOUS":
       return "INFO";
     case "QUESTION_BACK_NAVIGATION_BLOCKED":
+      return "LOW";
+    // --- Question Navigator v1 — see docs/question-navigator-v1.md.
+    // Direct navigation is never itself suspicious when the exam's
+    // settings permit it — same INFO/LOW pattern as the sequential
+    // events above. A blocked attempt is a mild, non-zero signal
+    // (a student clicking/requesting a disallowed jump is not itself
+    // suspicious — it may just be an unfamiliar UI).
+    case "QUESTION_NAVIGATED_DIRECT":
+      return "INFO";
+    case "QUESTION_DIRECT_NAVIGATION_BLOCKED":
       return "LOW";
   }
 }
