@@ -22,12 +22,30 @@ import {
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   PHONE_CONFIDENCE_THRESHOLD,
-  isVideoFrameReady,
-  shouldSuppressCameraIntegrityDuringStartup,
-  cameraStartupPhase,
-  type CameraStartupPhase,
   type DetectedObject,
 } from "@/lib/cameraIntegrityDetection";
+// Camera Startup Lifecycle v2 — see
+// docs/on-device-ai-integrity-detection-v1.md ("Camera startup
+// lifecycle"). Replaces the old flat 3-second-grace-period approach: the
+// camera is only ever considered READY after 3 consecutive genuinely
+// rendered frames plus a settle-time warm-up, never merely because
+// getUserMedia() resolved.
+import {
+  isRenderedFrameValid,
+  nextConsecutiveRenderedFrameCount,
+  hasReachedFrameReadiness,
+  resetCameraLifecycleTimers,
+  initialCameraLifecycleTimers,
+  isDetectionArmed,
+  shouldSuppressFocusEvent,
+  shouldAutoRetry,
+  isCurrentGeneration,
+  CAMERA_WARMUP_MS,
+  CAMERA_READY_TIMEOUT_MS,
+  CAMERA_RETRY_DELAY_MS,
+  type CameraLifecycleState,
+  type CameraLifecycleTimers,
+} from "@/lib/cameraLifecycle";
 import { loadCameraObjectDetector, type CameraObjectDetector } from "@/lib/cameraObjectDetector";
 import {
   clearAiCameraViolationOverlay,
@@ -330,6 +348,32 @@ function findFirstNavigableIndex(nav: NavigatorResponseDto, predicate: (tile: { 
   return match ? match.index : null;
 }
 
+// Camera Startup Lifecycle v2 — see docs/on-device-ai-integrity-detection-v1.md.
+// Neutral, non-accusatory operational messages only — never "Camera
+// blocked" / "Integrity violation" / "Suspicious behaviour" during
+// ordinary startup.
+function cameraLifecycleStatusMessage(state: CameraLifecycleState): string {
+  switch (state) {
+    case "IDLE":
+      return "";
+    case "REQUESTING_PERMISSION":
+    case "RETRYING":
+      return "Starting camera checks…";
+    case "PERMISSION_GRANTED":
+    case "STREAM_RECEIVED":
+    case "VIDEO_ATTACHED":
+    case "WAITING_FOR_PLAYBACK":
+      return "Waiting for the camera preview…";
+    case "WAITING_FOR_FIRST_FRAME":
+    case "WARMING_UP":
+      return "Preparing camera integrity checks…";
+    case "READY":
+      return "Camera monitoring active";
+    case "FAILED":
+      return "Camera could not start. Check browser permission and try again.";
+  }
+}
+
 function navigatorTileLabel(tile: NavigatorQuestionTile): string {
   const parts = [`Question ${tile.number}`];
   if (tile.state === "CURRENT") parts.push("current question");
@@ -376,7 +420,11 @@ function QuestionNavigatorPanel({
           <span>{navigator.progress.unansweredCount} unanswered</span>
           {navigator.settings.allowFlagForReview && <span>{navigator.progress.flaggedCount} flagged</span>}
         </div>
-        <div className="mt-2 grid grid-cols-5 gap-1.5 sm:grid-cols-6">
+        {/* Compact, left-aligned wrapping group — NOT a fixed-column grid,
+            which would stretch a small tile count across the whole panel
+            width. Each tile has a fixed 40px size; gap-2 (8px) matches the
+            requested spacing regardless of how many tiles there are. */}
+        <div className="mt-1.5 flex flex-wrap items-start justify-start gap-2">
           {navigator.questions.map((tile) => (
             <button
               key={tile.questionId}
@@ -386,7 +434,7 @@ function QuestionNavigatorPanel({
               aria-current={tile.state === "CURRENT" ? "step" : undefined}
               aria-label={navigatorTileLabel(tile)}
               title={navigatorTileLabel(tile)}
-              className={`relative flex h-9 w-9 items-center justify-center rounded text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black disabled:cursor-not-allowed disabled:opacity-60 ${NAVIGATOR_STATE_STYLES[tile.state]}`}
+              className={`relative flex h-10 w-10 shrink-0 items-center justify-center rounded text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black disabled:cursor-not-allowed disabled:opacity-60 ${NAVIGATOR_STATE_STYLES[tile.state]}`}
             >
               {tile.number}
               {NAVIGATOR_STATE_ICON[tile.state] && (
@@ -407,7 +455,7 @@ function QuestionNavigatorPanel({
             </button>
           ))}
         </div>
-        <div className="mt-3 flex flex-wrap gap-3 border-t border-gray-100 pt-2 text-xs text-gray-500">
+        <div className="mt-2 flex flex-wrap gap-3 border-t border-gray-100 pt-2 text-xs text-gray-500">
           <span>◆ Current</span>
           <span>✓ Answered</span>
           <span>… Skipped</span>
@@ -524,24 +572,31 @@ export default function TakeExamPage({
   const [aiCheckStatus, setAiCheckStatus] = useState<"idle" | "loading" | "active" | "unavailable">(
     "idle",
   );
-  // Camera Startup Readiness v1 — see
+  // Camera Startup Lifecycle v2 — see
   // docs/on-device-ai-integrity-detection-v1.md ("Camera startup
-  // readiness"). Fixes false CAMERA_VIEW_BLOCKED/CAMERA_TOO_DARK/
+  // lifecycle"). Fixes false CAMERA_VIEW_BLOCKED/CAMERA_TOO_DARK/
   // NO_PERSON_VISIBLE/POSSIBLE_PHONE_VISIBLE/POSSIBLE_SECOND_PERSON_VISIBLE
-  // on first exam start: many webcams deliver a few transiently black/
-  // dark/artifacted frames while auto-exposure/auto-focus settle, even
-  // after the video element already reports itself as playable.
-  // cameraStreamStartedAtRef is set the moment getUserMedia resolves;
-  // firstReadyFrameAtRef is set on the first detection tick where the
-  // video actually has a ready frame. Both are reset to null whenever a
-  // NEW camera stream is acquired (see startCamera/stopCamera below), so
-  // a lost-and-restarted stream gets its own fresh warm-up window rather
-  // than being permanently suppressed or permanently un-suppressed.
+  // — and the premature "granted" that let students proceed before the
+  // camera was actually rendering anything — with an explicit state
+  // machine. `cameraLifecycleRef` is the SYNCHRONOUS source of truth read
+  // inside async continuations and event listeners (a ref never goes
+  // stale mid-await); `cameraLifecycleState` mirrors it only to drive
+  // re-renders. `cameraStartGenerationRef` is bumped on every
+  // startCamera() call — only a callback whose captured generation still
+  // matches the current one may update state, assign/stop a stream, or
+  // report an error, so a stale in-flight attempt can never clobber a
+  // newer successful one (Part 8).
+  const cameraLifecycleRef = useRef<CameraLifecycleState>("IDLE");
+  const [cameraLifecycleState, setCameraLifecycleStateRaw] = useState<CameraLifecycleState>("IDLE");
+  const cameraStartGenerationRef = useRef(0);
+  const cameraTimersRef = useRef<CameraLifecycleTimers>(initialCameraLifecycleTimers());
+  const cameraRetryAttemptRef = useRef(0);
+  const [cameraStartupError, setCameraStartupError] = useState<string | null>(null);
+  // Back-compat aliases: firstReadyFrameAtRef mirrors
+  // cameraTimersRef.current.firstFrameReadyAt so any remaining reads
+  // elsewhere stay accurate without needing a second source of truth.
   const cameraStreamStartedAtRef = useRef<number | null>(null);
   const firstReadyFrameAtRef = useRef<number | null>(null);
-  const [cameraStartupPhaseState, setCameraStartupPhaseState] = useState<CameraStartupPhase>(
-    "waiting_for_first_frame",
-  );
   // Local exam-content blur/overlay driven by AI camera violation events
   // (distinct from browser/window blur — see aiCameraViolationOverlay.ts).
   // Purely local UI state: acknowledging it clears this back to null but
@@ -1129,11 +1184,28 @@ export default function TakeExamPage({
         setFullscreenReturnNeeded(false);
       }
     };
-    const onBlur = () => secureSettings.trackWindowBlur && reportIntegrityEvent("WINDOW_BLUR");
+    // Camera Startup Lifecycle v2 (Part 7) — the getUserMedia() permission
+    // prompt (and the OS-level camera-access dialog on some platforms)
+    // can itself trigger a window blur or visibilitychange. Suppressing
+    // focus-loss reporting during every camera-startup phase — and ONLY
+    // during those phases, never permanently — prevents a false
+    // WINDOW_BLUR from firing on first exam start. A genuine focus loss
+    // once the camera is READY is never suppressed.
+    const onBlur = () => {
+      if (shouldSuppressFocusEvent(cameraLifecycleRef.current)) {
+        logAiCameraDebug("focus: suppressed", { eventType: "WINDOW_BLUR", reason: "camera-permission-or-startup" });
+        return;
+      }
+      if (secureSettings.trackWindowBlur) reportIntegrityEvent("WINDOW_BLUR");
+    };
     const onFocus = () => secureSettings.trackWindowBlur && reportIntegrityEvent("WINDOW_FOCUS_RETURN");
     const onVisibilityChange = () => {
       if (!secureSettings.trackWindowBlur) return;
       if (document.hidden) {
+        if (shouldSuppressFocusEvent(cameraLifecycleRef.current)) {
+          logAiCameraDebug("focus: suppressed", { eventType: "visibilitychange", reason: "camera-permission-or-startup" });
+          return;
+        }
         reportIntegrityEvent("WINDOW_BLUR");
       } else {
         reportIntegrityEvent("WINDOW_FOCUS_RETURN");
@@ -1210,8 +1282,26 @@ export default function TakeExamPage({
     }
   }
 
-  // --- Camera Monitoring v1: start/stop, preview, heartbeat ---
-  function stopCamera() {
+  // --- Camera Startup Lifecycle v2: start/stop, preview, heartbeat ---
+  // See docs/on-device-ai-integrity-detection-v1.md ("Camera startup
+  // lifecycle") for the full design rationale.
+
+  function setCameraLifecycleState(next: CameraLifecycleState, generation: number) {
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) {
+      logAiCameraDebug("lifecycle: stale generation ignored", {
+        generation,
+        currentGeneration: cameraStartGenerationRef.current,
+        attemptedState: next,
+      });
+      return;
+    }
+    cameraLifecycleRef.current = next;
+    setCameraLifecycleStateRaw(next);
+    logAiCameraDebug("lifecycle: transition", { generation, state: next });
+  }
+
+  /** Stops any active stream and detaches every <video> element referencing it. Always safe to call, even if nothing is running. */
+  function teardownCameraStream(reason: string) {
     if (heartbeatTimer.current) {
       clearInterval(heartbeatTimer.current);
       heartbeatTimer.current = null;
@@ -1220,41 +1310,249 @@ export default function TakeExamPage({
       cameraStreamRef.current.getTracks().forEach((t) => t.stop());
       cameraStreamRef.current = null;
     }
-    // Camera Startup Readiness v1 — a stopped stream has no readiness
-    // state at all; the next startCamera() call gets a completely fresh
-    // warm-up window, never an inherited one.
+    if (videoRef.current) videoRef.current.srcObject = null;
+    if (examVideoRef.current) examVideoRef.current.srcObject = null;
+    if (detectionVideoRef.current) detectionVideoRef.current.srcObject = null;
+    cameraTimersRef.current = initialCameraLifecycleTimers();
     cameraStreamStartedAtRef.current = null;
     firstReadyFrameAtRef.current = null;
-    setCameraStartupPhaseState("waiting_for_first_frame");
+    logAiCameraDebug("stream: cleanup", { reason });
   }
 
-  async function startCamera(): Promise<boolean> {
-    setCameraStatus("requesting");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      cameraStreamRef.current = stream;
-      if (videoRef.current) videoRef.current.srcObject = stream;
-      setCameraStatus("granted");
-      // Camera Startup Readiness v1 — see
-      // docs/on-device-ai-integrity-detection-v1.md. Reset on every
-      // successful (re)acquisition, including a restart after the stream
-      // was lost, so that attempt gets its own fresh warm-up window
-      // rather than reusing timing from a previous stream.
-      cameraStreamStartedAtRef.current = Date.now();
-      firstReadyFrameAtRef.current = null;
-      setCameraStartupPhaseState("waiting_for_first_frame");
-      reportIntegrityEvent("CAMERA_PERMISSION_GRANTED");
-      reportIntegrityEvent("CAMERA_STARTED");
-      return true;
-    } catch {
-      setCameraStatus("denied");
-      if (gateAcknowledged) {
-        reportIntegrityEvent("CAMERA_PRECHECK_FAILED");
-      } else {
-        reportIntegrityEvent("CAMERA_PERMISSION_DENIED");
+  function stopCamera() {
+    // Bumping the generation here means any still-in-flight
+    // startCameraAttempt from before this call can never resurrect a
+    // stream after this teardown (Part 8).
+    cameraStartGenerationRef.current += 1;
+    teardownCameraStream("stopCamera");
+    cameraLifecycleRef.current = "IDLE";
+    setCameraLifecycleStateRaw("IDLE");
+  }
+
+  function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function waitForVideoEvent(el: HTMLVideoElement, event: "loadedmetadata", timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      if (el.readyState >= 1) return resolve();
+      const timer = setTimeout(() => {
+        el.removeEventListener(event, onEvent);
+        resolve(); // Never rejects the whole startup — the frame-readiness poll below is the real gate.
+      }, timeoutMs);
+      function onEvent() {
+        clearTimeout(timer);
+        el.removeEventListener(event, onEvent);
+        resolve();
       }
+      el.addEventListener(event, onEvent);
+    });
+  }
+
+  /**
+   * Polls (via requestVideoFrameCallback where supported, else
+   * requestAnimationFrame) until REQUIRED_CONSECUTIVE_RENDERED_FRAMES
+   * genuinely valid frames have been observed in a row (Part 5), or the
+   * overall startup timeout elapses. A single bad frame resets the
+   * streak — never "banks" partial progress from before a dropout.
+   */
+  function waitForRenderedFrames(video: HTMLVideoElement, stream: MediaStream, generation: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const deadline = Date.now() + CAMERA_READY_TIMEOUT_MS;
+      let consecutive = 0;
+      let rvfcHandle: number | null = null;
+      let rafHandle: number | null = null;
+      let settled = false;
+
+      function finish(result: boolean) {
+        if (settled) return;
+        settled = true;
+        const videoWithRvfc = video as HTMLVideoElement & { cancelVideoFrameCallback?: (h: number) => void };
+        if (rvfcHandle != null) videoWithRvfc.cancelVideoFrameCallback?.(rvfcHandle);
+        if (rafHandle != null) cancelAnimationFrame(rafHandle);
+        resolve(result);
+      }
+
+      function checkFrame() {
+        if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return finish(false);
+        const track = stream.getVideoTracks()[0];
+        const valid = isRenderedFrameValid({
+          readyState: video.readyState,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+          currentTime: video.currentTime,
+          paused: video.paused,
+          trackReadyState: track?.readyState,
+        });
+        consecutive = nextConsecutiveRenderedFrameCount(consecutive, valid);
+        cameraTimersRef.current = { ...cameraTimersRef.current, consecutiveRenderedFrames: consecutive };
+        logAiCameraDebug("frame: observed", { generation, valid, consecutive, readyState: video.readyState, width: video.videoWidth, height: video.videoHeight });
+        if (hasReachedFrameReadiness(consecutive)) return finish(true);
+        if (Date.now() > deadline) return finish(false);
+        scheduleNext();
+      }
+
+      function scheduleNext() {
+        const videoWithRvfc = video as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number };
+        if (typeof videoWithRvfc.requestVideoFrameCallback === "function") {
+          rvfcHandle = videoWithRvfc.requestVideoFrameCallback(() => checkFrame());
+        } else {
+          rafHandle = requestAnimationFrame(() => checkFrame());
+        }
+      }
+
+      scheduleNext();
+    });
+  }
+
+  /**
+   * One full, idempotent camera-startup attempt: permission -> stream ->
+   * attach -> metadata -> playback -> first-rendered-frame (x3
+   * consecutive) -> warm-up -> READY. Every step checks the captured
+   * `generation` before touching shared state, so a newer startCamera()
+   * call (manual retry, or a second click) always wins over a stale one.
+   */
+  async function startCameraAttempt(generation: number): Promise<{ ok: true } | { ok: false; reason: "permission" | "readiness" }> {
+    let permissionState = "unknown";
+    try {
+      const permissionsApi = (navigator as Navigator & { permissions?: { query: (opts: { name: string }) => Promise<{ state: string }> } }).permissions;
+      if (permissionsApi?.query) {
+        const status = await permissionsApi.query({ name: "camera" });
+        permissionState = status.state;
+      }
+    } catch {
+      permissionState = "unknown";
+    }
+    logAiCameraDebug("permission: state", { generation, permissionState });
+
+    setCameraLifecycleState("REQUESTING_PERMISSION", generation);
+    let stream: MediaStream;
+    try {
+      logAiCameraDebug("getUserMedia: requesting", { generation });
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      logAiCameraDebug("getUserMedia: success", { generation, videoTrackCount: stream.getVideoTracks().length });
+    } catch (err) {
+      logAiCameraDebug("getUserMedia: failed", { generation, error: err instanceof Error ? err.message : String(err) });
+      return { ok: false, reason: "permission" };
+    }
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) {
+      stream.getTracks().forEach((t) => t.stop());
+      return { ok: false, reason: "readiness" };
+    }
+
+    setCameraLifecycleState("PERMISSION_GRANTED", generation);
+    cameraStreamRef.current = stream;
+    cameraTimersRef.current = resetCameraLifecycleTimers(Date.now());
+    cameraStreamStartedAtRef.current = cameraTimersRef.current.streamStartedAt;
+    reportIntegrityEvent("CAMERA_PERMISSION_GRANTED");
+
+    setCameraLifecycleState("STREAM_RECEIVED", generation);
+    const video = videoRef.current;
+    if (!video) return { ok: false, reason: "readiness" };
+    video.srcObject = stream;
+    setCameraLifecycleState("VIDEO_ATTACHED", generation);
+
+    await waitForVideoEvent(video, "loadedmetadata", 5_000);
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return { ok: false, reason: "readiness" };
+
+    setCameraLifecycleState("WAITING_FOR_PLAYBACK", generation);
+    try {
+      await video.play();
+      logAiCameraDebug("video.play: success", { generation });
+    } catch (err) {
+      // Some browsers resolve play() late (or reject once, then still
+      // render) — the frame-readiness poll below is the real gate, so a
+      // rejected play() promise alone doesn't abort startup.
+      logAiCameraDebug("video.play: failed", { generation, error: err instanceof Error ? err.message : String(err) });
+    }
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return { ok: false, reason: "readiness" };
+
+    setCameraLifecycleState("WAITING_FOR_FIRST_FRAME", generation);
+    const reachedReadiness = await waitForRenderedFrames(video, stream, generation);
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return { ok: false, reason: "readiness" };
+    if (!reachedReadiness) {
+      logAiCameraDebug("readiness: timed out waiting for rendered frames", { generation });
+      return { ok: false, reason: "readiness" };
+    }
+
+    const firstFrameReadyAt = Date.now();
+    cameraTimersRef.current = { ...cameraTimersRef.current, firstFrameReadyAt };
+    firstReadyFrameAtRef.current = firstFrameReadyAt;
+    logAiCameraDebug("readiness: first rendered frame confirmed (3 consecutive)", { generation, firstFrameReadyAt });
+
+    setCameraLifecycleState("WARMING_UP", generation);
+    logAiCameraDebug("warmup: start", { generation, warmupMs: CAMERA_WARMUP_MS });
+    await delay(CAMERA_WARMUP_MS);
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return { ok: false, reason: "readiness" };
+    logAiCameraDebug("warmup: end", { generation });
+
+    setCameraLifecycleState("READY", generation);
+    setCameraStatus("granted");
+    setCameraStartupError(null);
+    reportIntegrityEvent("CAMERA_STARTED");
+    logAiCameraDebug("lifecycle: detection armed", { generation, armed: true });
+    return { ok: true };
+  }
+
+  /**
+   * Bounded automatic retry (Part 9) — only for READINESS failures
+   * (stream/frame never settled), never for a permission denial (that
+   * needs the student to act). Each retry does a full teardown first, so
+   * a zombie stream can never block the next getUserMedia() call the way
+   * it previously could (this is exactly why a full page reload used to
+   * be required).
+   */
+  async function attemptCameraStartWithRetry(generation: number): Promise<boolean> {
+    const result = await startCameraAttempt(generation);
+    if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return false;
+    if (result.ok) {
+      cameraRetryAttemptRef.current = 0;
+      return true;
+    }
+
+    if (result.reason === "permission") {
+      setCameraLifecycleState("FAILED", generation);
+      setCameraStatus("denied");
+      setCameraStartupError(
+        "Camera permission is required for this exam. Allow camera access in your browser, then select “Try camera again”.",
+      );
+      if (gateAcknowledged) reportIntegrityEvent("CAMERA_PRECHECK_FAILED");
+      else reportIntegrityEvent("CAMERA_PERMISSION_DENIED");
       return false;
     }
+
+    if (shouldAutoRetry(cameraRetryAttemptRef.current)) {
+      cameraRetryAttemptRef.current += 1;
+      logAiCameraDebug("retry: automatic attempt", { generation, attempt: cameraRetryAttemptRef.current });
+      setCameraLifecycleState("RETRYING", generation);
+      teardownCameraStream("automatic-retry");
+      await delay(CAMERA_RETRY_DELAY_MS);
+      if (!isCurrentGeneration(cameraStartGenerationRef.current, generation)) return false;
+      return attemptCameraStartWithRetry(generation);
+    }
+
+    setCameraLifecycleState("FAILED", generation);
+    setCameraStatus("denied");
+    setCameraStartupError("Camera could not start. Check browser permission and try again.");
+    if (secureSettings?.recordCameraUnavailableEvents) reportIntegrityEvent("CAMERA_UNAVAILABLE");
+    return false;
+  }
+
+  /**
+   * The single authoritative entry point for starting (or retrying) the
+   * camera — used for the initial "Enable camera" click, the manual "Try
+   * camera again" button, and heartbeat-triggered restarts alike. Always
+   * tears down any existing stream first (idempotent — Part 4) and bumps
+   * the generation so any previous in-flight attempt is invalidated.
+   */
+  async function startCamera(): Promise<boolean> {
+    cameraStartGenerationRef.current += 1;
+    const generation = cameraStartGenerationRef.current;
+    cameraRetryAttemptRef.current = 0;
+    setCameraStartupError(null);
+    setCameraStatus("requesting");
+    teardownCameraStream("restart");
+    return attemptCameraStartWithRetry(generation);
   }
 
   // Camera heartbeat: checks the existing stream's track state on an
@@ -1329,6 +1627,9 @@ export default function TakeExamPage({
       stopCamera();
       stopAiDetection();
     };
+    // Intentionally unmount-only — stopCamera/stopAiDetection are stable
+    // function declarations and this must run exactly once, on unmount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function stopAiDetection() {
@@ -1515,49 +1816,24 @@ export default function TakeExamPage({
       logAiCameraDebug("tick: start", { tickTimestamp: now, cadenceMs: currentDetectionDelayMs });
 
       try {
-        if (!isVideoFrameReady(video)) return;
+        if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
 
-        // Camera Startup Readiness v1 — see
+        // Camera Startup Lifecycle v2 — see
         // docs/on-device-ai-integrity-detection-v1.md ("Camera startup
-        // readiness"). This is the fix for false CAMERA_VIEW_BLOCKED/
-        // CAMERA_TOO_DARK/NO_PERSON_VISIBLE/POSSIBLE_PHONE_VISIBLE/
-        // POSSIBLE_SECOND_PERSON_VISIBLE on first exam start: passing
-        // isVideoFrameReady above only means the video element has SOME
-        // frame, not that the camera's auto-exposure/auto-focus have
-        // settled yet. Detection/inference still runs every tick from
-        // here on (so the model warms up and the local overlay/quality
-        // pipeline stay exercised) — only EMISSION (backend logging and
-        // the local violation overlay) is suppressed until the grace
-        // period since the first ready frame has elapsed.
-        if (firstReadyFrameAtRef.current == null) {
-          firstReadyFrameAtRef.current = now;
-          logAiCameraDebug("camera startup: first ready frame observed", {
-            readyState: video!.readyState,
-            videoWidth: video!.videoWidth,
-            videoHeight: video!.videoHeight,
-            warmUpStartedAt: now,
-          });
-        }
-        const suppressStartup = shouldSuppressCameraIntegrityDuringStartup(firstReadyFrameAtRef.current, now);
-        const nextStartupPhase = cameraStartupPhase({
-          firstReadyFrameAt: firstReadyFrameAtRef.current,
-          now,
-          streamStartedAt: cameraStreamStartedAtRef.current,
-        });
-        if (nextStartupPhase !== cameraStartupPhaseState) {
-          logAiCameraDebug("camera startup: phase changed", {
-            previousPhase: cameraStartupPhaseState,
-            nextPhase: nextStartupPhase,
-            firstReadyFrameAt: firstReadyFrameAtRef.current,
-            warmUpEndedAt: nextStartupPhase === "ready" ? now : null,
-          });
-          setCameraStartupPhaseState(nextStartupPhase);
-        }
+        // lifecycle"). Detection/inference still runs every tick
+        // regardless of lifecycle phase (so the model warms up and the
+        // local overlay/quality pipeline stay exercised), but EMISSION
+        // (backend logging, the local violation overlay, and evidence-
+        // frame upload) is armed ONLY once the lifecycle has actually
+        // reached READY — never merely because a frame exists. READY
+        // itself is only ever set by startCameraAttempt() after 3
+        // consecutive genuinely rendered frames plus the warm-up period;
+        // this tick loop never sets it.
+        const armed = isDetectionArmed(cameraLifecycleRef.current);
+        const suppressStartup = !armed;
         if (suppressStartup) {
-          logAiCameraDebug("tick: suppressed — camera starting up", {
-            reason: firstReadyFrameAtRef.current === now ? "no-video-dimensions-yet" : "warm-up-period",
-            firstReadyFrameAt: firstReadyFrameAtRef.current,
-            msSinceFirstReadyFrame: now - firstReadyFrameAtRef.current,
+          logAiCameraDebug("tick: suppressed — camera not yet READY", {
+            lifecycleState: cameraLifecycleRef.current,
           });
         }
 
@@ -2130,29 +2406,38 @@ export default function TakeExamPage({
                     disabled={cameraStatus === "requesting"}
                     className="mt-2 rounded border border-gray-300 bg-white px-3 py-1.5 text-sm disabled:opacity-50"
                   >
-                    {cameraStatus === "requesting" ? "Requesting..." : "Enable camera"}
+                    {cameraStatus === "requesting"
+                      ? (cameraLifecycleStatusMessage(cameraLifecycleState) || "Starting…")
+                      : cameraStartupError
+                        ? "Try camera again"
+                        : "Enable camera"}
                   </button>
-                  {cameraStatus === "denied" && (
-                    <p className="mt-2 text-sm text-red-600">
-                      Camera access is required for this exam. Please allow camera access in your
-                      browser settings and try again.
-                    </p>
+                  {cameraStartupError && (
+                    <p className="mt-2 text-sm text-red-600">{cameraStartupError}</p>
                   )}
                 </>
               )}
+              {/* The <video> element is mounted unconditionally (whenever
+                  camera access is required) rather than only after
+                  cameraStatus === "granted" — startCameraAttempt() needs
+                  videoRef.current to exist BEFORE the camera is ready in
+                  order to attach the stream and await metadata/playback.
+                  Visually hidden until the preview should actually show. */}
+              <video
+                ref={videoRef}
+                autoPlay
+                muted
+                playsInline
+                className={
+                  cameraStatus === "granted" && secureSettings?.showCameraPreview
+                    ? "mt-2 w-48 rounded border border-gray-300"
+                    : "sr-only"
+                }
+              />
               {cameraStatus === "granted" && secureSettings?.showCameraPreview && (
-                <div className="mt-2">
-                  <video
-                    ref={videoRef}
-                    autoPlay
-                    muted
-                    playsInline
-                    className="w-48 rounded border border-gray-300"
-                  />
-                  <p className="mt-1 text-xs text-gray-500">
-                    Your camera preview — only you can see this
-                  </p>
-                </div>
+                <p className="mt-1 text-xs text-gray-500">
+                  Your camera preview — only you can see this
+                </p>
               )}
               {cameraStatus === "granted" && !secureSettings?.showCameraPreview && (
                 <p className="mt-2 text-sm text-green-700">Camera enabled.</p>
@@ -2249,22 +2534,27 @@ export default function TakeExamPage({
               Camera monitoring active
             </span>
           )}
-          {enableAiCameraIntegrityChecks && cameraStatus === "granted" && (
+          {requireCamera && cameraStatus !== "granted" && cameraStatus !== "denied" && cameraLifecycleState !== "IDLE" && (
+            <span className="rounded bg-yellow-100 px-2 py-0.5 text-xs text-yellow-700">
+              {cameraLifecycleStatusMessage(cameraLifecycleState)}
+            </span>
+          )}
+          {enableAiCameraIntegrityChecks && (
             <span
               className={
-                aiCheckStatus === "unavailable" || cameraStartupPhaseState === "timed_out"
+                aiCheckStatus === "unavailable" || cameraLifecycleState === "FAILED"
                   ? "rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600"
-                  : cameraStartupPhaseState !== "ready"
+                  : cameraLifecycleState !== "READY"
                     ? "rounded bg-yellow-100 px-2 py-0.5 text-xs text-yellow-700"
                     : "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
               }
             >
               {aiCheckStatus === "unavailable"
                 ? "Camera integrity checks unavailable"
-                : cameraStartupPhaseState === "timed_out"
+                : cameraLifecycleState === "FAILED"
                   ? "Camera setup issue — checks unavailable"
-                  : cameraStartupPhaseState !== "ready"
-                    ? "Starting camera checks..."
+                  : cameraLifecycleState !== "READY"
+                    ? "Preparing camera integrity checks…"
                     : "Camera integrity checks active"}
             </span>
           )}
@@ -2327,21 +2617,15 @@ export default function TakeExamPage({
                 playsInline
                 className="w-40 rounded border border-gray-200"
               />
-              {/* Camera Startup Readiness v1 — a calm, non-alarming
-                  status message during the brief warm-up window, never
-                  the violation overlay (see
-                  docs/on-device-ai-integrity-detection-v1.md). */}
-              {enableAiCameraIntegrityChecks &&
-                (cameraStartupPhaseState === "waiting_for_first_frame" ||
-                  cameraStartupPhaseState === "warming_up") && (
-                  <p className="mt-1 text-xs text-gray-500">
-                    Camera is starting. Please keep your face visible.
-                  </p>
-                )}
-              {enableAiCameraIntegrityChecks && cameraStartupPhaseState === "timed_out" && (
+              {/* Camera Startup Lifecycle v2 — a calm, non-alarming status
+                  message during startup, never the violation overlay. See
+                  docs/on-device-ai-integrity-detection-v1.md. */}
+              {enableAiCameraIntegrityChecks && cameraLifecycleState !== "READY" && cameraLifecycleState !== "FAILED" && (
+                <p className="mt-1 text-xs text-gray-500">{cameraLifecycleStatusMessage(cameraLifecycleState)}</p>
+              )}
+              {enableAiCameraIntegrityChecks && cameraLifecycleState === "FAILED" && (
                 <p className="mt-1 text-xs text-amber-700">
-                  Camera checks could not start. You can continue your exam — try refreshing the
-                  camera if this persists.
+                  Camera could not start. Check browser permission and try again.
                 </p>
               )}
             </div>

@@ -91,6 +91,17 @@ Unanswered questions never block submission (unless a future lecturer setting ex
 it — not implemented in v1); the warning uses neutral wording: "You may submit now, but
 unanswered questions may receive no marks."
 
+## Grid layout
+
+The tile group is a **compact, left-aligned wrapping flex layout** (`flex flex-wrap gap-2`), not a
+fixed-column grid (`grid-cols-N`). A fixed-column grid stretches tiles into equal-width columns
+across the panel's full width regardless of how many questions actually exist — with only 3
+questions this produced three widely-spaced, stretched tiles rather than a compact group. Each
+tile is a fixed 40×40px (`h-10 w-10 shrink-0`) with an 8px gap (`gap-2`), so tile count never
+changes tile size or spacing, and the group never grows wider than its content — e.g. `[1] [2]
+[3]` stays compact regardless of the panel's width. Vertical spacing between the heading, counts,
+grid, and legend is intentionally tight (`mt-1.5`/`mt-2`) while keeping the legend readable.
+
 ## Accessibility
 
 - Every grid tile is a real `<button>` — full keyboard operability, visible focus ring
