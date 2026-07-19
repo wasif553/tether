@@ -34,6 +34,7 @@ import {
   isRenderedFrameValid,
   nextConsecutiveRenderedFrameCount,
   hasReachedFrameReadiness,
+  isWarmupComplete,
   resetCameraLifecycleTimers,
   initialCameraLifecycleTimers,
   isDetectionArmed,
@@ -43,6 +44,7 @@ import {
   CAMERA_WARMUP_MS,
   CAMERA_READY_TIMEOUT_MS,
   CAMERA_RETRY_DELAY_MS,
+  DETECTION_SAMPLING_WARMUP_MS,
   type CameraLifecycleState,
   type CameraLifecycleTimers,
 } from "@/lib/cameraLifecycle";
@@ -1781,6 +1783,19 @@ export default function TakeExamPage({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setAiCheckStatus("loading");
 
+    // Detection-sampling element readiness — see
+    // docs/on-device-ai-integrity-detection-v1.md ("Detection-sampling
+    // element readiness"). detectionVideoRef is a SEPARATE hidden <video>
+    // from the one the camera lifecycle above warms up — its srcObject is
+    // only assigned right as the overall lifecycle reaches READY, so it
+    // is a brand-new decode pipeline with no warm-up of its own. These
+    // are local to this effect run (never a component-level ref) so a
+    // fresh attach — including a heartbeat-triggered restart — always
+    // starts this readiness tracking from zero, never carrying over a
+    // previous run's state.
+    let detectionVideoConsecutiveFrames = 0;
+    let detectionVideoFirstReadyFrameAt: number | null = null;
+
     loadCameraObjectDetector().then((detector) => {
       if (cancelled) return;
       detectorRef.current = detector;
@@ -1818,22 +1833,48 @@ export default function TakeExamPage({
       try {
         if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
 
+        // Detection-sampling element readiness — see
+        // docs/on-device-ai-integrity-detection-v1.md ("Detection-
+        // sampling element readiness"). detectionVideoRef is a SEPARATE
+        // <video> from the one the camera lifecycle warms up, first
+        // attached right as the lifecycle reaches READY — it has had NO
+        // warm-up of its own. Reuses the exact same strict rendered-frame
+        // check and consecutive-frame requirement as the primary
+        // lifecycle (never a weaker one), then its own short settle
+        // warm-up, before this element's frames are trusted for emission.
+        const detectionTrack = cameraStreamRef.current?.getVideoTracks()[0];
+        const detectionFrameValid = isRenderedFrameValid({
+          readyState: video.readyState,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+          currentTime: video.currentTime,
+          paused: video.paused,
+          trackReadyState: detectionTrack?.readyState,
+        });
+        detectionVideoConsecutiveFrames = nextConsecutiveRenderedFrameCount(detectionVideoConsecutiveFrames, detectionFrameValid);
+        if (detectionVideoFirstReadyFrameAt == null && hasReachedFrameReadiness(detectionVideoConsecutiveFrames)) {
+          detectionVideoFirstReadyFrameAt = now;
+          logAiCameraDebug("detection sampling: readiness reached", { firstReadyFrameAt: now });
+        }
+        const detectionVideoWarmedUp = isWarmupComplete(detectionVideoFirstReadyFrameAt, now, DETECTION_SAMPLING_WARMUP_MS);
+
         // Camera Startup Lifecycle v2 — see
         // docs/on-device-ai-integrity-detection-v1.md ("Camera startup
         // lifecycle"). Detection/inference still runs every tick
-        // regardless of lifecycle phase (so the model warms up and the
-        // local overlay/quality pipeline stay exercised), but EMISSION
-        // (backend logging, the local violation overlay, and evidence-
-        // frame upload) is armed ONLY once the lifecycle has actually
-        // reached READY — never merely because a frame exists. READY
-        // itself is only ever set by startCameraAttempt() after 3
-        // consecutive genuinely rendered frames plus the warm-up period;
-        // this tick loop never sets it.
-        const armed = isDetectionArmed(cameraLifecycleRef.current);
+        // regardless of readiness (so the model warms up and the local
+        // overlay/quality pipeline stay exercised), but EMISSION (backend
+        // logging, the local violation overlay, and evidence-frame
+        // upload) is armed ONLY once BOTH the overall lifecycle has
+        // reached READY AND this detection-sampling element has
+        // independently reached its own frame readiness + warm-up —
+        // never merely because a frame exists on either element.
+        const armed = isDetectionArmed(cameraLifecycleRef.current) && detectionVideoWarmedUp;
         const suppressStartup = !armed;
         if (suppressStartup) {
-          logAiCameraDebug("tick: suppressed — camera not yet READY", {
+          logAiCameraDebug("tick: suppressed — not yet fully armed", {
             lifecycleState: cameraLifecycleRef.current,
+            detectionVideoConsecutiveFrames,
+            detectionVideoWarmedUp,
           });
         }
 

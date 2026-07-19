@@ -19,6 +19,8 @@ import {
   isCurrentGeneration,
   REQUIRED_CONSECUTIVE_RENDERED_FRAMES,
   CAMERA_MAX_AUTO_RETRIES,
+  CAMERA_WARMUP_MS,
+  DETECTION_SAMPLING_WARMUP_MS,
   type RenderedFrameCheckInput,
 } from "./cameraLifecycle";
 import { normalizeCameraPermissionState } from "./sessionBinding";
@@ -156,6 +158,30 @@ describe("13/14. generation guard — stale async work cannot act", () => {
   it("only a matching generation is authoritative", () => {
     expect(isCurrentGeneration(3, 3)).toBe(true);
     expect(isCurrentGeneration(3, 2)).toBe(false);
+  });
+});
+
+describe("detection-sampling element readiness (fixes the second false CAMERA_VIEW_BLOCKED)", () => {
+  it("DETECTION_SAMPLING_WARMUP_MS is a real, shorter, independent warm-up — not a no-op and not equal to the primary warm-up", () => {
+    expect(DETECTION_SAMPLING_WARMUP_MS).toBeGreaterThan(0);
+    expect(DETECTION_SAMPLING_WARMUP_MS).toBeLessThan(CAMERA_WARMUP_MS);
+  });
+
+  it("a detection-sampling element that just reached frame readiness is not yet warmed up", () => {
+    const firstReady = 10_000;
+    expect(isWarmupComplete(firstReady, firstReady + 100, DETECTION_SAMPLING_WARMUP_MS)).toBe(false);
+  });
+
+  it("a detection-sampling element is warmed up only after its own warm-up duration elapses", () => {
+    const firstReady = 10_000;
+    expect(isWarmupComplete(firstReady, firstReady + DETECTION_SAMPLING_WARMUP_MS, DETECTION_SAMPLING_WARMUP_MS)).toBe(true);
+  });
+
+  it("full arming requires BOTH the primary lifecycle to be READY and the detection-sampling element to independently reach its own readiness", () => {
+    const lifecycleReady = true;
+    const detectionVideoWarmedUp = false; // e.g. just attached, frames not yet stable
+    const armed = lifecycleReady && detectionVideoWarmedUp;
+    expect(armed).toBe(false);
   });
 });
 

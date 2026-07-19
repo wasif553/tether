@@ -88,6 +88,21 @@ export function hasReachedFrameReadiness(
 /** Time to let auto-exposure/auto-focus settle AFTER frame readiness is first reached — never from permission grant or stream acquisition. */
 export const CAMERA_WARMUP_MS = 2_500;
 
+/**
+ * A SECOND, independent warm-up used only for the hidden AI-detection
+ * sampling `<video>` element (see docs/on-device-ai-integrity-detection-v1.md,
+ * "Detection-sampling element readiness"). That element is a distinct
+ * decode/render pipeline from the primary preview element the lifecycle
+ * above warms up — attaching an already-stable MediaStream to a brand
+ * new `<video>` sink still needs its own moment to start delivering
+ * genuinely stable frames, even though the camera hardware itself is
+ * already settled. Shorter than CAMERA_WARMUP_MS because the stream is
+ * already live and stable by the time this applies — this only covers
+ * the new element's own attach/first-decode lag, not camera hardware
+ * settling.
+ */
+export const DETECTION_SAMPLING_WARMUP_MS = 1_000;
+
 /** If READY is never reached within this long after the stream started, startup is considered failed (never an indefinite spinner). */
 export const CAMERA_READY_TIMEOUT_MS = 15_000;
 
