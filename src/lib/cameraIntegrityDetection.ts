@@ -173,7 +173,15 @@ export function computeNextDetectionDelayMs(
   return inferenceMs > config.slowInferenceThresholdMs ? config.slowIntervalMs : config.fastIntervalMs;
 }
 
-export type DetectedObject = { className: string; score: number };
+/**
+ * `bbox` is `[x, y, width, height]` in PIXEL coordinates of whatever
+ * source element/canvas was actually passed to `detect()` — optional
+ * because not every caller needs it (the existing quality/person checks
+ * never used it), but required for the multi-scale phone tracking in
+ * phoneDetectionTracking.ts / phoneMultiScaleCrops.ts, which converts it
+ * to normalized original-frame coordinates via `pixelBoxToNormalized`.
+ */
+export type DetectedObject = { className: string; score: number; bbox?: [number, number, number, number] };
 
 export type PhoneDetectionResult = { detected: boolean; confidence: number };
 

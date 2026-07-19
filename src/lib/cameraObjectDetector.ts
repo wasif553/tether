@@ -16,16 +16,27 @@
  * - A failed load NEVER throws to the caller — `loadCameraObjectDetector`
  *   resolves to `null`, and the caller must treat that as "AI camera
  *   checks unavailable" rather than crashing the exam.
- * - `detect()` only ever returns class names + confidence scores. It
+ * - `detect()` only ever returns class names, confidence scores and
+ *   numeric bounding-box coordinates (pixel offsets within whatever
+ *   source element was passed in — never pixel/image data itself). It
  *   never returns pixel data, and this module never uploads the video
  *   frame anywhere — inference runs entirely on-device.
  */
 import type { DetectedObject } from "@/lib/cameraIntegrityDetection";
 
+/**
+ * The detector accepts either the live `<video>` element (the existing
+ * full-frame pass) or an offscreen `<canvas>` (used by the multi-scale
+ * crop analysis in phoneMultiScaleCrops.ts — a region of the video
+ * redrawn/rescaled onto its own canvas before inference). Both are valid
+ * `model.detect()` inputs for coco-ssd.
+ */
+export type CameraDetectionSource = HTMLVideoElement | HTMLCanvasElement;
+
 export type CameraObjectDetector = {
   modelName: string;
   modelVersion: string;
-  detect(video: HTMLVideoElement): Promise<DetectedObject[]>;
+  detect(source: CameraDetectionSource): Promise<DetectedObject[]>;
   dispose(): void;
 };
 
@@ -49,10 +60,14 @@ export async function loadCameraObjectDetector(): Promise<CameraObjectDetector |
     return {
       modelName: "coco-ssd",
       modelVersion: "lite_mobilenet_v2",
-      async detect(video: HTMLVideoElement): Promise<DetectedObject[]> {
+      async detect(source: CameraDetectionSource): Promise<DetectedObject[]> {
         try {
-          const predictions = await model.detect(video);
-          return predictions.map((p) => ({ className: p.class, score: p.score }));
+          const predictions = await model.detect(source);
+          return predictions.map((p) => ({
+            className: p.class,
+            score: p.score,
+            bbox: p.bbox as [number, number, number, number],
+          }));
         } catch {
           // A single failed inference pass (e.g. the video element is
           // momentarily not ready) should never crash the exam — treat

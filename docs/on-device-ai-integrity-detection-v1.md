@@ -152,6 +152,23 @@ The confidence threshold was also lowered from the original 0.65 to `PHONE_CONFI
 
 **Expected latency:** with the first tick running immediately and the adaptive 1–1.5s cadence above, a phone that stays in frame is typically flagged within one tick (as little as ~1 second on fast hardware, up to ~1.5s+inference time when the device has backed off). This is a *typical-case* number, not a guarantee — see "Limitations" below.
 
+**Strengthened detection for angled/edge/partial phones — see
+docs/phone-detection-calibration-v1.md.** The single global 0.45 threshold
+above (still unchanged) governs the original instant-confirm full-frame
+path, but it alone struggles with a phone that is angled, small, near the
+bottom or a side edge, or briefly occluded by a hand. The student exam
+page's live emission decision for `POSSIBLE_PHONE_VISIBLE` now comes from
+a candidate tracker (`src/lib/phoneDetectionTracking.ts`) fed by both the
+full frame and a small set of additional zoomed-in crops on an adaptive
+schedule (`src/lib/phoneMultiScaleCrops.ts`): a clear ("strong") detection
+still confirms on the very first observation exactly as before, while a
+weaker ("moderate") one only warns after persisting across several ticks
+at a spatially consistent location, optionally strengthened by a bounded
+second-stage verification crop. This is additive recall, not a lowered
+threshold — see the calibration doc for the full design, false-positive
+controls, and known limitations (in particular: no labelled fixture or
+real-hardware evaluation has been run in this environment).
+
 ### Timing, debounce, and cooldown
 
 Two independent layers prevent event flooding:

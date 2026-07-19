@@ -52,6 +52,30 @@ import {
   type CameraLifecycleTimers,
 } from "@/lib/cameraLifecycle";
 import { loadCameraObjectDetector, type CameraObjectDetector } from "@/lib/cameraObjectDetector";
+// Strengthened phone detection (angled/edge/partial candidates) — see
+// docs/phone-detection-calibration-v1.md. Runs alongside, not instead of,
+// the existing single-frame full-confidence path in cameraIntegrityDetection.ts.
+import {
+  PhoneCandidateTracker,
+  dedupeObservations,
+  isPlausiblePhoneGeometry,
+  phoneEvidenceTier,
+  shouldRunSecondStageVerification,
+  expandCandidateBoxForVerification,
+  PHONE_DETECTION_ALGORITHM_VERSION,
+  type PhoneObservation,
+  type PhoneDetectionSource,
+  type NormalizedBox,
+} from "@/lib/phoneDetectionTracking";
+import {
+  PHONE_CROP_REGIONS,
+  computeCropSchedule,
+  mapCropDetectionToOriginalFrame,
+  pixelBoxToNormalized,
+  withinCropInferenceBudget,
+  prunedCropInferenceTimestamps,
+  MAX_VERIFICATION_ATTEMPTS_PER_TICK,
+} from "@/lib/phoneMultiScaleCrops";
 import {
   clearAiCameraViolationOverlay,
   computeLocalAiCameraOverlay,
@@ -67,6 +91,38 @@ import {
   shouldLogEvidenceUploadDebug,
 } from "@/lib/aiCameraEvidenceFrame";
 import { ExamWatermark } from "@/components/ExamWatermark";
+
+/**
+ * Strengthened phone detection (Part 3/4) — converts raw detector output
+ * from a single source (full frame OR one crop) into normalized,
+ * ORIGINAL-frame-space phone observations for the candidate tracker.
+ * Pure enough to live at module scope: no closure over component state,
+ * everything it needs is passed in explicitly. See
+ * docs/phone-detection-calibration-v1.md.
+ */
+const PHONE_CLASS_NAMES = new Set(["cell phone", "mobile phone", "phone"]);
+/** Crop canvases are resized up to this before a second detector pass (Part 4) — matches coco-ssd's own internal input scale, so a small edge/lower-frame candidate occupies far more model pixels than it would in the full, uniformly-downscaled frame. */
+const PHONE_CROP_INPUT_SIZE = 300;
+
+function phoneObservationsFromDetections(
+  detections: DetectedObject[],
+  sourceWidth: number,
+  sourceHeight: number,
+  source: PhoneDetectionSource,
+  cropRegionBox?: NormalizedBox,
+): PhoneObservation[] {
+  const observations: PhoneObservation[] = [];
+  for (const d of detections) {
+    if (!PHONE_CLASS_NAMES.has(d.className.toLowerCase().trim())) continue;
+    if (!d.bbox) continue;
+    const [x, y, width, height] = d.bbox;
+    const normalizedLocal = pixelBoxToNormalized({ x, y, width, height }, sourceWidth, sourceHeight);
+    const box = cropRegionBox ? mapCropDetectionToOriginalFrame(cropRegionBox, normalizedLocal) : normalizedLocal;
+    if (!isPlausiblePhoneGeometry(box)) continue;
+    observations.push({ box, score: d.score, source });
+  }
+  return observations;
+}
 
 type Question = {
   id: string;
@@ -574,6 +630,14 @@ export default function TakeExamPage({
   const detectorRef = useRef<CameraObjectDetector | null>(null);
   const detectionCooldown = useRef(new DetectionCooldownTracker());
   const detectionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Strengthened phone detection — see docs/phone-detection-calibration-v1.md.
+  // Owned entirely by refs (not effect-local state) for the same reason
+  // detectionSamplingReadyRef is: a restart of the detection effect must
+  // never discard in-progress candidate tracking.
+  const phoneTrackerRef = useRef(new PhoneCandidateTracker());
+  const phoneCropCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const phoneCropInferenceTimestampsRef = useRef<number[]>([]);
+  const phoneDetectionTickIndexRef = useRef(0);
   const [aiCheckStatus, setAiCheckStatus] = useState<"idle" | "loading" | "active" | "unavailable">(
     "idle",
   );
@@ -1350,6 +1414,12 @@ export default function TakeExamPage({
     setDetectionSamplingReady(false);
     detectionSamplingConsecutiveFramesRef.current = 0;
     detectionSamplingFirstFrameAtRef.current = null;
+    // Strengthened phone detection — a camera restart is a genuinely new
+    // stream; stale candidate tracks from the previous stream must never
+    // carry over (Part 6, phone-detection-calibration-v1.md).
+    phoneTrackerRef.current.reset();
+    phoneCropInferenceTimestampsRef.current = [];
+    phoneDetectionTickIndexRef.current = 0;
     logAiCameraDebug("stream: cleanup", { reason });
   }
 
@@ -2206,14 +2276,6 @@ export default function TakeExamPage({
               personCount: person.personCount,
             });
 
-            // Phone is the urgent exception: `conditionMet` is true on the
-            // first qualifying detection rather than waiting for a second
-            // consecutive tick (see decidePhoneEmission), since a student
-            // may show a phone only briefly. `shouldEmit` (backend
-            // logging) still respects the cooldown, so a phone that stays
-            // visible doesn't flood the evidence timeline with repeat
-            // events — but the local overlay, driven by `conditionMet`
-            // below, is not held back by that same cooldown.
             const phoneCooldownOk = cooldown.canEmit("POSSIBLE_PHONE_VISIBLE", now, 45_000);
             const secondPersonCount = cooldown.recordObservation("secondPerson", person.multiplePersons);
             const secondPersonCooldownOk = cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000);
@@ -2226,9 +2288,6 @@ export default function TakeExamPage({
             // but the decisions themselves are forced to "nothing
             // detected" while suppressStartup is true — never emits an
             // event or shows the local overlay for a warm-up frame.
-            phoneDecision = suppressStartup
-              ? { conditionMet: false, shouldEmit: false, confidenceBand: null }
-              : decidePhoneEmission(phone, phoneCooldownOk);
             secondPersonDecision = suppressStartup
               ? { conditionMet: false, shouldEmit: false, confidenceBand: null }
               : decideSecondPersonEmission(person, secondPersonCount, secondPersonCooldownOk);
@@ -2236,10 +2295,149 @@ export default function TakeExamPage({
               ? { conditionMet: false, shouldEmit: false }
               : decideNoPersonEmission(person, noPersonCount, noPersonCooldownOk);
 
+            // Strengthened phone detection (multi-scale + temporal
+            // tracking) — see docs/phone-detection-calibration-v1.md.
+            // Runs alongside (not instead of) the person/no-person/
+            // frame-quality logic above/below. Full-frame phone-class
+            // detections from the inference pass already run this tick
+            // feed the tracker first; additional lower/edge crops run on
+            // their own bounded, adaptive schedule so a small, angled or
+            // edge-of-frame phone gets a second, zoomed-in look without
+            // running every crop on every tick.
+            const tracker = phoneTrackerRef.current;
+            const tickIndex = phoneDetectionTickIndexRef.current;
+            phoneDetectionTickIndexRef.current += 1;
+
+            const runPhoneCropPass = async (
+              box: NormalizedBox,
+              videoEl: HTMLVideoElement,
+              detectorInstance: CameraObjectDetector,
+            ): Promise<DetectedObject[]> => {
+              phoneCropInferenceTimestampsRef.current = prunedCropInferenceTimestamps(
+                phoneCropInferenceTimestampsRef.current,
+                now,
+              );
+              if (!withinCropInferenceBudget(phoneCropInferenceTimestampsRef.current, now)) return [];
+              if (!phoneCropCanvasRef.current) phoneCropCanvasRef.current = document.createElement("canvas");
+              const cropCanvas = phoneCropCanvasRef.current;
+              const srcX = Math.round(box.x * videoEl.videoWidth);
+              const srcY = Math.round(box.y * videoEl.videoHeight);
+              const srcW = Math.max(1, Math.round(box.width * videoEl.videoWidth));
+              const srcH = Math.max(1, Math.round(box.height * videoEl.videoHeight));
+              cropCanvas.width = PHONE_CROP_INPUT_SIZE;
+              cropCanvas.height = PHONE_CROP_INPUT_SIZE;
+              const cropCtx = cropCanvas.getContext("2d");
+              if (!cropCtx) return [];
+              // Resizing the crop up to the model's normal input scale
+              // (Part 4) — a small phone near the bottom/edge occupies far
+              // more model pixels here than it would in the full,
+              // uniformly-downscaled frame.
+              cropCtx.drawImage(videoEl, srcX, srcY, srcW, srcH, 0, 0, PHONE_CROP_INPUT_SIZE, PHONE_CROP_INPUT_SIZE);
+              phoneCropInferenceTimestampsRef.current.push(now);
+              try {
+                return await detectorInstance.detect(cropCanvas);
+              } catch {
+                return [];
+              }
+            };
+
+            let phoneObservations = phoneObservationsFromDetections(
+              detections,
+              video.videoWidth,
+              video.videoHeight,
+              "full_frame",
+            );
+
+            if (!suppressStartup) {
+              const schedule = computeCropSchedule(tickIndex);
+              for (const regionName of schedule.cropsToRun) {
+                const region = PHONE_CROP_REGIONS.find((r) => r.name === regionName);
+                if (!region) continue;
+                const cropDetections = await runPhoneCropPass(region.box, video, detector);
+                if (cropDetections.length === 0) continue;
+                const cropSource: PhoneDetectionSource =
+                  regionName === "left_edge" || regionName === "right_edge" ? "edge_crop" : "lower_crop";
+                phoneObservations = phoneObservations.concat(
+                  phoneObservationsFromDetections(
+                    cropDetections,
+                    PHONE_CROP_INPUT_SIZE,
+                    PHONE_CROP_INPUT_SIZE,
+                    cropSource,
+                    region.box,
+                  ),
+                );
+              }
+            }
+
+            const dedupedPhoneObservations = dedupeObservations(phoneObservations);
+            const phoneTrackerResult = suppressStartup
+              ? { tracks: tracker.getTracks(), newlyConfirmed: [] as ReturnType<typeof tracker.getTracks> }
+              : tracker.update(dedupedPhoneObservations, now);
+
+            // Second-stage verification (Part 10) — bounded to at most
+            // MAX_VERIFICATION_ATTEMPTS_PER_TICK candidates per tick, only
+            // for MODERATE candidates (a strong candidate already confirms
+            // instantly; a weak one never confirms alone, so spending a
+            // verification pass on it isn't worthwhile). Strengthens or
+            // weakens the candidate's band — never an irreversible
+            // decision from a single frame.
+            if (!suppressStartup) {
+              let verificationAttempts = 0;
+              for (const track of phoneTrackerResult.tracks) {
+                if (verificationAttempts >= MAX_VERIFICATION_ATTEMPTS_PER_TICK) break;
+                if (!shouldRunSecondStageVerification(track.latestBand)) continue;
+                verificationAttempts += 1;
+                const verifyDetections = await runPhoneCropPass(
+                  expandCandidateBoxForVerification(track.box),
+                  video,
+                  detector,
+                );
+                const verifyPhone = verifyDetections
+                  .filter((d) => PHONE_CLASS_NAMES.has(d.className.toLowerCase().trim()))
+                  .reduce<DetectedObject | null>((max, d) => (!max || d.score > max.score ? d : max), null);
+                tracker.applyVerification(track.id, verifyPhone != null, verifyPhone?.score ?? 0);
+                logAiCameraDebug("tick: phone second-stage verification", {
+                  trackId: track.id,
+                  outcome: verifyPhone ? "raised" : "lowered",
+                  verificationScore: verifyPhone?.score ?? null,
+                });
+              }
+            }
+
+            const bestConfirmedPhoneTrack = phoneTrackerResult.tracks
+              .filter((t) => t.confirmedLocalWarning)
+              .reduce<(typeof phoneTrackerResult.tracks)[number] | null>(
+                (max, t) => (!max || t.latestScore > max.latestScore ? t : max),
+                null,
+              );
+
+            phoneDecision =
+              suppressStartup || !bestConfirmedPhoneTrack
+                ? { conditionMet: false, shouldEmit: false, confidenceBand: null }
+                : {
+                    conditionMet: true,
+                    shouldEmit: phoneCooldownOk,
+                    confidenceBand: bestConfirmedPhoneTrack.latestBand === "strong" ? "high" : "medium",
+                  };
+
+            const debugPhoneTier = bestConfirmedPhoneTrack
+              ? phoneEvidenceTier(bestConfirmedPhoneTrack, false, secureSettings?.captureAiViolationEvidence ?? false, true, true)
+              : phoneTrackerResult.tracks.length > 0
+                ? "OBSERVED_CANDIDATE"
+                : null;
+
             logAiCameraDebug("tick: phone decision", {
               phoneDetected: phone.detected,
               phoneConfidence: phone.confidence,
               phoneThreshold,
+              algorithmVersion: PHONE_DETECTION_ALGORITHM_VERSION,
+              observationCount: dedupedPhoneObservations.length,
+              activeTrackCount: phoneTrackerResult.tracks.length,
+              bestTrackBand: bestConfirmedPhoneTrack?.latestBand ?? null,
+              bestTrackScore: bestConfirmedPhoneTrack?.latestScore ?? null,
+              bestTrackSource: bestConfirmedPhoneTrack?.latestSource ?? null,
+              bestTrackEdgeContact: bestConfirmedPhoneTrack?.touchesEdge ?? null,
+              evidenceTier: debugPhoneTier,
               conditionMet: phoneDecision.conditionMet,
               backendLogCooldownOk: phoneCooldownOk,
               backendLogSent: phoneDecision.shouldEmit,
@@ -2264,15 +2462,32 @@ export default function TakeExamPage({
               backendLogSent: noPersonDecision.shouldEmit,
             });
 
-            if (phoneDecision.shouldEmit) {
+            if (phoneDecision.shouldEmit && bestConfirmedPhoneTrack) {
               cooldown.markEmitted("POSSIBLE_PHONE_VISIBLE", now);
+              // Safe metadata only (Part 13) — no image/pixel data, ever.
+              // Keys deliberately avoid the substring "frame" (see
+              // FORBIDDEN_METADATA_KEY_PATTERN in cameraIntegrityDetection.ts
+              // / the server-side check in the integrity-events route) —
+              // "confirmingObservationCount"/"edgeContact", not
+              // "confirmationFrameCount"/"touchesFrameEdge".
               reportIntegrityEvent("POSSIBLE_PHONE_VISIBLE", {
                 source: "on_device_camera_ai",
-                confidence: phone.confidence,
+                confidence: Math.round(bestConfirmedPhoneTrack.latestScore * 100) / 100,
                 confidenceBand: phoneDecision.confidenceBand,
                 modelName: detector.modelName,
                 modelVersion: detector.modelVersion,
                 detectionIntervalSeconds: currentDetectionDelayMs / 1000,
+                algorithmVersion: PHONE_DETECTION_ALGORITHM_VERSION,
+                confirmingObservationCount: bestConfirmedPhoneTrack.recentEligibleWindow.filter(Boolean).length,
+                observationWindowLength: bestConfirmedPhoneTrack.recentEligibleWindow.length,
+                detectionSource: bestConfirmedPhoneTrack.latestSource,
+                edgeContact: bestConfirmedPhoneTrack.touchesEdge,
+                boundingBox: {
+                  x: Math.round(bestConfirmedPhoneTrack.box.x * 1000) / 1000,
+                  y: Math.round(bestConfirmedPhoneTrack.box.y * 1000) / 1000,
+                  width: Math.round(bestConfirmedPhoneTrack.box.width * 1000) / 1000,
+                  height: Math.round(bestConfirmedPhoneTrack.box.height * 1000) / 1000,
+                },
               });
             }
 

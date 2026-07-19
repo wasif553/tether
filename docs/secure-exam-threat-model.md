@@ -137,6 +137,26 @@ remains scoped narrowly:
   cannot start after retries, checks remain inactive and the status
   banner says so rather than silently degrading to a different video
   source.
+- **Strengthened phone detection (Phone Detection Calibration v1)** —
+  see docs/phone-detection-calibration-v1.md. Angled, small, edge-of-
+  frame or briefly hand-occluded phones are harder for a single
+  full-frame detector pass to catch reliably. Rather than lowering the
+  existing global confidence threshold (which would also raise false
+  alarms from calculators/hands/books/keyboards), detection now also
+  analyzes a small, bounded set of zoomed-in crops on an adaptive
+  schedule and tracks phone candidates across several ticks: a clearly
+  confident detection still confirms immediately as before, while a
+  lower-confidence one only produces the (unchanged) "Possible phone
+  visible" review signal after persisting at a spatially consistent
+  location across several ticks, optionally strengthened by a bounded
+  local re-check crop. Entirely on-device — no frame, crop, or
+  verification image is ever sent to Anthropic, OpenAI, Microsoft, or
+  any other external service, and evidence-frame capture, cooldowns, and
+  event severities are all unchanged. This does not guarantee zero false
+  positives or zero missed detections, and the confidence-band values
+  are principled starting points, not the result of a labelled
+  fixture/hardware evaluation — see the calibration doc's "Known
+  limitations."
 
 ## Exam Watermark v1
 
