@@ -1,8 +1,21 @@
+/**
+ * Backward-compatible legacy resolve route — see
+ * docs/evidence-review-workflow-v1.md ("Backward-compatible resolve
+ * route"). Preserved for existing UI/tests exactly as before (same
+ * request/response shape, same LECTURER-only check), and internally
+ * mapped into the new 5-state workflow: it now ALSO sets reviewStatus to
+ * RESOLVED and creates an IntegrityReviewStatusHistory entry, so an
+ * event resolved through this legacy route shows up consistently in the
+ * new evidence-review UI. resolvedAt/resolvedById/resolutionNote are
+ * untouched in shape — no historical resolution information is ever
+ * removed.
+ */
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { isPlatformAdmin, assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
+import { createPlatformAuditLog } from "@/lib/platformAdmin";
 
 const resolveSchema = z.object({
   resolutionNote: z.string().min(1),
@@ -41,14 +54,43 @@ export async function POST(
     return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
 
-  const updated = await prisma.integrityEvent.update({
-    where: { id: eventId },
-    data: {
-      resolvedAt: new Date(),
-      resolvedById: session.user.id,
-      resolutionNote: parsed.data.resolutionNote,
-    },
-  });
+  const now = new Date();
+  const previousReviewStatus = event.reviewStatus;
+  const [updated] = await prisma.$transaction([
+    prisma.integrityEvent.update({
+      where: { id: eventId },
+      data: {
+        resolvedAt: now,
+        resolvedById: session.user.id,
+        resolutionNote: parsed.data.resolutionNote,
+        // Keep the new 5-state workflow consistent with legacy resolutions.
+        reviewStatus: "RESOLVED",
+        reviewedAt: now,
+        reviewedById: session.user.id,
+        reviewNote: parsed.data.resolutionNote,
+      },
+    }),
+    prisma.integrityReviewStatusHistory.create({
+      data: {
+        integrityEventId: eventId,
+        submissionId: event.submissionId,
+        fromStatus: previousReviewStatus,
+        toStatus: "RESOLVED",
+        changedById: session.user.id,
+        changedByRole: session.user.role,
+        reason: parsed.data.resolutionNote,
+      },
+    }),
+  ]);
+
+  createPlatformAuditLog({
+    actorId: session.user.id,
+    action: "INTEGRITY_EVENT_RESOLVED",
+    targetType: "IntegrityEvent",
+    targetId: eventId,
+    institutionId: event.exam.institutionId,
+    metadata: { examId: event.examId, submissionId: event.submissionId, oldStatus: previousReviewStatus, newStatus: "RESOLVED", legacyRoute: true },
+  }).catch(() => {});
 
   return NextResponse.json(updated);
 }

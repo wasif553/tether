@@ -134,9 +134,14 @@ describe("secure settings additions (camera + browser-friction)", () => {
     );
   });
 
-  it("does not require Canvas or AI configuration for any secure setting default", () => {
+  it("does not require Canvas or AI-provider configuration for any secure setting default", () => {
+    // Exam Design Policy v1 added `aiToolsAllowed` — a permitted-resource
+    // policy flag (default false), not an AI-provider config requirement,
+    // so the old generic `^ai` prefix check would false-positive on it.
+    // The real intent here is "no default depends on Canvas/LTI/Anthropic
+    // credentials being configured" — see docs/exam-design-policy-v1.md.
     const keys = Object.keys(DEFAULT_SECURE_SETTINGS);
-    expect(keys.some((k) => /canvas|lti|anthropic|^ai/i.test(k))).toBe(false);
+    expect(keys.some((k) => /canvas|lti|anthropic|apikey/i.test(k))).toBe(false);
   });
 });
 

@@ -28,7 +28,7 @@ export const COMBINED_RECOMMENDATION_LABELS: Record<CombinedRecommendation, stri
   ESCALATION_RECOMMENDED: "Escalated",
 };
 
-export type CombinedSignalCategory = "SESSION" | "TIMING";
+export type CombinedSignalCategory = "SESSION" | "TIMING" | "EVIDENCE";
 export type CombinedSignalLevel = "LOW" | "MEDIUM" | "HIGH";
 
 export type CombinedSignalInput = {
@@ -55,6 +55,20 @@ const LIMITED_ALONE_SIGNAL_TYPES = new Set([
   "INSUFFICIENT_TIMING_DATA",
 ]);
 
+/**
+ * Exam Design Policy v1 (Part 10) — every EVIDENCE-category signal (a
+ * policy-interpreted integrity event, from
+ * src/lib/examPolicy.ts:integrityEventPolicyToRecommendationSignal) is
+ * ALWAYS treated as "limited alone", regardless of its specific type:
+ * "one policy inconsistency should normally recommend lecturer review at
+ * most". Permitted activity never reaches this function at all — see
+ * integrityEventPolicyToRecommendationSignal, which returns null for
+ * PERMITTED/NONE-level interpretations before a signal is ever built.
+ */
+function isLimitedAloneSignal(signal: CombinedSignalInput): boolean {
+  return signal.category === "EVIDENCE" || LIMITED_ALONE_SIGNAL_TYPES.has(signal.signalType);
+}
+
 export type ExistingFeatureRecommendations = {
   /** From src/lib/answerSimilarity.ts computeSimilarityRecommendation(). */
   similarityRecommendation?: "NO_IMMEDIATE_ACTION" | "LECTURER_REVIEW_RECOMMENDED" | "ORAL_VERIFICATION_RECOMMENDED" | "ESCALATION_RECOMMENDED";
@@ -62,6 +76,8 @@ export type ExistingFeatureRecommendations = {
   aiUseReviewRecommendation?: "NO_IMMEDIATE_ACTION" | "LECTURER_REVIEW_RECOMMENDED" | "ORAL_VERIFICATION_RECOMMENDED";
   /** Count of existing camera-related integrity events on this submission (phone/second-person) — corroboration only, never a signal on its own here. */
   cameraIntegrityEventCount?: number;
+  /** Exam Design Policy v1 — included in reasonCodes for transparency only; never changes the arithmetic above on its own. */
+  examMode?: "CLOSED_BOOK" | "OPEN_BOOK" | "CUSTOM";
 };
 
 export type CombinedRecommendationResult = {
@@ -84,9 +100,10 @@ export function calculateCombinedReviewRecommendation(
   if (existing.similarityRecommendation) reasonCodes.push(`EXISTING_SIMILARITY:${existing.similarityRecommendation}`);
   if (existing.aiUseReviewRecommendation) reasonCodes.push(`EXISTING_AI_USE_REVIEW:${existing.aiUseReviewRecommendation}`);
   if (existing.cameraIntegrityEventCount) reasonCodes.push(`CAMERA_INTEGRITY_EVENTS:${existing.cameraIntegrityEventCount}`);
+  if (existing.examMode) reasonCodes.push(`POLICY_CONTEXT:${existing.examMode}`);
 
   const mediumOrAbove = signals.filter((s) => s.signalLevel === "MEDIUM" || s.signalLevel === "HIGH");
-  const nonLimitedMediumOrAbove = mediumOrAbove.filter((s) => !LIMITED_ALONE_SIGNAL_TYPES.has(s.signalType));
+  const nonLimitedMediumOrAbove = mediumOrAbove.filter((s) => !isLimitedAloneSignal(s));
   const distinctNonLimitedTypes = new Set(nonLimitedMediumOrAbove.map((s) => s.signalType));
   const distinctNonLimitedHighTypes = new Set(nonLimitedMediumOrAbove.filter((s) => s.signalLevel === "HIGH").map((s) => s.signalType));
 

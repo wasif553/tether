@@ -17,6 +17,14 @@ import {
   safeExamModeStatusLabel,
   secureSettingsChanged,
 } from "@/lib/secureExam";
+import {
+  EXAM_MODES,
+  EXAM_MODE_LABELS,
+  getExamModePreset,
+  validateExamPolicy,
+  buildLecturerExamPolicySummary,
+  type ExamMode,
+} from "@/lib/examPolicy";
 import { buildStudentJoinLink } from "@/lib/examShareLink";
 
 type Question = {
@@ -69,6 +77,12 @@ type SecureSettings = {
   randomiseMcqOptionOrder: boolean;
   enableQuestionPools: boolean;
   questionPoolSelectionMode: "ALL_QUESTIONS" | "DRAW_FROM_POOLS";
+  // Exam Design Policy v1 — see docs/exam-design-policy-v1.md.
+  examMode: "CLOSED_BOOK" | "OPEN_BOOK" | "CUSTOM";
+  calculatorAllowed: boolean;
+  notesAllowed: boolean;
+  internetAllowed: boolean;
+  aiToolsAllowed: boolean;
 };
 
 type Exam = {
@@ -137,6 +151,11 @@ export default function LecturerExamPage({
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [secureForm, setSecureForm] = useState<SecureSettings | null>(null);
+  // Exam Design Policy v1 — see docs/exam-design-policy-v1.md. Holds a
+  // pending preset proposal until the lecturer explicitly confirms it —
+  // selecting Closed-book/Open-book never silently overwrites existing
+  // settings.
+  const [pendingPreset, setPendingPreset] = useState<ExamMode | null>(null);
 
   // Temporary dev-only diagnostic (see loadExam above) — logs secureForm
   // (and therefore what the toggles below will render as `checked`)
@@ -930,6 +949,213 @@ export default function LecturerExamPage({
           </p>
         </div>
       </div>
+
+      {/* Exam Design Policy v1 — see docs/exam-design-policy-v1.md. Kept
+          compact and separate from the full secure-settings form below —
+          this section is about WHAT resources are permitted, not the
+          technical enforcement controls. */}
+      <h2 className="mt-8 text-lg font-medium">Exam conditions and permitted resources</h2>
+      {secureForm && (
+        <div className="mt-3 space-y-4 rounded border border-gray-200 p-4">
+          <div>
+            <p className="text-sm font-medium">Exam format</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {EXAM_MODES.map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => {
+                    if (mode === secureForm.examMode) return;
+                    if (mode === "CUSTOM") {
+                      setSecureForm({ ...secureForm, examMode: "CUSTOM" });
+                      setPendingPreset(null);
+                      return;
+                    }
+                    // Closed-book/Open-book propose a preset — never
+                    // applied until the lecturer explicitly confirms it.
+                    setPendingPreset(mode);
+                  }}
+                  className={`rounded px-3 py-1.5 text-sm ${
+                    secureForm.examMode === mode
+                      ? "bg-black text-white"
+                      : "border border-gray-300 text-gray-700"
+                  }`}
+                >
+                  {EXAM_MODE_LABELS[mode]}
+                </button>
+              ))}
+            </div>
+            {secureForm.examMode === "CLOSED_BOOK" && (
+              <p className="mt-2 text-xs text-gray-500">
+                Students must complete the assessment without unauthorised external resources.
+                Stronger secure-exam controls are recommended.
+              </p>
+            )}
+            {secureForm.examMode === "OPEN_BOOK" && (
+              <p className="mt-2 text-xs text-gray-500">
+                Students may use only the resources explicitly permitted below. Answer
+                originality and application remain subject to review.
+              </p>
+            )}
+          </div>
+
+          {pendingPreset && (
+            <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm">
+              <p className="font-medium text-amber-900">
+                Apply the {EXAM_MODE_LABELS[pendingPreset]} preset?
+              </p>
+              <p className="mt-1 text-xs text-amber-800">
+                {getExamModePreset(pendingPreset)?.description}
+              </p>
+              <ul className="mt-2 list-disc pl-5 text-xs text-amber-800">
+                <li>Calculator: {getExamModePreset(pendingPreset)?.resources.calculatorAllowed ? "allowed" : "not allowed"}</li>
+                <li>Notes: {getExamModePreset(pendingPreset)?.resources.notesAllowed ? "allowed" : "not allowed"}</li>
+                <li>Internet: {getExamModePreset(pendingPreset)?.resources.internetAllowed ? "allowed" : "not allowed"}</li>
+                <li>AI tools: {getExamModePreset(pendingPreset)?.resources.aiToolsAllowed ? "allowed" : "not allowed"}</li>
+              </ul>
+              <p className="mt-2 text-xs text-amber-800">
+                You can change any of these afterwards — applying a preset never locks the
+                settings.
+              </p>
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const preset = getExamModePreset(pendingPreset);
+                    if (preset) {
+                      setSecureForm({
+                        ...secureForm,
+                        examMode: pendingPreset,
+                        ...preset.resources,
+                        ...preset.recommendedSecureControls,
+                      });
+                    }
+                    setPendingPreset(null);
+                  }}
+                  className="rounded bg-black px-3 py-1.5 text-xs text-white"
+                >
+                  Apply preset
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPendingPreset(null)}
+                  className="rounded border border-gray-300 px-3 py-1.5 text-xs"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div>
+            <p className="text-sm font-medium">Permitted resources</p>
+            <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={secureForm.calculatorAllowed}
+                  onChange={(e) => setSecureForm({ ...secureForm, calculatorAllowed: e.target.checked })}
+                />
+                Calculator
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={secureForm.notesAllowed}
+                  onChange={(e) => setSecureForm({ ...secureForm, notesAllowed: e.target.checked })}
+                />
+                Notes
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={secureForm.internetAllowed}
+                  onChange={(e) => setSecureForm({ ...secureForm, internetAllowed: e.target.checked })}
+                />
+                Internet
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={secureForm.aiToolsAllowed}
+                  onChange={(e) => setSecureForm({ ...secureForm, aiToolsAllowed: e.target.checked })}
+                />
+                AI tools
+              </label>
+            </div>
+            <p className="mt-2 text-xs text-gray-500">
+              {secureForm.aiToolsAllowed
+                ? "Students may use AI tools according to the assessment instructions. AI-use answer signals will not be treated as policy violations by themselves."
+                : "AI-use review signals may be considered alongside other evidence, but they do not prove that AI was used."}
+            </p>
+          </div>
+
+          {(() => {
+            const warnings = validateExamPolicy(
+              {
+                examMode: secureForm.examMode,
+                calculatorAllowed: secureForm.calculatorAllowed,
+                notesAllowed: secureForm.notesAllowed,
+                internetAllowed: secureForm.internetAllowed,
+                aiToolsAllowed: secureForm.aiToolsAllowed,
+              },
+              secureForm,
+            );
+            return warnings.length > 0 ? (
+              <div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                <p className="font-medium">Policy warnings (advisory only)</p>
+                <ul className="mt-1 list-disc pl-5">
+                  {warnings.map((w) => (
+                    <li key={w.code}>{w.message}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null;
+          })()}
+
+          {(() => {
+            const summary = buildLecturerExamPolicySummary(
+              {
+                examMode: secureForm.examMode,
+                calculatorAllowed: secureForm.calculatorAllowed,
+                notesAllowed: secureForm.notesAllowed,
+                internetAllowed: secureForm.internetAllowed,
+                aiToolsAllowed: secureForm.aiToolsAllowed,
+              },
+              secureForm,
+            );
+            return (
+              <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs">
+                <p className="text-sm font-medium">{summary.examModeLabel}</p>
+                {summary.allowed.length > 0 && (
+                  <p className="mt-1">
+                    <span className="font-medium">Allowed:</span> {summary.allowed.join(", ")}
+                  </p>
+                )}
+                {summary.notAllowed.length > 0 && (
+                  <p className="mt-0.5">
+                    <span className="font-medium">Not allowed:</span> {summary.notAllowed.join(", ")}
+                  </p>
+                )}
+                {summary.secureControls.length > 0 && (
+                  <p className="mt-0.5">
+                    <span className="font-medium">Secure controls:</span>{" "}
+                    {summary.secureControls.join(", ")}
+                  </p>
+                )}
+              </div>
+            );
+          })()}
+
+          <button
+            onClick={handleSaveSecureSettings}
+            disabled={savingSecure}
+            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+          >
+            {savingSecure ? "Saving..." : "Save exam conditions"}
+          </button>
+        </div>
+      )}
 
       <h2 className="mt-8 text-lg font-medium">Safe Exam Mode</h2>
       <p className="mt-1 text-sm text-gray-500">

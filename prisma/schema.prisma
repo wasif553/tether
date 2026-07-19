@@ -188,6 +188,12 @@ model User {
   timingAnalysesRequested          TimingAnalysis[]          @relation("TimingAnalysisRequestedBy")
   reviewedTimingIntegritySignals   TimingIntegritySignal[]   @relation("TimingIntegritySignalReviewer")
 
+  // Exam Design Policy + Evidence Review v1 (additive) — see
+  // docs/evidence-review-workflow-v1.md.
+  reviewedIntegrityEvents      IntegrityEvent[]                @relation("IntegrityEventReviewer")
+  integrityReviewComments      IntegrityReviewComment[]        @relation("IntegrityReviewCommentAuthor")
+  integrityReviewStatusChanges IntegrityReviewStatusHistory[]  @relation("IntegrityReviewStatusChanger")
+
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
 }
@@ -456,6 +462,20 @@ model Submission {
   answerActivityEvents     AnswerActivityEvent[]
   timingAnalysis           TimingAnalysis?
 
+  // Exam Design Policy + Evidence Review v1 (additive) — see
+  // docs/exam-design-policy-v1.md. The immutable policy snapshot taken
+  // at attempt start (see src/lib/examPolicy.ts:buildExamPolicySnapshot).
+  // Null for every submission created before this feature shipped, and
+  // for any exam where no policy was ever configured — a null snapshot
+  // is never treated as evidence of anything, and this attempt's
+  // integrity signals are always interpreted with UNKNOWN policy
+  // alignment rather than retrospectively judged against a policy that
+  // did not exist when the attempt happened. Never rewritten after
+  // creation, even if the exam's own secureSettings/policy change later.
+  examPolicySnapshotJson Json?
+  integrityReviewComments       IntegrityReviewComment[]
+  integrityReviewStatusHistory  IntegrityReviewStatusHistory[]
+
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])
 }
@@ -504,12 +524,93 @@ model IntegrityEvent {
   // integrityEventId below).
   evidenceAsset  IntegrityEvidenceAsset?
 
+  // Exam Design Policy + Evidence Review v1 (additive) — see
+  // docs/evidence-review-workflow-v1.md. The old resolvedAt/resolvedById/
+  // resolutionNote above predate this feature and represent a single
+  // resolved/unresolved boolean — kept exactly as-is, still written by
+  // the legacy POST .../resolve route for backward compatibility (which
+  // also now sets reviewStatus below to keep both views consistent).
+  // reviewStatus is the new 5-state workflow field; validated string, not
+  // a Prisma enum, following the SubmissionSimilarityAnalysis convention
+  // — see src/lib/integrityReview.ts. reviewedAt/reviewedById/reviewNote
+  // are new, separate from the legacy trio above, because "reviewed — no
+  // concern" is not the same fact as "resolved".
+  reviewStatus  String    @default("NEEDS_REVIEW") // NEEDS_REVIEW | REVIEWED_NO_CONCERN | REVIEWED_CONCERN_REMAINS | ESCALATED | RESOLVED
+  reviewedAt    DateTime?
+  reviewedById  String?
+  reviewedBy    User?     @relation("IntegrityEventReviewer", fields: [reviewedById], references: [id])
+  reviewNote    String?
+
+  comments      IntegrityReviewComment[]
+  statusHistory IntegrityReviewStatusHistory[]
+
   @@index([submissionId])
   @@index([examId])
   @@index([studentId])
   @@index([eventType])
   @@index([severity])
   @@index([occurredAt])
+  @@index([reviewStatus])
+}
+
+// Exam Design Policy + Evidence Review v1 (additive) — see
+// docs/evidence-review-workflow-v1.md. A freeform reviewer comment on
+// one integrity event (optionally scoped to a specific evidence frame).
+// Comments are immutable in practice — the API never exposes an edit or
+// delete action, only create — updatedAt exists purely for Prisma's
+// @updatedAt convention and is expected to always equal createdAt.
+// authorRole/commentType are always derived server-side from the
+// authenticated session, never accepted from the client (see
+// docs/evidence-review-workflow-v1.md, "Reviewer identity"). This repo
+// has no separate marker role/assignment — see
+// docs/course-enrolment-and-exam-assignment.md and prisma/schema.prisma's
+// Role enum — so commentType is REVIEWER_COMMENT for a PLATFORM_ADMIN or
+// LECTURER_COMMENT for an actual LECTURER; MARKER_COMMENT is defined for
+// forward-compatibility only and is never produced by any route today.
+model IntegrityReviewComment {
+  id               String                  @id @default(cuid())
+  integrityEventId String
+  integrityEvent   IntegrityEvent          @relation(fields: [integrityEventId], references: [id], onDelete: Cascade)
+  evidenceAssetId  String?
+  evidenceAsset    IntegrityEvidenceAsset? @relation(fields: [evidenceAssetId], references: [id], onDelete: SetNull)
+  submissionId     String
+  submission       Submission              @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  authorId         String
+  author           User                    @relation("IntegrityReviewCommentAuthor", fields: [authorId], references: [id])
+  authorRole       String // "LECTURER" | "PLATFORM_ADMIN" — server-derived, never client-supplied
+  commentType      String // REVIEWER_COMMENT | LECTURER_COMMENT | MARKER_COMMENT | DECISION_NOTE
+  comment          String
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  @@index([integrityEventId])
+  @@index([submissionId])
+  @@index([evidenceAssetId])
+}
+
+// Exam Design Policy + Evidence Review v1 (additive) — see
+// docs/evidence-review-workflow-v1.md. One immutable row per status
+// transition — created on EVERY reviewStatus change (including the
+// initial implicit NEEDS_REVIEW is never written here; only actual
+// transitions are). Never updated or deleted by any route — this is the
+// audit-grade history a lecturer sees in the UI, distinct from
+// PlatformAuditLog (which is the platform-wide operational audit trail).
+model IntegrityReviewStatusHistory {
+  id               String         @id @default(cuid())
+  integrityEventId String
+  integrityEvent   IntegrityEvent @relation(fields: [integrityEventId], references: [id], onDelete: Cascade)
+  submissionId     String
+  submission       Submission     @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  fromStatus       String?
+  toStatus         String
+  changedById      String
+  changedBy        User           @relation("IntegrityReviewStatusChanger", fields: [changedById], references: [id])
+  changedByRole    String
+  reason           String?
+  createdAt        DateTime       @default(now())
+
+  @@index([integrityEventId])
+  @@index([submissionId])
 }
 
 // Course, Enrolment, Exam Assignment, Scheduling v1 — see
@@ -744,6 +845,12 @@ model IntegrityEvidenceAsset {
   capturedAt    DateTime @default(now())
 
   createdAt DateTime @default(now())
+
+  // Exam Design Policy + Evidence Review v1 (additive) — see
+  // docs/evidence-review-workflow-v1.md. A comment may optionally be
+  // scoped to this specific evidence frame rather than the event as a
+  // whole.
+  reviewComments IntegrityReviewComment[]
 
   @@index([integrityEventId])
   @@index([submissionId])

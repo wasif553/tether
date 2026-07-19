@@ -15,6 +15,7 @@ import {
 } from "@/lib/questionDelivery";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
+import { buildExamPolicySnapshot } from "@/lib/examPolicy";
 
 export async function POST(
   req: Request,
@@ -104,13 +105,16 @@ export async function POST(
   }
   const attemptNumber = nextAttemptNumber(attempts);
 
+  // Body is read once, up-front, for both the access code (below) and the
+  // policy acknowledgement (Exam Design Policy v1 — see
+  // docs/exam-design-policy-v1.md). Every new attempt requires both,
+  // exactly once each — resuming an existing in-progress attempt (the
+  // idempotency check above) never re-prompts for either.
+  const body = await req.json().catch(() => ({}));
+
   // Student Onboarding and Exam Access v1 — see
-  // docs/student-onboarding-and-exam-access.md. Checked after the
-  // existing in-progress submission idempotency check above, so resuming
-  // an already-started attempt never re-prompts for the code, but every
-  // new attempt still requires a valid one.
+  // docs/student-onboarding-and-exam-access.md.
   if (exam.accessCodeRequired) {
-    const body = await req.json().catch(() => ({}));
     const accessCode = typeof body?.accessCode === "string" ? body.accessCode : "";
     const valid =
       accessCode.length > 0 &&
@@ -123,6 +127,20 @@ export async function POST(
       );
     }
   }
+
+  // Exam Design Policy v1 (Part 7/8) — see docs/exam-design-policy-v1.md.
+  // The student must not start a new attempt until acknowledgement is
+  // recorded. The acknowledgement timestamp is captured here (server
+  // time, not client-supplied) and embedded directly into the immutable
+  // policy snapshot built below — there is no separate acknowledgement
+  // table in v1.
+  if (body?.policyAcknowledged !== true) {
+    return NextResponse.json(
+      { error: "You must acknowledge the exam conditions before starting this exam." },
+      { status: 400 },
+    );
+  }
+  const policyAcknowledgedAt = new Date();
 
   // Two near-simultaneous "start exam" requests from the same student (e.g.
   // a double-click, or a flaky network retry) can both pass the check above
@@ -192,6 +210,31 @@ export async function POST(
         }
       : null;
 
+  // Exam Design Policy v1 — the immutable snapshot for THIS attempt,
+  // built once here from the exam's settings as they exist right now.
+  // Never recomputed or overwritten later — changing the exam afterwards
+  // never changes this attempt's snapshot (see
+  // docs/exam-design-policy-v1.md).
+  const policySnapshot = buildExamPolicySnapshot(
+    {
+      examMode: settings.examMode,
+      calculatorAllowed: settings.calculatorAllowed,
+      notesAllowed: settings.notesAllowed,
+      internetAllowed: settings.internetAllowed,
+      aiToolsAllowed: settings.aiToolsAllowed,
+    },
+    {
+      secureModeEnabled: settings.secureModeEnabled,
+      requireFullscreen: settings.requireFullscreen,
+      blockCopyPaste: settings.blockCopyPaste,
+      trackWindowBlur: settings.trackWindowBlur,
+      requireCamera: settings.requireCamera,
+      enableAiCameraIntegrityChecks: settings.enableAiCameraIntegrityChecks,
+    },
+    policyAcknowledgedAt,
+    new Date(),
+  );
+
   try {
     const submission = await prisma.submission.create({
       data: {
@@ -199,12 +242,32 @@ export async function POST(
         studentId: session.user.id,
         attemptNumber,
         questionOrderJson: questionOrderJson ?? Prisma.DbNull,
+        examPolicySnapshotJson: policySnapshot as unknown as Prisma.InputJsonValue,
       },
     });
 
     // Academic Integrity Network Evidence v1 — captured fire-and-forget
     // after the submission row exists. Never blocks exam start.
     const institutionId = requireInstitutionId(session);
+
+    // Exam Design Policy v1 — audit both the acknowledgement and the
+    // snapshot creation. Never blocks exam start.
+    createPlatformAuditLog({
+      actorId: session.user.id,
+      action: "EXAM_POLICY_ACKNOWLEDGED",
+      targetType: "Submission",
+      targetId: submission.id,
+      institutionId,
+      metadata: { examId: id, examMode: policySnapshot.examMode, policyVersion: policySnapshot.policyVersion },
+    }).catch(() => {});
+    createPlatformAuditLog({
+      actorId: session.user.id,
+      action: "EXAM_POLICY_SNAPSHOT_CREATED",
+      targetType: "Submission",
+      targetId: submission.id,
+      institutionId,
+      metadata: { examId: id, examMode: policySnapshot.examMode, policyVersion: policySnapshot.policyVersion },
+    }).catch(() => {});
     captureNetworkEvidence({
       req,
       submissionId: submission.id,

@@ -113,6 +113,19 @@ export const secureExamSettingsSchema = z.object({
   // enableQuestionPools-implies-nothing-until-a-second-flag-is-also-true
   // relationship.
   questionPoolSelectionMode: z.enum(["ALL_QUESTIONS", "DRAW_FROM_POOLS"]).default("ALL_QUESTIONS"),
+
+  // --- Exam Design Policy v1 (additive) — see docs/exam-design-policy-v1.md.
+  // Kept inside this same JSON structure rather than new Exam columns —
+  // these are settings, exactly like everything else here. Defaults to
+  // CUSTOM + everything disallowed so an EXISTING exam's behaviour never
+  // changes and is never retroactively assumed to be closed-book (see
+  // parseSecureSettings' merge-with-defaults behaviour below, and
+  // docs/exam-design-policy-v1.md "Legacy-attempt behaviour").
+  examMode: z.enum(["CLOSED_BOOK", "OPEN_BOOK", "CUSTOM"]).default("CUSTOM"),
+  calculatorAllowed: z.boolean().default(false),
+  notesAllowed: z.boolean().default(false),
+  internetAllowed: z.boolean().default(false),
+  aiToolsAllowed: z.boolean().default(false),
 });
 
 export type SecureExamSettings = z.infer<typeof secureExamSettingsSchema>;

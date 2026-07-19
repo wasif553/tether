@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
+import { parseSecureSettings } from "@/lib/secureExam";
+import { buildStudentExamPolicySummary } from "@/lib/examPolicy";
 
 /**
  * Safe Exam Deep Link v1 — see docs/course-enrolment-and-exam-assignment.md
@@ -92,6 +94,28 @@ export async function GET(
       select: { id: true, status: true, attemptNumber: true },
     }));
 
+  // Exam Design Policy v1 — see docs/exam-design-policy-v1.md. The same
+  // student-safe summary shown on the "Exam conditions" acknowledgement
+  // screen. Built from the exam's CURRENT settings (there is no
+  // submission/attempt yet to snapshot) — the immutable snapshot itself
+  // is only created once the student actually starts the attempt.
+  const settings = parseSecureSettings(exam.secureSettings);
+  const examPolicySummary = buildStudentExamPolicySummary({
+    examMode: settings.examMode,
+    calculatorAllowed: settings.calculatorAllowed,
+    notesAllowed: settings.notesAllowed,
+    internetAllowed: settings.internetAllowed,
+    aiToolsAllowed: settings.aiToolsAllowed,
+    secureSettings: {
+      secureModeEnabled: settings.secureModeEnabled,
+      requireFullscreen: settings.requireFullscreen,
+      blockCopyPaste: settings.blockCopyPaste,
+      trackWindowBlur: settings.trackWindowBlur,
+      requireCamera: settings.requireCamera,
+      enableAiCameraIntegrityChecks: settings.enableAiCameraIntegrityChecks,
+    },
+  });
+
   return NextResponse.json({
     ok: true,
     exam: {
@@ -103,6 +127,7 @@ export async function GET(
       course: exam.course,
     },
     existingSubmission,
+    examPolicySummary,
   });
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, use as usePromise } from "react";
+import { useCallback, useEffect, useMemo, useState, use as usePromise } from "react";
 import Link from "next/link";
 import { buildEvidenceFrameViewPath, evidenceFrameEventLabel, hasEvidenceFrame } from "@/lib/aiCameraEvidenceFrame";
 import {
@@ -95,6 +95,109 @@ type EvidenceReport = {
   disclaimer: string;
 };
 
+// Exam Design Policy + Evidence Review v1 — see
+// docs/exam-design-policy-v1.md and docs/evidence-review-workflow-v1.md.
+// Every signal shown below is a REVIEW SIGNAL, never an automatic
+// misconduct finding — the lecturer/institution makes the final decision.
+type PolicyInterpretation = {
+  applicable: boolean;
+  policyAlignment: "PERMITTED" | "NOT_PERMITTED" | "NOT_APPLICABLE" | "UNKNOWN";
+  adjustedReviewLevel: "NONE" | "LOW" | "MEDIUM" | "HIGH";
+  reasonCode: string;
+  explanation: string;
+  limitation: string;
+};
+
+type ReviewComment = {
+  id: string;
+  comment: string;
+  authorName: string;
+  authorRole: string;
+  commentType: string;
+  createdAt: string;
+};
+
+type ReviewStatusHistoryEntry = {
+  id: string;
+  fromStatus: string | null;
+  toStatus: string;
+  changedByName: string;
+  changedByRole: string;
+  reason: string | null;
+  createdAt: string;
+};
+
+type ReviewEvent = {
+  id: string;
+  eventType: string;
+  eventLabel: string;
+  severity: string;
+  message: string;
+  occurredAt: string;
+  evidenceFrame: { id: string; contentType: string; byteSize: number; capturedAt: string } | null;
+  policyInterpretation: PolicyInterpretation;
+  reviewStatus: string;
+  reviewStatusLabel: string;
+  reviewedAt: string | null;
+  reviewedByName: string | null;
+  reviewNote: string | null;
+  comments: ReviewComment[];
+  statusHistory: ReviewStatusHistoryEntry[];
+};
+
+type IntegrityReview = {
+  submissionId: string;
+  status: string;
+  policy:
+    | {
+        available: true;
+        examMode: "CLOSED_BOOK" | "OPEN_BOOK" | "CUSTOM";
+        calculatorAllowed: boolean;
+        notesAllowed: boolean;
+        internetAllowed: boolean;
+        aiToolsAllowed: boolean;
+        secureControls: string[];
+      }
+    | { available: false; message: string };
+  events: ReviewEvent[];
+  summary: {
+    overallReviewStatus: string;
+    needsReviewCount: number;
+    reviewedNoConcernCount: number;
+    concernRemainsCount: number;
+    escalatedCount: number;
+    resolvedCount: number;
+    evidenceFrameCount: number;
+    lastReviewActivityAt: string | null;
+    lastReviewer: string | null;
+  };
+  recommendation: { recommendation: string; reasonCodes: string[]; summary: string };
+};
+
+const EXAM_MODE_LABELS_MAP: Record<string, string> = { CLOSED_BOOK: "Closed-book", OPEN_BOOK: "Open-book", CUSTOM: "Custom" };
+
+const REVIEW_STATUS_STYLES: Record<string, string> = {
+  NEEDS_REVIEW: "bg-gray-100 text-gray-600",
+  REVIEWED_NO_CONCERN: "bg-green-100 text-green-700",
+  REVIEWED_CONCERN_REMAINS: "bg-yellow-100 text-yellow-700",
+  ESCALATED: "bg-red-100 text-red-700",
+  RESOLVED: "bg-blue-100 text-blue-700",
+};
+
+const REVIEW_RECOMMENDATION_LABELS: Record<string, string> = {
+  NO_IMMEDIATE_ACTION: "No immediate action",
+  LECTURER_REVIEW_RECOMMENDED: "Lecturer review recommended",
+  ORAL_VERIFICATION_RECOMMENDED: "Oral verification recommended",
+  ESCALATION_RECOMMENDED: "Escalated",
+};
+
+const REVIEW_ACTIONS: Array<{ status: string; label: string }> = [
+  { status: "REVIEWED_NO_CONCERN", label: "Reviewed — no concern" },
+  { status: "REVIEWED_CONCERN_REMAINS", label: "Reviewed — concern remains" },
+  { status: "ESCALATED", label: "Escalate" },
+  { status: "RESOLVED", label: "Resolve" },
+];
+
 const RISK_LEVEL_STYLES: Record<string, string> = {
   CLEAN: "bg-gray-100 text-gray-600",
   LOW: "bg-blue-100 text-blue-700",
@@ -156,6 +259,73 @@ export default function EvidenceReportPage({
     loading: boolean;
     error: string | null;
   } | null>(null);
+
+  // Exam Design Policy + Evidence Review v1 — see
+  // docs/evidence-review-workflow-v1.md.
+  const [review, setReview] = useState<IntegrityReview | null>(null);
+  const [reviewLoading, setReviewLoading] = useState(true);
+  const [reviewNoteDrafts, setReviewNoteDrafts] = useState<Record<string, string>>({});
+  const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
+  const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+  const [bulkSelection, setBulkSelection] = useState<Set<string>>(new Set());
+  const [bulkConfirming, setBulkConfirming] = useState(false);
+
+  const loadReview = useCallback(async () => {
+    const res = await fetch(`/api/lecturer/submissions/${id}/integrity-review`);
+    if (res.ok) setReview(await res.json());
+    setReviewLoading(false);
+  }, [id]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadReview();
+  }, [loadReview]);
+
+  async function submitEventReview(eventId: string, reviewStatus: string) {
+    const reviewNote = reviewNoteDrafts[eventId];
+    const res = await fetch(`/api/lecturer/integrity-events/${eventId}/review`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reviewStatus, reviewNote: reviewNote || undefined }),
+    });
+    if (res.ok) await loadReview();
+  }
+
+  async function submitComment(eventId: string) {
+    const comment = commentDrafts[eventId]?.trim();
+    if (!comment) return;
+    const res = await fetch(`/api/lecturer/integrity-events/${eventId}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ comment }),
+    });
+    if (res.ok) {
+      setCommentDrafts((prev) => ({ ...prev, [eventId]: "" }));
+      await loadReview();
+    }
+  }
+
+  function toggleBulkSelection(eventId: string) {
+    setBulkSelection((prev) => {
+      const next = new Set(prev);
+      if (next.has(eventId)) next.delete(eventId);
+      else next.add(eventId);
+      return next;
+    });
+  }
+
+  async function confirmBulkNoConcern() {
+    const res = await fetch(`/api/lecturer/submissions/${id}/integrity-review/bulk-no-concern`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ eventIds: [...bulkSelection] }),
+    });
+    setBulkConfirming(false);
+    if (res.ok) {
+      setBulkSelection(new Set());
+      await loadReview();
+    }
+  }
 
   useEffect(() => {
     fetch(`/api/lecturer/submissions/${id}/evidence`).then(async (res) => {
@@ -233,6 +403,234 @@ export default function EvidenceReportPage({
       <p className="mt-2 rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
         {data.disclaimer}
       </p>
+
+      {/* Exam Design Policy + Evidence Review v1 — see
+          docs/exam-design-policy-v1.md and
+          docs/evidence-review-workflow-v1.md. Every status/signal here is
+          a review signal for a human lecturer, never an automatic
+          misconduct finding — the lecturer/institution makes the final
+          decision. */}
+      <h2 className="mt-8 text-lg font-medium">Evidence review</h2>
+      {reviewLoading && <p className="mt-2 text-sm text-gray-500">Loading evidence review...</p>}
+      {!reviewLoading && review && (
+        <>
+          <div className="mt-3 grid grid-cols-2 gap-3 rounded border border-gray-200 p-4 text-sm sm:grid-cols-3">
+            <div>
+              <p className="text-xs uppercase text-gray-500">Overall review status</p>
+              <p className="mt-1">
+                <span className={`rounded px-2 py-0.5 text-xs ${REVIEW_STATUS_STYLES[review.summary.overallReviewStatus]}`}>
+                  {review.summary.overallReviewStatus === "NEEDS_REVIEW" ? "Needs review" : review.summary.overallReviewStatus}
+                </span>
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase text-gray-500">Items needing review</p>
+              <p className="mt-1">{review.summary.needsReviewCount}</p>
+            </div>
+            <div>
+              <p className="text-xs uppercase text-gray-500">Evidence frames</p>
+              <p className="mt-1">{review.summary.evidenceFrameCount}</p>
+            </div>
+            <div>
+              <p className="text-xs uppercase text-gray-500">Last reviewer activity</p>
+              <p className="mt-1">
+                {review.summary.lastReviewActivityAt
+                  ? `${new Date(review.summary.lastReviewActivityAt).toLocaleString()}${review.summary.lastReviewer ? ` — ${review.summary.lastReviewer}` : ""}`
+                  : "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase text-gray-500">Recommended next action</p>
+              <p className="mt-1">
+                <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
+                  {REVIEW_RECOMMENDATION_LABELS[review.recommendation.recommendation] ?? review.recommendation.recommendation}
+                </span>
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-3 rounded border border-gray-200 p-4 text-sm">
+            <p className="text-xs uppercase text-gray-500">Policy applied to this attempt</p>
+            {review.policy.available ? (
+              <>
+                <p className="mt-1 font-medium">{EXAM_MODE_LABELS_MAP[review.policy.examMode]}</p>
+                <p className="mt-1 text-xs text-gray-600">
+                  Calculator {review.policy.calculatorAllowed ? "allowed" : "not allowed"} · Notes{" "}
+                  {review.policy.notesAllowed ? "allowed" : "not allowed"} · Internet{" "}
+                  {review.policy.internetAllowed ? "allowed" : "not allowed"} · AI tools{" "}
+                  {review.policy.aiToolsAllowed ? "allowed" : "not allowed"}
+                </p>
+                {review.policy.secureControls.length > 0 && (
+                  <p className="mt-1 text-xs text-gray-500">Secure controls: {review.policy.secureControls.join(", ")}</p>
+                )}
+              </>
+            ) : (
+              <p className="mt-1 text-gray-500">{review.policy.message}</p>
+            )}
+          </div>
+
+          {bulkSelection.size > 0 && (
+            <div className="mt-3 flex items-center gap-2 rounded border border-gray-200 bg-gray-50 p-3 text-sm">
+              <span>{bulkSelection.size} event(s) selected</span>
+              <button
+                type="button"
+                onClick={() => setBulkConfirming(true)}
+                className="rounded bg-black px-3 py-1.5 text-xs text-white"
+              >
+                Mark selected as Reviewed — no concern
+              </button>
+            </div>
+          )}
+          {bulkConfirming && (
+            <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              <p>
+                Mark {bulkSelection.size} selected event(s) as &quot;Reviewed — no concern&quot;? This creates an
+                individual, immutable review record for each event.
+              </p>
+              <div className="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={confirmBulkNoConcern}
+                  className="rounded bg-black px-3 py-1.5 text-xs text-white"
+                >
+                  Confirm
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBulkConfirming(false)}
+                  className="rounded border border-gray-300 px-3 py-1.5 text-xs"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="mt-3 space-y-3">
+            {review.events.length === 0 && (
+              <p className="rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-500">
+                No reviewable integrity events for this submission.
+              </p>
+            )}
+            {review.events.map((e) => (
+              <div key={e.id} className="rounded border border-gray-200 p-4 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={bulkSelection.has(e.id)}
+                    onChange={() => toggleBulkSelection(e.id)}
+                    aria-label="Select for bulk review"
+                  />
+                  <span className="font-medium">{e.eventLabel}</span>
+                  <span className={`rounded px-2 py-0.5 text-xs ${REVIEW_STATUS_STYLES[e.reviewStatus] ?? REVIEW_STATUS_STYLES.NEEDS_REVIEW}`}>
+                    {e.reviewStatusLabel}
+                  </span>
+                  <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">Signal: {e.severity}</span>
+                  <span className="text-xs text-gray-400">{new Date(e.occurredAt).toLocaleString()}</span>
+                </div>
+
+                <p className="mt-2 text-xs font-medium text-gray-600">Policy interpretation:</p>
+                <p className="text-gray-700">{e.policyInterpretation.explanation}</p>
+                <p className="mt-1 text-xs text-amber-700">Limitation: {e.policyInterpretation.limitation}</p>
+
+                {e.evidenceFrame && (
+                  <button
+                    type="button"
+                    onClick={() => openEvidenceFrame(e.evidenceFrame!.id, e.eventLabel, e.occurredAt)}
+                    className="mt-2 rounded border border-gray-300 px-2 py-1 text-xs"
+                  >
+                    View evidence frame
+                  </button>
+                )}
+
+                {e.reviewedAt && (
+                  <p className="mt-2 text-xs text-gray-500">
+                    Decision: {e.reviewStatusLabel} by {e.reviewedByName ?? "—"} on {new Date(e.reviewedAt).toLocaleString()}
+                    {e.reviewNote && ` — ${e.reviewNote}`}
+                  </p>
+                )}
+
+                <div className="mt-3">
+                  <input
+                    type="text"
+                    placeholder="Optional review note"
+                    className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                    value={reviewNoteDrafts[e.id] ?? ""}
+                    onChange={(ev) => setReviewNoteDrafts((prev) => ({ ...prev, [e.id]: ev.target.value }))}
+                  />
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {REVIEW_ACTIONS.map((action) => (
+                      <button
+                        key={action.status}
+                        onClick={() => submitEventReview(e.id, action.status)}
+                        className="rounded border border-gray-300 px-2 py-1 text-xs"
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setExpandedEventId(expandedEventId === e.id ? null : e.id)}
+                      className="rounded border border-gray-300 px-2 py-1 text-xs"
+                    >
+                      {expandedEventId === e.id ? "Hide comments" : `Comments (${e.comments.length})`}
+                    </button>
+                    <Link
+                      href={`/lecturer/exams/${data.exam.id}/submissions/${data.submissionId}`}
+                      className="rounded border border-gray-300 px-2 py-1 text-xs"
+                    >
+                      Require oral verification
+                    </Link>
+                  </div>
+                </div>
+
+                {expandedEventId === e.id && (
+                  <div className="mt-3 border-t border-gray-200 pt-3">
+                    {e.comments.length === 0 && <p className="text-xs text-gray-400">No comments yet.</p>}
+                    {e.comments.map((c) => (
+                      <div key={c.id} className="mt-2 text-xs">
+                        <p className="font-medium text-gray-700">
+                          {c.authorName} — {c.authorRole === "LECTURER" ? "Lecturer" : c.authorRole === "PLATFORM_ADMIN" ? "Platform admin" : c.authorRole}
+                        </p>
+                        <p className="text-gray-400">{new Date(c.createdAt).toLocaleString()}</p>
+                        <p className="mt-0.5 text-gray-700">{c.comment}</p>
+                      </div>
+                    ))}
+                    <div className="mt-2 flex gap-2">
+                      <input
+                        type="text"
+                        placeholder="Add a comment"
+                        className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                        value={commentDrafts[e.id] ?? ""}
+                        onChange={(ev) => setCommentDrafts((prev) => ({ ...prev, [e.id]: ev.target.value }))}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => submitComment(e.id)}
+                        className="rounded border border-gray-300 px-2 py-1 text-xs"
+                      >
+                        Add comment
+                      </button>
+                    </div>
+                    {e.statusHistory.length > 0 && (
+                      <div className="mt-3">
+                        <p className="text-xs font-medium text-gray-600">Status history</p>
+                        {e.statusHistory.map((h) => (
+                          <p key={h.id} className="mt-1 text-xs text-gray-500">
+                            {h.fromStatus ?? "NEEDS_REVIEW"} → {h.toStatus} by {h.changedByName} (
+                            {h.changedByRole === "LECTURER" ? "Lecturer" : "Platform admin"}) on{" "}
+                            {new Date(h.createdAt).toLocaleString()}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <div className="mt-6 grid grid-cols-2 gap-3 rounded border border-gray-200 p-4 text-sm sm:grid-cols-3">
         <div>

@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 
 type AvailableExam = {
   id: string;
@@ -25,12 +24,8 @@ type AvailableExam = {
 };
 
 export default function StudentDashboard() {
-  const router = useRouter();
   const [exams, setExams] = useState<AvailableExam[]>([]);
   const [loading, setLoading] = useState(true);
-  const [startingId, setStartingId] = useState<string | null>(null);
-  const [accessCodeInputs, setAccessCodeInputs] = useState<Record<string, string>>({});
-  const [startErrors, setStartErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     fetch("/api/exams/available")
@@ -38,27 +33,6 @@ export default function StudentDashboard() {
       .then(setExams)
       .finally(() => setLoading(false));
   }, []);
-
-  async function startExam(examId: string, accessCode?: string) {
-    setStartingId(examId);
-    setStartErrors((prev) => ({ ...prev, [examId]: "" }));
-    const res = await fetch(`/api/exams/${examId}/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(accessCode ? { accessCode } : {}),
-    });
-    setStartingId(null);
-    if (!res.ok) {
-      const body = await res.json().catch(() => null);
-      setStartErrors((prev) => ({
-        ...prev,
-        [examId]: typeof body?.error === "string" ? body.error : "Failed to start exam.",
-      }));
-      return;
-    }
-    const submission = await res.json();
-    router.push(`/student/exams/${submission.id}`);
-  }
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -104,45 +78,19 @@ export default function StudentDashboard() {
               {exam.availability === "upcoming" && exam.canStartAttempt && (
                 <span className="text-sm text-gray-500">Not yet open</span>
               )}
-              {exam.availability === "open" && exam.canStartAttempt && exam.accessCodeRequired && (
-                <div className="flex items-end gap-2">
-                  <input
-                    type="text"
-                    placeholder="Enter access code"
-                    className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-                    value={accessCodeInputs[exam.id] ?? ""}
-                    onChange={(e) =>
-                      setAccessCodeInputs((prev) => ({ ...prev, [exam.id]: e.target.value }))
-                    }
-                  />
-                  <button
-                    onClick={() => startExam(exam.id, accessCodeInputs[exam.id] ?? "")}
-                    disabled={startingId === exam.id || !(accessCodeInputs[exam.id] ?? "").trim()}
-                    className="rounded bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
-                  >
-                    {startingId === exam.id
-                      ? "Starting..."
-                      : exam.submission
-                        ? "Start next attempt"
-                        : "Start exam"}
-                  </button>
-                </div>
-              )}
-              {exam.availability === "open" && exam.canStartAttempt && !exam.accessCodeRequired && (
-                <button
-                  onClick={() => startExam(exam.id)}
-                  disabled={startingId === exam.id}
-                  className="rounded bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
+              {exam.availability === "open" && exam.canStartAttempt && (
+                // Exam Design Policy v1 — see docs/exam-design-policy-v1.md.
+                // Routed through the join page rather than starting
+                // directly from here, so every attempt (whether started
+                // from the dashboard or a shared link) goes through the
+                // same "Exam conditions" acknowledgement step before
+                // POST /api/exams/[id]/start is ever called.
+                <a
+                  href={`/student/exams/join/${exam.id}`}
+                  className="inline-block rounded bg-black px-3 py-1.5 text-sm text-white"
                 >
-                  {startingId === exam.id
-                    ? "Starting..."
-                    : exam.submission
-                      ? "Start next attempt"
-                      : "Start exam"}
-                </button>
-              )}
-              {startErrors[exam.id] && (
-                <p className="mt-1 text-sm text-red-600">{startErrors[exam.id]}</p>
+                  {exam.submission ? "Start next attempt" : "Start exam"}
+                </a>
               )}
               {exam.submission?.status === "IN_PROGRESS" && (
                 <a
