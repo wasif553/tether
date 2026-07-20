@@ -158,6 +158,35 @@ remains scoped narrowly:
   fixture/hardware evaluation — see the calibration doc's "Known
   limitations."
 
+## Controlled AI Brainstorming Assistance v1
+
+A separate, independent opt-in — see
+docs/controlled-ai-brainstorming-assistance-v1.md for the full design.
+Lets students use a heavily restricted AI assistant (Socratic questions,
+concept explanations, planning support — never a direct answer, MCQ
+option, final numeric result, submission-ready prose, or complete code)
+during a live exam. **This is an ALLOWED assessment resource, explicitly
+outside the threat model above — using it as intended is never treated
+as an integrity violation and never increases a student's integrity risk
+score** (every `AI_ASSISTANCE_*` event is `INFO` severity, weight 0 — see
+`severityFor()` in src/lib/secureExam.ts). Disabled by default; a
+lecturer must explicitly enable it, with conservative default limits (3
+prompts/question, 10/attempt, 800-character responses). Every candidate
+response passes through an INDEPENDENT verifier (separate system prompt,
+separate model call, given the hidden model answer/rubric the generator
+never sees) before it can be shown to a student; a rejected candidate is
+regenerated once under stricter instructions, then falls back to a fixed
+deterministic Socratic message — never a rejected candidate's actual
+text, which is never stored anywhere. Prompt-injection attempts (asking
+the assistant to ignore its rules) are detected and blocked before any
+generation runs. All interactions are recorded and reviewable by the
+exam's lecturer, exactly like answers and integrity events, but are
+never themselves a misconduct signal. See the calibration doc's "Known
+limitations" — no ML-based request classifier, and no guarantee that a
+language-model verifier can never let excessive detail through; this
+requires institutional configuration and pilot validation before broad
+reliance, exactly like every other AI-adjacent feature in this repo.
+
 ## Exam Watermark v1
 
 A separate, independent opt-in — see docs/exam-watermark-v1.md for the

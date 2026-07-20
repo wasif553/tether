@@ -72,6 +72,15 @@ enum IntegrityEventType {
   // using the existing QUESTION_NAVIGATED_NEXT/PREVIOUS types above.
   QUESTION_NAVIGATED_DIRECT
   QUESTION_DIRECT_NAVIGATION_BLOCKED
+  // Controlled AI Brainstorming Assistance v1 (additive — see
+  // docs/controlled-ai-brainstorming-assistance-v1.md). Neutral,
+  // operational events only — this is an ALLOWED assessment resource,
+  // never treated as misconduct, so none of these carry any integrity
+  // risk weight (see severityFor in src/lib/secureExam.ts).
+  AI_ASSISTANCE_USED
+  AI_ASSISTANCE_REQUEST_BLOCKED
+  AI_ASSISTANCE_LIMIT_REACHED
+  AI_ASSISTANCE_RESPONSE_REGENERATED
 }
 
 enum IntegritySeverity {
@@ -199,6 +208,10 @@ model User {
   reviewedIntegrityEvents      IntegrityEvent[]                @relation("IntegrityEventReviewer")
   integrityReviewComments      IntegrityReviewComment[]        @relation("IntegrityReviewCommentAuthor")
   integrityReviewStatusChanges IntegrityReviewStatusHistory[]  @relation("IntegrityReviewStatusChanger")
+
+  // Controlled AI Brainstorming Assistance v1 (additive) — see
+  // docs/controlled-ai-brainstorming-assistance-v1.md.
+  aiAssistanceInteractions AiAssistanceInteraction[]
 
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
@@ -332,6 +345,9 @@ model Question {
   // Question Navigator v1 (additive, opt-in) — see
   // docs/question-navigator-v1.md.
   submissionQuestionStates SubmissionQuestionState[]
+  // Controlled AI Brainstorming Assistance v1 (additive, opt-in) — see
+  // docs/controlled-ai-brainstorming-assistance-v1.md.
+  aiAssistanceInteractions AiAssistanceInteraction[]
 }
 
 // Answer Similarity Review v1 (additive) — see
@@ -488,6 +504,19 @@ model Submission {
   // Question Navigator v1 (additive, opt-in) — see
   // docs/question-navigator-v1.md.
   questionStates SubmissionQuestionState[]
+
+  // Controlled AI Brainstorming Assistance v1 (additive, opt-in) — see
+  // docs/controlled-ai-brainstorming-assistance-v1.md. The effective AI-
+  // assistance policy (mode + limits + allowed-capability flags) copied
+  // at attempt start — exactly the same immutable-snapshot pattern as
+  // examPolicySnapshotJson above. All later assistance decisions for this
+  // attempt (limits, allowed capabilities) MUST read this snapshot, never
+  // the exam's current (possibly since-changed) secureSettings. Null for
+  // every submission created before this feature shipped, or where AI
+  // assistance was never configured — always treated as DISABLED, never
+  // silently active.
+  aiAssistancePolicySnapshotJson Json?
+  aiAssistanceInteractions       AiAssistanceInteraction[]
 
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])
@@ -1187,4 +1216,64 @@ model BankQuestion {
   @@index([type])
   @@index([topic])
   @@index([difficulty])
+}
+
+// Controlled AI Brainstorming Assistance v1 (additive, opt-in) — see
+// docs/controlled-ai-brainstorming-assistance-v1.md. One row per student
+// request. This is an AUDITABLE RECORD OF AN ALLOWED ASSESSMENT RESOURCE,
+// not an integrity-violation log — status/riskCodes describe the
+// generator/verifier pipeline's own internal decision-making, never a
+// finding about the student. `status`/`riskCodes` are validated strings,
+// not Prisma enums, following the SubmissionSimilarityAnalysis/
+// IntegrityEvidenceAsset convention (see src/lib/aiAssistancePolicy.ts for
+// validation). `approvedResponse` is null whenever the request was
+// blocked pre-generation (status "BLOCKED") — the verifier's rejected
+// candidate text is NEVER stored anywhere, on any status, since it may
+// contain prohibited answer content (see src/lib/aiAssistanceRunner.ts).
+model AiAssistanceInteraction {
+  id           String     @id @default(cuid())
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  questionId   String
+  question     Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  examId       String
+  studentId    String
+  student      User       @relation(fields: [studentId], references: [id])
+
+  studentPrompt    String
+  // Null when status is "BLOCKED" (classifier rejected the request before
+  // any generation/verification ran) — see status below.
+  approvedResponse String?
+
+  // BLOCKED (classifier rejected the request pre-generation) |
+  // APPROVED (first candidate passed verification) |
+  // REGENERATED_APPROVED (first candidate failed verification, the
+  //   stricter regeneration passed) |
+  // FALLBACK (both attempts failed verification; the deterministic safe
+  //   Socratic fallback was returned instead of any generated text)
+  status String
+
+  promptNumberForQuestion Int
+  promptNumberForAttempt  Int
+  policyVersion           String
+
+  // Structured verifier output (Part 8) — riskCodesJson is a JSON array of
+  // strings (DIRECT_ANSWER, NEAR_COMPLETE_ANSWER, etc; empty array for a
+  // BLOCKED or cleanly-APPROVED interaction with nothing flagged).
+  riskCodesJson        Json?
+  riskScore            Float @default(0)
+  cumulativeRiskScore  Float @default(0)
+  specificityLevel     Int   @default(0)
+
+  providerModel String?
+  latencyMs     Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([submissionId])
+  @@index([submissionId, questionId])
+  @@index([examId])
+  @@index([studentId])
+  @@index([submissionId, createdAt])
 }

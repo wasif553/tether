@@ -237,6 +237,22 @@ export default function StudentExamNoticePage() {
         </section>
 
         <section>
+          <h2 className="font-medium text-gray-900">AI Brainstorming Assistance, if enabled by your lecturer</h2>
+          <p className="mt-1">
+            Some lecturers enable a controlled AI assistant to help you understand a question,
+            organise your ideas, or think through your reasoning. It will not provide the answer,
+            the correct multiple-choice option, or write a submission-ready response for you —
+            every response is checked by a separate verification step before it is shown to you,
+            and requests for a direct answer are declined. Your prompts and the assistant&apos;s
+            approved responses are recorded as part of the assessment record and are visible to
+            your lecturer, in the same way your answers are. Using this assistant as intended is
+            an allowed part of the exam, not an integrity concern, and does not affect your
+            integrity risk score. See docs/controlled-ai-brainstorming-assistance-v1.md for the
+            full design.
+          </p>
+        </section>
+
+        <section>
           <h2 className="font-medium text-gray-900">Who can review this data</h2>
           <p className="mt-1">
             Your answers, timing data, and any integrity events for an exam are visible to the

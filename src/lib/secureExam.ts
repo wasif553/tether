@@ -136,9 +136,31 @@ export const secureExamSettingsSchema = z.object({
   showQuestionNavigator: z.boolean().default(false),
   allowQuestionJumping: z.boolean().default(false),
   allowFlagForReview: z.boolean().default(true),
+
+  // --- Controlled AI Brainstorming Assistance v1 (additive, opt-in) —
+  // see docs/controlled-ai-brainstorming-assistance-v1.md. An ALLOWED
+  // assessment resource, not an integrity violation — see
+  // src/lib/aiAssistancePolicy.ts for the full policy/limit logic and
+  // src/lib/aiAssistanceRunner.ts for the generator/verifier pipeline
+  // that actually enforces it. Defaults are conservative and disabled:
+  // no existing exam's behaviour changes unless a lecturer explicitly
+  // opts in. All later assistance decisions for an in-progress attempt
+  // must use the immutable Submission.aiAssistancePolicySnapshotJson
+  // taken at attempt start, never these live settings directly.
+  aiAssistanceMode: z.enum(["DISABLED", "BRAINSTORM_ONLY"]).default("DISABLED"),
+  aiAssistanceMaxPromptsPerQuestion: z.number().int().min(1).max(20).default(3),
+  aiAssistanceMaxPromptsPerAttempt: z.number().int().min(1).max(100).default(10),
+  aiAssistanceMaxResponseCharacters: z.number().int().min(200).max(4000).default(800),
+  aiAssistanceAllowConceptExplanations: z.boolean().default(true),
+  aiAssistanceAllowAnswerPlanning: z.boolean().default(true),
+  aiAssistanceAllowReasoningFeedback: z.boolean().default(true),
+  aiAssistanceAllowProgrammingConceptHelp: z.boolean().default(true),
 });
 
 export type SecureExamSettings = z.infer<typeof secureExamSettingsSchema>;
+
+/** Controlled AI Brainstorming Assistance v1 — see docs/controlled-ai-brainstorming-assistance-v1.md. */
+export type AiAssistanceMode = SecureExamSettings["aiAssistanceMode"];
 
 /**
  * Single source of truth for "is question-pool drawing actually active"
@@ -240,7 +262,13 @@ export type IntegrityEventTypeName =
   | "QUESTION_BACK_NAVIGATION_BLOCKED"
   // --- Question Navigator v1 — see docs/question-navigator-v1.md.
   | "QUESTION_NAVIGATED_DIRECT"
-  | "QUESTION_DIRECT_NAVIGATION_BLOCKED";
+  | "QUESTION_DIRECT_NAVIGATION_BLOCKED"
+  // --- Controlled AI Brainstorming Assistance v1 — see
+  // docs/controlled-ai-brainstorming-assistance-v1.md.
+  | "AI_ASSISTANCE_USED"
+  | "AI_ASSISTANCE_REQUEST_BLOCKED"
+  | "AI_ASSISTANCE_LIMIT_REACHED"
+  | "AI_ASSISTANCE_RESPONSE_REGENERATED";
 
 export function severityFor(
   eventType: IntegrityEventTypeName,
@@ -331,5 +359,17 @@ export function severityFor(
       return "INFO";
     case "QUESTION_DIRECT_NAVIGATION_BLOCKED":
       return "LOW";
+    // --- Controlled AI Brainstorming Assistance v1 — see
+    // docs/controlled-ai-brainstorming-assistance-v1.md. This is an
+    // ALLOWED assessment resource, not an integrity violation — every
+    // event here is INFO (weight 0, see src/lib/integrityRisk.ts) so
+    // permitted use, blocked requests, limit-reached notices and
+    // stricter-regeneration outcomes can NEVER increase a student's
+    // integrity risk score, no matter how often they occur.
+    case "AI_ASSISTANCE_USED":
+    case "AI_ASSISTANCE_REQUEST_BLOCKED":
+    case "AI_ASSISTANCE_LIMIT_REACHED":
+    case "AI_ASSISTANCE_RESPONSE_REGENERATED":
+      return "INFO";
   }
 }

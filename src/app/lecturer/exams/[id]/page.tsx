@@ -87,6 +87,16 @@ type SecureSettings = {
   showQuestionNavigator: boolean;
   allowQuestionJumping: boolean;
   allowFlagForReview: boolean;
+  // Controlled AI Brainstorming Assistance v1 — see
+  // docs/controlled-ai-brainstorming-assistance-v1.md.
+  aiAssistanceMode: "DISABLED" | "BRAINSTORM_ONLY";
+  aiAssistanceMaxPromptsPerQuestion: number;
+  aiAssistanceMaxPromptsPerAttempt: number;
+  aiAssistanceMaxResponseCharacters: number;
+  aiAssistanceAllowConceptExplanations: boolean;
+  aiAssistanceAllowAnswerPlanning: boolean;
+  aiAssistanceAllowReasoningFeedback: boolean;
+  aiAssistanceAllowProgrammingConceptHelp: boolean;
 };
 
 type Exam = {
@@ -1634,6 +1644,156 @@ export default function LecturerExamPage({
                 Students may flag earlier questions, but they may not be able to reopen them
                 after moving forward.
               </p>
+            )}
+          </div>
+
+          {/* Controlled AI Brainstorming Assistance v1 — see
+              docs/controlled-ai-brainstorming-assistance-v1.md. This is an
+              ALLOWED assessment resource, not a secure-mode control — kept
+              enabled/disabled independently of secureModeEnabled. */}
+          <div className="border-t border-gray-200 pt-3">
+            <h3 className="text-sm font-medium">AI Brainstorming Assistance</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Students may use a controlled assistant to understand the task, organise ideas and
+              receive guiding questions. It will not provide the answer or write a
+              submission-ready response.
+            </p>
+            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={secureForm.aiAssistanceMode === "BRAINSTORM_ONLY"}
+                onChange={(e) =>
+                  setSecureForm({
+                    ...secureForm,
+                    aiAssistanceMode: e.target.checked ? "BRAINSTORM_ONLY" : "DISABLED",
+                  })
+                }
+              />
+              <span>
+                Enable AI brainstorming assistance
+                <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  Disabled by default. Every interaction is recorded as part of the assessment
+                  record and reviewable by lecturers — see the AI assistance section on each
+                  submission.
+                </span>
+              </span>
+            </label>
+
+            {secureForm.aiAssistanceMode === "BRAINSTORM_ONLY" && (
+              <div className="mt-3 space-y-3 pl-6">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <label className="text-xs text-gray-700">
+                    Max prompts per question
+                    <input
+                      type="number"
+                      min={1}
+                      max={20}
+                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                      value={secureForm.aiAssistanceMaxPromptsPerQuestion}
+                      onChange={(e) =>
+                        setSecureForm({
+                          ...secureForm,
+                          aiAssistanceMaxPromptsPerQuestion: Math.max(1, Number(e.target.value) || 1),
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="text-xs text-gray-700">
+                    Max prompts per attempt
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                      value={secureForm.aiAssistanceMaxPromptsPerAttempt}
+                      onChange={(e) =>
+                        setSecureForm({
+                          ...secureForm,
+                          aiAssistanceMaxPromptsPerAttempt: Math.max(1, Number(e.target.value) || 1),
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="text-xs text-gray-700">
+                    Max response length (characters)
+                    <input
+                      type="number"
+                      min={200}
+                      max={4000}
+                      step={100}
+                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                      value={secureForm.aiAssistanceMaxResponseCharacters}
+                      onChange={(e) =>
+                        setSecureForm({
+                          ...secureForm,
+                          aiAssistanceMaxResponseCharacters: Math.max(200, Number(e.target.value) || 200),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="flex items-start gap-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={secureForm.aiAssistanceAllowConceptExplanations}
+                      onChange={(e) =>
+                        setSecureForm({ ...secureForm, aiAssistanceAllowConceptExplanations: e.target.checked })
+                      }
+                    />
+                    <span>Allow concept explanations</span>
+                  </label>
+                  <label className="flex items-start gap-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={secureForm.aiAssistanceAllowAnswerPlanning}
+                      onChange={(e) =>
+                        setSecureForm({ ...secureForm, aiAssistanceAllowAnswerPlanning: e.target.checked })
+                      }
+                    />
+                    <span>Allow answer planning (structuring an approach, not the wording)</span>
+                  </label>
+                  <label className="flex items-start gap-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={secureForm.aiAssistanceAllowReasoningFeedback}
+                      onChange={(e) =>
+                        setSecureForm({ ...secureForm, aiAssistanceAllowReasoningFeedback: e.target.checked })
+                      }
+                    />
+                    <span>Allow feedback on the student&apos;s own reasoning</span>
+                  </label>
+                  <label className="flex items-start gap-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={secureForm.aiAssistanceAllowProgrammingConceptHelp}
+                      onChange={(e) =>
+                        setSecureForm({ ...secureForm, aiAssistanceAllowProgrammingConceptHelp: e.target.checked })
+                      }
+                    />
+                    <span>Allow programming-concept assistance (no complete code)</span>
+                  </label>
+                </div>
+
+                <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+                  <p className="font-medium">AI Brainstorming Assistance: Enabled</p>
+                  <p>
+                    {secureForm.aiAssistanceMaxPromptsPerQuestion} prompt(s) per question,{" "}
+                    {secureForm.aiAssistanceMaxPromptsPerAttempt} per attempt, responses up to{" "}
+                    {secureForm.aiAssistanceMaxResponseCharacters} characters.
+                  </p>
+                  <p className="mt-1">
+                    It will never reveal the correct answer, correct MCQ option, marking rubric, or
+                    write a submission-ready response — see docs/controlled-ai-brainstorming-assistance-v1.md.
+                  </p>
+                </div>
+              </div>
             )}
           </div>
 

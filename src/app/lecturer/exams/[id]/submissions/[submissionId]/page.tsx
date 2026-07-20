@@ -508,12 +508,20 @@ export default function GradeSubmissionPage({
     <div className="mx-auto max-w-2xl">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">{data.exam.title}</h1>
-        <Link
-          href={`/lecturer/submissions/${submissionId}/evidence`}
-          className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-        >
-          Evidence report
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link
+            href={`/lecturer/submissions/${submissionId}/ai-assistance`}
+            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+          >
+            AI assistance
+          </Link>
+          <Link
+            href={`/lecturer/submissions/${submissionId}/evidence`}
+            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+          >
+            Evidence report
+          </Link>
+        </div>
       </div>
       <p className="text-sm text-gray-500">
         Status: {data.status} · Attempt {data.attemptNumber}

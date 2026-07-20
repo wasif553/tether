@@ -16,6 +16,7 @@ import {
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { buildExamPolicySnapshot } from "@/lib/examPolicy";
+import { buildAiAssistancePolicySnapshot } from "@/lib/aiAssistancePolicy";
 
 export async function POST(
   req: Request,
@@ -235,6 +236,22 @@ export async function POST(
     new Date(),
   );
 
+  // Controlled AI Brainstorming Assistance v1 — see
+  // docs/controlled-ai-brainstorming-assistance-v1.md. Same immutable-
+  // snapshot pattern as policySnapshot above: built once here from the
+  // exam's CURRENT settings, then never recomputed for this attempt even
+  // if the lecturer changes aiAssistance* settings afterwards.
+  const aiAssistancePolicySnapshot = buildAiAssistancePolicySnapshot({
+    aiAssistanceMode: settings.aiAssistanceMode,
+    aiAssistanceMaxPromptsPerQuestion: settings.aiAssistanceMaxPromptsPerQuestion,
+    aiAssistanceMaxPromptsPerAttempt: settings.aiAssistanceMaxPromptsPerAttempt,
+    aiAssistanceMaxResponseCharacters: settings.aiAssistanceMaxResponseCharacters,
+    aiAssistanceAllowConceptExplanations: settings.aiAssistanceAllowConceptExplanations,
+    aiAssistanceAllowAnswerPlanning: settings.aiAssistanceAllowAnswerPlanning,
+    aiAssistanceAllowReasoningFeedback: settings.aiAssistanceAllowReasoningFeedback,
+    aiAssistanceAllowProgrammingConceptHelp: settings.aiAssistanceAllowProgrammingConceptHelp,
+  });
+
   try {
     const submission = await prisma.submission.create({
       data: {
@@ -243,6 +260,7 @@ export async function POST(
         attemptNumber,
         questionOrderJson: questionOrderJson ?? Prisma.DbNull,
         examPolicySnapshotJson: policySnapshot as unknown as Prisma.InputJsonValue,
+        aiAssistancePolicySnapshotJson: aiAssistancePolicySnapshot as unknown as Prisma.InputJsonValue,
       },
     });
 

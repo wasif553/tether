@@ -91,6 +91,7 @@ import {
   shouldLogEvidenceUploadDebug,
 } from "@/lib/aiCameraEvidenceFrame";
 import { ExamWatermark } from "@/components/ExamWatermark";
+import { AiBrainstormPanel } from "@/components/AiBrainstormPanel";
 
 /**
  * Strengthened phone detection (Part 3/4) — converts raw detector output
@@ -169,6 +170,9 @@ type SecureSettings = {
   showQuestionNavigator: boolean;
   allowQuestionJumping: boolean;
   allowFlagForReview: boolean;
+  // Controlled AI Brainstorming Assistance v1 — see
+  // docs/controlled-ai-brainstorming-assistance-v1.md.
+  aiAssistanceMode: "DISABLED" | "BRAINSTORM_ONLY";
 };
 
 type SubmissionData = {
@@ -3252,6 +3256,14 @@ export default function TakeExamPage({
                     />
                   )}
 
+                  {secureSettings?.aiAssistanceMode === "BRAINSTORM_ONLY" && (
+                    <AiBrainstormPanel
+                      submissionId={id}
+                      questionId={oneQuestion.payload.question.id}
+                      currentResponseText={responses[oneQuestion.payload.question.id] ?? null}
+                    />
+                  )}
+
                   <div className="mt-4 flex items-center gap-2">
                     {oneQuestion.payload.canGoPrevious && (
                       <button
@@ -3339,6 +3351,14 @@ export default function TakeExamPage({
                       value={responses[q.id] ?? ""}
                       onChange={(e) => handleChange(q.id, e.target.value)}
                       disabled={submitting || autoSubmitLocked || timerStopped}
+                    />
+                  )}
+
+                  {secureSettings?.aiAssistanceMode === "BRAINSTORM_ONLY" && (
+                    <AiBrainstormPanel
+                      submissionId={id}
+                      questionId={q.id}
+                      currentResponseText={responses[q.id] ?? null}
                     />
                   )}
                 </div>
