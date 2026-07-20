@@ -18,6 +18,16 @@
 --
 -- Apply via the Supabase SQL Editor (or `psql`) against production.
 -- Do NOT run `prisma db push` against production.
+--
+-- Idempotency: the four ALTER TYPE ... ADD VALUE IF NOT EXISTS statements
+-- are safe to re-run. The ALTER TABLE / CREATE TABLE / CREATE INDEX / ADD
+-- CONSTRAINT statements below are NOT idempotent — this is a ONE-TIME
+-- script per environment. Re-running it after a successful apply will
+-- error ("column already exists" / "relation already exists"). Before
+-- applying, run the read-only verification queries in
+-- docs/migration-ledger.md to confirm it hasn't already been applied to
+-- the target environment, and record the applied date in that ledger
+-- once it has.
 
 -- ============================================================================
 -- 1. AlterEnum: IntegrityEventType — four new values, following the same
