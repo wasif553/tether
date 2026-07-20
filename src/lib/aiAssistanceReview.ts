@@ -13,6 +13,7 @@
  */
 import { prisma } from "@/lib/prisma";
 import { isPlatformAdmin } from "@/lib/institutionScope";
+import { isStaleReservation } from "@/lib/aiAssistancePolicy";
 import type { Session } from "next-auth";
 
 export class AiAssistanceReviewNotFoundError extends Error {}
@@ -25,6 +26,7 @@ export type AiAssistanceReviewInteraction = {
   studentPrompt: string;
   response: string | null;
   status: string;
+  wasRegenerated: boolean;
   promptNumberForQuestion: number;
   promptNumberForAttempt: number;
   policyVersion: string;
@@ -75,7 +77,22 @@ export async function buildAiAssistanceReview(
       questionText: interaction.question.text,
       studentPrompt: interaction.studentPrompt,
       response: interaction.approvedResponse,
-      status: interaction.status,
+      // A RESERVED row still showing at review time is either a request
+      // genuinely mid-flight (extremely unlikely by the time a lecturer
+      // is looking — the whole pipeline runs synchronously within one
+      // request) or an abandoned reservation from a crashed/timed-out
+      // invocation that hasn't yet been touched again by a client retry
+      // (see reserveInteractionSlot's self-healing in
+      // src/lib/aiAssistanceRunner.ts, which only fires on the NEXT
+      // request with the same clientRequestId). Never shown as a
+      // silently-ambiguous "pending" status here (Part 4 — "RESERVED
+      // records cannot remain permanently misleading") — displayed as
+      // FAILED once stale.
+      status:
+        interaction.status === "RESERVED" && isStaleReservation(interaction.createdAt)
+          ? "FAILED"
+          : interaction.status,
+      wasRegenerated: interaction.wasRegenerated,
       promptNumberForQuestion: interaction.promptNumberForQuestion,
       promptNumberForAttempt: interaction.promptNumberForAttempt,
       policyVersion: interaction.policyVersion,

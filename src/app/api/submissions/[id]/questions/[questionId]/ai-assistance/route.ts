@@ -28,6 +28,10 @@ const bodySchema = z.object({
   // allowReasoningFeedback true (see the runner); harmless to accept and
   // ignore otherwise.
   studentCurrentReasoning: z.string().max(MAX_STUDENT_PROMPT_CHARACTERS).optional(),
+  // Idempotency key (Part 2 hardening) — a client-generated UUID, one per
+  // logical "send" action (see src/components/AiBrainstormPanel.tsx).
+  // Optional: a request without one is simply never deduplicated.
+  clientRequestId: z.string().uuid().optional(),
 });
 
 export async function POST(
@@ -57,6 +61,7 @@ export async function POST(
       questionId,
       studentPrompt: parsed.data.studentPrompt,
       studentCurrentReasoning: parsed.data.studentCurrentReasoning ?? null,
+      clientRequestId: parsed.data.clientRequestId ?? null,
     });
     return NextResponse.json(result);
   } catch (err) {

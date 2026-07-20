@@ -188,6 +188,60 @@ describe("2/27. another student cannot access or review", () => {
   });
 });
 
+describe("18. a locked future question (one-question-at-a-time delivery) rejects assistance", () => {
+  it("rejects a question ahead of the student's current position", async () => {
+    const exam = await prisma.exam.create({
+      data: {
+        title: `AI Assistance One-Question Exam ${Date.now()}-${Math.random()}`,
+        durationMins: 30,
+        published: true,
+        createdById: lecturerA.id,
+        institutionId: instA,
+        secureSettings: {
+          oneQuestionAtATime: true,
+          aiAssistanceMode: "BRAINSTORM_ONLY",
+          aiAssistanceMaxPromptsPerQuestion: 3,
+          aiAssistanceMaxPromptsPerAttempt: 10,
+          aiAssistanceMaxResponseCharacters: 800,
+          aiAssistanceAllowConceptExplanations: true,
+          aiAssistanceAllowAnswerPlanning: true,
+          aiAssistanceAllowReasoningFeedback: true,
+          aiAssistanceAllowProgrammingConceptHelp: true,
+        },
+      },
+    });
+    cleanup.exams.push(exam.id);
+    await prisma.question.create({ data: { examId: exam.id, type: "ESSAY", text: "Q0", points: 5, order: 0 } });
+    const q1 = await prisma.question.create({ data: { examId: exam.id, type: "ESSAY", text: "Q1", points: 5, order: 1 } });
+    const submission = await prisma.submission.create({
+      data: {
+        examId: exam.id,
+        studentId: studentA.id,
+        status: "IN_PROGRESS",
+        currentQuestionIndex: 0, // student is still on q0
+        aiAssistancePolicySnapshotJson: {
+          schemaVersion: 1,
+          policyVersion: "v1.0",
+          mode: "BRAINSTORM_ONLY",
+          maxPromptsPerQuestion: 3,
+          maxPromptsPerAttempt: 10,
+          maxResponseCharacters: 800,
+          allowConceptExplanations: true,
+          allowAnswerPlanning: true,
+          allowReasoningFeedback: true,
+          allowProgrammingConceptHelp: true,
+        },
+      },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this." }), {
+      params: Promise.resolve({ id: submission.id, questionId: q1.id }), // q1 is ahead
+    });
+    expect(res.status).toBe(403);
+  });
+});
+
 describe("4. question outside the stable attempt set rejects", () => {
   it("rejects a questionId from a different exam", async () => {
     const { submission, outsideQuestion } = await createExamAndSubmission();
@@ -276,5 +330,161 @@ describe("26. lecturer can review approved interactions", () => {
     const body = await res.json();
     expect(body.interactions.length).toBeGreaterThan(0);
     expect(body.interactions[0].status).toBe("APPROVED");
+    expect(body.interactions[0]).toHaveProperty("wasRegenerated");
+  });
+});
+
+describe("9/10/11. concurrency — atomic reservation prevents exceeding limits under simultaneous requests", () => {
+  it("9. two simultaneous requests against a 1-prompt-per-question limit never both approve", async () => {
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 1 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    const [resA, resB] = await Promise.all([
+      assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this, take one." }), {
+        params: Promise.resolve({ id: submission.id, questionId: question.id }),
+      }),
+      assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this, take two." }), {
+        params: Promise.resolve({ id: submission.id, questionId: question.id }),
+      }),
+    ]);
+    const [bodyA, bodyB] = await Promise.all([resA.json(), resB.json()]);
+    const statuses = [bodyA.status, bodyB.status];
+
+    // Exactly one of the two got the single available slot; the other
+    // was blocked by the atomic reservation — never both APPROVED.
+    expect(statuses.filter((s) => s === "APPROVED")).toHaveLength(1);
+    expect(statuses.filter((s) => s === "BLOCKED")).toHaveLength(1);
+
+    const rows = await prisma.aiAssistanceInteraction.count({
+      where: { submissionId: submission.id, questionId: question.id },
+    });
+    expect(rows).toBe(1); // the blocked request never reserved a row at all
+  });
+
+  it("10. the same guarantee holds for the per-attempt limit across two different questions", async () => {
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerAttempt: 1 });
+    const question2 = await prisma.question.create({
+      data: { examId: submission.examId, type: "ESSAY", text: "A second question.", points: 5, order: 1 },
+    });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    const [resA, resB] = await Promise.all([
+      assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand question one." }), {
+        params: Promise.resolve({ id: submission.id, questionId: question.id }),
+      }),
+      assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand question two." }), {
+        params: Promise.resolve({ id: submission.id, questionId: question2.id }),
+      }),
+    ]);
+    const [bodyA, bodyB] = await Promise.all([resA.json(), resB.json()]);
+    const statuses = [bodyA.status, bodyB.status];
+    expect(statuses.filter((s) => s === "APPROVED")).toHaveLength(1);
+    expect(statuses.filter((s) => s === "BLOCKED")).toHaveLength(1);
+  });
+});
+
+describe("11/12. idempotency key — a duplicate client request never creates a second interaction", () => {
+  it("11. resubmitting the same clientRequestId replays the original outcome instead of consuming a second slot", async () => {
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const clientRequestId = "11111111-1111-4111-8111-111111111111";
+
+    const first = await assistanceRoute.POST(
+      jsonRequest({ studentPrompt: "Help me understand this.", clientRequestId }),
+      { params: Promise.resolve({ id: submission.id, questionId: question.id }) },
+    );
+    const firstBody = await first.json();
+
+    const second = await assistanceRoute.POST(
+      jsonRequest({ studentPrompt: "Help me understand this.", clientRequestId }),
+      { params: Promise.resolve({ id: submission.id, questionId: question.id }) },
+    );
+    const secondBody = await second.json();
+
+    expect(secondBody.status).toBe(firstBody.status);
+    expect(secondBody.response).toBe(firstBody.response);
+
+    const rows = await prisma.aiAssistanceInteraction.count({
+      where: { submissionId: submission.id, questionId: question.id },
+    });
+    expect(rows).toBe(1);
+  });
+});
+
+describe("22/23. cumulative-leakage isolation — never mixes another student/submission/question", () => {
+  it("two different students' approved interactions on the same question never share cumulative risk", async () => {
+    const { submission: submissionA, question } = await createExamAndSubmission();
+    const examId = submissionA.examId;
+    const submissionB = await prisma.submission.create({
+      data: {
+        examId,
+        studentId: studentB.id,
+        status: "IN_PROGRESS",
+        aiAssistancePolicySnapshotJson: {
+          schemaVersion: 1,
+          policyVersion: "v1.0",
+          mode: "BRAINSTORM_ONLY",
+          maxPromptsPerQuestion: 3,
+          maxPromptsPerAttempt: 10,
+          maxResponseCharacters: 800,
+          allowConceptExplanations: true,
+          allowAnswerPlanning: true,
+          allowReasoningFeedback: true,
+          allowProgrammingConceptHelp: true,
+        },
+      },
+    });
+
+    // Student A racks up cumulative risk on this question.
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    for (let i = 0; i < 3; i++) {
+      await assistanceRoute.POST(jsonRequest({ studentPrompt: `Help me with this, attempt ${i}.` }), {
+        params: Promise.resolve({ id: submissionA.id, questionId: question.id }),
+      });
+    }
+    const rowsA = await prisma.aiAssistanceInteraction.findMany({
+      where: { submissionId: submissionA.id, questionId: question.id, status: "APPROVED" },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(rowsA[0]?.cumulativeRiskScore).toBeGreaterThan(0);
+
+    // Student B's first interaction on the SAME question must start from
+    // zero cumulative risk — never inherit student A's.
+    mockAuth.mockResolvedValue(sessionFor(studentB.id, "STUDENT", instA));
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this question." }), {
+      params: Promise.resolve({ id: submissionB.id, questionId: question.id }),
+    });
+    const rowB = await prisma.aiAssistanceInteraction.findFirst({
+      where: { submissionId: submissionB.id, questionId: question.id, status: "APPROVED" },
+    });
+    expect(rowB?.cumulativeRiskScore).toBe(rowB?.riskScore ?? 0);
+  });
+});
+
+describe("4/5/7/8. FAILED status — a genuine provider failure never shows generated content and consumes the reserved slot", () => {
+  it("both generate attempts throwing resolves to FAILED with no response text, one interaction row", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mocked = vi.mocked(generateBrainstormResponse);
+    mocked.mockRejectedValueOnce(new Error("boom")).mockRejectedValueOnce(new Error("boom again"));
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("FAILED");
+    expect(body.response).toBeNull();
+
+    const rows = await prisma.aiAssistanceInteraction.findMany({
+      where: { submissionId: submission.id, questionId: question.id },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("FAILED");
+    expect(rows[0].approvedResponse).toBeNull();
+
+    mocked.mockResolvedValue("What concept do you think this question is testing?"); // restore default
   });
 });

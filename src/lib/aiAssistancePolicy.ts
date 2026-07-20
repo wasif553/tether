@@ -220,18 +220,77 @@ export function isCumulativeHintLeakageRisk(
 }
 
 // ---------------------------------------------------------------------------
-// Interaction status (Part 4/9)
+// Interaction status lifecycle (hardening v1.1) — six explicit states. See
+// the AiAssistanceInteraction.status column comment in prisma/schema.prisma
+// for what each one means and why REGENERATED_APPROVED was folded into
+// APPROVED + a separate wasRegenerated flag instead of staying a seventh
+// status value.
 // ---------------------------------------------------------------------------
 
 export const AI_ASSISTANCE_INTERACTION_STATUSES = [
-  "BLOCKED",
+  "RESERVED",
   "APPROVED",
-  "REGENERATED_APPROVED",
+  "BLOCKED",
   "FALLBACK",
+  "FAILED",
 ] as const;
 export type AiAssistanceInteractionStatus = (typeof AI_ASSISTANCE_INTERACTION_STATUSES)[number];
+
+/** Every one of these is a genuinely terminal outcome — RESERVED is the only non-terminal status. */
+export const TERMINAL_AI_ASSISTANCE_STATUSES = ["APPROVED", "BLOCKED", "FALLBACK", "FAILED"] as const;
+
+/**
+ * A RESERVED row this old was almost certainly left behind by a crashed or
+ * timed-out server invocation (the whole reserve→generate→verify→finalize
+ * sequence runs synchronously within one request — see
+ * src/lib/aiAssistanceRunner.ts) rather than a request that is still
+ * genuinely in flight. Used by the lecturer review and duplicate-request
+ * detection so a RESERVED row can never appear as a silently-forever-
+ * pending state (Part 4 — "RESERVED records cannot remain permanently
+ * misleading"). Comfortably above the generator/verifier's own bounded
+ * ANTHROPIC_TIMEOUT_MS (see aiAssistanceGenerator.ts/aiAssistanceVerifier.ts)
+ * times two attempts, plus request overhead.
+ */
+export const STALE_RESERVATION_MS = 90_000;
+
+export function isStaleReservation(createdAt: Date, now: number = Date.now()): boolean {
+  return now - createdAt.getTime() > STALE_RESERVATION_MS;
+}
 
 /** The deterministic, always-safe fallback (Part 9) — never generated text, never model output of any kind. */
 export const AI_ASSISTANCE_FALLBACK_RESPONSE =
   "I cannot provide that part of the answer. Start by identifying the main concept being assessed. " +
   "What information in the question appears most relevant to that concept?";
+
+/** Shown to the student on a genuine provider/parsing failure (status FAILED) — distinct wording from the fallback above, since nothing was actually generated at all, safe/degraded or otherwise. */
+export const AI_ASSISTANCE_UNAVAILABLE_MESSAGE =
+  "The brainstorming assistant is temporarily unavailable. Please try again shortly.";
+
+// ---------------------------------------------------------------------------
+// Provider payload bounds (Part 9) — server-side, never relies on the
+// model following an instruction or on the browser truncating anything.
+// ---------------------------------------------------------------------------
+
+/** Hard ceiling on hidden reference material (Question.correctAnswer text) sent to the verifier — lecturer-authored free text has no length limit enforced elsewhere in this app. */
+export const MAX_HIDDEN_REFERENCE_CHARACTERS = 2_000;
+
+export function boundedHiddenReference(text: string | null | undefined): string | null {
+  if (!text) return null;
+  return text.length > MAX_HIDDEN_REFERENCE_CHARACTERS ? text.slice(0, MAX_HIDDEN_REFERENCE_CHARACTERS) : text;
+}
+
+/**
+ * Server-side response-length enforcement (Part 9) — checked AFTER
+ * verification, never before (a too-long response might otherwise still
+ * be safe content-wise, but must never be truncated — truncation can
+ * change meaning, e.g. cut off a "but you should NOT do X" qualifier).
+ * The caller (aiAssistanceRunner.ts) treats a too-long verified response
+ * exactly like a failed verification: retry once, then the deterministic
+ * fallback. Never truncated and returned.
+ */
+export function isApprovedResponseLengthValid(
+  response: string,
+  policy: Pick<AiAssistancePolicy, "maxResponseCharacters">,
+): boolean {
+  return response.length > 0 && response.length <= policy.maxResponseCharacters;
+}

@@ -18,7 +18,15 @@ import {
   isCumulativeHintLeakageRisk,
   CUMULATIVE_HINT_LEAKAGE_THRESHOLD,
   AI_ASSISTANCE_FALLBACK_RESPONSE,
+  AI_ASSISTANCE_UNAVAILABLE_MESSAGE,
   DISABLED_AI_ASSISTANCE_POLICY,
+  AI_ASSISTANCE_INTERACTION_STATUSES,
+  TERMINAL_AI_ASSISTANCE_STATUSES,
+  STALE_RESERVATION_MS,
+  isStaleReservation,
+  MAX_HIDDEN_REFERENCE_CHARACTERS,
+  boundedHiddenReference,
+  isApprovedResponseLengthValid,
 } from "./aiAssistancePolicy";
 import { severityFor, DEFAULT_SECURE_SETTINGS } from "./secureExam";
 import { SEVERITY_WEIGHTS } from "./integrityRisk";
@@ -145,17 +153,81 @@ describe("9. Part 9 deterministic fallback", () => {
 });
 
 describe("24. permitted AI-assistance use never increases integrity risk", () => {
-  it("every AI_ASSISTANCE_* event severity is INFO (weight 0)", () => {
+  it("every AI_ASSISTANCE_* event severity is INFO (weight 0), including the new FAILED-provider event", () => {
     const settings = DEFAULT_SECURE_SETTINGS;
     for (const eventType of [
       "AI_ASSISTANCE_USED",
       "AI_ASSISTANCE_REQUEST_BLOCKED",
       "AI_ASSISTANCE_LIMIT_REACHED",
       "AI_ASSISTANCE_RESPONSE_REGENERATED",
+      "AI_ASSISTANCE_REQUEST_FAILED",
     ] as const) {
       const severity = severityFor(eventType, settings);
       expect(severity).toBe("INFO");
       expect(SEVERITY_WEIGHTS[severity]).toBe(0);
     }
+  });
+});
+
+describe("4. interaction status lifecycle", () => {
+  it("is exactly the six-state (five persisted-terminal-plus-RESERVED) lifecycle", () => {
+    expect([...AI_ASSISTANCE_INTERACTION_STATUSES].sort()).toEqual(
+      ["RESERVED", "APPROVED", "BLOCKED", "FALLBACK", "FAILED"].sort(),
+    );
+  });
+
+  it("every status except RESERVED is terminal", () => {
+    expect(TERMINAL_AI_ASSISTANCE_STATUSES).not.toContain("RESERVED");
+    for (const status of TERMINAL_AI_ASSISTANCE_STATUSES) {
+      expect(AI_ASSISTANCE_INTERACTION_STATUSES).toContain(status);
+    }
+  });
+});
+
+describe("RESERVED records cannot remain permanently misleading", () => {
+  it("a fresh reservation is not stale", () => {
+    expect(isStaleReservation(new Date())).toBe(false);
+  });
+
+  it("a reservation older than STALE_RESERVATION_MS is stale", () => {
+    const old = new Date(Date.now() - STALE_RESERVATION_MS - 1);
+    expect(isStaleReservation(old)).toBe(true);
+  });
+
+  it("a reservation just under the threshold is not yet stale", () => {
+    const almostOld = new Date(Date.now() - (STALE_RESERVATION_MS - 5_000));
+    expect(isStaleReservation(almostOld)).toBe(false);
+  });
+});
+
+describe("9. FAILED-status student message is distinct from the FALLBACK message", () => {
+  it("never claims to have generated content, and is a fixed string", () => {
+    expect(AI_ASSISTANCE_UNAVAILABLE_MESSAGE).not.toBe(AI_ASSISTANCE_FALLBACK_RESPONSE);
+    expect(AI_ASSISTANCE_UNAVAILABLE_MESSAGE.length).toBeGreaterThan(0);
+  });
+});
+
+describe("Part 9 — provider payload bounds", () => {
+  it("bounds hidden reference material to MAX_HIDDEN_REFERENCE_CHARACTERS", () => {
+    const long = "a".repeat(MAX_HIDDEN_REFERENCE_CHARACTERS + 500);
+    const bounded = boundedHiddenReference(long);
+    expect(bounded).not.toBeNull();
+    expect(bounded!.length).toBe(MAX_HIDDEN_REFERENCE_CHARACTERS);
+  });
+
+  it("leaves short reference material untouched", () => {
+    expect(boundedHiddenReference("short answer")).toBe("short answer");
+  });
+
+  it("returns null for empty/null/undefined input", () => {
+    expect(boundedHiddenReference(null)).toBeNull();
+    expect(boundedHiddenReference(undefined)).toBeNull();
+    expect(boundedHiddenReference("")).toBeNull();
+  });
+
+  it("21. approved-response length is enforced against the policy limit, never truncated by this function itself", () => {
+    expect(isApprovedResponseLengthValid("short", { maxResponseCharacters: 800 })).toBe(true);
+    expect(isApprovedResponseLengthValid("x".repeat(801), { maxResponseCharacters: 800 })).toBe(false);
+    expect(isApprovedResponseLengthValid("", { maxResponseCharacters: 800 })).toBe(false);
   });
 });

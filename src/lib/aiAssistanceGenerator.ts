@@ -52,6 +52,16 @@ export type BrainstormGeneratorInput = {
 
 export class AiAssistanceGenerationError extends Error {}
 
+/**
+ * Bounded request timeout and retry count (Part 10 hardening) — never the
+ * Anthropic SDK's own defaults (a multi-minute timeout would leave a
+ * student staring at a loading spinner far longer than a live-exam
+ * interaction should ever take). Set on the client itself so every
+ * request this module makes is bounded the same way.
+ */
+export const ANTHROPIC_TIMEOUT_MS = 20_000;
+export const ANTHROPIC_MAX_RETRIES = 1;
+
 function buildSystemPrompt(policy: BrainstormPolicyCapabilities, stricter: boolean): string {
   const capabilities: string[] = [];
   if (policy.allowConceptExplanations) capabilities.push("explaining relevant concepts in general terms");
@@ -109,13 +119,18 @@ function buildUserPrompt(input: BrainstormGeneratorInput): string {
 
 let cachedClient: Anthropic | undefined;
 
+/** Cheap presence check the runner uses BEFORE reserving a prompt slot (Part 3/10) — a missing key must never consume a student's prompt allowance. */
+export function isAnthropicConfigured(): boolean {
+  return Boolean(process.env.ANTHROPIC_API_KEY);
+}
+
 function getClient(): Anthropic {
   if (cachedClient) return cachedClient;
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new AiAssistanceGenerationError("Missing required environment variable: ANTHROPIC_API_KEY");
   }
-  cachedClient = new Anthropic({ apiKey });
+  cachedClient = new Anthropic({ apiKey, timeout: ANTHROPIC_TIMEOUT_MS, maxRetries: ANTHROPIC_MAX_RETRIES });
   return cachedClient;
 }
 
@@ -150,8 +165,15 @@ export async function generateBrainstormResponse(input: BrainstormGeneratorInput
       system,
       messages: [{ role: "user", content: userPrompt }],
     });
-  } catch (err) {
-    throw new AiAssistanceGenerationError(`Anthropic API request failed: ${(err as Error).message}`);
+  } catch {
+    // Never include the caught error's own message (Part 1) — an
+    // Anthropic SDK error's `.message` can include the raw HTTP response
+    // body (rate-limit details, request-id, etc.), which must never
+    // reach a log line this module doesn't otherwise emit, let alone the
+    // student. A fixed, generic message is enough for the caller
+    // (src/lib/aiAssistanceRunner.ts) to treat this as a provider
+    // failure and follow the fail-closed path.
+    throw new AiAssistanceGenerationError("Anthropic API request failed");
   }
 
   const textBlock = response.content.find((block) => block.type === "text");
@@ -159,5 +181,14 @@ export async function generateBrainstormResponse(input: BrainstormGeneratorInput
     throw new AiAssistanceGenerationError("Anthropic response did not contain a text block");
   }
 
-  return textBlock.text.trim();
+  const text = textBlock.text.trim();
+  if (text.length === 0) {
+    // Empty/whitespace-only completion (Part 1 — "the generator returns
+    // empty or malformed output") is treated as a hard generation
+    // failure, not a candidate to verify — an empty string would
+    // otherwise sail through the verifier with nothing to actually flag.
+    throw new AiAssistanceGenerationError("Anthropic returned an empty response");
+  }
+
+  return text;
 }

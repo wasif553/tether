@@ -81,6 +81,13 @@ enum IntegrityEventType {
   AI_ASSISTANCE_REQUEST_BLOCKED
   AI_ASSISTANCE_LIMIT_REACHED
   AI_ASSISTANCE_RESPONSE_REGENERATED
+  // Hardening v1.1 — a genuine provider/parsing failure (see
+  // AiAssistanceInteraction.status "FAILED" above), distinct from a
+  // policy-driven decline (AI_ASSISTANCE_REQUEST_BLOCKED) or a graceful
+  // safe-fallback (still AI_ASSISTANCE_USED). Still INFO severity/zero
+  // risk weight like every other AI_ASSISTANCE_* event — a provider
+  // outage is never evidence about the student.
+  AI_ASSISTANCE_REQUEST_FAILED
 }
 
 enum IntegritySeverity {
@@ -1241,17 +1248,61 @@ model AiAssistanceInteraction {
   student      User       @relation(fields: [studentId], references: [id])
 
   studentPrompt    String
-  // Null when status is "BLOCKED" (classifier rejected the request before
-  // any generation/verification ran) — see status below.
+  // Null for every status except APPROVED/FALLBACK (BLOCKED and FAILED
+  // never have a response — see status below).
   approvedResponse String?
 
-  // BLOCKED (classifier rejected the request pre-generation) |
-  // APPROVED (first candidate passed verification) |
-  // REGENERATED_APPROVED (first candidate failed verification, the
-  //   stricter regeneration passed) |
-  // FALLBACK (both attempts failed verification; the deterministic safe
-  //   Socratic fallback was returned instead of any generated text)
+  // Hardening v1.1 (see docs/controlled-ai-brainstorming-assistance-v1.md,
+  // "Interaction status lifecycle") — six explicit states rather than
+  // ambiguous free-text values:
+  //   RESERVED  — a prompt slot was atomically reserved for this request;
+  //               this row exists but no terminal outcome has been
+  //               recorded yet. Should be extremely short-lived (the
+  //               whole request completes synchronously in one server
+  //               invocation) — a row still RESERVED after
+  //               STALE_RESERVATION_MS (src/lib/aiAssistancePolicy.ts)
+  //               indicates the server crashed/timed out mid-request and
+  //               is treated as an effectively-failed request by the
+  //               lecturer review and prompt-accounting reads, never as
+  //               a silently-forever-pending state.
+  //   APPROVED  — a candidate passed verification and was shown to the
+  //               student (see wasRegenerated below for whether this took
+  //               a first-try pass or the stricter regeneration).
+  //   BLOCKED   — the classifier rejected the request before any
+  //               generation ran.
+  //   FALLBACK  — generation/verification completed (no provider error)
+  //               but no candidate ever passed verification; the fixed
+  //               deterministic Socratic fallback text was shown instead.
+  //   FAILED    — a genuine provider/parsing failure (timeout, malformed
+  //               output, etc.) on every attempt — no model output and no
+  //               fallback text was shown; a generic "temporarily
+  //               unavailable" message was returned instead.
+  // A prior version of this column additionally had a distinct
+  // "REGENERATED_APPROVED" value — folded into APPROVED + wasRegenerated
+  // below instead, since this schema change was made before this feature
+  // was ever applied to any real database (see docs/migration-ledger.md,
+  // row 10 — still PENDING at the time of this change), so no backfill
+  // was required.
   status String
+
+  // True when the FIRST candidate failed verification and the response
+  // actually shown came from the single stricter regeneration attempt
+  // (Part 9 of the original spec) — tracked as a flag on the same row
+  // rather than a separate status value, since the task's "explicit
+  // statuses" requirement and "regeneration remains part of the same
+  // interaction" requirement are both about ONE thing each (terminal
+  // outcome vs. how it was reached), not the same axis.
+  wasRegenerated Boolean @default(false)
+
+  // Idempotency key (Part 2 — concurrency hardening). Supplied by the
+  // client (crypto.randomUUID(), generated once per logical "send"
+  // action — see src/components/AiBrainstormPanel.tsx) so a duplicate
+  // POST from a double-click or a browser-level retry of the same
+  // request is recognised and replayed rather than silently consuming a
+  // second prompt slot. Nullable (a request without one is simply never
+  // deduplicated) with a unique index — Postgres allows unlimited NULLs
+  // in a unique index, so only actual duplicate non-null keys collide.
+  clientRequestId String? @unique
 
   promptNumberForQuestion Int
   promptNumberForAttempt  Int

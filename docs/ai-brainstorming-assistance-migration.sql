@@ -13,8 +13,19 @@
 -- other new exam-level setting (prompt limits, response-length limit,
 -- allowed-capability flags) live inside the EXISTING Exam.secureSettings
 -- JSONB column — no migration is required for those at all; only the
--- changes below (four new IntegrityEventType enum values, one new
+-- changes below (five new IntegrityEventType enum values, one new
 -- Submission column, one new table) touch the database schema.
+--
+-- Revised during pre-Preview hardening (see
+-- docs/controlled-ai-brainstorming-assistance-v1.md, "Interaction status
+-- lifecycle" / "Concurrency: atomic prompt-slot reservation") — updated
+-- IN PLACE rather than as a second migration file, since this migration
+-- had not yet been applied to any environment at the time of the
+-- revision (see docs/migration-ledger.md, row 10 — still PENDING).
+-- Two additions since the original version: AiAssistanceInteraction now
+-- has `wasRegenerated` and a unique `clientRequestId` (idempotency key),
+-- and IntegrityEventType gained a fifth new value,
+-- AI_ASSISTANCE_REQUEST_FAILED, for genuine provider/parsing failures.
 --
 -- Apply via the Supabase SQL Editor (or `psql`) against production.
 -- Do NOT run `prisma db push` against production.
@@ -30,17 +41,18 @@
 -- once it has.
 
 -- ============================================================================
--- 1. AlterEnum: IntegrityEventType — four new values, following the same
+-- 1. AlterEnum: IntegrityEventType — five new values, following the same
 --    convention already used for every previous addition to this enum.
 --    Postgres requires each new enum value to be added in its own
 --    statement, and none of them may be used in the same transaction that
---    adds them — run these four statements first, on their own, before
+--    adds them — run these five statements first, on their own, before
 --    anything else in this file.
 -- ============================================================================
 ALTER TYPE "IntegrityEventType" ADD VALUE IF NOT EXISTS 'AI_ASSISTANCE_USED';
 ALTER TYPE "IntegrityEventType" ADD VALUE IF NOT EXISTS 'AI_ASSISTANCE_REQUEST_BLOCKED';
 ALTER TYPE "IntegrityEventType" ADD VALUE IF NOT EXISTS 'AI_ASSISTANCE_LIMIT_REACHED';
 ALTER TYPE "IntegrityEventType" ADD VALUE IF NOT EXISTS 'AI_ASSISTANCE_RESPONSE_REGENERATED';
+ALTER TYPE "IntegrityEventType" ADD VALUE IF NOT EXISTS 'AI_ASSISTANCE_REQUEST_FAILED';
 
 -- ============================================================================
 -- 2. AlterTable: Submission — the immutable per-attempt AI-assistance
@@ -60,10 +72,15 @@ ALTER TABLE "Submission" ADD COLUMN "aiAssistancePolicySnapshotJson" JSONB;
 --    src/lib/aiAssistanceVerifier.ts for validation), following the
 --    SubmissionSimilarityAnalysis/IntegrityEvidenceAsset convention so a
 --    future addition never requires an enum-alteration migration.
---    approvedResponse is nullable — null whenever status = 'BLOCKED'.
---    THE REJECTED CANDIDATE TEXT FROM A FAILED VERIFICATION PASS IS NEVER
---    WRITTEN TO ANY COLUMN HERE, ON ANY STATUS — see
---    src/lib/aiAssistanceRunner.ts.
+--    approvedResponse is nullable — null except for status = 'APPROVED'
+--    or 'FALLBACK'. THE REJECTED CANDIDATE TEXT FROM A FAILED
+--    VERIFICATION PASS IS NEVER WRITTEN TO ANY COLUMN HERE, ON ANY
+--    STATUS — see src/lib/aiAssistanceRunner.ts. status is one of
+--    RESERVED | APPROVED | BLOCKED | FALLBACK | FAILED — see the column
+--    comment in prisma/schema.prisma for the full lifecycle.
+--    clientRequestId is the idempotency key (Part 2 hardening) —
+--    nullable with a unique index; Postgres allows unlimited NULLs in a
+--    unique index, so only actual duplicate non-null keys collide.
 -- ============================================================================
 CREATE TABLE "AiAssistanceInteraction" (
     "id" TEXT NOT NULL,
@@ -74,6 +91,8 @@ CREATE TABLE "AiAssistanceInteraction" (
     "studentPrompt" TEXT NOT NULL,
     "approvedResponse" TEXT,
     "status" TEXT NOT NULL,
+    "wasRegenerated" BOOLEAN NOT NULL DEFAULT false,
+    "clientRequestId" TEXT,
     "promptNumberForQuestion" INTEGER NOT NULL,
     "promptNumberForAttempt" INTEGER NOT NULL,
     "policyVersion" TEXT NOT NULL,
@@ -89,6 +108,7 @@ CREATE TABLE "AiAssistanceInteraction" (
     CONSTRAINT "AiAssistanceInteraction_pkey" PRIMARY KEY ("id")
 );
 
+CREATE UNIQUE INDEX "AiAssistanceInteraction_clientRequestId_key" ON "AiAssistanceInteraction"("clientRequestId");
 CREATE INDEX "AiAssistanceInteraction_submissionId_idx" ON "AiAssistanceInteraction"("submissionId");
 CREATE INDEX "AiAssistanceInteraction_submissionId_questionId_idx" ON "AiAssistanceInteraction"("submissionId", "questionId");
 CREATE INDEX "AiAssistanceInteraction_examId_idx" ON "AiAssistanceInteraction"("examId");
@@ -103,9 +123,9 @@ ALTER TABLE "AiAssistanceInteraction" ADD CONSTRAINT "AiAssistanceInteraction_st
 -- Verification queries — run after applying the above
 -- ============================================================================
 
--- 1. New enum values exist:
+-- 1. New enum values exist (expect 5 rows):
 -- SELECT enumlabel FROM pg_enum WHERE enumtypid = 'IntegrityEventType'::regtype
---   AND enumlabel IN ('AI_ASSISTANCE_USED', 'AI_ASSISTANCE_REQUEST_BLOCKED', 'AI_ASSISTANCE_LIMIT_REACHED', 'AI_ASSISTANCE_RESPONSE_REGENERATED');
+--   AND enumlabel IN ('AI_ASSISTANCE_USED', 'AI_ASSISTANCE_REQUEST_BLOCKED', 'AI_ASSISTANCE_LIMIT_REACHED', 'AI_ASSISTANCE_RESPONSE_REGENERATED', 'AI_ASSISTANCE_REQUEST_FAILED');
 
 -- 2. New Submission column exists, and no existing column was altered/removed:
 -- SELECT column_name FROM information_schema.columns WHERE table_name = 'Submission' ORDER BY ordinal_position;
@@ -122,8 +142,11 @@ ALTER TABLE "AiAssistanceInteraction" ADD CONSTRAINT "AiAssistanceInteraction_st
 -- SELECT count(*) FROM "AiAssistanceInteraction";
 
 -- 6. No rejected/pre-verification text ever lands in approvedResponse for
---    a BLOCKED interaction (should always return 0 rows):
--- SELECT count(*) FROM "AiAssistanceInteraction" WHERE status = 'BLOCKED' AND "approvedResponse" IS NOT NULL;
+--    a BLOCKED or FAILED interaction (should always return 0 rows):
+-- SELECT count(*) FROM "AiAssistanceInteraction" WHERE status IN ('BLOCKED', 'FAILED') AND "approvedResponse" IS NOT NULL;
+
+-- 7. The clientRequestId unique index exists:
+-- SELECT indexname FROM pg_indexes WHERE tablename = 'AiAssistanceInteraction' AND indexname = 'AiAssistanceInteraction_clientRequestId_key';
 
 -- ============================================================================
 -- Legacy compatibility and in-progress attempts

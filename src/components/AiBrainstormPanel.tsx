@@ -16,7 +16,7 @@ type TranscriptEntry = {
   prompt: string;
   response: string | null;
   studentMessage: string | null;
-  status: "APPROVED" | "REGENERATED_APPROVED" | "FALLBACK" | "BLOCKED" | "ERROR";
+  status: "APPROVED" | "FALLBACK" | "BLOCKED" | "FAILED" | "ERROR";
 };
 
 const STARTER_ACTIONS = [
@@ -47,7 +47,15 @@ export function AiBrainstormPanel(props: {
 
   async function sendPrompt(prompt: string) {
     const trimmed = prompt.trim();
+    // `disabled` (which includes `loading`) is the primary double-click
+    // guard, but a client-generated idempotency key (Part 2 hardening)
+    // is still sent with every request — it protects against a browser-
+    // level retry of an already-sent request (e.g. a dropped connection)
+    // that `disabled` alone can't catch, by letting the server recognise
+    // and replay the original outcome instead of creating a second
+    // interaction.
     if (!trimmed || disabled) return;
+    const clientRequestId = crypto.randomUUID();
     setLoading(true);
     setRateLimited(false);
     try {
@@ -59,6 +67,7 @@ export function AiBrainstormPanel(props: {
           body: JSON.stringify({
             studentPrompt: trimmed,
             studentCurrentReasoning: props.currentResponseText || undefined,
+            clientRequestId,
           }),
         },
       );
@@ -72,7 +81,7 @@ export function AiBrainstormPanel(props: {
         setTranscript((prev) => [
           ...prev,
           {
-            id: `${Date.now()}`,
+            id: clientRequestId,
             prompt: trimmed,
             response: null,
             studentMessage: body?.error ?? "Something went wrong. Please try again.",
@@ -87,7 +96,7 @@ export function AiBrainstormPanel(props: {
       setTranscript((prev) => [
         ...prev,
         {
-          id: `${Date.now()}`,
+          id: clientRequestId,
           prompt: trimmed,
           response: body.response ?? null,
           studentMessage: body.studentMessage ?? null,
@@ -152,7 +161,7 @@ export function AiBrainstormPanel(props: {
                 {entry.status === "BLOCKED" && entry.studentMessage && (
                   <p className="mt-1 text-amber-700">{entry.studentMessage}</p>
                 )}
-                {entry.status === "ERROR" && entry.studentMessage && (
+                {(entry.status === "ERROR" || entry.status === "FAILED") && entry.studentMessage && (
                   <p className="mt-1 text-red-600">{entry.studentMessage}</p>
                 )}
               </div>

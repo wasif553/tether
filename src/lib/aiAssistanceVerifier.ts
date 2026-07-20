@@ -14,6 +14,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import type { BrainstormQuestionType } from "@/lib/aiAssistanceGenerator";
+import { boundedHiddenReference } from "@/lib/aiAssistancePolicy";
 
 export const RISK_CODES = [
   "DIRECT_ANSWER",
@@ -92,11 +93,16 @@ function buildUserPrompt(input: BrainstormVerifierInput): string {
     `Hints already approved for this question: ${input.priorApprovedHintCount}`,
     `Cumulative risk score already accumulated for this question: ${input.cumulativeRiskScoreSoFar.toFixed(2)}`,
   ];
-  if (input.hiddenModelAnswer) {
-    lines.push(`Hidden model answer (reference only — never disclose): ${input.hiddenModelAnswer}`);
+  // Bounded even though the runner already bounds these before calling
+  // in (Part 9) — defense in depth against a future call site that
+  // forgets to.
+  const hiddenModelAnswer = boundedHiddenReference(input.hiddenModelAnswer);
+  const hiddenRubricSummary = boundedHiddenReference(input.hiddenRubricSummary);
+  if (hiddenModelAnswer) {
+    lines.push(`Hidden model answer (reference only — never disclose): ${hiddenModelAnswer}`);
   }
-  if (input.hiddenRubricSummary) {
-    lines.push(`Hidden rubric summary (reference only — never disclose): ${input.hiddenRubricSummary}`);
+  if (hiddenRubricSummary) {
+    lines.push(`Hidden rubric summary (reference only — never disclose): ${hiddenRubricSummary}`);
   }
   return lines.join("\n");
 }
@@ -109,13 +115,17 @@ function stripMarkdownFences(text: string): string {
 
 let cachedClient: Anthropic | undefined;
 
+/** Bounded request timeout and retry count (Part 10 hardening) — see the matching constants in aiAssistanceGenerator.ts. */
+export const ANTHROPIC_TIMEOUT_MS = 20_000;
+export const ANTHROPIC_MAX_RETRIES = 1;
+
 function getClient(): Anthropic {
   if (cachedClient) return cachedClient;
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new AiAssistanceVerificationError("Missing required environment variable: ANTHROPIC_API_KEY");
   }
-  cachedClient = new Anthropic({ apiKey });
+  cachedClient = new Anthropic({ apiKey, timeout: ANTHROPIC_TIMEOUT_MS, maxRetries: ANTHROPIC_MAX_RETRIES });
   return cachedClient;
 }
 
@@ -131,8 +141,12 @@ export async function verifyBrainstormResponse(input: BrainstormVerifierInput): 
       system: buildSystemPrompt(),
       messages: [{ role: "user", content: buildUserPrompt(input) }],
     });
-  } catch (err) {
-    throw new AiAssistanceVerificationError(`Anthropic API request failed: ${(err as Error).message}`);
+  } catch {
+    // Never include the caught error's own message — see the identical
+    // note in aiAssistanceGenerator.ts. A verifier failure is at least
+    // as sensitive to sanitise as a generator one, since the SDK error
+    // could in principle echo back request content.
+    throw new AiAssistanceVerificationError("Anthropic API request failed");
   }
 
   const textBlock = response.content.find((block) => block.type === "text");
@@ -145,15 +159,22 @@ export async function verifyBrainstormResponse(input: BrainstormVerifierInput): 
   let parsedJson: unknown;
   try {
     parsedJson = JSON.parse(cleaned);
-  } catch (err) {
-    throw new AiAssistanceVerificationError(`Failed to parse verifier output as JSON: ${(err as Error).message}`);
+  } catch {
+    // Do not include the raw model text or the parser's own message —
+    // both could contain a snippet of the (potentially unsafe) candidate
+    // content the verifier was judging.
+    throw new AiAssistanceVerificationError("Failed to parse verifier output as JSON");
   }
 
+  // Also structurally rejects an unknown/invented risk code (Part 1 —
+  // "the verifier returns an unknown risk code") via the z.enum(RISK_CODES)
+  // array element schema: any code outside the fixed RISK_CODES list
+  // fails validation here exactly like any other malformed payload, so
+  // it hits the same fail-closed path rather than being silently
+  // accepted or crashing later.
   const validated = verifierResultSchema.safeParse(parsedJson);
   if (!validated.success) {
-    throw new AiAssistanceVerificationError(
-      `Verifier output did not match the expected schema: ${validated.error.message}`,
-    );
+    throw new AiAssistanceVerificationError("Verifier output did not match the expected schema");
   }
 
   return validated.data;

@@ -53,15 +53,21 @@ WHERE table_name = 'Submission' AND column_name = 'aiAssistancePolicySnapshotJso
 SELECT table_name FROM information_schema.tables
 WHERE table_schema = 'public' AND table_name = 'AiAssistanceInteraction';
 
--- Do the four new IntegrityEventType enum values already exist?
+-- Do the five new IntegrityEventType enum values already exist?
 SELECT enumlabel FROM pg_enum
 WHERE enumtypid = 'IntegrityEventType'::regtype
   AND enumlabel IN (
     'AI_ASSISTANCE_USED',
     'AI_ASSISTANCE_REQUEST_BLOCKED',
     'AI_ASSISTANCE_LIMIT_REACHED',
-    'AI_ASSISTANCE_RESPONSE_REGENERATED'
+    'AI_ASSISTANCE_RESPONSE_REGENERATED',
+    'AI_ASSISTANCE_REQUEST_FAILED'
   );
+
+-- Does the AiAssistanceInteraction.clientRequestId idempotency-key
+-- unique index already exist (added during pre-Preview hardening)?
+SELECT indexname FROM pg_indexes
+WHERE tablename = 'AiAssistanceInteraction' AND indexname = 'AiAssistanceInteraction_clientRequestId_key';
 
 -- Full current enum value list, for a manual diff against prisma/schema.prisma:
 SELECT enumlabel FROM pg_enum
@@ -70,7 +76,7 @@ ORDER BY enumsortorder;
 ```
 
 Interpretation:
-- All five targeted queries return no rows → `docs/ai-brainstorming-assistance-migration.sql`
+- All six targeted queries return no rows → `docs/ai-brainstorming-assistance-migration.sql`
   has not been applied yet; safe to apply.
 - The column/table/enum values already exist → it has already been
   applied; re-running the file would error on `CREATE TABLE`/`ADD COLUMN`
@@ -95,7 +101,7 @@ Interpretation:
 | 7 | `docs/ai-use-review-migration.sql` | AI-Use Answer Review v1 | not tracked (predates ledger) | not tracked (predates ledger) | |
 | 8 | `docs/exam-policy-evidence-review-migration.sql` | Exam Design Policy + Evidence Review v1 | not tracked (predates ledger) | not tracked (predates ledger) | |
 | 9 | `docs/question-navigator-migration.sql` | Question Navigator v1 | not tracked (predates ledger) | not tracked (predates ledger) | |
-| 10 | `docs/ai-brainstorming-assistance-migration.sql` | Controlled AI Brainstorming Assistance v1 | **PENDING — not yet applied** | **PENDING — not yet applied** | See "Deployment procedure" below. This was NOT applied as part of this repair task — see the final report for why. |
+| 10 | `docs/ai-brainstorming-assistance-migration.sql` | Controlled AI Brainstorming Assistance v1 | **PENDING — not yet applied** | **PENDING — not yet applied** | See "Deployment procedure" below. Revised in place during pre-Preview hardening (added `wasRegenerated`/`clientRequestId`/unique index + a fifth `AI_ASSISTANCE_REQUEST_FAILED` enum value) — safe to revise in place since it had not been applied to any environment yet. Still NOT applied as part of either the original feature or this hardening pass. |
 
 Rows 1-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the

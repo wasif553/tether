@@ -20,6 +20,7 @@ type Interaction = {
   studentPrompt: string;
   response: string | null;
   status: string;
+  wasRegenerated: boolean;
   promptNumberForQuestion: number;
   promptNumberForAttempt: number;
   policyVersion: string;
@@ -36,10 +37,17 @@ type Review = {
 
 const STATUS_LABELS: Record<string, string> = {
   APPROVED: "Approved",
-  REGENERATED_APPROVED: "Approved (regenerated under stricter guidance)",
   FALLBACK: "Safe fallback shown",
   BLOCKED: "Request declined",
+  FAILED: "Could not be completed (provider error)",
 };
+
+function statusLabel(interaction: Interaction): string {
+  const base = STATUS_LABELS[interaction.status] ?? interaction.status;
+  return interaction.status === "APPROVED" && interaction.wasRegenerated
+    ? `${base} (regenerated under stricter guidance)`
+    : base;
+}
 
 export default function AiAssistanceReviewPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = usePromise(params);
@@ -105,9 +113,7 @@ export default function AiAssistanceReviewPage({ params }: { params: Promise<{ i
               </p>
             )}
             <div className="mt-2 flex flex-wrap gap-2 text-xs">
-              <span className="rounded bg-gray-100 px-2 py-0.5">
-                {STATUS_LABELS[interaction.status] ?? interaction.status}
-              </span>
+              <span className="rounded bg-gray-100 px-2 py-0.5">{statusLabel(interaction)}</span>
               <span className="rounded bg-gray-100 px-2 py-0.5">
                 Prompt {interaction.promptNumberForQuestion} (question) / {interaction.promptNumberForAttempt} (attempt)
               </span>

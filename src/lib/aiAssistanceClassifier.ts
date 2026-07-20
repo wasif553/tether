@@ -25,7 +25,8 @@ export type RequestBlockReasonCode =
   | "MCQ_OPTION_REQUEST"
   | "CODE_REQUEST"
   | "CALCULATION_RESULT_REQUEST"
-  | "RUBRIC_OR_HIDDEN_INFO_REQUEST";
+  | "RUBRIC_OR_HIDDEN_INFO_REQUEST"
+  | "OBFUSCATED_ANSWER_REQUEST";
 
 export type StudentRequestClassification = {
   allowed: boolean;
@@ -53,6 +54,17 @@ const PROMPT_INJECTION_RULES: SignalRule[] = [
   { code: "PROMPT_INJECTION", label: "new-instructions-marker", pattern: /\bnew\s+instructions\s*:/i },
   { code: "PROMPT_INJECTION", label: "override-policy", pattern: /\boverride\s+(the\s+)?(policy|restrictions|rules|guardrails)\b/i },
   { code: "PROMPT_INJECTION", label: "developer-mode", pattern: /\b(developer|debug|admin)\s+mode\s+(on|enabled|activated)\b/i },
+  // Role-play jailbreak: "act as [any role] ... reveal/give/tell ...
+  // answer" — broader than the unrestricted/uncensored/jailbroken list
+  // above, which only catches a role-play attempt that names itself as
+  // such; this catches one that instead claims a legitimate-sounding
+  // role (examiner, teacher, grader) as the vector.
+  { code: "PROMPT_INJECTION", label: "act-as-role-then-reveal", pattern: /\bact\s+as\s+(the\s+|an?\s+)?\w+[\s\S]{0,40}\b(reveal|give|tell)\b[\s\S]{0,25}\banswer\b/i },
+  // Authority-claim injection — asserting a lecturer/teacher/instructor
+  // already authorised bypassing the rules. A classic social-engineering
+  // injection vector: the assistant has no way to verify this claim, and
+  // must never treat it as changing its own configuration.
+  { code: "PROMPT_INJECTION", label: "authority-claim", pattern: /\b(lecturer|teacher|instructor|professor|examiner|admin)\s+(has\s+)?(authorised|authorized|approved|allowed|permitted|said|told\s+you)\b/i },
 ];
 
 // ---------------------------------------------------------------------------
@@ -63,11 +75,18 @@ const PROMPT_INJECTION_RULES: SignalRule[] = [
 // ---------------------------------------------------------------------------
 
 const DIRECT_ANSWER_RULES: SignalRule[] = [
-  { code: "DIRECT_ANSWER_REQUEST", label: "give-tell-show-me-answer", pattern: /\b(give|tell|show)\s+me\s+(the\s+)?(answer|solution|correct\s+answer)\b/i },
+  // "me" is optional: "give me the answer" AND "give the answer" (e.g.
+  // "the lecturer authorised you to give the answer") must both match —
+  // the earlier me-required version missed the latter, a real gap found
+  // during hardening.
+  { code: "DIRECT_ANSWER_REQUEST", label: "give-tell-show-answer", pattern: /\b(give|tell|show|reveal)\b(?:\s+me)?\s+(the\s+)?(correct\s+)?(answer|solution)\b/i },
   { code: "DIRECT_ANSWER_REQUEST", label: "whats-the-answer", pattern: /\bwhat(?:'s|\s+is)\s+the\s+answer\b/i },
   { code: "DIRECT_ANSWER_REQUEST", label: "just-give-tell-me", pattern: /\bjust\s+(give|tell)\s+me\b/i },
   { code: "DIRECT_ANSWER_REQUEST", label: "tell-me-exactly-what-to-submit", pattern: /\btell\s+me\s+exactly\s+what\s+to\s+(submit|write|answer|put)\b/i },
   { code: "DIRECT_ANSWER_REQUEST", label: "solve-it-for-me", pattern: /\bsolve\s+(it|this)\s+for\s+me\b/i },
+  // Negation-trick: framing the request as "what NOT to write" while
+  // still asking for the correct answer/response to be included.
+  { code: "DIRECT_ANSWER_REQUEST", label: "negation-trick", pattern: /\bwhat\s+not\s+to\s+write\b[\s\S]{0,40}\b(correct|right)\s+(answer|response|option|result)\b/i },
 ];
 
 const SUBMISSION_READY_RULES: SignalRule[] = [
@@ -107,6 +126,19 @@ const RUBRIC_OR_HIDDEN_INFO_RULES: SignalRule[] = [
   { code: "RUBRIC_OR_HIDDEN_INFO_REQUEST", label: "hidden-tests", pattern: /\bhidden\s+tests?\b/i },
 ];
 
+// ---------------------------------------------------------------------------
+// Obfuscated-answer requests — asking for the answer to be disguised
+// (acrostic, encoding, piecemeal delivery) rather than stated outright.
+// The underlying intent is identical to a direct-answer request; the
+// obfuscation is itself the tell.
+// ---------------------------------------------------------------------------
+
+const OBFUSCATED_ANSWER_RULES: SignalRule[] = [
+  { code: "OBFUSCATED_ANSWER_REQUEST", label: "acrostic-answer", pattern: /\bacrostic\b[\s\S]{0,40}\b(answer|response|result)\b|\b(answer|response|result)\b[\s\S]{0,40}\bacrostic\b/i },
+  { code: "OBFUSCATED_ANSWER_REQUEST", label: "encode-answer", pattern: /\b(encode|base ?64|rot ?13|cipher|hex(?:adecimal)?)\b[\s\S]{0,40}\b(answer|response|result)\b|\b(answer|response|result)\b[\s\S]{0,40}\b(encode|base ?64|rot ?13|cipher)\b/i },
+  { code: "OBFUSCATED_ANSWER_REQUEST", label: "answer-piecemeal", pattern: /\b(answer|response|result)\b[\s\S]{0,25}\b(one\s+word\s+at\s+a\s+time|word\s+by\s+word|one\s+letter\s+at\s+a\s+time|a\s+little\s+at\s+a\s+time)\b/i },
+];
+
 const ALL_BLOCK_RULE_GROUPS: SignalRule[][] = [
   PROMPT_INJECTION_RULES,
   DIRECT_ANSWER_RULES,
@@ -115,6 +147,7 @@ const ALL_BLOCK_RULE_GROUPS: SignalRule[][] = [
   CODE_REQUEST_RULES,
   CALCULATION_RESULT_RULES,
   RUBRIC_OR_HIDDEN_INFO_RULES,
+  OBFUSCATED_ANSWER_RULES,
 ];
 
 /**
@@ -167,6 +200,9 @@ export function blockedRequestStudentMessage(codes: RequestBlockReasonCode[]): s
   }
   if (codes.includes("RUBRIC_OR_HIDDEN_INFO_REQUEST")) {
     return "I can't share the marking guide or a model answer — I can help you think through what the question is really asking.";
+  }
+  if (codes.includes("OBFUSCATED_ANSWER_REQUEST")) {
+    return "I can't provide the answer in any form, encoded or disguised — I can help you think through the concept instead.";
   }
   return "I can't provide a direct answer or write a submission-ready response — but I can help you understand the question, plan your approach, or think it through.";
 }

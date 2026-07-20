@@ -268,7 +268,8 @@ export type IntegrityEventTypeName =
   | "AI_ASSISTANCE_USED"
   | "AI_ASSISTANCE_REQUEST_BLOCKED"
   | "AI_ASSISTANCE_LIMIT_REACHED"
-  | "AI_ASSISTANCE_RESPONSE_REGENERATED";
+  | "AI_ASSISTANCE_RESPONSE_REGENERATED"
+  | "AI_ASSISTANCE_REQUEST_FAILED";
 
 export function severityFor(
   eventType: IntegrityEventTypeName,
@@ -370,6 +371,7 @@ export function severityFor(
     case "AI_ASSISTANCE_REQUEST_BLOCKED":
     case "AI_ASSISTANCE_LIMIT_REACHED":
     case "AI_ASSISTANCE_RESPONSE_REGENERATED":
+    case "AI_ASSISTANCE_REQUEST_FAILED":
       return "INFO";
   }
 }
