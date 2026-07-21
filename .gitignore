@@ -55,3 +55,8 @@ next-env.d.ts
 # storage only (see src/lib/evidenceStorage.ts). Never used in production —
 # a real object storage provider must be configured there.
 /.evidence-storage
+
+.vercel
+.env*
+
+!.env.example
