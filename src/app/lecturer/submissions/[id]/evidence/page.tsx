@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState, use as usePromise } from "react";
 import Link from "next/link";
-import { buildEvidenceFrameViewPath, evidenceFrameEventLabel, hasEvidenceFrame } from "@/lib/aiCameraEvidenceFrame";
+import { buildEvidenceFrameViewPath, hasEvidenceFrame } from "@/lib/aiCameraEvidenceFrame";
+import { evidenceFrameSourceLabel } from "@/lib/screenShareEvidence";
 import {
   categoryForEventType,
+  labelForEventType,
   INTEGRITY_EVENT_CATEGORY_LABELS,
   type IntegrityEventCategory,
 } from "@/lib/integrityEventLabels";
@@ -33,6 +35,7 @@ type EvidenceReport = {
     confidenceBand: string | null;
     evidenceFrame: {
       id: string;
+      kind: string;
       contentType: string;
       byteSize: number;
       capturedAt: string;
@@ -40,6 +43,7 @@ type EvidenceReport = {
   }>;
   evidenceFrames: Array<{
     id: string;
+    kind: string;
     eventId: string;
     eventType: string;
     occurredAt: string;
@@ -52,6 +56,23 @@ type EvidenceReport = {
     possibleSecondPersonCount: number;
     noPersonCount: number;
     cameraBlockedOrDarkCount: number;
+    disclaimer: string;
+  } | null;
+  screenShareIntegritySummary: {
+    startedCount: number;
+    interruptedCount: number;
+    restoredCount: number;
+    surfaceRejectedCount: number;
+    permissionDeniedCount: number;
+    unavailableCount: number;
+    evidenceFrameCount: number;
+    evidenceCaptureFailedCount: number;
+    policy: {
+      mode: "OFF" | "REQUIRED";
+      captureEvidence: boolean;
+      evidenceIntervalSeconds: number;
+      maxEvidenceFrames: number;
+    };
     disclaimer: string;
   } | null;
   canvasPassback: {
@@ -217,7 +238,7 @@ function formatByteSize(byteSize: number): string {
   return `${(byteSize / 1024).toFixed(1)} KB`;
 }
 
-const CATEGORY_FILTER_ORDER: IntegrityEventCategory[] = ["evidence", "camera", "window", "info"];
+const CATEGORY_FILTER_ORDER: IntegrityEventCategory[] = ["evidence", "camera", "screen", "window", "info"];
 
 function severityBadge(severity: string) {
   const styles: Record<string, string> = {
@@ -367,7 +388,7 @@ export default function EvidenceReportPage({
   // returns below) so hook order stays stable across renders.
   const events = useMemo(() => data?.events ?? [], [data]);
   const categoryCounts = useMemo(() => {
-    const counts: Record<IntegrityEventCategory, number> = { evidence: 0, camera: 0, window: 0, info: 0 };
+    const counts: Record<IntegrityEventCategory, number> = { evidence: 0, camera: 0, screen: 0, window: 0, info: 0 };
     for (const e of events) counts[categoryForEventType(e.eventType)]++;
     return counts;
   }, [events]);
@@ -798,25 +819,92 @@ export default function EvidenceReportPage({
         </div>
       )}
 
+      {/* Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
+          Shows the lifecycle timeline summary AND the policy actually in
+          effect for THIS attempt (the immutable snapshot, never the
+          exam's current settings). */}
+      {data.screenShareIntegritySummary && (
+        <div className="mt-8">
+          <h2 className="text-lg font-medium">Screen-share integrity signals</h2>
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.startedCount}</p>
+              <p className="text-xs text-gray-500">Sharing started</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.interruptedCount}</p>
+              <p className="text-xs text-gray-500">Interruptions</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.restoredCount}</p>
+              <p className="text-xs text-gray-500">Restorations</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.surfaceRejectedCount}</p>
+              <p className="text-xs text-gray-500">Non-monitor shares rejected</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.permissionDeniedCount}</p>
+              <p className="text-xs text-gray-500">Permission denied</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.unavailableCount}</p>
+              <p className="text-xs text-gray-500">Unavailable</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.evidenceFrameCount}</p>
+              <p className="text-xs text-gray-500">Evidence frames captured</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.evidenceCaptureFailedCount}</p>
+              <p className="text-xs text-gray-500">Capture failures</p>
+            </div>
+          </div>
+          <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+            <p className="font-medium">Policy at the time of this attempt</p>
+            <p className="mt-1">
+              Mode: {data.screenShareIntegritySummary.policy.mode} · Evidence capture:{" "}
+              {data.screenShareIntegritySummary.policy.captureEvidence ? "Enabled" : "Disabled"}
+              {data.screenShareIntegritySummary.policy.captureEvidence && (
+                <>
+                  {" "}
+                  · Interval: {data.screenShareIntegritySummary.policy.evidenceIntervalSeconds}s · Max frames:{" "}
+                  {data.screenShareIntegritySummary.policy.maxEvidenceFrames}
+                </>
+              )}
+            </p>
+          </div>
+          <p className="mt-3 rounded border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">
+            {data.screenShareIntegritySummary.disclaimer}
+          </p>
+        </div>
+      )}
+
       {/* Main review area — surfaced above the (potentially long) timeline
           below so a lecturer never has to scroll through hundreds of rows
-          to find a saved camera evidence frame. */}
-      <h2 className="mt-8 text-lg font-medium">Camera evidence frames</h2>
+          to find a saved evidence frame. Covers BOTH camera and
+          screen-share evidence, sourced from the same IntegrityEvidenceAsset
+          table — distinguished per-frame by `kind` (see
+          evidenceFrameSourceLabel in src/lib/screenShareEvidence.ts). */}
+      <h2 className="mt-8 text-lg font-medium">Evidence frames</h2>
       <p className="mt-1 text-sm text-gray-600">
-        Low-resolution camera evidence frames saved for review. These are review signals, not
-        automatic misconduct decisions.
+        Low-resolution camera and screen-share evidence frames saved for review. These are review
+        signals, not automatic misconduct decisions.
       </p>
       {data.evidenceFrames.length === 0 ? (
         <p className="mt-3 rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-500">
-          No camera evidence frames were saved for this submission.
+          No evidence frames were saved for this submission.
         </p>
       ) : (
         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
           {data.evidenceFrames.map((frame) => (
             <div key={frame.id} className="rounded border border-gray-200 p-3 text-sm">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
+                <span className="rounded bg-purple-50 px-2 py-0.5 text-xs font-medium text-purple-700">
+                  {evidenceFrameSourceLabel(frame.kind)}
+                </span>
                 <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
-                  {evidenceFrameEventLabel(frame.eventType)}
+                  {labelForEventType(frame.eventType)}
                 </span>
                 <span className="text-xs text-gray-400">{formatByteSize(frame.byteSize)}</span>
               </div>
@@ -825,7 +913,7 @@ export default function EvidenceReportPage({
               <button
                 type="button"
                 onClick={() =>
-                  openEvidenceFrame(frame.id, evidenceFrameEventLabel(frame.eventType), frame.occurredAt)
+                  openEvidenceFrame(frame.id, `${evidenceFrameSourceLabel(frame.kind)} — ${labelForEventType(frame.eventType)}`, frame.occurredAt)
                 }
                 className="mt-3 rounded border border-gray-300 px-2 py-1 text-xs"
               >

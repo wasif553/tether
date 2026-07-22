@@ -155,6 +155,30 @@ export const secureExamSettingsSchema = z.object({
   aiAssistanceAllowAnswerPlanning: z.boolean().default(true),
   aiAssistanceAllowReasoningFeedback: z.boolean().default(true),
   aiAssistanceAllowProgrammingConceptHelp: z.boolean().default(true),
+
+  // --- Screen-share Evidence Mode v1 (additive, opt-in) — see
+  // docs/screen-share-evidence-v1.md. This is an INTEGRITY-REVIEW
+  // feature, not an automatic cheating detector — a strongly-typed mode
+  // (not a bare boolean) so "not configured"/"explicitly off" and
+  // "explicitly required" are never ambiguous, matching the enum the
+  // task calls for. Defaults are conservative and OFF: no existing exam's
+  // behaviour changes unless a lecturer explicitly opts in. All later
+  // screen-share decisions for an in-progress attempt must use the
+  // immutable Submission.screenSharePolicySnapshotJson taken at attempt
+  // start, never these live settings directly.
+  screenShareMode: z.enum(["OFF", "REQUIRED"]).default("OFF"),
+  // Off by default even when sharing is required — privacy by design,
+  // never silently on for an existing exam.
+  screenShareCaptureEvidence: z.boolean().default(false),
+  // Recommended v1 bounds (docs/screen-share-evidence-v1.md): default
+  // 60s, hard-bounded [30s, 300s] server-side regardless of what a
+  // client sends — see clampScreenShareEvidenceInterval() in
+  // src/lib/screenSharePolicy.ts, the single source of truth other than
+  // this schema's own min/max.
+  screenShareEvidenceIntervalSeconds: z.number().int().min(30).max(300).default(60),
+  // Default 20, hard ceiling 50 — see clampScreenShareMaxEvidenceFrames()
+  // in src/lib/screenSharePolicy.ts.
+  screenShareMaxEvidenceFrames: z.number().int().min(1).max(50).default(20),
 });
 
 export type SecureExamSettings = z.infer<typeof secureExamSettingsSchema>;
@@ -269,7 +293,16 @@ export type IntegrityEventTypeName =
   | "AI_ASSISTANCE_REQUEST_BLOCKED"
   | "AI_ASSISTANCE_LIMIT_REACHED"
   | "AI_ASSISTANCE_RESPONSE_REGENERATED"
-  | "AI_ASSISTANCE_REQUEST_FAILED";
+  | "AI_ASSISTANCE_REQUEST_FAILED"
+  // --- Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
+  | "SCREEN_SHARE_STARTED"
+  | "SCREEN_SHARE_PERMISSION_DENIED"
+  | "SCREEN_SHARE_UNAVAILABLE"
+  | "SCREEN_SHARE_SURFACE_REJECTED"
+  | "SCREEN_SHARE_INTERRUPTED"
+  | "SCREEN_SHARE_RESTORED"
+  | "SCREEN_SHARE_EVIDENCE_CAPTURED"
+  | "SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED";
 
 export function severityFor(
   eventType: IntegrityEventTypeName,
@@ -373,5 +406,28 @@ export function severityFor(
     case "AI_ASSISTANCE_RESPONSE_REGENERATED":
     case "AI_ASSISTANCE_REQUEST_FAILED":
       return "INFO";
+    // --- Screen-share Evidence Mode v1 — see
+    // docs/screen-share-evidence-v1.md. This is a review-signal feature,
+    // not an automatic misconduct detector: a single interruption is
+    // MEDIUM (weight 3 — same tier as WINDOW_BLUR/POSSIBLE_PHONE_VISIBLE
+    // above), never HIGH. Repeated interruptions accumulate risk through
+    // the existing summing model in src/lib/integrityRisk.ts alone — no
+    // escalation logic is added here, exactly like the AI camera signals
+    // above. Permitted/informational states (started, restored, evidence
+    // captured) are always INFO and never contribute risk weight.
+    case "SCREEN_SHARE_STARTED":
+    case "SCREEN_SHARE_RESTORED":
+    case "SCREEN_SHARE_EVIDENCE_CAPTURED":
+    case "SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED":
+      return "INFO";
+    case "SCREEN_SHARE_PERMISSION_DENIED":
+    case "SCREEN_SHARE_UNAVAILABLE":
+    case "SCREEN_SHARE_SURFACE_REJECTED":
+      // A student who denies permission, hits a browser limitation, or
+      // picks the wrong surface most often needs guidance, not scrutiny
+      // — LOW, matching FULLSCREEN_FORCED_RETURN's tier above.
+      return "LOW";
+    case "SCREEN_SHARE_INTERRUPTED":
+      return "MEDIUM";
   }
 }

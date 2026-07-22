@@ -253,6 +253,25 @@ export default function StudentExamNoticePage() {
         </section>
 
         <section>
+          <h2 className="font-medium text-gray-900">Screen-share evidence, if enabled by your lecturer</h2>
+          <p className="mt-1">
+            Some lecturers require you to share your entire screen for the duration of the exam.
+            You will be shown what this involves and asked to start sharing yourself — the exam
+            cannot begin until you do. Only your video is shared: your microphone and system audio
+            are never captured, and your screen is never continuously recorded or streamed. Tether
+            records when sharing starts, stops, or is restored as review signals, and, if your
+            lecturer has enabled it, may save a limited number of still frames of your screen for
+            review. These signals and frames are stored privately and are for your lecturer&apos;s
+            review, not an automatic finding — an interruption to your screen share does not, by
+            itself, mean you have done anything wrong. Because your entire display may be shared,
+            we recommend closing anything unrelated to the exam beforehand. Screen sharing cannot
+            detect a separate device, and on some browsers it cannot fully confirm that your whole
+            screen (rather than a single window) was shared — you will be told if this applies to
+            you. See docs/screen-share-evidence-v1.md for the full design.
+          </p>
+        </section>
+
+        <section>
           <h2 className="font-medium text-gray-900">Who can review this data</h2>
           <p className="mt-1">
             Your answers, timing data, and any integrity events for an exam are visible to the

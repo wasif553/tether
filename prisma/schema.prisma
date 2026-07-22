@@ -88,6 +88,21 @@ enum IntegrityEventType {
   // risk weight like every other AI_ASSISTANCE_* event — a provider
   // outage is never evidence about the student.
   AI_ASSISTANCE_REQUEST_FAILED
+  // Screen-share Evidence Mode v1 (additive) — see
+  // docs/screen-share-evidence-v1.md. Lifecycle and evidence-capture
+  // signals for an optional, opt-in whole-screen-sharing requirement.
+  // These are REVIEW SIGNALS, never automatic misconduct findings — see
+  // severityFor() in src/lib/secureExam.ts, which keeps a single
+  // interruption at a moderate (not severe) weight and never assigns
+  // risk to permitted/informational events.
+  SCREEN_SHARE_STARTED
+  SCREEN_SHARE_PERMISSION_DENIED
+  SCREEN_SHARE_UNAVAILABLE
+  SCREEN_SHARE_SURFACE_REJECTED
+  SCREEN_SHARE_INTERRUPTED
+  SCREEN_SHARE_RESTORED
+  SCREEN_SHARE_EVIDENCE_CAPTURED
+  SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED
 }
 
 enum IntegritySeverity {
@@ -525,6 +540,15 @@ model Submission {
   aiAssistancePolicySnapshotJson Json?
   aiAssistanceInteractions       AiAssistanceInteraction[]
 
+  // Screen-share Evidence Mode v1 (additive, opt-in) — see
+  // docs/screen-share-evidence-v1.md. Same immutable-snapshot pattern as
+  // examPolicySnapshotJson/aiAssistancePolicySnapshotJson above: the
+  // effective screen-share policy (mode, evidence capture, interval,
+  // max frames) copied once at attempt start. Null for every submission
+  // created before this feature, or any exam where it was never
+  // configured — always treated as OFF, never silently required.
+  screenSharePolicySnapshotJson Json?
+
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])
 }
@@ -917,6 +941,16 @@ model IntegrityEvidenceAsset {
   height        Int?
   redactionMode String   @default("LOW_RES_FULL_FRAME")
   capturedAt    DateTime @default(now())
+
+  // Screen-share Evidence Mode v1 (additive) — see
+  // docs/screen-share-evidence-v1.md. Idempotency key: a client-generated
+  // id (one per logical capture action), unique when present. Nullable —
+  // camera evidence frames (v1) never set it; Postgres allows unlimited
+  // NULLs in a unique index, so only actual duplicate non-null keys
+  // collide. Lets a retried/duplicated upload request be recognised and
+  // replayed instead of silently creating a second evidence asset and
+  // consuming a second slot against the attempt's max-frames limit.
+  clientRequestId String? @unique
 
   createdAt DateTime @default(now())
 

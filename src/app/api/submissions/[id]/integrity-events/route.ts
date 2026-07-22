@@ -43,6 +43,19 @@ const INTEGRITY_EVENT_TYPES = [
   "QUESTION_NAVIGATED_NEXT",
   "QUESTION_NAVIGATED_PREVIOUS",
   "QUESTION_BACK_NAVIGATION_BLOCKED",
+  // Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
+  // Every lifecycle event goes through this same route/debounce
+  // mechanism as every other integrity event; only the evidence-frame
+  // UPLOAD itself (which creates its own SCREEN_SHARE_EVIDENCE_CAPTURED
+  // event server-side, atomically with the asset) uses a dedicated route
+  // — see POST /api/submissions/[id]/screen-evidence.
+  "SCREEN_SHARE_STARTED",
+  "SCREEN_SHARE_PERMISSION_DENIED",
+  "SCREEN_SHARE_UNAVAILABLE",
+  "SCREEN_SHARE_SURFACE_REJECTED",
+  "SCREEN_SHARE_INTERRUPTED",
+  "SCREEN_SHARE_RESTORED",
+  "SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED",
 ] as const;
 
 const INTEGRITY_SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH"] as const;
@@ -94,6 +107,17 @@ const DEBOUNCE_WINDOWS_MS: Partial<Record<(typeof INTEGRITY_EVENT_TYPES)[number]
   // direct API manipulation, but debounce anyway against accidental
   // rapid-fire duplicates.
   QUESTION_BACK_NAVIGATION_BLOCKED: 3_000,
+  // Screen-share Evidence Mode v1 — guards against repeated browser
+  // callbacks for the same underlying condition (e.g. a `mute` event
+  // firing more than once) creating duplicate events server-side, in
+  // addition to (not instead of) the client-side idempotent state
+  // machine in src/lib/screenShareLifecycle.ts. INTERRUPTED/RESTORED use
+  // a short window — a genuine second interruption a few seconds after
+  // restoration should still be recorded promptly, not swallowed.
+  SCREEN_SHARE_INTERRUPTED: 5_000,
+  SCREEN_SHARE_RESTORED: 5_000,
+  SCREEN_SHARE_STARTED: 5_000,
+  SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED: 10_000,
 };
 
 export async function POST(

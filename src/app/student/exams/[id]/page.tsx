@@ -92,6 +92,7 @@ import {
 } from "@/lib/aiCameraEvidenceFrame";
 import { ExamWatermark } from "@/components/ExamWatermark";
 import { AiBrainstormPanel } from "@/components/AiBrainstormPanel";
+import { useScreenShareLifecycle } from "@/hooks/useScreenShareLifecycle";
 
 /**
  * Strengthened phone detection (Part 3/4) — converts raw detector output
@@ -173,6 +174,11 @@ type SecureSettings = {
   // Controlled AI Brainstorming Assistance v1 — see
   // docs/controlled-ai-brainstorming-assistance-v1.md.
   aiAssistanceMode: "DISABLED" | "BRAINSTORM_ONLY";
+  // Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
+  screenShareMode: "OFF" | "REQUIRED";
+  screenShareCaptureEvidence: boolean;
+  screenShareEvidenceIntervalSeconds: number;
+  screenShareMaxEvidenceFrames: number;
 };
 
 type SubmissionData = {
@@ -1033,6 +1039,26 @@ export default function TakeExamPage({
   const secureSettings = data?.exam.secureSettings;
   const secureModeEnabled = secureSettings?.secureModeEnabled ?? false;
 
+  // Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
+  // Called unconditionally on every render (Rules of Hooks) — this
+  // component has no early return before this point. `enabled` gates all
+  // actual monitoring/capture behind the gate screen being acknowledged
+  // AND the attempt still being IN_PROGRESS; policy defaults to OFF
+  // before `data` has loaded, which is always safe (nothing starts on
+  // its own — see useScreenShareLifecycle.ts).
+  const screenShare = useScreenShareLifecycle({
+    submissionId: id,
+    policy: {
+      mode: secureSettings?.screenShareMode ?? "OFF",
+      captureEvidence: secureSettings?.screenShareCaptureEvidence ?? false,
+      evidenceIntervalSeconds: secureSettings?.screenShareEvidenceIntervalSeconds ?? 60,
+      maxEvidenceFrames: secureSettings?.screenShareMaxEvidenceFrames ?? 20,
+    },
+    enabled: gateAcknowledged && data?.status === "IN_PROGRESS",
+  });
+  const requireScreenShare = secureSettings?.screenShareMode === "REQUIRED";
+  const screenShareGateSatisfied = !requireScreenShare || screenShare.state === "ACTIVE";
+
   const reportIntegrityEvent = useCallback(
     (eventType: IntegrityEventType, metadata?: Record<string, unknown>) => {
       if (!data || data.status !== "IN_PROGRESS" || !secureSettings) return;
@@ -1195,6 +1221,7 @@ export default function TakeExamPage({
         );
         stopCamera();
         stopAiDetection();
+        screenShare.stop();
         router.refresh();
         return;
       }
@@ -1208,6 +1235,7 @@ export default function TakeExamPage({
     if (res.ok) {
       stopCamera();
       stopAiDetection();
+      screenShare.stop();
       const updated = await res.json();
       terminalSubmitRef.current = true;
       setTimerStopped(true);
@@ -2774,6 +2802,9 @@ export default function TakeExamPage({
               <li>Selected keyboard shortcuts may be blocked where the browser allows it.</li>
             )}
             {requireCamera && <li>This exam requires camera access.</li>}
+            {requireScreenShare && (
+              <li>This exam requires sharing your entire screen. Audio is not captured.</li>
+            )}
             <li>Exam integrity signals (such as switching windows) may be recorded for lecturer review.</li>
             <li>Network interruptions during the exam may be logged.</li>
             {enableAiCameraIntegrityChecks && (
@@ -2915,6 +2946,65 @@ export default function TakeExamPage({
             </div>
           )}
 
+          {/* Screen-share Evidence Mode v1 — see
+              docs/screen-share-evidence-v1.md. Explains what is
+              collected BEFORE requesting permission, and requires an
+              explicit student action (a real button click, so
+              getDisplayMedia() is always called from a user gesture) —
+              never called automatically. */}
+          {requireScreenShare && (
+            <div className="mt-4 rounded border border-gray-200 bg-gray-50 p-3">
+              <p className="text-sm font-medium">This exam requires sharing your entire screen.</p>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-gray-700">
+                <li>You must choose to share your ENTIRE screen, not a window or browser tab.</li>
+                <li>Audio is not captured.</li>
+                <li>Continuous screen video is never recorded or uploaded.</li>
+                {secureSettings?.screenShareCaptureEvidence ? (
+                  <li>
+                    Occasional low-resolution evidence frames and sharing lifecycle events (started,
+                    stopped, restored) may be stored for lecturer review.
+                  </li>
+                ) : (
+                  <li>Sharing lifecycle events (started, stopped, restored) may be recorded for lecturer review.</li>
+                )}
+                <li>These are review signals, not automatic misconduct findings.</li>
+              </ul>
+
+              {screenShare.state !== "ACTIVE" && (
+                <>
+                  <button
+                    onClick={screenShare.start}
+                    className="mt-3 rounded border border-gray-300 bg-white px-3 py-1.5 text-sm"
+                  >
+                    {screenShare.state === "REQUESTING" ? "Starting…" : "Share entire screen"}
+                  </button>
+                  {screenShare.errorMessage && (
+                    <p className="mt-2 text-sm text-red-600">{screenShare.errorMessage}</p>
+                  )}
+                </>
+              )}
+
+              <video
+                ref={screenShare.videoRef}
+                autoPlay
+                muted
+                playsInline
+                className={screenShare.state === "ACTIVE" ? "mt-2 w-48 rounded border border-gray-300" : "sr-only"}
+              />
+              {screenShare.state === "ACTIVE" && (
+                <p className="mt-1 text-xs text-gray-500">
+                  Your screen-share preview — only you can see this
+                </p>
+              )}
+              {screenShare.state === "ACTIVE" && screenShare.surfaceUnverifiable && (
+                <p className="mt-2 text-xs text-amber-700">
+                  Your browser cannot confirm which screen/window was shared. Please double-check
+                  you selected your entire screen.
+                </p>
+              )}
+            </div>
+          )}
+
           {requireStudentVerification && !verificationConfirmed && (
             <p className="mt-3 text-sm text-red-600">
               Please confirm your identity above before starting the exam.
@@ -2922,7 +3012,7 @@ export default function TakeExamPage({
           )}
           <button
             onClick={handleStartSecureExam}
-            disabled={!cameraGateSatisfied}
+            disabled={!cameraGateSatisfied || !screenShareGateSatisfied}
             className="mt-4 rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
           >
             Start secure exam
@@ -3046,9 +3136,73 @@ export default function TakeExamPage({
               Retry camera checks
             </button>
           )}
+          {/* Screen-share Evidence Mode v1 — compact status only, never a
+              large distracting panel (see docs/screen-share-evidence-v1.md).
+              Colour is never the only signal — the text itself always
+              states the status. */}
+          {requireScreenShare && (
+            <span
+              className={
+                screenShare.state === "ACTIVE"
+                  ? "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
+                  : screenShare.state === "INTERRUPTED"
+                    ? "rounded bg-red-100 px-2 py-0.5 text-xs text-red-700"
+                    : "rounded bg-yellow-100 px-2 py-0.5 text-xs text-yellow-700"
+              }
+            >
+              {screenShare.state === "ACTIVE"
+                ? "Screen sharing active"
+                : screenShare.state === "INTERRUPTED"
+                  ? "Screen sharing stopped"
+                  : "Screen sharing needs attention"}
+            </span>
+          )}
           <a href="/privacy/student-exam-notice" target="_blank" rel="noreferrer" className="text-xs underline">
             What does this record?
           </a>
+        </div>
+      )}
+
+      {/* Screen-share Evidence Mode v1 — calm blocking recovery overlay.
+          Shown only while sharing is required AND actually interrupted;
+          never auto-submits, never auto-accuses, and always preserves
+          autosaved answers (nothing here touches responses/timers other
+          than the existing, unrelated timer behaviour already in
+          effect). See docs/screen-share-evidence-v1.md. */}
+      {requireScreenShare && (screenShare.state === "INTERRUPTED" || screenShare.state === "REQUESTING") && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="screen-share-overlay-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+        >
+          <div className="max-w-md rounded bg-white p-5 shadow-lg">
+            <h2 id="screen-share-overlay-title" className="text-lg font-semibold">
+              Screen sharing has stopped
+            </h2>
+            <p className="mt-2 text-sm text-gray-700">
+              This exam requires sharing your entire screen. Sharing stopped — this has been
+              recorded as a review signal, not an automatic misconduct finding. Please resume
+              screen sharing to continue.
+            </p>
+            <p className="mt-2 text-sm text-gray-700">
+              Your answers are saved automatically and have not been lost. The exam has not been
+              submitted, and the timer continues to run as normal.
+            </p>
+            <button
+              onClick={screenShare.resume}
+              className="mt-4 rounded bg-black px-4 py-2 text-sm text-white"
+            >
+              {screenShare.state === "REQUESTING" ? "Starting…" : "Resume screen sharing"}
+            </button>
+            {screenShare.errorMessage && (
+              <p className="mt-2 text-sm text-red-600">{screenShare.errorMessage}</p>
+            )}
+            <p className="mt-3 text-xs text-gray-500">
+              If you cannot resume screen sharing, contact your institution&apos;s exam support for
+              guidance — your progress is not at risk while you do.
+            </p>
+          </div>
         </div>
       )}
 

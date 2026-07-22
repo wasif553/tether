@@ -17,6 +17,7 @@ import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { buildExamPolicySnapshot } from "@/lib/examPolicy";
 import { buildAiAssistancePolicySnapshot } from "@/lib/aiAssistancePolicy";
+import { buildScreenSharePolicySnapshot } from "@/lib/screenSharePolicy";
 
 export async function POST(
   req: Request,
@@ -252,6 +253,15 @@ export async function POST(
     aiAssistanceAllowProgrammingConceptHelp: settings.aiAssistanceAllowProgrammingConceptHelp,
   });
 
+  // Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
+  // Same immutable-snapshot pattern as the two snapshots above.
+  const screenSharePolicySnapshot = buildScreenSharePolicySnapshot({
+    screenShareMode: settings.screenShareMode,
+    screenShareCaptureEvidence: settings.screenShareCaptureEvidence,
+    screenShareEvidenceIntervalSeconds: settings.screenShareEvidenceIntervalSeconds,
+    screenShareMaxEvidenceFrames: settings.screenShareMaxEvidenceFrames,
+  });
+
   try {
     const submission = await prisma.submission.create({
       data: {
@@ -261,6 +271,7 @@ export async function POST(
         questionOrderJson: questionOrderJson ?? Prisma.DbNull,
         examPolicySnapshotJson: policySnapshot as unknown as Prisma.InputJsonValue,
         aiAssistancePolicySnapshotJson: aiAssistancePolicySnapshot as unknown as Prisma.InputJsonValue,
+        screenSharePolicySnapshotJson: screenSharePolicySnapshot as unknown as Prisma.InputJsonValue,
       },
     });
 

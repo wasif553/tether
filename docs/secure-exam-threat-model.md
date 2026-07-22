@@ -187,6 +187,35 @@ language-model verifier can never let excessive detail through; this
 requires institutional configuration and pilot validation before broad
 reliance, exactly like every other AI-adjacent feature in this repo.
 
+## Screen-share Evidence Mode v1
+
+A separate, independent opt-in — see docs/screen-share-evidence-v1.md
+for the full design. When `screenShareMode` is `REQUIRED`, a student
+must share their entire display via `getDisplayMedia()`, started only
+by a direct click, before an attempt can begin. Tether monitors the
+share's lifecycle (started/interrupted/restored/permission-denied/
+unavailable/surface-rejected) and, optionally, captures low-frequency,
+strictly bounded still frames to the existing private evidence-storage
+bucket — never continuous recording, never audio. **This is an
+integrity-REVIEW feature, explicitly outside the automatic-detection
+threat model above** — an interruption is recorded as a "needs review"
+signal, capped at `MEDIUM` severity for a single occurrence (never
+`HIGH`), and never by itself constitutes or implies misconduct; only a
+documented pattern across the existing explainable risk model can
+compound multiple such signals, and even then the system only ever
+labels something for lecturer review, never as a finding. Disabled
+(`OFF`) by default; a lecturer must explicitly enable it, with
+conservative default evidence bounds (60s interval, 20 frames/attempt,
+both server-clamped to a hard safe range regardless of configured
+values). Screen sharing cannot detect a second physical device, cannot
+provide OS-level lockdown, and — on a browser that does not reliably
+report `MediaStreamTrack.getSettings().displaySurface` — cannot
+guarantee the shared surface was genuinely the entire screen; students
+are told this explicitly before sharing, and lecturers see this
+disclosed on every reviewed attempt. Works alongside, and does not
+replace, camera monitoring, on-device AI camera integrity checks, or
+any other control described in this document.
+
 ## Exam Watermark v1
 
 A separate, independent opt-in — see docs/exam-watermark-v1.md for the

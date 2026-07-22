@@ -14,10 +14,10 @@ records during an exam." Covers: answers, timing information, network
 evidence, integrity events, camera monitoring, student verification/AI
 camera checks, camera evidence frames, exam watermark, one-question-at-
 a-time delivery, browser secure mode, existing AI features (essay
-marking drafts), who can review the data, who makes assessment
-decisions. Kept in sync with each opt-in feature as it ships — every
-section is additive and only appears/applies when the corresponding
-exam setting is enabled.
+marking drafts), AI Brainstorming Assistance, screen-share evidence, who
+can review the data, who makes assessment decisions. Kept in sync with
+each opt-in feature as it ships — every section is additive and only
+appears/applies when the corresponding exam setting is enabled.
 
 ## Controlled AI Brainstorming Assistance v1 — privacy summary
 
@@ -34,6 +34,26 @@ by your lecturer":
   this data" on the same page).
 - Using it as intended is an allowed part of the exam, not an integrity
   concern, and never affects the student's integrity risk score.
+
+## Screen-share Evidence Mode v1 — privacy summary
+
+Added to the notice page under "Screen-share evidence, if enabled by
+your lecturer":
+
+- Only video is shared — no microphone or system audio is ever
+  captured, and the screen is never continuously recorded or streamed.
+- Sharing lifecycle (started/stopped/restored) is recorded as a review
+  signal; a limited number of still frames may also be saved, only if
+  the lecturer has separately enabled evidence capture.
+- These are records for lecturer review, not automatic findings — an
+  interruption does not, by itself, mean the student did anything
+  wrong.
+- Because the entire display may be shared, students are advised to
+  close unrelated windows/applications beforehand.
+- Screen sharing cannot detect a second physical device, and on some
+  browsers cannot fully confirm the shared surface was the entire
+  screen rather than a single window — this limitation is disclosed to
+  the student when it applies.
 
 ## Provider use
 
@@ -69,3 +89,34 @@ cohort, an institution should:
 
 See docs/controlled-ai-brainstorming-assistance-v1.md for the full
 technical design, generator/verifier separation, and known limitations.
+
+## Screen-share Evidence Mode v1 — retention and institutional review
+
+Lifecycle events (`IntegrityEvent`) and evidence frames
+(`IntegrityEvidenceAsset`) are retained for the same lifetime as the
+rest of the submission record — no separate retention window or
+deletion mechanism exists in v1; this follows the institution's own
+data-retention policy exactly like camera evidence frames already do.
+
+Before enabling Screen-share Evidence Mode for a real cohort, an
+institution should:
+
+- Confirm the screen-share disclosure text on the student notice page
+  (above) meets local student-data-notice requirements, and that
+  students are told before sharing that their entire display — which
+  may contain personal or unrelated information — could be visible.
+- Confirm that evidence-frame retention is consistent with the
+  institution's own data-retention and deletion policy; deletion beyond
+  the submission's normal lifecycle is an institutional/administrative
+  action outside this feature's v1 scope.
+- Decide whether evidence-frame capture (a separate, nested setting
+  from the sharing requirement itself) is appropriate for the exam, and
+  review the default interval/max-frame bounds.
+- Understand and accept the disclosed limitations — no OS-level
+  lockdown, no second-device detection, and, on some browsers, no way
+  to confirm the shared surface was the entire screen — before treating
+  this as a meaningful integrity control for a given cohort.
+- Run a pilot per docs/pilot-readiness.md before broad rollout.
+
+See docs/screen-share-evidence-v1.md for the full technical design and
+known limitations.

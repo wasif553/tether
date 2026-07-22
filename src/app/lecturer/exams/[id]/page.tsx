@@ -97,6 +97,11 @@ type SecureSettings = {
   aiAssistanceAllowAnswerPlanning: boolean;
   aiAssistanceAllowReasoningFeedback: boolean;
   aiAssistanceAllowProgrammingConceptHelp: boolean;
+  // Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
+  screenShareMode: "OFF" | "REQUIRED";
+  screenShareCaptureEvidence: boolean;
+  screenShareEvidenceIntervalSeconds: number;
+  screenShareMaxEvidenceFrames: number;
 };
 
 type Exam = {
@@ -1792,6 +1797,104 @@ export default function LecturerExamPage({
                     It will never reveal the correct answer, correct MCQ option, marking rubric, or
                     write a submission-ready response — see docs/controlled-ai-brainstorming-assistance-v1.md.
                   </p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Screen-share Evidence Mode v1 — see
+              docs/screen-share-evidence-v1.md. An INTEGRITY-REVIEW
+              feature, not an automatic cheating detector — kept
+              independent of secureModeEnabled, same as AI Brainstorming
+              Assistance above. */}
+          <div className="border-t border-gray-200 pt-3">
+            <h3 className="text-sm font-medium">Screen-share evidence</h3>
+            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={secureForm.screenShareMode === "REQUIRED"}
+                onChange={(e) =>
+                  setSecureForm({
+                    ...secureForm,
+                    screenShareMode: e.target.checked ? "REQUIRED" : "OFF",
+                    screenShareCaptureEvidence: e.target.checked ? secureForm.screenShareCaptureEvidence : false,
+                  })
+                }
+              />
+              <span>
+                Require students to share their entire screen
+                <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  Students must share their entire display while completing this exam. Tether
+                  records sharing interruptions and may save limited evidence frames for lecturer
+                  review.
+                </span>
+              </span>
+            </label>
+
+            {secureForm.screenShareMode === "REQUIRED" && (
+              <div className="mt-3 space-y-3 pl-6">
+                <label className="flex items-start gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={secureForm.screenShareCaptureEvidence}
+                    onChange={(e) => setSecureForm({ ...secureForm, screenShareCaptureEvidence: e.target.checked })}
+                  />
+                  <span>Save limited screen evidence frames</span>
+                </label>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <label className="text-xs text-gray-700">
+                    Evidence interval (seconds)
+                    <input
+                      type="number"
+                      min={30}
+                      max={300}
+                      step={10}
+                      disabled={!secureForm.screenShareCaptureEvidence}
+                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:opacity-50"
+                      value={secureForm.screenShareEvidenceIntervalSeconds}
+                      onChange={(e) =>
+                        setSecureForm({
+                          ...secureForm,
+                          screenShareEvidenceIntervalSeconds: Math.min(300, Math.max(30, Number(e.target.value) || 60)),
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="text-xs text-gray-700">
+                    Max evidence frames per attempt
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      disabled={!secureForm.screenShareCaptureEvidence}
+                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:opacity-50"
+                      value={secureForm.screenShareMaxEvidenceFrames}
+                      onChange={(e) =>
+                        setSecureForm({
+                          ...secureForm,
+                          screenShareMaxEvidenceFrames: Math.min(50, Math.max(1, Number(e.target.value) || 20)),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+
+                <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+                  <p className="font-medium">Screen-share evidence: Enabled</p>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    <li>No audio is recorded.</li>
+                    <li>Continuous screen video is never recorded or uploaded.</li>
+                    <li>
+                      {secureForm.screenShareCaptureEvidence
+                        ? `Up to ${secureForm.screenShareMaxEvidenceFrames} low-resolution evidence frame(s), at most one every ${secureForm.screenShareEvidenceIntervalSeconds}s, are stored privately.`
+                        : "No evidence frames are saved — only sharing start/stop/interruption signals are recorded."}
+                    </li>
+                    <li>Frames and signals are review evidence, not automatic misconduct findings.</li>
+                    <li>Browser and operating-system limitations apply — see docs/screen-share-evidence-v1.md.</li>
+                  </ul>
                 </div>
               </div>
             )}

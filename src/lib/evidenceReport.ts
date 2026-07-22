@@ -3,6 +3,7 @@ import { computeRiskScore, riskLevelForScore, type RiskLevel } from "@/lib/integ
 import { labelForEventType } from "@/lib/integrityEventLabels";
 import { isPlatformAdmin, requireInstitutionId } from "@/lib/institutionScope";
 import { networkReviewSignal, type NetworkReviewSignal } from "@/lib/networkEvidence";
+import { parseScreenSharePolicy, isScreenShareRequired } from "@/lib/screenSharePolicy";
 import type { Session } from "next-auth";
 
 export const EVIDENCE_DISCLAIMER =
@@ -18,6 +19,12 @@ export const NETWORK_EVIDENCE_DISCLAIMER =
 export const AI_CAMERA_INTEGRITY_DISCLAIMER =
   "AI camera signals are indicators for review. They are not automatic misconduct decisions.";
 
+// Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
+export const SCREEN_SHARE_EVIDENCE_DISCLAIMER =
+  "Screen-share signals and evidence frames are indicators for human review. They are not " +
+  "automatic misconduct decisions, and browser/operating-system limitations apply — see " +
+  "docs/screen-share-evidence-v1.md.";
+
 const AI_CAMERA_EVENT_TYPES = [
   "POSSIBLE_PHONE_VISIBLE",
   "POSSIBLE_SECOND_PERSON_VISIBLE",
@@ -26,11 +33,23 @@ const AI_CAMERA_EVENT_TYPES = [
   "CAMERA_TOO_DARK",
 ] as const;
 
+const SCREEN_SHARE_EVENT_TYPES = [
+  "SCREEN_SHARE_STARTED",
+  "SCREEN_SHARE_PERMISSION_DENIED",
+  "SCREEN_SHARE_UNAVAILABLE",
+  "SCREEN_SHARE_SURFACE_REJECTED",
+  "SCREEN_SHARE_INTERRUPTED",
+  "SCREEN_SHARE_RESTORED",
+  "SCREEN_SHARE_EVIDENCE_CAPTURED",
+  "SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED",
+] as const;
+
 export class EvidenceNotFoundError extends Error {}
 export class EvidenceForbiddenError extends Error {}
 
 export type EvidenceReportEventEvidenceFrame = {
   id: string;
+  kind: string;
   contentType: string;
   byteSize: number;
   capturedAt: string;
@@ -40,6 +59,7 @@ export type EvidenceReportEvidenceFrame = {
   id: string;
   eventId: string;
   eventType: string;
+  kind: string;
   occurredAt: string;
   contentType: string;
   byteSize: number;
@@ -90,6 +110,29 @@ export type EvidenceReport = {
     possibleSecondPersonCount: number;
     noPersonCount: number;
     cameraBlockedOrDarkCount: number;
+    disclaimer: string;
+  } | null;
+  // Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
+  // Null unless screen sharing was required for this attempt (per the
+  // IMMUTABLE snapshot taken at attempt start — never the exam's current,
+  // possibly since-changed, settings).
+  screenShareIntegritySummary: {
+    startedCount: number;
+    interruptedCount: number;
+    restoredCount: number;
+    surfaceRejectedCount: number;
+    permissionDeniedCount: number;
+    unavailableCount: number;
+    evidenceFrameCount: number;
+    evidenceCaptureFailedCount: number;
+    // The policy actually in effect for THIS attempt — never the exam's
+    // current settings, which may have changed since.
+    policy: {
+      mode: "OFF" | "REQUIRED";
+      captureEvidence: boolean;
+      evidenceIntervalSeconds: number;
+      maxEvidenceFrames: number;
+    };
     disclaimer: string;
   } | null;
   canvasPassback: {
@@ -149,7 +192,7 @@ export async function buildEvidenceReport(
       integrityEvents: {
         include: {
           resolvedBy: { select: { name: true } },
-          evidenceAsset: { select: { id: true, contentType: true, byteSize: true, capturedAt: true } },
+          evidenceAsset: { select: { id: true, kind: true, contentType: true, byteSize: true, capturedAt: true } },
         },
         // Newest first — a lecturer reviewing a submission cares most
         // about the most recent signals, not the oldest; also matches the
@@ -205,6 +248,30 @@ export async function buildEvidenceReport(
       }
     : null;
 
+  const screenSharePolicy = parseScreenSharePolicy(submission.screenSharePolicySnapshotJson);
+  const screenShareEvents = submission.integrityEvents.filter((e) =>
+    (SCREEN_SHARE_EVENT_TYPES as readonly string[]).includes(e.eventType),
+  );
+  const screenShareIntegritySummary = isScreenShareRequired(screenSharePolicy)
+    ? {
+        startedCount: screenShareEvents.filter((e) => e.eventType === "SCREEN_SHARE_STARTED").length,
+        interruptedCount: screenShareEvents.filter((e) => e.eventType === "SCREEN_SHARE_INTERRUPTED").length,
+        restoredCount: screenShareEvents.filter((e) => e.eventType === "SCREEN_SHARE_RESTORED").length,
+        surfaceRejectedCount: screenShareEvents.filter((e) => e.eventType === "SCREEN_SHARE_SURFACE_REJECTED").length,
+        permissionDeniedCount: screenShareEvents.filter((e) => e.eventType === "SCREEN_SHARE_PERMISSION_DENIED").length,
+        unavailableCount: screenShareEvents.filter((e) => e.eventType === "SCREEN_SHARE_UNAVAILABLE").length,
+        evidenceFrameCount: screenShareEvents.filter((e) => e.eventType === "SCREEN_SHARE_EVIDENCE_CAPTURED").length,
+        evidenceCaptureFailedCount: screenShareEvents.filter((e) => e.eventType === "SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED").length,
+        policy: {
+          mode: screenSharePolicy.mode,
+          captureEvidence: screenSharePolicy.captureEvidence,
+          evidenceIntervalSeconds: screenSharePolicy.evidenceIntervalSeconds,
+          maxEvidenceFrames: screenSharePolicy.maxEvidenceFrames,
+        },
+        disclaimer: SCREEN_SHARE_EVIDENCE_DISCLAIMER,
+      }
+    : null;
+
   return {
     submissionId: submission.id,
     student: { name: submission.student.name, email: submission.student.email },
@@ -234,6 +301,7 @@ export async function buildEvidenceReport(
         evidenceFrame: e.evidenceAsset
           ? {
               id: e.evidenceAsset.id,
+              kind: e.evidenceAsset.kind,
               contentType: e.evidenceAsset.contentType,
               byteSize: e.evidenceAsset.byteSize,
               capturedAt: e.evidenceAsset.capturedAt.toISOString(),
@@ -245,6 +313,7 @@ export async function buildEvidenceReport(
       .filter((e) => e.evidenceAsset != null)
       .map((e) => ({
         id: e.evidenceAsset!.id,
+        kind: e.evidenceAsset!.kind,
         eventId: e.id,
         eventType: e.eventType,
         occurredAt: e.occurredAt.toISOString(),
@@ -253,6 +322,7 @@ export async function buildEvidenceReport(
         capturedAt: e.evidenceAsset!.capturedAt.toISOString(),
       })),
     aiCameraIntegritySummary,
+    screenShareIntegritySummary,
     canvasPassback: submission.gradePassback
       ? {
           status: submission.gradePassback.status,

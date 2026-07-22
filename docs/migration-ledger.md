@@ -10,6 +10,18 @@ been applied to Preview and production, since nothing in this repository
 or its CI automatically applies them — see docs/deployment-vercel-supabase.md
 for the full deployment process.
 
+**Preview/Production database topology note (as of the Screen-share
+Evidence Mode v1 migration):** Preview and Production currently point at
+the SAME Supabase database — they are not two separate databases that
+each need this file applied to them. Any migration file whose header
+doesn't explicitly say otherwise should still be treated as "apply once,
+to the one shared database" unless/until Preview and Production are
+split onto separate database instances. The two-step "apply to Preview,
+then separately to production" procedures documented for earlier
+migrations in this ledger were written before this was confirmed
+explicitly — re-run the pre-check query for any of them before assuming
+a second apply is actually needed.
+
 ## Migration convention
 
 - **Base schema** (initial launch): applied with `npx prisma db push`, a
@@ -69,6 +81,19 @@ WHERE enumtypid = 'IntegrityEventType'::regtype
 SELECT indexname FROM pg_indexes
 WHERE tablename = 'AiAssistanceInteraction' AND indexname = 'AiAssistanceInteraction_clientRequestId_key';
 
+-- Has the screen-share Submission column already been applied?
+SELECT column_name FROM information_schema.columns
+WHERE table_name = 'Submission' AND column_name = 'screenSharePolicySnapshotJson';
+
+-- Does IntegrityEvidenceAsset.clientRequestId already exist?
+SELECT column_name FROM information_schema.columns
+WHERE table_name = 'IntegrityEvidenceAsset' AND column_name = 'clientRequestId';
+
+-- Do the eight new screen-share IntegrityEventType enum values already exist?
+SELECT enumlabel FROM pg_enum
+WHERE enumtypid = 'IntegrityEventType'::regtype
+  AND enumlabel LIKE 'SCREEN_SHARE_%';
+
 -- Full current enum value list, for a manual diff against prisma/schema.prisma:
 SELECT enumlabel FROM pg_enum
 WHERE enumtypid = 'IntegrityEventType'::regtype
@@ -76,8 +101,8 @@ ORDER BY enumsortorder;
 ```
 
 Interpretation:
-- All six targeted queries return no rows → `docs/ai-brainstorming-assistance-migration.sql`
-  has not been applied yet; safe to apply.
+- All targeted queries for a given migration file return no rows → that
+  file has not been applied yet; safe to apply.
 - The column/table/enum values already exist → it has already been
   applied; re-running the file would error on `CREATE TABLE`/`ADD COLUMN`
   (the `ALTER TYPE ... ADD VALUE IF NOT EXISTS` statements alone are safe
@@ -102,13 +127,13 @@ Interpretation:
 | 8 | `docs/exam-policy-evidence-review-migration.sql` | Exam Design Policy + Evidence Review v1 | not tracked (predates ledger) | not tracked (predates ledger) | |
 | 9 | `docs/question-navigator-migration.sql` | Question Navigator v1 | not tracked (predates ledger) | not tracked (predates ledger) | |
 | 10 | `docs/ai-brainstorming-assistance-migration.sql` | Controlled AI Brainstorming Assistance v1 | **PENDING — not yet applied** | **PENDING — not yet applied** | See "Deployment procedure" below. Revised in place during pre-Preview hardening (added `wasRegenerated`/`clientRequestId`/unique index + a fifth `AI_ASSISTANCE_REQUEST_FAILED` enum value) — safe to revise in place since it had not been applied to any environment yet. Still NOT applied as part of either the original feature or this hardening pass. |
+| 11 | `docs/screen-share-evidence-migration.sql` | Screen-share Evidence Mode v1 | **PENDING — not yet applied** | **PENDING — not yet applied (same shared database as Preview)** | See "Deployment procedure — screen-share evidence" below. No new table — additive columns on the existing `Submission` and `IntegrityEvidenceAsset` tables plus 8 new `IntegrityEventType` enum values. |
 
 Rows 1-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
-real dates. Row 10 (this feature) is the first entry created alongside
-its own migration file and should be kept accurate going forward: fill in
-the real date the moment the file is actually run against each
-environment.
+real dates. Rows 10-11 were created alongside their own migration files
+and should be kept accurate going forward: fill in the real date the
+moment each file is actually run.
 
 ## Deployment procedure — `docs/ai-brainstorming-assistance-migration.sql`
 
@@ -146,6 +171,28 @@ Only after Preview has been verified and (ideally) briefly pilot-tested:
    institutional pilot-readiness checklist in docs/pilot-readiness.md is
    complete.
 
+## Deployment procedure — `docs/screen-share-evidence-migration.sql`
+
+Preview and Production currently share ONE Supabase database — apply
+this file **once**, not once per environment.
+
+1. Run the pre-check query embedded at the top of
+   `docs/screen-share-evidence-migration.sql` first, to confirm the
+   migration has not already been applied.
+2. Open the (shared) Supabase project → SQL Editor.
+3. Paste and run sections 1-3 of the file (the `ALTER TYPE` statements,
+   then the two `ALTER TABLE` statements, then the `CREATE UNIQUE INDEX`)
+   — the file is already in execution order.
+4. Run the file's own "Verification queries" section to confirm all
+   changes landed and no existing camera-evidence row was altered.
+5. Record the date in the Ledger table above (row 11) — a single date is
+   sufficient given the shared database; leave the second cell blank or
+   mark it "same database as Preview."
+6. Do not set `screenShareMode: "REQUIRED"` on any real exam until the
+   institutional pilot-readiness checklist in docs/pilot-readiness.md is
+   complete and the manual Preview validation checklist in
+   docs/screen-share-evidence-v1.md has been run end-to-end at least once.
+
 ## Rollback / forward-fix strategy
 
 This migration is additive-only (new enum values, one new nullable
@@ -175,3 +222,30 @@ rollback is genuinely required:
   no exam has the feature enabled, rather than reverting the schema —
   the new column/table/enum values sitting unused in the database has no
   functional effect on any other feature.
+
+### Rollback — `docs/screen-share-evidence-migration.sql`
+
+Also additive-only, and touches no existing column/row's data:
+
+- **New enum values** (`SCREEN_SHARE_*`): same as above — cannot be
+  removed once added; leaving them unused is the recommended forward-fix.
+- **`Submission.screenSharePolicySnapshotJson`**: safe to drop
+  (`ALTER TABLE "Submission" DROP COLUMN "screenSharePolicySnapshotJson";`)
+  — every application code path treats a missing/null value as OFF.
+- **`IntegrityEvidenceAsset.clientRequestId`**: safe to drop
+  (`DROP INDEX "IntegrityEvidenceAsset_clientRequestId_key"; ALTER TABLE "IntegrityEvidenceAsset" DROP COLUMN "clientRequestId";`)
+  — every EXISTING camera evidence row already has this column NULL, and
+  no application code reads it for camera evidence at all, so dropping it
+  only affects the screen-share idempotency guarantee, not any stored
+  data.
+- Dropping either column does NOT remove any `IntegrityEvidenceAsset` rows
+  already created with `kind = 'SCREEN_SHARE_EVIDENCE_FRAME'` — those
+  would need a separate, explicit decision (and, if evidence frames must
+  be deleted, corresponding calls to the storage adapter's `delete()` for
+  each `storageKey`, not just a DB row delete, to avoid orphaned objects
+  in the private evidence bucket).
+- **Preferred approach in practice**: identical reasoning to the
+  AI-assistance rollback above — since the feature defaults to
+  `screenShareMode: "OFF"`, ensuring no exam has it enabled is the
+  practical "rollback" for almost any issue, rather than reverting the
+  schema.
