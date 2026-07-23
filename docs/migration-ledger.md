@@ -22,6 +22,26 @@ migrations in this ledger were written before this was confirmed
 explicitly — re-run the pre-check query for any of them before assuming
 a second apply is actually needed.
 
+**Confirmed applied — do not re-apply.** As of 2026-07-24, the following
+four migration files have each been applied exactly once to the one
+shared Preview/Production Supabase database (confirmed via the read-only
+verification queries below returning the expected tables/columns/enum
+values):
+
+- `docs/ai-brainstorming-assistance-migration.sql` — applied 2026-07-22.
+- `docs/screen-share-evidence-migration.sql` — applied 2026-07-23.
+- `docs/answer-similarity-migration.sql` — applied 2026-07-24.
+- `docs/cohort-collusion-graph-v1-migration.sql` — applied 2026-07-24.
+
+Because Preview and Production are the same database, there is no
+separate "now apply it to the other environment" step for any of these
+four — that single application already covers both. **None of these four
+files should be run again against this database.** Re-running any of
+them will error on `CREATE TABLE`/`ADD COLUMN` (see each file's own
+idempotency note) at best, or silently duplicate rows at worst if a
+statement happens to be re-runnable — always re-run the relevant
+pre-check query first if there is ever any doubt.
+
 ## Migration convention
 
 - **Base schema** (initial launch): applied with `npx prisma db push`, a
@@ -117,7 +137,7 @@ Interpretation:
 | # | File | Feature | Preview applied | Production applied | Notes |
 |---|------|---------|-----------------|--------------------:|-------|
 | — | (base schema) | Initial schema | `prisma db push` (pre-dates this ledger) | `prisma db push` (pre-dates this ledger) | One-time exception — see "Migration convention" above |
-| 1 | `docs/answer-similarity-migration.sql` | Answer Similarity Review v1 | not tracked (predates ledger) | not tracked (predates ledger) | Bundled in the repository's initial commit |
+| 1 | `docs/answer-similarity-migration.sql` | Answer Similarity Review v1 | **Applied 2026-07-24** | **Applied 2026-07-24 (same shared database as Preview)** | Confirmed applied — do not re-apply. |
 | 2 | `docs/answer-activity-telemetry-migration.sql` | Exam Session Binding + Time Anomaly Review v1 | not tracked (predates ledger) | not tracked (predates ledger) | Bundled in the repository's initial commit |
 | 3 | `docs/exam-session-binding-migration.sql` | Exam Session Binding v1 | not tracked (predates ledger) | not tracked (predates ledger) | Bundled in the repository's initial commit |
 | 4 | `docs/evidence-frame-migration.sql` | On-Device AI Camera Integrity Detection v1 — Evidence Frames | not tracked (predates ledger) | not tracked (predates ledger) | |
@@ -126,17 +146,22 @@ Interpretation:
 | 7 | `docs/ai-use-review-migration.sql` | AI-Use Answer Review v1 | not tracked (predates ledger) | not tracked (predates ledger) | |
 | 8 | `docs/exam-policy-evidence-review-migration.sql` | Exam Design Policy + Evidence Review v1 | not tracked (predates ledger) | not tracked (predates ledger) | |
 | 9 | `docs/question-navigator-migration.sql` | Question Navigator v1 | not tracked (predates ledger) | not tracked (predates ledger) | |
-| 10 | `docs/ai-brainstorming-assistance-migration.sql` | Controlled AI Brainstorming Assistance v1 | **PENDING — not yet applied** | **PENDING — not yet applied** | See "Deployment procedure" below. Revised in place during pre-Preview hardening (added `wasRegenerated`/`clientRequestId`/unique index + a fifth `AI_ASSISTANCE_REQUEST_FAILED` enum value) — safe to revise in place since it had not been applied to any environment yet. Still NOT applied as part of either the original feature or this hardening pass. |
-| 11 | `docs/screen-share-evidence-migration.sql` | Screen-share Evidence Mode v1 | **PENDING — not yet applied** | **PENDING — not yet applied (same shared database as Preview)** | See "Deployment procedure — screen-share evidence" below. No new table — additive columns on the existing `Submission` and `IntegrityEvidenceAsset` tables plus 8 new `IntegrityEventType` enum values. |
-| 12 | `docs/cohort-collusion-graph-v1-migration.sql` | Cohort-Level Collusion Detection and Integrity Graph v1 | **PENDING — NOT APPLIED** | **PENDING — NOT APPLIED (same shared database as Preview)** | See "Deployment procedure — cohort collusion graph" below. Five new tables (`CohortCollusionAnalysis`, `CollusionPairEdge`, `CollusionSignal`, `CollusionCluster`, `CollusionClusterMember`) — zero columns added to any existing table. Do not apply without explicit authorization. |
+| 10 | `docs/ai-brainstorming-assistance-migration.sql` | Controlled AI Brainstorming Assistance v1 | **Applied 2026-07-22** | **Applied 2026-07-22 (same shared database as Preview)** | Confirmed applied — do not re-apply. Revised in place during pre-Preview hardening (added `wasRegenerated`/`clientRequestId`/unique index + a fifth `AI_ASSISTANCE_REQUEST_FAILED` enum value) before it was ever applied to any environment — the version actually applied is the fully-hardened one. |
+| 11 | `docs/screen-share-evidence-migration.sql` | Screen-share Evidence Mode v1 | **Applied 2026-07-23** | **Applied 2026-07-23 (same shared database as Preview)** | Confirmed applied — do not re-apply. No new table — additive columns on the existing `Submission` and `IntegrityEvidenceAsset` tables plus 8 new `IntegrityEventType` enum values. |
+| 12 | `docs/cohort-collusion-graph-v1-migration.sql` | Cohort-Level Collusion Detection and Integrity Graph v1 | **Applied 2026-07-24** | **Applied 2026-07-24 (same shared database as Preview)** | Confirmed applied — do not re-apply. Five new tables (`CohortCollusionAnalysis`, `CollusionPairEdge`, `CollusionSignal`, `CollusionCluster`, `CollusionClusterMember`) — zero columns added to any existing table. |
 
-Rows 1-9 predate this ledger's creation, so their actual apply dates are
+Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
-real dates. Rows 10-11 were created alongside their own migration files
-and should be kept accurate going forward: fill in the real date the
-moment each file is actually run.
+real dates. Row 1 and rows 10-12 have now been confirmed applied (see
+"Confirmed applied — do not re-apply" above) and their dates are
+recorded above; keep this accurate going forward for any future
+migration file.
 
 ## Deployment procedure — `docs/ai-brainstorming-assistance-migration.sql`
+
+**Already applied — 2026-07-22, to the one shared Preview/Production
+database. Do not run this file again.** The steps below are kept as a
+historical record of the procedure that was followed.
 
 ### Preview
 
@@ -174,6 +199,10 @@ Only after Preview has been verified and (ideally) briefly pilot-tested:
 
 ## Deployment procedure — `docs/screen-share-evidence-migration.sql`
 
+**Already applied — 2026-07-23, to the one shared Preview/Production
+database. Do not run this file again.** The steps below are kept as a
+historical record of the procedure that was followed.
+
 Preview and Production currently share ONE Supabase database — apply
 this file **once**, not once per environment.
 
@@ -196,10 +225,9 @@ this file **once**, not once per environment.
 
 ## Deployment procedure — `docs/cohort-collusion-graph-v1-migration.sql`
 
-**This migration must NOT be applied without explicit authorization from
-the user.** It is documented here so the exact procedure is ready when
-that authorization is given — do not run any of the following
-proactively.
+**Already applied — 2026-07-24, to the one shared Preview/Production
+database. Do not run this file again.** The steps below are kept as a
+historical record of the procedure that was followed.
 
 Preview and Production currently share ONE Supabase database — apply
 this file **once**, not once per environment.
