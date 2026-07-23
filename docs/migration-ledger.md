@@ -128,6 +128,7 @@ Interpretation:
 | 9 | `docs/question-navigator-migration.sql` | Question Navigator v1 | not tracked (predates ledger) | not tracked (predates ledger) | |
 | 10 | `docs/ai-brainstorming-assistance-migration.sql` | Controlled AI Brainstorming Assistance v1 | **PENDING — not yet applied** | **PENDING — not yet applied** | See "Deployment procedure" below. Revised in place during pre-Preview hardening (added `wasRegenerated`/`clientRequestId`/unique index + a fifth `AI_ASSISTANCE_REQUEST_FAILED` enum value) — safe to revise in place since it had not been applied to any environment yet. Still NOT applied as part of either the original feature or this hardening pass. |
 | 11 | `docs/screen-share-evidence-migration.sql` | Screen-share Evidence Mode v1 | **PENDING — not yet applied** | **PENDING — not yet applied (same shared database as Preview)** | See "Deployment procedure — screen-share evidence" below. No new table — additive columns on the existing `Submission` and `IntegrityEvidenceAsset` tables plus 8 new `IntegrityEventType` enum values. |
+| 12 | `docs/cohort-collusion-graph-v1-migration.sql` | Cohort-Level Collusion Detection and Integrity Graph v1 | **PENDING — NOT APPLIED** | **PENDING — NOT APPLIED (same shared database as Preview)** | See "Deployment procedure — cohort collusion graph" below. Five new tables (`CohortCollusionAnalysis`, `CollusionPairEdge`, `CollusionSignal`, `CollusionCluster`, `CollusionClusterMember`) — zero columns added to any existing table. Do not apply without explicit authorization. |
 
 Rows 1-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -192,6 +193,58 @@ this file **once**, not once per environment.
    institutional pilot-readiness checklist in docs/pilot-readiness.md is
    complete and the manual Preview validation checklist in
    docs/screen-share-evidence-v1.md has been run end-to-end at least once.
+
+## Deployment procedure — `docs/cohort-collusion-graph-v1-migration.sql`
+
+**This migration must NOT be applied without explicit authorization from
+the user.** It is documented here so the exact procedure is ready when
+that authorization is given — do not run any of the following
+proactively.
+
+Preview and Production currently share ONE Supabase database — apply
+this file **once**, not once per environment.
+
+1. Take a pre-migration backup of the shared database (Supabase project
+   → Database → Backups, or a manual `pg_dump`) before applying anything.
+2. Run the pre-check query embedded at the top of
+   `docs/cohort-collusion-graph-v1-migration.sql` first, to confirm the
+   migration has not already been applied.
+3. Open the (shared) Supabase project → SQL Editor.
+4. Paste and run sections 1-7 of the file (the five `CREATE TABLE`
+   statements, then indexes, then foreign keys) — the file is already in
+   execution order.
+5. Run the file's own "Verification queries" section to confirm all five
+   tables, their indexes, and their foreign keys landed, and that no
+   existing table's columns changed.
+6. Record the date in the Ledger table above (row 12) — a single date is
+   sufficient given the shared database.
+7. Do not run the manual Preview smoke test in
+   docs/cohort-collusion-graph-v1.md against Production.
+8. Do not apply this file a second time — re-running it after a
+   successful apply will error.
+
+### Rollback — `docs/cohort-collusion-graph-v1-migration.sql`
+
+Additive-only, and touches no existing table, column, or row's data at
+all:
+
+- **All five new tables**: safe to drop, in child-to-parent order, if the
+  feature must be fully removed —
+  `DROP TABLE "CollusionClusterMember"; DROP TABLE "CollusionCluster"; DROP TABLE "CollusionSignal"; DROP TABLE "CollusionPairEdge"; DROP TABLE "CohortCollusionAnalysis";`
+  — no other table has a foreign key pointing at any of these five (they
+  only have OUTGOING foreign keys to `Exam`/`Submission`/`User`), so
+  dropping them cannot cascade into unrelated data loss. This would
+  permanently delete any recorded analyses, edges, signals, clusters, and
+  lecturer review decisions on those clusters — export/audit first if
+  that data must be retained.
+- **Preferred approach in practice**: since no exam has this feature
+  enabled unless a lecturer explicitly clicks "Run cohort integrity
+  analysis" for it, the practical "rollback" for almost any issue is
+  simply not running the analysis for any exam, rather than reverting the
+  schema — the five new tables sitting empty/unused in the database have
+  no functional effect on any other feature (SubmissionSimilarityAnalysis,
+  TimingAnalysis, ExamAttemptSession/SessionIntegritySignal,
+  NetworkEvidence, OralVerification all continue exactly as before).
 
 ## Rollback / forward-fix strategy
 

@@ -235,6 +235,11 @@ model User {
   // docs/controlled-ai-brainstorming-assistance-v1.md.
   aiAssistanceInteractions AiAssistanceInteraction[]
 
+  // Cohort-Level Collusion Detection and Integrity Graph v1 (additive) —
+  // see docs/cohort-collusion-graph-v1.md.
+  cohortCollusionAnalysesRequested CohortCollusionAnalysis[] @relation("CohortCollusionAnalysisRequestedBy")
+  reviewedCollusionClusters        CollusionCluster[]        @relation("CollusionClusterReviewer")
+
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
 }
@@ -308,6 +313,12 @@ model Exam {
   // Exam Session Binding + Time Anomaly Review v1 (additive) — see
   // docs/time-anomaly-review-v1.md.
   timingAnalyses TimingAnalysis[]
+
+  // Cohort-Level Collusion Detection and Integrity Graph v1 (additive) —
+  // see docs/cohort-collusion-graph-v1.md. Consumes the outputs of the
+  // similarity/timing/session-binding features above; does not replace
+  // or duplicate them.
+  cohortCollusionAnalyses CohortCollusionAnalysis[]
 
   @@index([institutionId])
   @@index([courseId])
@@ -548,6 +559,14 @@ model Submission {
   // created before this feature, or any exam where it was never
   // configured — always treated as OFF, never silently required.
   screenSharePolicySnapshotJson Json?
+
+  // Cohort-Level Collusion Detection and Integrity Graph v1 (additive) —
+  // see docs/cohort-collusion-graph-v1.md. A submission is a graph node;
+  // an edge represents a possible relationship with another submission,
+  // never a finding on its own.
+  collusionEdgesAsSource       CollusionPairEdge[]       @relation("CollusionEdgeSource")
+  collusionEdgesAsCompared     CollusionPairEdge[]       @relation("CollusionEdgeCompared")
+  collusionClusterMemberships  CollusionClusterMember[]
 
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])
@@ -1361,4 +1380,191 @@ model AiAssistanceInteraction {
   @@index([examId])
   @@index([studentId])
   @@index([submissionId, createdAt])
+}
+
+// Cohort-Level Collusion Detection and Integrity Graph v1 (additive) — see
+// docs/cohort-collusion-graph-v1.md. THIS PRODUCES REVIEW SIGNALS ONLY —
+// "possible coordinated-answer cluster", never "confirmed collusion" or
+// "students cheated". It consumes the outputs of the pre-existing
+// SubmissionSimilarityAnalysis, TimingAnalysis, ExamAttemptSession/
+// SessionIntegritySignal, and NetworkEvidence features above — it does
+// not replace or duplicate any of them, and never alters a grade,
+// submission, or existing integrity evidence. Status/level/type fields
+// are plain validated String columns (not Prisma enums), following the
+// SubmissionSimilarityAnalysis convention — see
+// src/lib/cohortCollusionThresholds.ts and src/lib/cohortCollusion/graph.ts
+// for the validators. One reusable row per exam — a re-run replaces the
+// previous machine-generated edges/signals/clusters (deleteMany + create
+// inside one transaction, mirroring runSimilarityAnalysisForExam) but
+// never deletes a cluster's lecturer review history fields
+// (reviewStatus/reviewedAt/reviewedById/reviewNote), which the runner
+// carries forward onto the recreated cluster row with the same
+// clusterKey — see docs/cohort-collusion-graph-v1.md, "Repeated analysis
+// runs".
+model CohortCollusionAnalysis {
+  id     String @id @default(cuid())
+  examId String
+  exam   Exam   @relation(fields: [examId], references: [id], onDelete: Cascade)
+
+  status           String    @default("PENDING") // PENDING | PROCESSING | COMPLETE | FAILED | INSUFFICIENT_DATA
+  algorithmVersion String
+  analysedAt       DateTime?
+
+  submissionCount   Int @default(0)
+  eligibleEdgeCount Int @default(0)
+  clusterCount      Int @default(0)
+  // NONE | WATCH | NEEDS_REVIEW | HIGHER_CONCERN — highest concernLevel of
+  // any cluster produced by this run; NONE when no cluster was formed.
+  overallReviewLevel String @default("NONE")
+
+  summaryJson Json?
+
+  requestedById String
+  requestedBy   User   @relation("CohortCollusionAnalysisRequestedBy", fields: [requestedById], references: [id])
+
+  failureCode String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  edges    CollusionPairEdge[]
+  clusters CollusionCluster[]
+
+  @@index([examId])
+  @@index([status])
+}
+
+// One possible pairwise relationship between two submissions of the same
+// exam — an edge on the integrity graph, never a finding on its own. Pair
+// ordering is canonical (sourceSubmissionId < comparedSubmissionId
+// lexicographically, mirroring SubmissionSimilarityMatch) so A-vs-B and
+// B-vs-A never produce duplicate edges. eligibleForClustering is only
+// ever true when independentFamilyCount >= the configured minimum AND
+// combinedScore exceeds the versioned threshold — see
+// src/lib/cohortCollusion/graph.ts. A single shared IP, one matching
+// device identifier, one similarity score, or one timing event can never
+// make an edge eligible on their own (each is exactly one family).
+model CollusionPairEdge {
+  id         String                  @id @default(cuid())
+  analysisId String
+  analysis   CohortCollusionAnalysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  sourceSubmissionId   String
+  sourceSubmission     Submission @relation("CollusionEdgeSource", fields: [sourceSubmissionId], references: [id], onDelete: Cascade)
+  comparedSubmissionId String
+  comparedSubmission   Submission @relation("CollusionEdgeCompared", fields: [comparedSubmissionId], references: [id], onDelete: Cascade)
+
+  combinedScore           Float
+  independentFamilyCount  Int
+  eligibleForClustering   Boolean @default(false)
+  // Per-family capped contribution to combinedScore — see
+  // FAMILY_SCORE_CAPS in src/lib/cohortCollusionThresholds.ts. Keyed by
+  // signal family (ANSWER_CONTENT | RARE_MISTAKE | MCQ_PATTERN |
+  // TIMING_SYNCHRONISATION | SESSION_NETWORK_DEVICE | CROSS_EXAM_RECURRENCE).
+  familyScoresJson Json?
+  summaryJson      Json?
+
+  createdAt DateTime @default(now())
+
+  signals CollusionSignal[]
+
+  @@unique([analysisId, sourceSubmissionId, comparedSubmissionId])
+  @@index([analysisId])
+  @@index([sourceSubmissionId])
+  @@index([comparedSubmissionId])
+}
+
+// One explainable signal contributing to one edge. Multiple signals from
+// the same underlying evidence (e.g. three answer-content metrics on the
+// same pair of responses) still count as ONE independent family — see
+// signalFamily below and src/lib/cohortCollusion/graph.ts,
+// countIndependentFamilies(). evidenceJson stores only minimal explainable
+// excerpts or hashes, never a full duplicated student answer — see
+// docs/cohort-collusion-graph-v1.md, "Privacy controls".
+model CollusionSignal {
+  id     String            @id @default(cuid())
+  edgeId String
+  edge   CollusionPairEdge @relation(fields: [edgeId], references: [id], onDelete: Cascade)
+
+  // ANSWER_CONTENT | RARE_MISTAKE | MCQ_PATTERN | TIMING_SYNCHRONISATION |
+  // SESSION_NETWORK_DEVICE | CROSS_EXAM_RECURRENCE
+  signalFamily String
+  signalType   String
+  score        Float
+  confidence   Float
+  explanation  String
+  evidenceJson Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([edgeId])
+  @@index([signalFamily])
+}
+
+// A possible coordinated-answer cluster: a connected component of eligible
+// edges that has survived the minimum-size, family-diversity, and
+// weak-member-pruning rules in src/lib/cohortCollusion/graph.ts. Never a
+// misconduct finding — concernLevel/reviewStatus are lecturer-review
+// signals only. clusterKey is a stable, deterministic identifier derived
+// from its (post-pruning) sorted member submission ids, so a re-run of
+// the same underlying pattern updates the same row (carrying forward
+// reviewStatus/reviewedAt/reviewedById/reviewNote) rather than creating a
+// duplicate and losing review history — see
+// docs/cohort-collusion-graph-v1.md, "Repeated analysis runs".
+model CollusionCluster {
+  id         String                  @id @default(cuid())
+  analysisId String
+  analysis   CohortCollusionAnalysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  clusterKey             String
+  memberCount            Int
+  independentFamilyCount Int
+  edgeCount              Int
+  // NONE | WATCH | NEEDS_REVIEW | HIGHER_CONCERN — see
+  // HIGHER_CONCERN_RULES in src/lib/cohortCollusionThresholds.ts.
+  concernLevel String @default("NEEDS_REVIEW")
+  // NEEDS_REVIEW | REVIEWED_NO_CONCERN | REVIEWED_CONCERN_REMAINS |
+  // ORAL_VERIFICATION_REQUESTED | ESCALATED | RESOLVED
+  reviewStatus String @default("NEEDS_REVIEW")
+
+  summaryJson Json?
+
+  reviewedAt   DateTime?
+  reviewedById String?
+  reviewedBy   User?     @relation("CollusionClusterReviewer", fields: [reviewedById], references: [id])
+  reviewNote   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members CollusionClusterMember[]
+
+  @@unique([analysisId, clusterKey])
+  @@index([analysisId])
+  @@index([reviewStatus])
+  @@index([concernLevel])
+}
+
+// One student's membership in one possible coordinated-answer cluster.
+// supportingEdgeCount/independentFamilyCount are the member's OWN support
+// within the cluster (not the cluster's totals) — a member must never
+// remain in a cluster on the strength of a single weak pair; see
+// pruneUnsupportedMembers() in src/lib/cohortCollusion/graph.ts.
+model CollusionClusterMember {
+  id        String           @id @default(cuid())
+  clusterId String
+  cluster   CollusionCluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  supportingEdgeCount    Int
+  independentFamilyCount Int
+  memberScore            Float
+
+  createdAt DateTime @default(now())
+
+  @@unique([clusterId, submissionId])
+  @@index([clusterId])
+  @@index([submissionId])
 }

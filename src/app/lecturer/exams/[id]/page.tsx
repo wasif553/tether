@@ -876,6 +876,12 @@ export default function LecturerExamPage({
             Similarity review
           </Link>
           <Link
+            href={`/lecturer/exams/${id}/collusion-analysis`}
+            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+          >
+            Cohort integrity analysis
+          </Link>
+          <Link
             href={`/lecturer/exams/${id}/import-questions`}
             className="rounded border border-gray-300 px-3 py-1.5 text-sm"
           >
