@@ -9,6 +9,8 @@ import { canAcceptSubmit, submissionDeadline } from "@/lib/assessmentLifecycle";
 import { resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
 import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { endExamAttemptSessionsForSubmission } from "@/lib/examAttemptSessionRunner";
+import { parseAnswerProvenancePolicy, isAnswerProvenanceEnabled } from "@/lib/answerProvenancePolicy";
+import { isSourceDeclarationSatisfied, createFinalDevelopmentRecordsForSubmission } from "@/lib/answerDevelopmentRunner";
 
 function studentSubmitResponse(submission: {
   id: string;
@@ -85,6 +87,26 @@ export async function POST(
         },
         { status: 409 },
       );
+    }
+
+    // Answer-Development Provenance v1 — see
+    // docs/answer-development-provenance-v1.md. A required source/AI-use
+    // declaration blocks finalisation ONLY when the immutable policy says
+    // so (Part 5/6/7) — never for an OFF/optional policy. Checked before
+    // any grading/write happens, so a missing declaration never wastes a
+    // grading pass just to be rejected.
+    const provenancePolicy = parseAnswerProvenancePolicy(submission.answerProvenancePolicySnapshotJson);
+    if (isAnswerProvenanceEnabled(provenancePolicy) && provenancePolicy.requireAiSourceDeclaration) {
+      const declared = await isSourceDeclarationSatisfied(id, provenancePolicy);
+      if (!declared) {
+        return NextResponse.json(
+          {
+            code: "SOURCE_DECLARATION_REQUIRED",
+            error: "A source/AI-use declaration is required before this exam can be submitted.",
+          },
+          { status: 400 },
+        );
+      }
     }
 
     const answersByQuestion = new Map(submission.answers.map((a) => [a.questionId, a]));
@@ -166,6 +188,18 @@ export async function POST(
     // fire-and-forget: never blocks or affects the submission itself.
     recordSimpleActivityEvent({ submissionId: id, eventType: "ATTEMPT_SUBMITTED" }).catch(() => {});
     endExamAttemptSessionsForSubmission(id).catch(() => {});
+
+    // Answer-Development Provenance v1 — see
+    // docs/answer-development-provenance-v1.md. Fire-and-forget, AFTER the
+    // grading transaction has already committed: a provenance write
+    // failure here must never lose the student's final answer or affect
+    // the (already-finalized) submission/grade. No-ops immediately if the
+    // policy is OFF for this attempt.
+    if (isAnswerProvenanceEnabled(provenancePolicy)) {
+      createFinalDevelopmentRecordsForSubmission(id, [...effectiveQuestionIds]).catch((err) => {
+        console.error("[submit] createFinalDevelopmentRecordsForSubmission failed", err);
+      });
+    }
 
     // Academic Integrity Network Evidence v1 — compare IP with EXAM_START
     // to detect network change. Fire-and-forget; never blocks submission.

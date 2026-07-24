@@ -92,7 +92,9 @@ import {
 } from "@/lib/aiCameraEvidenceFrame";
 import { ExamWatermark } from "@/components/ExamWatermark";
 import { AiBrainstormPanel } from "@/components/AiBrainstormPanel";
+import { AnswerDevelopmentPanel } from "@/components/AnswerDevelopmentPanel";
 import { useScreenShareLifecycle } from "@/hooks/useScreenShareLifecycle";
+import { useAnswerDevelopmentCapture } from "@/hooks/useAnswerDevelopmentCapture";
 
 /**
  * Strengthened phone detection (Part 3/4) — converts raw detector output
@@ -179,6 +181,14 @@ type SecureSettings = {
   screenShareCaptureEvidence: boolean;
   screenShareEvidenceIntervalSeconds: number;
   screenShareMaxEvidenceFrames: number;
+  // Answer-Development Provenance v1 — see
+  // docs/answer-development-provenance-v1.md.
+  answerProvenanceMode: "OFF" | "BASIC" | "DETAILED";
+  answerVersionIntervalSeconds: number;
+  enableOutlineWorkspace: boolean;
+  enableCalculationWorkspace: boolean;
+  enableCodeWorkspace: boolean;
+  requireAiSourceDeclaration: boolean;
 };
 
 type SubmissionData = {
@@ -892,6 +902,10 @@ export default function TakeExamPage({
         if (secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
         return false;
       }
+      // Answer-Development Provenance v1 — a navigation-triggered
+      // checkpoint, after the ordinary autosave above has already
+      // succeeded. Best-effort; never blocks navigation.
+      answerDevelopmentCapture.flushNavigation(questionId, response);
       return true;
     } catch {
       if (secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
@@ -1058,6 +1072,19 @@ export default function TakeExamPage({
   });
   const requireScreenShare = secureSettings?.screenShareMode === "REQUIRED";
   const screenShareGateSatisfied = !requireScreenShare || screenShare.state === "ACTIVE";
+
+  // Answer-Development Provenance v1 — see
+  // docs/answer-development-provenance-v1.md. Called unconditionally
+  // (Rules of Hooks); `enabled` gates all actual capture behind the
+  // policy being on AND the attempt still being IN_PROGRESS. THIS IS
+  // PROCESS EVIDENCE, NOT A MISCONDUCT DETECTOR — see that hook for what
+  // is (and, just as importantly, is not) ever sent to the server.
+  const answerProvenanceMode = secureSettings?.answerProvenanceMode ?? "OFF";
+  const answerDevelopmentCapture = useAnswerDevelopmentCapture({
+    submissionId: id,
+    enabled: answerProvenanceMode !== "OFF" && data?.status === "IN_PROGRESS",
+    intervalSeconds: secureSettings?.answerVersionIntervalSeconds ?? 60,
+  });
 
   const reportIntegrityEvent = useCallback(
     (eventType: IntegrityEventType, metadata?: Record<string, unknown>) => {
@@ -2663,6 +2690,11 @@ export default function TakeExamPage({
     if (submitting || autoSubmitLocked || timerStopped) return;
     setResponses((prev) => ({ ...prev, [questionId]: value }));
     saveAnswer(questionId, value);
+    // Answer-Development Provenance v1 — tracks the latest text and
+    // triggers an immediate checkpoint only for a large single-step
+    // insertion (paste-like); otherwise the periodic timer in the hook
+    // covers it. No-ops entirely when provenance is OFF.
+    answerDevelopmentCapture.notifyTextChange(questionId, value);
   }
 
   if (!data && loadError) {
@@ -3418,6 +3450,18 @@ export default function TakeExamPage({
                     />
                   )}
 
+                  {answerProvenanceMode !== "OFF" && (
+                    <AnswerDevelopmentPanel
+                      submissionId={id}
+                      questionId={oneQuestion.payload.question.id}
+                      mode={answerProvenanceMode}
+                      enableOutlineWorkspace={secureSettings?.enableOutlineWorkspace ?? false}
+                      enableCalculationWorkspace={secureSettings?.enableCalculationWorkspace ?? false}
+                      enableCodeWorkspace={secureSettings?.enableCodeWorkspace ?? false}
+                      requireAiSourceDeclaration={secureSettings?.requireAiSourceDeclaration ?? false}
+                    />
+                  )}
+
                   <div className="mt-4 flex items-center gap-2">
                     {oneQuestion.payload.canGoPrevious && (
                       <button
@@ -3513,6 +3557,18 @@ export default function TakeExamPage({
                       submissionId={id}
                       questionId={q.id}
                       currentResponseText={responses[q.id] ?? null}
+                    />
+                  )}
+
+                  {answerProvenanceMode !== "OFF" && (
+                    <AnswerDevelopmentPanel
+                      submissionId={id}
+                      questionId={q.id}
+                      mode={answerProvenanceMode}
+                      enableOutlineWorkspace={secureSettings?.enableOutlineWorkspace ?? false}
+                      enableCalculationWorkspace={secureSettings?.enableCalculationWorkspace ?? false}
+                      enableCodeWorkspace={secureSettings?.enableCodeWorkspace ?? false}
+                      requireAiSourceDeclaration={secureSettings?.requireAiSourceDeclaration ?? false}
                     />
                   )}
                 </div>

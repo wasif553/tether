@@ -179,6 +179,40 @@ export const secureExamSettingsSchema = z.object({
   // Default 20, hard ceiling 50 — see clampScreenShareMaxEvidenceFrames()
   // in src/lib/screenSharePolicy.ts.
   screenShareMaxEvidenceFrames: z.number().int().min(1).max(50).default(20),
+
+  // --- Answer-Development Provenance v1 (additive, opt-in) — see
+  // docs/answer-development-provenance-v1.md. THIS IS PROCESS EVIDENCE,
+  // NOT A MISCONDUCT DETECTOR — never keystroke surveillance (see
+  // src/lib/answerProvenancePolicy.ts for the full policy/limit logic and
+  // src/lib/answerDevelopmentRunner.ts for checkpoint/artifact
+  // persistence). Defaults are conservative and OFF: no existing exam's
+  // behaviour changes unless a lecturer explicitly opts in. All later
+  // provenance decisions for an in-progress attempt must use the
+  // immutable Submission.answerProvenancePolicySnapshotJson taken at
+  // attempt start, never these live settings directly.
+  answerProvenanceMode: z.enum(["OFF", "BASIC", "DETAILED"]).default("OFF"),
+  // Recommended default 60s, hard-bounded [30, 300] server-side — see
+  // clampAnswerVersionIntervalSeconds() in src/lib/answerProvenancePolicy.ts.
+  answerVersionIntervalSeconds: z.number().int().min(30).max(300).default(60),
+  // Recommended default 80 characters, hard-bounded [20, 1000].
+  answerVersionMinimumCharacterChange: z.number().int().min(20).max(1000).default(80),
+  // Recommended default 40 checkpoints per question, hard-bounded [5, 100].
+  answerVersionMaximumPerQuestion: z.number().int().min(5).max(100).default(40),
+  capturePasteMetadata: z.boolean().default(true),
+  captureDeletionRewriteMetadata: z.boolean().default(true),
+  // Workspaces all default OFF — DETAILED mode alone does not turn any of
+  // them on; each is an independent lecturer opt-in.
+  enableOutlineWorkspace: z.boolean().default(false),
+  enableCalculationWorkspace: z.boolean().default(false),
+  enableCodeWorkspace: z.boolean().default(false),
+  // Has no effect unless enableCodeWorkspace is also true. Even when true,
+  // no code is ever executed in v1 — see docs, "Code-run limitation".
+  captureCodeRunHistory: z.boolean().default(false),
+  requireAiSourceDeclaration: z.boolean().default(false),
+  // Whether a student may view their OWN development timeline/versions
+  // (a read-only self-review convenience) — distinct from lecturer
+  // access, which is always allowed regardless of this setting.
+  allowStudentDevelopmentReview: z.boolean().default(true),
 });
 
 export type SecureExamSettings = z.infer<typeof secureExamSettingsSchema>;

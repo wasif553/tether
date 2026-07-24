@@ -102,6 +102,20 @@ type SecureSettings = {
   screenShareCaptureEvidence: boolean;
   screenShareEvidenceIntervalSeconds: number;
   screenShareMaxEvidenceFrames: number;
+  // Answer-Development Provenance v1 — see
+  // docs/answer-development-provenance-v1.md.
+  answerProvenanceMode: "OFF" | "BASIC" | "DETAILED";
+  answerVersionIntervalSeconds: number;
+  answerVersionMinimumCharacterChange: number;
+  answerVersionMaximumPerQuestion: number;
+  capturePasteMetadata: boolean;
+  captureDeletionRewriteMetadata: boolean;
+  enableOutlineWorkspace: boolean;
+  enableCalculationWorkspace: boolean;
+  enableCodeWorkspace: boolean;
+  captureCodeRunHistory: boolean;
+  requireAiSourceDeclaration: boolean;
+  allowStudentDevelopmentReview: boolean;
 };
 
 type Exam = {
@@ -1900,6 +1914,181 @@ export default function LecturerExamPage({
                     </li>
                     <li>Frames and signals are review evidence, not automatic misconduct findings.</li>
                     <li>Browser and operating-system limitations apply — see docs/screen-share-evidence-v1.md.</li>
+                  </ul>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Answer-Development Provenance v1 — see
+              docs/answer-development-provenance-v1.md. This is process
+              evidence, not a misconduct detector. */}
+          <div className="border-t border-gray-200 pt-3">
+            <h3 className="text-sm font-medium">Answer-development provenance</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Preserve readable answer-development checkpoints for lecturer review. Never records individual keystrokes.
+            </p>
+            <label className="mt-2 block text-sm text-gray-700">
+              <span>Mode</span>
+              <select
+                className="mt-1 block w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                value={secureForm.answerProvenanceMode}
+                onChange={(e) => setSecureForm({ ...secureForm, answerProvenanceMode: e.target.value as SecureSettings["answerProvenanceMode"] })}
+              >
+                <option value="OFF">Off</option>
+                <option value="BASIC">Basic (checkpoints only)</option>
+                <option value="DETAILED">Detailed (checkpoints + optional workspaces)</option>
+              </select>
+            </label>
+
+            {secureForm.answerProvenanceMode !== "OFF" && (
+              <div className="mt-3 space-y-3 pl-6">
+                <div className="grid grid-cols-3 gap-2 text-sm text-gray-700">
+                  <label>
+                    <span className="text-xs text-gray-500">Interval (s)</span>
+                    <input
+                      type="number"
+                      min={30}
+                      max={300}
+                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                      value={secureForm.answerVersionIntervalSeconds}
+                      onChange={(e) =>
+                        setSecureForm({
+                          ...secureForm,
+                          answerVersionIntervalSeconds: Math.min(300, Math.max(30, Number(e.target.value) || 60)),
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span className="text-xs text-gray-500">Min. change (chars)</span>
+                    <input
+                      type="number"
+                      min={20}
+                      max={1000}
+                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                      value={secureForm.answerVersionMinimumCharacterChange}
+                      onChange={(e) =>
+                        setSecureForm({
+                          ...secureForm,
+                          answerVersionMinimumCharacterChange: Math.min(1000, Math.max(20, Number(e.target.value) || 80)),
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span className="text-xs text-gray-500">Max checkpoints/question</span>
+                    <input
+                      type="number"
+                      min={5}
+                      max={100}
+                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                      value={secureForm.answerVersionMaximumPerQuestion}
+                      onChange={(e) =>
+                        setSecureForm({
+                          ...secureForm,
+                          answerVersionMaximumPerQuestion: Math.min(100, Math.max(5, Number(e.target.value) || 40)),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+
+                <label className="flex items-start gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={secureForm.capturePasteMetadata}
+                    onChange={(e) => setSecureForm({ ...secureForm, capturePasteMetadata: e.target.checked })}
+                  />
+                  <span>Capture paste metadata (size, timing — never clipboard contents on their own)</span>
+                </label>
+                <label className="flex items-start gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={secureForm.captureDeletionRewriteMetadata}
+                    onChange={(e) => setSecureForm({ ...secureForm, captureDeletionRewriteMetadata: e.target.checked })}
+                  />
+                  <span>Capture deletion/rewrite metadata</span>
+                </label>
+                <label className="flex items-start gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={secureForm.allowStudentDevelopmentReview}
+                    onChange={(e) => setSecureForm({ ...secureForm, allowStudentDevelopmentReview: e.target.checked })}
+                  />
+                  <span>Allow students to review their own development history</span>
+                </label>
+
+                {secureForm.answerProvenanceMode === "DETAILED" && (
+                  <div className="space-y-2 border-t border-gray-100 pt-2">
+                    <p className="text-xs font-medium text-gray-600">Detailed-mode workspaces</p>
+                    <label className="flex items-start gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={secureForm.enableOutlineWorkspace}
+                        onChange={(e) => setSecureForm({ ...secureForm, enableOutlineWorkspace: e.target.checked })}
+                      />
+                      <span>Outline workspace</span>
+                    </label>
+                    <label className="flex items-start gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={secureForm.enableCalculationWorkspace}
+                        onChange={(e) => setSecureForm({ ...secureForm, enableCalculationWorkspace: e.target.checked })}
+                      />
+                      <span>Calculation working area</span>
+                    </label>
+                    <label className="flex items-start gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={secureForm.enableCodeWorkspace}
+                        onChange={(e) =>
+                          setSecureForm({
+                            ...secureForm,
+                            enableCodeWorkspace: e.target.checked,
+                            captureCodeRunHistory: e.target.checked ? secureForm.captureCodeRunHistory : false,
+                          })
+                        }
+                      />
+                      <span>
+                        Code working area <span className="text-xs text-gray-500">(execution is not available — see docs)</span>
+                      </span>
+                    </label>
+                    {secureForm.enableCodeWorkspace && (
+                      <label className="flex items-start gap-2 pl-6 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={secureForm.captureCodeRunHistory}
+                          onChange={(e) => setSecureForm({ ...secureForm, captureCodeRunHistory: e.target.checked })}
+                        />
+                        <span>Record code-run requests (no code is actually executed)</span>
+                      </label>
+                    )}
+                    <label className="flex items-start gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={secureForm.requireAiSourceDeclaration}
+                        onChange={(e) => setSecureForm({ ...secureForm, requireAiSourceDeclaration: e.target.checked })}
+                      />
+                      <span>Require a source/AI-use declaration before submission</span>
+                    </label>
+                  </div>
+                )}
+
+                <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+                  <p className="font-medium">Answer-development provenance: Enabled</p>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    <li>Individual keystrokes are never recorded.</li>
+                    <li>Readable answer-version checkpoints and process events are process evidence, not proof of misconduct.</li>
+                    <li>Lecturer judgement remains final; no grade is automatically changed.</li>
                   </ul>
                 </div>
               </div>

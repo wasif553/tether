@@ -381,6 +381,13 @@ model Question {
   // Controlled AI Brainstorming Assistance v1 (additive, opt-in) — see
   // docs/controlled-ai-brainstorming-assistance-v1.md.
   aiAssistanceInteractions AiAssistanceInteraction[]
+
+  // Answer-Development Provenance v1 (additive, opt-in) — see
+  // docs/answer-development-provenance-v1.md.
+  developmentVersions AnswerDevelopmentVersion[]
+  developmentEvents   AnswerDevelopmentEvent[]
+  developmentArtifacts AnswerDevelopmentArtifact[]
+  codeExecutionEvents  CodeExecutionEvent[]
 }
 
 // Answer Similarity Review v1 (additive) — see
@@ -568,6 +575,22 @@ model Submission {
   collusionEdgesAsCompared     CollusionPairEdge[]       @relation("CollusionEdgeCompared")
   collusionClusterMemberships  CollusionClusterMember[]
 
+  // Answer-Development Provenance v1 (additive, opt-in) — see
+  // docs/answer-development-provenance-v1.md. Same immutable-snapshot
+  // pattern as examPolicySnapshotJson/aiAssistancePolicySnapshotJson/
+  // screenSharePolicySnapshotJson above: the effective provenance policy
+  // (mode, version-capture limits, enabled workspaces, source-declaration
+  // requirement) copied once at attempt start. Null for every submission
+  // created before this feature, or any exam where it was never
+  // configured — always treated as OFF, never silently capturing
+  // anything. This is PROCESS EVIDENCE, not a misconduct detector — see
+  // that doc for the full privacy/threat-model treatment.
+  answerProvenancePolicySnapshotJson Json?
+  answerDevelopmentVersions          AnswerDevelopmentVersion[]
+  answerDevelopmentEvents            AnswerDevelopmentEvent[]
+  answerDevelopmentArtifacts         AnswerDevelopmentArtifact[]
+  codeExecutionEvents                CodeExecutionEvent[]
+
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])
 }
@@ -613,6 +636,13 @@ model Answer {
   aiGradedAt        DateTime?
   // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
   aiUseReviewSignals AiUseReviewSignal[]
+
+  // Answer-Development Provenance v1 (additive, opt-in) — see
+  // docs/answer-development-provenance-v1.md.
+  developmentVersions AnswerDevelopmentVersion[]
+  developmentEvents   AnswerDevelopmentEvent[]
+  developmentArtifacts AnswerDevelopmentArtifact[]
+  codeExecutionEvents  CodeExecutionEvent[]
 
   @@unique([submissionId, questionId])
 }
@@ -1110,6 +1140,9 @@ model ExamAttemptSession {
 
   signals SessionIntegritySignal[]
   activityEvents AnswerActivityEvent[]
+  // Answer-Development Provenance v1 (additive, opt-in) — see
+  // docs/answer-development-provenance-v1.md.
+  developmentEvents AnswerDevelopmentEvent[]
 
   @@index([submissionId])
   @@index([userId])
@@ -1567,4 +1600,254 @@ model CollusionClusterMember {
   @@unique([clusterId, submissionId])
   @@index([clusterId])
   @@index([submissionId])
+}
+
+// Answer-Development Provenance v1 (additive, opt-in) — see
+// docs/answer-development-provenance-v1.md. THIS IS PROCESS EVIDENCE, NOT
+// A MISCONDUCT DETECTOR — "development checkpoint"/"process evidence",
+// never "proof of cheating". Never stores individual keystrokes, scan
+// codes, or clipboard content separately from what the student actually
+// inserted into an authorised answer field — see that doc's threat model.
+// Uses the existing AnswerActivityEvent for low-volume coarse activity
+// (unchanged, not replaced); this model is for READABLE answer-version
+// checkpoints only. Default OFF for every exam — see
+// Submission.answerProvenancePolicySnapshotJson above; a null snapshot on
+// a submission means no rows here were ever created for it.
+model AnswerDevelopmentVersion {
+  id           String     @id @default(cuid())
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  answerId     String
+  answer       Answer     @relation(fields: [answerId], references: [id], onDelete: Cascade)
+  questionId   String
+  question     Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  // Server-assigned, sequential per (submissionId, questionId) — the
+  // client never supplies or is trusted for this number (Part 6).
+  versionNumber Int
+
+  // The answer text AS IT EXISTED at this checkpoint. This is process
+  // evidence of the student's own authorised answer content, not a
+  // separate secret capture — the same text is (or will be) reflected in
+  // Answer.response via the ordinary autosave path.
+  responseText   String
+  responseLength Int
+  responseHash   String
+
+  // Advisory pointer only (no FK, mirrors AnswerActivityEvent.previousEventId)
+  // to the prior version for this question — used to compute diffs, never
+  // used for cascade behaviour.
+  previousVersionId String?
+
+  // INITIAL_TEXT | PERIODIC_CHECKPOINT | SUBSTANTIAL_EDIT |
+  // POST_PASTE_CHECKPOINT | PRE_SUBMISSION_CHECKPOINT | FINAL_SUBMISSION |
+  // MANUAL_STUDENT_CHECKPOINT — validated string, not a Prisma enum,
+  // following the SubmissionSimilarityAnalysis convention. See
+  // src/lib/answerDevelopment.ts for the validator.
+  changeType String
+
+  charactersAdded   Int
+  charactersRemoved Int
+  /** Fraction of the prior version's length that changed, in [0, 1] (0 for INITIAL_TEXT). */
+  changeRatio Float
+
+  // AUTOSAVE | TIMER | PASTE | NAVIGATION | SUBMISSION | STUDENT_ACTION
+  source String
+
+  // Idempotency key (mirrors AiAssistanceInteraction/IntegrityEvidenceAsset
+  // clientRequestId precedent) — nullable with a unique index; a retried/
+  // duplicated checkpoint request is recognised and replayed instead of
+  // consuming a second version-number slot.
+  clientRequestId String? @unique
+
+  // Server-received timestamp is authoritative; clientElapsedMs is
+  // supplementary only (Part 3/4) — mirrors AnswerActivityEvent exactly.
+  serverReceivedAt DateTime @default(now())
+  clientElapsedMs  Int?
+
+  createdAt DateTime @default(now())
+
+  @@unique([submissionId, questionId, versionNumber])
+  @@index([submissionId])
+  @@index([answerId])
+  @@index([questionId])
+  @@index([submissionId, questionId])
+}
+
+// Structured process metadata that does not require a full readable
+// version — see docs/answer-development-provenance-v1.md. No event here
+// is itself labelled misconduct; eventLevel is INFORMATIONAL/CONTEXT/
+// REVIEW_CONTEXT, never a risk score.
+model AnswerDevelopmentEvent {
+  id                   String              @id @default(cuid())
+  submissionId         String
+  submission           Submission          @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  answerId             String?
+  answer               Answer?             @relation(fields: [answerId], references: [id], onDelete: SetNull)
+  questionId           String?
+  question             Question?           @relation(fields: [questionId], references: [id], onDelete: SetNull)
+  examAttemptSessionId String?
+  examAttemptSession   ExamAttemptSession? @relation(fields: [examAttemptSessionId], references: [id], onDelete: SetNull)
+
+  // FIRST_KEYSTROKE | FIRST_MEANINGFUL_TEXT | SUBSTANTIAL_EDIT |
+  // LARGE_DELETION | MAJOR_REWRITE | PASTE_ATTEMPT_BLOCKED | PASTE_INSERTED |
+  // PASTED_TEXT_SUBSTANTIALLY_REPLACED | OUTLINE_CREATED | OUTLINE_UPDATED |
+  // CALCULATION_WORKING_CREATED | CALCULATION_WORKING_UPDATED |
+  // CODE_WORKING_CREATED | CODE_WORKING_UPDATED | CODE_RUN_REQUESTED |
+  // CODE_RUN_COMPLETED | CODE_RUN_FAILED | TEST_RUN_COMPLETED |
+  // SOURCE_DECLARATION_CREATED | SOURCE_DECLARATION_UPDATED |
+  // FINAL_ANSWER_SUBMITTED — see src/lib/answerDevelopment.ts.
+  eventType String
+  // INFORMATIONAL | CONTEXT | REVIEW_CONTEXT — never MISCONDUCT/VIOLATION.
+  eventLevel String
+
+  clientRequestId String? @unique
+
+  serverReceivedAt DateTime @default(now())
+  clientElapsedMs  Int?
+
+  // Tightly-validated, bounded metadata only (Part 11) — never arbitrary
+  // unlimited JSON; see ANSWER_DEVELOPMENT_EVENT_METADATA_MAX_BYTES in
+  // src/lib/answerDevelopmentThresholds.ts and the validator in
+  // src/lib/answerDevelopment.ts. Never a raw clipboard field, never
+  // individual keystrokes.
+  metadataJson Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([submissionId])
+  @@index([answerId])
+  @@index([questionId])
+  @@index([examAttemptSessionId])
+  @@index([eventType])
+  @@index([serverReceivedAt])
+}
+
+// Structured student working associated with one answer (outline,
+// calculation working, code working, or a source/AI-use declaration) —
+// see docs/answer-development-provenance-v1.md. One CURRENT row per
+// (submission, question-or-null, artifactType); questionId is nullable
+// because AI_SOURCE_DECLARATION/GENERAL_SOURCE_DECLARATION are attempt-
+// level, not per-question (see that doc, "Sources and AI declaration").
+// Historical versions are preserved in AnswerDevelopmentArtifactVersion
+// below — updating this row never silently discards prior working.
+// Student-authored content is private assessment data: students can read
+// only their own current attempt; lecturers can read only authorised
+// submissions within their institution (enforced in the API routes, not
+// the schema).
+model AnswerDevelopmentArtifact {
+  id           String     @id @default(cuid())
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  answerId     String?
+  answer       Answer?    @relation(fields: [answerId], references: [id], onDelete: SetNull)
+  questionId   String?
+  question     Question?  @relation(fields: [questionId], references: [id], onDelete: SetNull)
+
+  // OUTLINE | CALCULATION_WORKING | CODE_WORKING | AI_SOURCE_DECLARATION |
+  // GENERAL_SOURCE_DECLARATION
+  artifactType String
+
+  // Bounded per type — see ARTIFACT_MAX_CHARACTERS in
+  // src/lib/answerDevelopmentThresholds.ts (e.g. outline 20,000 chars,
+  // code working 100,000 chars). Plain text/structured text only — never
+  // unsafe HTML rendering (Part 5).
+  content     String
+  contentHash String
+
+  // Current version number — increments on every update; full history in
+  // AnswerDevelopmentArtifactVersion, never silently overwritten.
+  version Int @default(1)
+
+  clientRequestId String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  versions AnswerDevelopmentArtifactVersion[]
+
+  // Postgres unique indexes treat NULL as distinct per row, so this
+  // constraint fully enforces "one current row per question+type" only
+  // for the non-null-questionId case (OUTLINE/CALCULATION_WORKING/
+  // CODE_WORKING); the questionId-null case (attempt-level source
+  // declarations) is de-duplicated at the application layer (findFirst-
+  // then-update inside a transaction) in src/lib/answerDevelopmentRunner.ts
+  // — documented simplification, see docs/answer-development-provenance-v1.md
+  // "Known limitations".
+  @@unique([submissionId, questionId, artifactType])
+  @@index([submissionId])
+  @@index([answerId])
+  @@index([questionId])
+}
+
+// Readable version history for AnswerDevelopmentArtifact — see
+// docs/answer-development-provenance-v1.md. One row per historical
+// version; the CURRENT version's content also lives denormalised on the
+// parent AnswerDevelopmentArtifact row for cheap reads.
+model AnswerDevelopmentArtifactVersion {
+  id         String                    @id @default(cuid())
+  artifactId String
+  artifact   AnswerDevelopmentArtifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+
+  versionNumber Int
+  content       String
+  contentHash   String
+
+  clientRequestId String? @unique
+
+  createdAt DateTime @default(now())
+
+  @@unique([artifactId, versionNumber])
+  @@index([artifactId])
+}
+
+// Code-execution event contract — see docs/answer-development-provenance-v1.md
+// ("Code-run limitation"). No secure isolated code runner exists in this
+// repo/environment, so v1 NEVER executes student code inside the Next.js/
+// Vercel application process and NEVER fabricates a pass/fail result.
+// Every row this feature actually writes in v1 has exitStatus
+// "NOT_CONFIGURED" — this model exists to give the code-working editor's
+// "Run code" contract a real, typed, persisted shape (request received,
+// clearly reported as unavailable) so a future isolated runner can be
+// wired in later without a schema change. Never stores unrestricted
+// terminal output — outputSummaryJson is bounded (see
+// src/lib/answerDevelopmentThresholds.ts).
+model CodeExecutionEvent {
+  id           String     @id @default(cuid())
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  answerId     String?
+  answer       Answer?    @relation(fields: [answerId], references: [id], onDelete: SetNull)
+  questionId   String
+  question     Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  clientRequestId String? @unique
+
+  // RUN | TEST — see src/lib/answerDevelopment.ts.
+  runType  String
+  language String?
+
+  codeHash   String
+  codeLength Int
+
+  testSetIdentifier String?
+  testsRun          Int?
+  testsPassed       Int?
+  testsFailed       Int?
+
+  // NOT_CONFIGURED in v1 (always) — reserved values PASSED/FAILED/ERROR/
+  // TIMEOUT for a future real runner; never written by v1.
+  exitStatus String
+  durationMs Int?
+
+  // Bounded, structured summary only — never raw/unrestricted terminal
+  // output (Part 2).
+  outputSummaryJson Json?
+
+  serverReceivedAt DateTime @default(now())
+  createdAt        DateTime @default(now())
+
+  @@index([submissionId])
+  @@index([answerId])
+  @@index([questionId])
 }

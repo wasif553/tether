@@ -18,6 +18,7 @@ import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { buildExamPolicySnapshot } from "@/lib/examPolicy";
 import { buildAiAssistancePolicySnapshot } from "@/lib/aiAssistancePolicy";
 import { buildScreenSharePolicySnapshot } from "@/lib/screenSharePolicy";
+import { buildAnswerProvenancePolicySnapshot } from "@/lib/answerProvenancePolicy";
 
 export async function POST(
   req: Request,
@@ -262,6 +263,24 @@ export async function POST(
     screenShareMaxEvidenceFrames: settings.screenShareMaxEvidenceFrames,
   });
 
+  // Answer-Development Provenance v1 — see
+  // docs/answer-development-provenance-v1.md. Same immutable-snapshot
+  // pattern as the snapshots above.
+  const answerProvenancePolicySnapshot = buildAnswerProvenancePolicySnapshot({
+    answerProvenanceMode: settings.answerProvenanceMode,
+    answerVersionIntervalSeconds: settings.answerVersionIntervalSeconds,
+    answerVersionMinimumCharacterChange: settings.answerVersionMinimumCharacterChange,
+    answerVersionMaximumPerQuestion: settings.answerVersionMaximumPerQuestion,
+    capturePasteMetadata: settings.capturePasteMetadata,
+    captureDeletionRewriteMetadata: settings.captureDeletionRewriteMetadata,
+    enableOutlineWorkspace: settings.enableOutlineWorkspace,
+    enableCalculationWorkspace: settings.enableCalculationWorkspace,
+    enableCodeWorkspace: settings.enableCodeWorkspace,
+    captureCodeRunHistory: settings.captureCodeRunHistory,
+    requireAiSourceDeclaration: settings.requireAiSourceDeclaration,
+    allowStudentDevelopmentReview: settings.allowStudentDevelopmentReview,
+  });
+
   try {
     const submission = await prisma.submission.create({
       data: {
@@ -272,6 +291,7 @@ export async function POST(
         examPolicySnapshotJson: policySnapshot as unknown as Prisma.InputJsonValue,
         aiAssistancePolicySnapshotJson: aiAssistancePolicySnapshot as unknown as Prisma.InputJsonValue,
         screenSharePolicySnapshotJson: screenSharePolicySnapshot as unknown as Prisma.InputJsonValue,
+        answerProvenancePolicySnapshotJson: answerProvenancePolicySnapshot as unknown as Prisma.InputJsonValue,
       },
     });
 

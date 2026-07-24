@@ -149,6 +149,7 @@ Interpretation:
 | 10 | `docs/ai-brainstorming-assistance-migration.sql` | Controlled AI Brainstorming Assistance v1 | **Applied 2026-07-22** | **Applied 2026-07-22 (same shared database as Preview)** | Confirmed applied — do not re-apply. Revised in place during pre-Preview hardening (added `wasRegenerated`/`clientRequestId`/unique index + a fifth `AI_ASSISTANCE_REQUEST_FAILED` enum value) before it was ever applied to any environment — the version actually applied is the fully-hardened one. |
 | 11 | `docs/screen-share-evidence-migration.sql` | Screen-share Evidence Mode v1 | **Applied 2026-07-23** | **Applied 2026-07-23 (same shared database as Preview)** | Confirmed applied — do not re-apply. No new table — additive columns on the existing `Submission` and `IntegrityEvidenceAsset` tables plus 8 new `IntegrityEventType` enum values. |
 | 12 | `docs/cohort-collusion-graph-v1-migration.sql` | Cohort-Level Collusion Detection and Integrity Graph v1 | **Applied 2026-07-24** | **Applied 2026-07-24 (same shared database as Preview)** | Confirmed applied — do not re-apply. Five new tables (`CohortCollusionAnalysis`, `CollusionPairEdge`, `CollusionSignal`, `CollusionCluster`, `CollusionClusterMember`) — zero columns added to any existing table. |
+| 13 | `docs/answer-development-provenance-v1-migration.sql` | Answer-Development Provenance v1 | **PENDING — NOT APPLIED** | **PENDING — NOT APPLIED (same shared database as Preview)** | See "Deployment procedure — answer-development provenance" below. One new nullable `Submission` column (`answerProvenancePolicySnapshotJson`) plus five new tables (`AnswerDevelopmentVersion`, `AnswerDevelopmentEvent`, `AnswerDevelopmentArtifact`, `AnswerDevelopmentArtifactVersion`, `CodeExecutionEvent`). Do not apply without explicit authorization. |
 
 Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -328,5 +329,58 @@ Also additive-only, and touches no existing column/row's data:
 - **Preferred approach in practice**: identical reasoning to the
   AI-assistance rollback above — since the feature defaults to
   `screenShareMode: "OFF"`, ensuring no exam has it enabled is the
+  practical "rollback" for almost any issue, rather than reverting the
+  schema.
+
+## Deployment procedure — `docs/answer-development-provenance-v1-migration.sql`
+
+**This migration must NOT be applied without explicit authorization from
+the user.** It is documented here so the exact procedure is ready when
+that authorization is given — do not run any of the following
+proactively.
+
+Preview and Production currently share ONE Supabase database — apply
+this file **once**, not once per environment.
+
+1. Take a pre-migration backup of the shared database (Supabase project
+   → Database → Backups, or a manual `pg_dump`) before applying anything.
+2. Run the pre-check query embedded at the top of
+   `docs/answer-development-provenance-v1-migration.sql` first, to
+   confirm the migration has not already been applied.
+3. Open the (shared) Supabase project → SQL Editor.
+4. Paste and run sections 1-8 of the file (the `ALTER TABLE` on
+   `Submission`, then the five `CREATE TABLE` statements, then indexes,
+   then foreign keys) — the file is already in execution order.
+5. Run the file's own "Verification queries" section to confirm the new
+   column, all five tables, their indexes, and their foreign keys
+   landed, and that every existing `Submission` row's new column is NULL.
+6. Record the date in the Ledger table above (row 13) — a single date is
+   sufficient given the shared database.
+7. Do not run the manual Preview smoke test in
+   docs/answer-development-provenance-v1.md against Production — only
+   against a disposable Preview/test database, per that document's own
+   note (Preview and Production currently share one database).
+8. Do not apply this file a second time — re-running it after a
+   successful apply will error.
+
+### Rollback — `docs/answer-development-provenance-v1-migration.sql`
+
+Additive-only, and touches no existing table's data at all beyond adding
+one new nullable column:
+
+- **All five new tables**: safe to drop, in child-to-parent order, if the
+  feature must be fully removed —
+  `DROP TABLE "AnswerDevelopmentArtifactVersion"; DROP TABLE "AnswerDevelopmentArtifact"; DROP TABLE "AnswerDevelopmentEvent"; DROP TABLE "AnswerDevelopmentVersion"; DROP TABLE "CodeExecutionEvent";`
+  — no other table has a foreign key pointing at any of these five (they
+  only have OUTGOING foreign keys to `Submission`/`Answer`/`Question`/
+  `ExamAttemptSession`), so dropping them cannot cascade into unrelated
+  data loss. This would permanently delete any recorded checkpoints,
+  events, artifacts, and code-execution requests — export/audit first if
+  that data must be retained.
+- **`Submission.answerProvenancePolicySnapshotJson`**: safe to drop
+  (`ALTER TABLE "Submission" DROP COLUMN "answerProvenancePolicySnapshotJson";`)
+  — every application code path treats a missing/null value as OFF.
+- **Preferred approach in practice**: since the feature defaults to
+  `answerProvenanceMode: "OFF"`, ensuring no exam has it enabled is the
   practical "rollback" for almost any issue, rather than reverting the
   schema.
