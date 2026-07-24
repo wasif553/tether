@@ -22,8 +22,8 @@ migrations in this ledger were written before this was confirmed
 explicitly — re-run the pre-check query for any of them before assuming
 a second apply is actually needed.
 
-**Confirmed applied — do not re-apply.** As of 2026-07-24, the following
-four migration files have each been applied exactly once to the one
+**Confirmed applied — do not re-apply.** As of 2026-07-25, the following
+five migration files have each been applied exactly once to the one
 shared Preview/Production Supabase database (confirmed via the read-only
 verification queries below returning the expected tables/columns/enum
 values):
@@ -32,10 +32,11 @@ values):
 - `docs/screen-share-evidence-migration.sql` — applied 2026-07-23.
 - `docs/answer-similarity-migration.sql` — applied 2026-07-24.
 - `docs/cohort-collusion-graph-v1-migration.sql` — applied 2026-07-24.
+- `docs/answer-development-provenance-v1-migration.sql` — applied 2026-07-25.
 
 Because Preview and Production are the same database, there is no
 separate "now apply it to the other environment" step for any of these
-four — that single application already covers both. **None of these four
+five — that single application already covers both. **None of these five
 files should be run again against this database.** Re-running any of
 them will error on `CREATE TABLE`/`ADD COLUMN` (see each file's own
 idempotency note) at best, or silently duplicate rows at worst if a
@@ -149,7 +150,7 @@ Interpretation:
 | 10 | `docs/ai-brainstorming-assistance-migration.sql` | Controlled AI Brainstorming Assistance v1 | **Applied 2026-07-22** | **Applied 2026-07-22 (same shared database as Preview)** | Confirmed applied — do not re-apply. Revised in place during pre-Preview hardening (added `wasRegenerated`/`clientRequestId`/unique index + a fifth `AI_ASSISTANCE_REQUEST_FAILED` enum value) before it was ever applied to any environment — the version actually applied is the fully-hardened one. |
 | 11 | `docs/screen-share-evidence-migration.sql` | Screen-share Evidence Mode v1 | **Applied 2026-07-23** | **Applied 2026-07-23 (same shared database as Preview)** | Confirmed applied — do not re-apply. No new table — additive columns on the existing `Submission` and `IntegrityEvidenceAsset` tables plus 8 new `IntegrityEventType` enum values. |
 | 12 | `docs/cohort-collusion-graph-v1-migration.sql` | Cohort-Level Collusion Detection and Integrity Graph v1 | **Applied 2026-07-24** | **Applied 2026-07-24 (same shared database as Preview)** | Confirmed applied — do not re-apply. Five new tables (`CohortCollusionAnalysis`, `CollusionPairEdge`, `CollusionSignal`, `CollusionCluster`, `CollusionClusterMember`) — zero columns added to any existing table. |
-| 13 | `docs/answer-development-provenance-v1-migration.sql` | Answer-Development Provenance v1 | **PENDING — NOT APPLIED** | **PENDING — NOT APPLIED (same shared database as Preview)** | See "Deployment procedure — answer-development provenance" below. One new nullable `Submission` column (`answerProvenancePolicySnapshotJson`) plus five new tables (`AnswerDevelopmentVersion`, `AnswerDevelopmentEvent`, `AnswerDevelopmentArtifact`, `AnswerDevelopmentArtifactVersion`, `CodeExecutionEvent`). Do not apply without explicit authorization. |
+| 13 | `docs/answer-development-provenance-v1-migration.sql` | Answer-Development Provenance v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — answer-development provenance migration" below for the full read-only confirmation record. |
 
 Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -334,10 +335,11 @@ Also additive-only, and touches no existing column/row's data:
 
 ## Deployment procedure — `docs/answer-development-provenance-v1-migration.sql`
 
-**This migration must NOT be applied without explicit authorization from
-the user.** It is documented here so the exact procedure is ready when
-that authorization is given — do not run any of the following
-proactively.
+**Already applied — 2026-07-25, to the one shared Preview/Production
+database. Do not run this file again.** The steps below are kept as a
+historical record of the procedure that was followed. See "Verification
+— answer-development provenance migration" further below for the full
+read-only confirmation record.
 
 Preview and Production currently share ONE Supabase database — apply
 this file **once**, not once per environment.
@@ -362,6 +364,37 @@ this file **once**, not once per environment.
    note (Preview and Production currently share one database).
 8. Do not apply this file a second time — re-running it after a
    successful apply will error.
+
+### Verification — answer-development provenance migration
+
+Confirmed via read-only queries against the shared database on
+2026-07-25, immediately after this migration was applied:
+
+- All five Answer-Development Provenance tables exist:
+  `AnswerDevelopmentVersion`, `AnswerDevelopmentEvent`,
+  `AnswerDevelopmentArtifact`, `AnswerDevelopmentArtifactVersion`,
+  `CodeExecutionEvent`.
+- `Submission.answerProvenancePolicySnapshotJson` exists as a nullable
+  `jsonb` column (`information_schema.columns`: `data_type = jsonb`,
+  `is_nullable = YES`).
+- Both partial unique indexes on `AnswerDevelopmentArtifact` exist with
+  their correct `WHERE` clauses (confirmed via `pg_indexes.indexdef`,
+  not just `indexname`, so they are genuinely partial, not plain,
+  indexes):
+  - `AnswerDevelopmentArtifact_answer_type_key` —
+    `("answerId", "artifactType") WHERE ("answerId" IS NOT NULL)`.
+  - `AnswerDevelopmentArtifact_submission_type_key` —
+    `("submissionId", "artifactType") WHERE ("answerId" IS NULL)`.
+- All five new tables contained **zero rows** immediately after
+  migration — expected, since nothing writes to them until a student
+  attempt actually enables and uses this feature.
+- Every existing `Submission` row had
+  `answerProvenancePolicySnapshotJson IS NULL` immediately after
+  migration (`count(*) WHERE ... IS NOT NULL` returned 0) — no existing
+  submission was retroactively affected; the feature remains OFF for
+  every attempt until a lecturer explicitly enables it on a new attempt.
+
+**This migration must not be applied again.**
 
 ### Rollback — `docs/answer-development-provenance-v1-migration.sql`
 
