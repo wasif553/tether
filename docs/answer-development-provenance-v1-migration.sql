@@ -21,6 +21,16 @@
 --      CodeExecutionEvent. See prisma/schema.prisma for full field-by-
 --      field documentation of each.
 --
+-- Revised (pre-apply hardening pass, still unapplied to any environment):
+-- AnswerDevelopmentArtifact's uniqueness is now enforced by two PARTIAL
+-- unique indexes keyed on `answerId` (AnswerDevelopmentArtifact_answer_type_key
+-- / AnswerDevelopmentArtifact_submission_type_key, see section 7 below)
+-- instead of a plain 3-column (submissionId, questionId, artifactType)
+-- index — the plain form does not actually enforce uniqueness for
+-- attempt-level rows (questionId always NULL, and Postgres treats every
+-- NULL as distinct in a plain unique index). Safe to revise in place
+-- since this file has never been applied to any environment.
+--
 -- IMPORTANT — shared database: Preview and Production currently point at
 -- the SAME Supabase database (see docs/migration-ledger.md). This
 -- migration must be applied ONCE, not once per environment. Run the
@@ -203,7 +213,38 @@ CREATE UNIQUE INDEX "AnswerDevelopmentArtifact_clientRequestId_key" ON "AnswerDe
 CREATE INDEX "AnswerDevelopmentArtifact_submissionId_idx" ON "AnswerDevelopmentArtifact"("submissionId");
 CREATE INDEX "AnswerDevelopmentArtifact_answerId_idx" ON "AnswerDevelopmentArtifact"("answerId");
 CREATE INDEX "AnswerDevelopmentArtifact_questionId_idx" ON "AnswerDevelopmentArtifact"("questionId");
-CREATE UNIQUE INDEX "AnswerDevelopmentArtifact_submissionId_questionId_artifactT_key" ON "AnswerDevelopmentArtifact"("submissionId", "questionId", "artifactType");
+
+-- Race-safety hardening (Part 3) — replaces a plain 3-column
+-- (submissionId, questionId, artifactType) unique index that a
+-- --from-empty diff would otherwise emit here. That plain index would
+-- NOT actually enforce anything for attempt-level artifacts (source
+-- declarations, questionId always NULL) — Postgres treats every NULL in
+-- a plain unique index as distinct from every other NULL, so multiple
+-- attempt-level rows for the same submission+type could slip through.
+-- The two PARTIAL indexes below fix this properly: each is scoped by a
+-- WHERE clause to rows where the partitioning column (answerId) is
+-- itself non-null/null respectively, so the indexed columns
+-- (answerId/artifactType, or submissionId/artifactType) are never
+-- themselves null within their own partial index — real, fully-enforcing
+-- database-level uniqueness in both cases, not an application-level-only
+-- guarantee. See src/lib/answerDevelopmentRunner.ts
+-- (upsertAnswerDevelopmentArtifact) for how `answerId` is guaranteed
+-- non-null for every per-question artifact type before it is ever
+-- written, and prisma/schema.prisma's AnswerDevelopmentArtifact comment
+-- for the full rationale (partial indexes have no `@@unique` equivalent
+-- in Prisma's schema DSL, so this SQL file is their only representation).
+
+-- Enforce one current artifact per answer and artifact type
+-- (OUTLINE/CALCULATION_WORKING/CODE_WORKING).
+CREATE UNIQUE INDEX "AnswerDevelopmentArtifact_answer_type_key"
+ON "AnswerDevelopmentArtifact" ("answerId", "artifactType")
+WHERE "answerId" IS NOT NULL;
+
+-- Enforce one attempt-level artifact per submission and artifact type
+-- (AI_SOURCE_DECLARATION/GENERAL_SOURCE_DECLARATION).
+CREATE UNIQUE INDEX "AnswerDevelopmentArtifact_submission_type_key"
+ON "AnswerDevelopmentArtifact" ("submissionId", "artifactType")
+WHERE "answerId" IS NULL;
 
 CREATE UNIQUE INDEX "AnswerDevelopmentArtifactVersion_clientRequestId_key" ON "AnswerDevelopmentArtifactVersion"("clientRequestId");
 CREATE INDEX "AnswerDevelopmentArtifactVersion_artifactId_idx" ON "AnswerDevelopmentArtifactVersion"("artifactId");
@@ -257,6 +298,16 @@ ALTER TABLE "CodeExecutionEvent" ADD CONSTRAINT "CodeExecutionEvent_questionId_f
 
 -- 4. Every existing Submission row has the new column NULL:
 -- SELECT count(*) FROM "Submission" WHERE "answerProvenancePolicySnapshotJson" IS NOT NULL; -- expect 0 immediately after migration
+
+-- 5. Both partial unique indexes on AnswerDevelopmentArtifact exist
+--    (Part 3 race-safety hardening) — expect exactly 2 rows:
+-- SELECT indexname, indexdef FROM pg_indexes
+--   WHERE tablename = 'AnswerDevelopmentArtifact'
+--   AND indexname IN ('AnswerDevelopmentArtifact_answer_type_key', 'AnswerDevelopmentArtifact_submission_type_key')
+--   ORDER BY indexname;
+-- Each indexdef should show its own WHERE clause
+-- ("WHERE (\"answerId\" IS NOT NULL)" / "WHERE (\"answerId\" IS NULL)")
+-- confirming Postgres registered them as PARTIAL indexes, not plain ones.
 
 -- ============================================================================
 -- Legacy compatibility and in-progress attempts

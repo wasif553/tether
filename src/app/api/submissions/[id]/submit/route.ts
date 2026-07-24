@@ -10,7 +10,7 @@ import { resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
 import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { endExamAttemptSessionsForSubmission } from "@/lib/examAttemptSessionRunner";
 import { parseAnswerProvenancePolicy, isAnswerProvenanceEnabled } from "@/lib/answerProvenancePolicy";
-import { isSourceDeclarationSatisfied, createFinalDevelopmentRecordsForSubmission } from "@/lib/answerDevelopmentRunner";
+import { isSourceDeclarationSatisfied, createFinalDevelopmentRecordsWithTx } from "@/lib/answerDevelopmentRunner";
 
 function studentSubmitResponse(submission: {
   id: string;
@@ -31,6 +31,9 @@ function studentSubmitResponse(submission: {
   };
 }
 
+/** Thrown inside the finalisation transaction when another request has already finalized the submission — never a real failure, just routes to the same ALREADY_FINALIZED response as the P2025 fallback below. */
+class AlreadyFinalizedError extends Error {}
+
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -46,13 +49,16 @@ export async function POST(
     const body = await req.json().catch(() => ({}));
     const systemAutoSubmit = body?.systemAutoSubmit === true;
 
-    // --- Reads: submission + answers + exam + questions, all in one
-    // query, all before any transaction. Grading is computed entirely
-    // from this data in memory — the transaction below contains writes
-    // only, no reads, so it never holds a lock waiting on a read.
+    // --- Reads outside any transaction: submission + exam + questions.
+    // Deadline/declaration gates and the effective question set are all
+    // decided from this snapshot. Answers themselves are re-read FRESH
+    // inside the transaction below (see "final checkpoints exactly match
+    // the authoritative submitted answers" — grading and provenance must
+    // use identical, transaction-time data, never a possibly-stale outer
+    // read that a concurrent autosave could have already superseded).
     const submission = await prisma.submission.findUnique({
       where: { id },
-      include: { exam: { include: { questions: true } }, answers: true },
+      include: { exam: { include: { questions: true } } },
     });
 
     if (!submission || submission.studentId !== session.user.id) {
@@ -109,8 +115,6 @@ export async function POST(
       }
     }
 
-    const answersByQuestion = new Map(submission.answers.map((a) => [a.questionId, a]));
-
     // Question Pools v1 — see docs/question-pools-v1.md. Grade only the
     // question set this submission was actually given: when pools are
     // active, that's the persisted selected subset, not every question
@@ -118,67 +122,121 @@ export async function POST(
     // question they were never shown, and totalScore/max-possible-marks
     // only ever reflect their own selected set. Falls back to the full
     // exam question set unchanged when pools aren't active.
-    const effectiveQuestionIds = new Set(
-      resolveEffectiveQuestionIds({
-        examQuestionIds: submission.exam.questions.map((q) => q.id),
-        stored: submission.questionOrderJson,
-        questionPoolsActive: questionPoolsActive(settings),
-      }),
-    );
-    const questionsToGrade = submission.exam.questions.filter((q) => effectiveQuestionIds.has(q.id));
-
-    let autoScore = 0;
-    let hasEssay = false;
-    const answerOps: Prisma.PrismaPromise<unknown>[] = [];
-
-    for (const question of questionsToGrade) {
-      if (question.type === "ESSAY") {
-        hasEssay = true;
-        continue;
-      }
-
-      const answer = answersByQuestion.get(question.id);
-      const correct =
-        !!answer?.response &&
-        !!question.correctAnswer &&
-        answer.response.trim().toLowerCase() === question.correctAnswer.trim().toLowerCase();
-      const score = correct ? question.points : 0;
-      autoScore += score;
-
-      if (answer) {
-        answerOps.push(
-          prisma.answer.update({ where: { id: answer.id }, data: { score, isCorrect: correct } }),
-        );
-      } else {
-        answerOps.push(
-          prisma.answer.create({
-            data: { submissionId: id, questionId: question.id, score, isCorrect: correct },
-          }),
-        );
-      }
-    }
-
-    const now = new Date();
-    // The `status: "IN_PROGRESS"` guard makes this update a no-op match
-    // (Prisma throws P2025, caught below) if another request already
-    // finalized the submission between the read above and this write —
-    // belt-and-suspenders alongside the early idempotency check above,
-    // without adding a read inside the transaction.
-    const submissionUpdate = prisma.submission.update({
-      where: { id, status: "IN_PROGRESS" },
-      data: {
-        status: hasEssay ? "SUBMITTED" : "GRADED",
-        submittedAt: now,
-        gradedAt: hasEssay ? null : now,
-        totalScore: hasEssay ? null : autoScore,
-      },
+    const effectiveQuestionIds = resolveEffectiveQuestionIds({
+      examQuestionIds: submission.exam.questions.map((q) => q.id),
+      stored: submission.questionOrderJson,
+      questionPoolsActive: questionPoolsActive(settings),
     });
+    const effectiveQuestionIdSet = new Set(effectiveQuestionIds);
+    const questionsToGrade = submission.exam.questions.filter((q) => effectiveQuestionIdSet.has(q.id));
 
-    // --- Writes only: every operation in this array is a write. ---
-    console.log("[submit] starting transaction for submission:", id);
-    const results = await prisma.$transaction([...answerOps, submissionUpdate]);
-    console.log("[submit] transaction complete for submission:", id);
-    const result = results[results.length - 1] as Awaited<typeof submissionUpdate>;
+    // --- Everything below (grading, submission-status update, and — when
+    // provenance is enabled — the final answer-development checkpoints/
+    // events) runs inside ONE transaction, guarded by the same
+    // submission-scoped advisory lock the rest of this feature uses.
+    // Hardening (Part 1, "final submission" spec): a provenance write
+    // failure here throws, which rolls back grading and the status
+    // update too — the submission is left genuinely still IN_PROGRESS,
+    // never "marked successfully submitted" alongside a lost checkpoint.
+    // Autosaved Answer.response rows are never touched by a rollback of
+    // THIS transaction (they were written by the separate, independent
+    // autosave/checkpoint routes already), so a retry always has the
+    // student's latest work available. No response is ever returned to
+    // the client until this whole transaction has resolved.
+    let hasEssay = false;
+    let autoScore = 0;
+    let finalizedSubmission: Awaited<ReturnType<typeof prisma.submission.update>>;
+    try {
+      finalizedSubmission = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}))`;
+
+        // Re-check status INSIDE the transaction — belt-and-suspenders
+        // against a genuine race between the outer read above and lock
+        // acquisition (two near-simultaneous submit requests: the advisory
+        // lock serializes them, and the loser must see the winner's
+        // already-committed status here, never re-grade or re-checkpoint).
+        const fresh = await tx.submission.findUnique({ where: { id }, select: { status: true } });
+        if (!fresh || fresh.status !== "IN_PROGRESS") {
+          throw new AlreadyFinalizedError();
+        }
+
+        // Fresh, transaction-time answers — the SAME data used for both
+        // grading and the final provenance checkpoints below, so the two
+        // can never disagree with each other or with what's actually
+        // stored.
+        const freshAnswers = await tx.answer.findMany({ where: { submissionId: id } });
+        const answersByQuestion = new Map(freshAnswers.map((a) => [a.questionId, a]));
+
+        autoScore = 0;
+        hasEssay = false;
+        for (const question of questionsToGrade) {
+          if (question.type === "ESSAY") {
+            hasEssay = true;
+            continue;
+          }
+          const answer = answersByQuestion.get(question.id);
+          const correct =
+            !!answer?.response &&
+            !!question.correctAnswer &&
+            answer.response.trim().toLowerCase() === question.correctAnswer.trim().toLowerCase();
+          const score = correct ? question.points : 0;
+          autoScore += score;
+
+          if (answer) {
+            await tx.answer.update({ where: { id: answer.id }, data: { score, isCorrect: correct } });
+          } else {
+            const created = await tx.answer.create({
+              data: { submissionId: id, questionId: question.id, score, isCorrect: correct },
+            });
+            answersByQuestion.set(question.id, created);
+          }
+        }
+
+        const now = new Date();
+        const updatedSubmission = await tx.submission.update({
+          where: { id, status: "IN_PROGRESS" },
+          data: {
+            status: hasEssay ? "SUBMITTED" : "GRADED",
+            submittedAt: now,
+            gradedAt: hasEssay ? null : now,
+            totalScore: hasEssay ? null : autoScore,
+          },
+        });
+
+        // Answer-Development Provenance v1 — see
+        // docs/answer-development-provenance-v1.md. AWAITED, inside this
+        // same transaction: a failure here throws, which rolls back
+        // grading and the status update above too. No-ops entirely when
+        // the policy is OFF for this attempt — legacy/OFF behaviour is
+        // completely unchanged.
+        if (isAnswerProvenanceEnabled(provenancePolicy)) {
+          await createFinalDevelopmentRecordsWithTx(
+            tx,
+            provenancePolicy,
+            id,
+            effectiveQuestionIds,
+            [...answersByQuestion.values()].map((a) => ({ id: a.id, questionId: a.questionId, response: a.response })),
+          );
+        }
+
+        return updatedSubmission;
+      });
+    } catch (err) {
+      if (err instanceof AlreadyFinalizedError || (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025")) {
+        const current = await prisma.submission.findUnique({
+          where: { id },
+          include: { exam: { select: { marksReleasedAt: true } } },
+        });
+        if (current) {
+          return NextResponse.json({ ...studentSubmitResponse(current), code: "ALREADY_FINALIZED" });
+        }
+      }
+      // A real grading/provenance failure: the transaction rolled back in
+      // full — the submission is still IN_PROGRESS, autosaved answers are
+      // untouched, and the student can safely retry. Never partially
+      // applied.
+      throw err;
+    }
 
     if (!hasEssay) {
       pushGradeToCanvas(id).catch(console.error);
@@ -188,18 +246,6 @@ export async function POST(
     // fire-and-forget: never blocks or affects the submission itself.
     recordSimpleActivityEvent({ submissionId: id, eventType: "ATTEMPT_SUBMITTED" }).catch(() => {});
     endExamAttemptSessionsForSubmission(id).catch(() => {});
-
-    // Answer-Development Provenance v1 — see
-    // docs/answer-development-provenance-v1.md. Fire-and-forget, AFTER the
-    // grading transaction has already committed: a provenance write
-    // failure here must never lose the student's final answer or affect
-    // the (already-finalized) submission/grade. No-ops immediately if the
-    // policy is OFF for this attempt.
-    if (isAnswerProvenanceEnabled(provenancePolicy)) {
-      createFinalDevelopmentRecordsForSubmission(id, [...effectiveQuestionIds]).catch((err) => {
-        console.error("[submit] createFinalDevelopmentRecordsForSubmission failed", err);
-      });
-    }
 
     // Academic Integrity Network Evidence v1 — compare IP with EXAM_START
     // to detect network change. Fire-and-forget; never blocks submission.
@@ -243,12 +289,15 @@ export async function POST(
       }).catch(() => {/* never block submit */});
     }
 
-    return NextResponse.json(studentSubmitResponse({ ...result, exam: submission.exam }));
+    return NextResponse.json(studentSubmitResponse({ ...finalizedSubmission, exam: submission.exam }));
   } catch (error) {
     console.error("[submit] error:", error);
     // A P2025 here means another concurrent request already finalized
     // this submission — that's a benign race, not a failure; return the
-    // current (already finalized) submission instead of a 500.
+    // current (already finalized) submission instead of a 500. (The
+    // primary handling for this race is now inside the transaction above
+    // — this remains as a defensive fallback for any P2025 raised outside
+    // it, e.g. from the deadline-check IntegrityEvent write.)
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2025"

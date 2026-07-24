@@ -6,8 +6,11 @@ import {
   isPastedTextSubstantiallyReplaced,
   decideCheckpoint,
   shouldSuppressForCapacity,
+  computeCapacityLimits,
   computeProcessObservations,
   toStudentSafeVersionSummary,
+  validateDevelopmentEventMetadata,
+  EXEMPT_CHANGE_TYPES,
   ALWAYS_PRESERVED_CHANGE_TYPES,
   isValidChangeType,
   isValidCheckpointSource,
@@ -196,14 +199,102 @@ describe("decideCheckpoint", () => {
   });
 });
 
-describe("shouldSuppressForCapacity (Part 11 retention rule)", () => {
-  it("suppresses only PERIODIC_CHECKPOINT once the max is reached", () => {
-    expect(shouldSuppressForCapacity("PERIODIC_CHECKPOINT", 40, policy)).toBe(true);
-    expect(shouldSuppressForCapacity("PERIODIC_CHECKPOINT", 39, policy)).toBe(false);
+describe("computeCapacityLimits / shouldSuppressForCapacity (Part 11 hardened retention rule)", () => {
+  // policy.versionMaximumPerQuestion === 40 (see the shared `policy` above).
+  // developmentalMax = 40 - 1 = 39 (one slot reserved for FINAL_SUBMISSION).
+  // lowPriorityMax = floor(39 * 0.5) = 19.
+  it("documents the effective hard maximum and reserved final slot", () => {
+    const limits = computeCapacityLimits(policy);
+    expect(limits.developmentalMax).toBe(39);
+    expect(limits.lowPriorityMax).toBe(19);
   });
-  it("never suppresses always-preserved change types, regardless of count", () => {
-    for (const changeType of ALWAYS_PRESERVED_CHANGE_TYPES) {
-      expect(shouldSuppressForCapacity(changeType, 1000, policy)).toBe(false);
+
+  it("periodic checkpoints are suppressed once the LOW-priority sub-budget is reached — well before the hard ceiling", () => {
+    expect(shouldSuppressForCapacity("PERIODIC_CHECKPOINT", { developmentalCount: 19, lowPriorityCount: 19 }, policy)).toBe(true);
+    expect(shouldSuppressForCapacity("PERIODIC_CHECKPOINT", { developmentalCount: 18, lowPriorityCount: 18 }, policy)).toBe(false);
+  });
+
+  it("manual checkpoints cannot bypass the limit — bounded by the same low-priority sub-budget as periodic", () => {
+    expect(shouldSuppressForCapacity("MANUAL_STUDENT_CHECKPOINT", { developmentalCount: 19, lowPriorityCount: 19 }, policy)).toBe(true);
+    expect(shouldSuppressForCapacity("MANUAL_STUDENT_CHECKPOINT", { developmentalCount: 5, lowPriorityCount: 5 }, policy)).toBe(false);
+  });
+
+  it("pre-submission checkpoints are also low-priority", () => {
+    expect(shouldSuppressForCapacity("PRE_SUBMISSION_CHECKPOINT", { developmentalCount: 19, lowPriorityCount: 19 }, policy)).toBe(true);
+  });
+
+  it("repeated paste checkpoints cannot grow without bound — eventually suppressed once the HARD developmental ceiling is reached", () => {
+    // Below the hard ceiling, paste checkpoints are never suppressed even
+    // when every low-priority slot is already used (preferential retention).
+    expect(shouldSuppressForCapacity("POST_PASTE_CHECKPOINT", { developmentalCount: 38, lowPriorityCount: 19 }, policy)).toBe(false);
+    // At the hard ceiling, even paste checkpoints are suppressed.
+    expect(shouldSuppressForCapacity("POST_PASTE_CHECKPOINT", { developmentalCount: 39, lowPriorityCount: 19 }, policy)).toBe(true);
+  });
+
+  it("repeated substantial edits cannot grow without bound — same hard ceiling as paste", () => {
+    expect(shouldSuppressForCapacity("SUBSTANTIAL_EDIT", { developmentalCount: 38, lowPriorityCount: 0 }, policy)).toBe(false);
+    expect(shouldSuppressForCapacity("SUBSTANTIAL_EDIT", { developmentalCount: 39, lowPriorityCount: 0 }, policy)).toBe(true);
+  });
+
+  it("preferentially retains paste/substantial-edit over periodic — paste still allowed well past where periodic would already be suppressed", () => {
+    const counts = { developmentalCount: 25, lowPriorityCount: 19 }; // periodic/manual/pre-submission budget already exhausted
+    expect(shouldSuppressForCapacity("PERIODIC_CHECKPOINT", counts, policy)).toBe(true);
+    expect(shouldSuppressForCapacity("POST_PASTE_CHECKPOINT", counts, policy)).toBe(false);
+    expect(shouldSuppressForCapacity("SUBSTANTIAL_EDIT", counts, policy)).toBe(false);
+  });
+
+  it("INITIAL_TEXT is always preserved, regardless of any count", () => {
+    expect(shouldSuppressForCapacity("INITIAL_TEXT", { developmentalCount: 1000, lowPriorityCount: 1000 }, policy)).toBe(false);
+  });
+
+  it("FINAL_SUBMISSION is always created even when normal developmental capacity is fully reached — the reserved slot", () => {
+    expect(shouldSuppressForCapacity("FINAL_SUBMISSION", { developmentalCount: 39, lowPriorityCount: 19 }, policy)).toBe(false);
+    expect(shouldSuppressForCapacity("FINAL_SUBMISSION", { developmentalCount: 1000, lowPriorityCount: 1000 }, policy)).toBe(false);
+  });
+
+  it("EXEMPT_CHANGE_TYPES / ALWAYS_PRESERVED_CHANGE_TYPES alias stays in sync", () => {
+    expect(new Set(EXEMPT_CHANGE_TYPES)).toEqual(new Set(ALWAYS_PRESERVED_CHANGE_TYPES));
+    expect(EXEMPT_CHANGE_TYPES.has("INITIAL_TEXT")).toBe(true);
+    expect(EXEMPT_CHANGE_TYPES.has("FINAL_SUBMISSION")).toBe(true);
+    expect(EXEMPT_CHANGE_TYPES.has("PERIODIC_CHECKPOINT")).toBe(false);
+  });
+
+  it("total stored rows per question can never exceed versionMaximumPerQuestion (developmentalMax + 1 reserved final slot)", () => {
+    const limits = computeCapacityLimits(policy);
+    expect(limits.developmentalMax + 1).toBe(policy.versionMaximumPerQuestion);
+  });
+});
+
+describe("validateDevelopmentEventMetadata (Part 4 privacy hardening)", () => {
+  it("FIRST_KEYSTROKE accepts no fields at all — timestamp only, via serverReceivedAt", () => {
+    expect(validateDevelopmentEventMetadata("FIRST_KEYSTROKE", {}).success).toBe(true);
+    expect(validateDevelopmentEventMetadata("FIRST_KEYSTROKE", { anything: "x" }).success).toBe(false);
+  });
+
+  it("PASTE_ATTEMPT_BLOCKED never accepts a text/clipboard field", () => {
+    expect(validateDevelopmentEventMetadata("PASTE_ATTEMPT_BLOCKED", { attemptedInsertedChars: 500 }).success).toBe(true);
+    expect(validateDevelopmentEventMetadata("PASTE_ATTEMPT_BLOCKED", { clipboardText: "secret pasted content" }).success).toBe(false);
+    expect(validateDevelopmentEventMetadata("PASTE_ATTEMPT_BLOCKED", { text: "anything" }).success).toBe(false);
+  });
+
+  it("PASTE_INSERTED only accepts numeric size/count fields, never text", () => {
+    expect(validateDevelopmentEventMetadata("PASTE_INSERTED", { insertedChars: 200, resultingLength: 500 }).success).toBe(true);
+    expect(validateDevelopmentEventMetadata("PASTE_INSERTED", { insertedChars: 200, pastedText: "leaked" }).success).toBe(false);
+    // insertedChars is required for this event type.
+    expect(validateDevelopmentEventMetadata("PASTE_INSERTED", {}).success).toBe(false);
+  });
+
+  it("every event type has a schema, and unknown keys are rejected everywhere", () => {
+    for (const eventType of [
+      "FIRST_MEANINGFUL_TEXT",
+      "SUBSTANTIAL_EDIT",
+      "LARGE_DELETION",
+      "MAJOR_REWRITE",
+      "OUTLINE_CREATED",
+      "SOURCE_DECLARATION_CREATED",
+      "FINAL_ANSWER_SUBMITTED",
+    ] as const) {
+      expect(validateDevelopmentEventMetadata(eventType, { unexpectedField: "nope" }).success).toBe(false);
     }
   });
 });

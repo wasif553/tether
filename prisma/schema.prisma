@@ -1766,15 +1766,28 @@ model AnswerDevelopmentArtifact {
 
   versions AnswerDevelopmentArtifactVersion[]
 
-  // Postgres unique indexes treat NULL as distinct per row, so this
-  // constraint fully enforces "one current row per question+type" only
-  // for the non-null-questionId case (OUTLINE/CALCULATION_WORKING/
-  // CODE_WORKING); the questionId-null case (attempt-level source
-  // declarations) is de-duplicated at the application layer (findFirst-
-  // then-update inside a transaction) in src/lib/answerDevelopmentRunner.ts
-  // — documented simplification, see docs/answer-development-provenance-v1.md
-  // "Known limitations".
-  @@unique([submissionId, questionId, artifactType])
+  // Part 3 hardening (see docs/answer-development-provenance-v1-migration.sql)
+  // — real uniqueness is enforced at the DATABASE level by two partial
+  // unique indexes keyed on `answerId` (the actual discriminator, not
+  // `questionId`), NOT representable in Prisma's schema DSL (partial/
+  // filtered unique indexes have no `@@unique` equivalent here) and so
+  // deliberately absent from this model as a `@@unique` line:
+  //   AnswerDevelopmentArtifact_answer_type_key
+  //     ON ("answerId", "artifactType") WHERE "answerId" IS NOT NULL
+  //   AnswerDevelopmentArtifact_submission_type_key
+  //     ON ("submissionId", "artifactType") WHERE "answerId" IS NULL
+  // Every per-question artifact type (OUTLINE/CALCULATION_WORKING/
+  // CODE_WORKING) is guaranteed a real, non-null `answerId` before this
+  // row is created (see upsertAnswerDevelopmentArtifact in
+  // src/lib/answerDevelopmentRunner.ts, which upserts the Answer row
+  // first); attempt-level source declarations always have `answerId:
+  // null`. Because the partitioned columns (`submissionId`/`artifactType`)
+  // are themselves never null, Postgres's "NULL is distinct" rule for
+  // plain unique indexes does not apply here — both indexes are fully
+  // enforcing, not an application-level-only guarantee. Application code
+  // additionally handles a `P2002` unique-violation race (two concurrent
+  // writes) by recovering into an update rather than relying on a
+  // pre-check alone — see that same file.
   @@index([submissionId])
   @@index([answerId])
   @@index([questionId])

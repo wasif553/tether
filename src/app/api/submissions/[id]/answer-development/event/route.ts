@@ -15,18 +15,22 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { DEVELOPMENT_EVENT_TYPES, isValidDevelopmentEventType } from "@/lib/answerDevelopment";
+import { DEVELOPMENT_EVENT_TYPES, isValidDevelopmentEventType, validateDevelopmentEventMetadata } from "@/lib/answerDevelopment";
 import { DEVELOPMENT_EVENT_RATE_LIMIT_WINDOW_MS } from "@/lib/answerDevelopmentThresholds";
 import { isWithinDevelopmentEventRateLimit } from "@/lib/answerProvenancePolicy";
 import { findMostRecentSessionId } from "@/lib/examAttemptSessionRunner";
 import { AnswerDevelopmentError, loadValidatedStudentContext, recordDevelopmentEvent } from "@/lib/answerDevelopmentRunner";
 
+// The outer envelope only validates shape/type — `metadata`'s actual
+// permitted fields are enforced per-eventType by
+// validateDevelopmentEventMetadata() below (Part 4 privacy hardening: a
+// discriminated strict schema per event type, not arbitrary JSON).
 const eventSchema = z.object({
   eventType: z.enum(DEVELOPMENT_EVENT_TYPES),
   questionId: z.string().optional(),
   clientRequestId: z.string().max(100).optional(),
   clientElapsedMs: z.number().int().nonnegative().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
+  metadata: z.unknown().optional(),
 });
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -43,6 +47,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
   if (!isValidDevelopmentEventType(parsed.data.eventType)) {
     return NextResponse.json({ error: "Invalid eventType" }, { status: 400 });
+  }
+  const metadataValidation = validateDevelopmentEventMetadata(parsed.data.eventType, parsed.data.metadata);
+  if (!metadataValidation.success) {
+    return NextResponse.json({ error: `Invalid metadata for ${parsed.data.eventType}: ${metadataValidation.error}` }, { status: 400 });
   }
 
   let context;
@@ -82,7 +90,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     eventType: parsed.data.eventType,
     clientRequestId: parsed.data.clientRequestId?.trim() || null,
     clientElapsedMs: parsed.data.clientElapsedMs ?? null,
-    metadata: parsed.data.metadata ?? null,
+    metadata: metadataValidation.data,
   });
 
   return NextResponse.json({ ok: true, eventId: result.id, replay: "replay" in result }, { status: "replay" in result ? 200 : 201 });

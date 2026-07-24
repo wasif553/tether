@@ -11,6 +11,7 @@
  * grades, flag misconduct, require oral verification, or change
  * submission status.
  */
+import { z } from "zod";
 import { diffAnswerText, type DiffResult } from "@/lib/answerDevelopmentDiff";
 import type { AnswerProvenancePolicy } from "@/lib/answerProvenancePolicy";
 import {
@@ -43,15 +44,44 @@ export function isValidChangeType(value: string): value is ChangeType {
   return (CHANGE_TYPES as readonly string[]).includes(value);
 }
 
-/** Change types that are ALWAYS preserved, never suppressed by the per-question version cap (Part 11) — only PERIODIC_CHECKPOINT is ever capacity-limited. */
-export const ALWAYS_PRESERVED_CHANGE_TYPES: ReadonlySet<ChangeType> = new Set([
-  "INITIAL_TEXT",
-  "SUBSTANTIAL_EDIT",
-  "POST_PASTE_CHECKPOINT",
-  "PRE_SUBMISSION_CHECKPOINT",
-  "FINAL_SUBMISSION",
+/**
+ * Retention tiers (Part 11 hardening) — `answerVersionMaximumPerQuestion`
+ * is a REAL, enforced total-storage bound per question, not just a limit
+ * on routine periodic checkpoints. Every changeType falls into exactly
+ * one tier:
+ *
+ * - EXEMPT: never suppressed, never counted against the developmental
+ *   budget below. INITIAL_TEXT can only ever exist once per question (it
+ *   is only created when no prior version exists, so it always fires at
+ *   developmentalCount === 0); FINAL_SUBMISSION can only ever exist once
+ *   per question (created exactly once, at actual exam submission). Both
+ *   are therefore inherently bounded to exactly one row each — "exempt"
+ *   does not mean "unbounded," it means "structurally can't repeat."
+ * - HIGH priority (preferentially retained): SUBSTANTIAL_EDIT,
+ *   POST_PASTE_CHECKPOINT. Allowed up to the full developmental budget.
+ * - LOW priority (suppressed first): PERIODIC_CHECKPOINT (covers both
+ *   plain periodic AND navigation-triggered checkpoints — both use this
+ *   changeType, see decideCheckpoint), MANUAL_STUDENT_CHECKPOINT (manual
+ *   checkpoints cannot bypass the limit), PRE_SUBMISSION_CHECKPOINT.
+ *   Bounded to a SMALLER sub-budget so low-priority activity can never
+ *   crowd out room for high-priority checkpoints.
+ *
+ * See computeCapacityLimits() for the exact numbers, and
+ * shouldSuppressForCapacity() for the decision function.
+ */
+export const EXEMPT_CHANGE_TYPES: ReadonlySet<ChangeType> = new Set(["INITIAL_TEXT", "FINAL_SUBMISSION"]);
+export const HIGH_PRIORITY_CHANGE_TYPES: ReadonlySet<ChangeType> = new Set(["SUBSTANTIAL_EDIT", "POST_PASTE_CHECKPOINT"]);
+export const LOW_PRIORITY_CHANGE_TYPES: ReadonlySet<ChangeType> = new Set([
+  "PERIODIC_CHECKPOINT",
   "MANUAL_STUDENT_CHECKPOINT",
+  "PRE_SUBMISSION_CHECKPOINT",
 ]);
+
+/** @deprecated kept only as an alias for EXEMPT_CHANGE_TYPES — prefer the tier constants above, which reflect the real (non-bypassable) capacity model. */
+export const ALWAYS_PRESERVED_CHANGE_TYPES = EXEMPT_CHANGE_TYPES;
+
+/** At most this fraction of the developmental budget (see computeCapacityLimits) may ever be consumed by LOW-priority change types — guarantees headroom for HIGH-priority checkpoints even under sustained periodic/manual/pre-submission activity. */
+export const LOW_PRIORITY_BUDGET_SHARE = 0.5;
 
 export const CHECKPOINT_SOURCES = ["AUTOSAVE", "TIMER", "PASTE", "NAVIGATION", "SUBMISSION", "STUDENT_ACTION"] as const;
 export type CheckpointSource = (typeof CHECKPOINT_SOURCES)[number];
@@ -118,6 +148,83 @@ export const DEFAULT_EVENT_LEVEL_FOR_TYPE: Record<DevelopmentEventType, EventLev
   SOURCE_DECLARATION_UPDATED: "CONTEXT",
   FINAL_ANSWER_SUBMITTED: "INFORMATIONAL",
 };
+
+// ---------------------------------------------------------------------------
+// Discriminated event-metadata schemas (Part 4 privacy hardening) — each
+// event type has its OWN strict schema, not arbitrary JSON. `.strict()`
+// rejects any unrecognised key outright, so a client can never smuggle a
+// raw clipboard-text field, keystroke sequence, or any other field a
+// given event type was never meant to carry. In particular:
+// PASTE_ATTEMPT_BLOCKED and PASTE_INSERTED both only ever accept small
+// numeric counts (never text); FIRST_KEYSTROKE accepts NO fields at all
+// (Part 3 — "capture first-keystroke as a timestamp only," and the
+// timestamp itself is always serverReceivedAt, never client-supplied
+// metadata).
+// ---------------------------------------------------------------------------
+
+const emptyMetadataSchema = z.object({}).strict();
+const versionedMetadataSchema = z.object({ version: z.number().int().positive().optional() }).strict();
+const exitStatusMetadataSchema = z.object({ exitStatus: z.string().max(50).optional() }).strict();
+
+export const DEVELOPMENT_EVENT_METADATA_SCHEMAS: Record<DevelopmentEventType, z.ZodTypeAny> = {
+  FIRST_KEYSTROKE: emptyMetadataSchema,
+  FIRST_MEANINGFUL_TEXT: emptyMetadataSchema,
+  SUBSTANTIAL_EDIT: z
+    .object({ charactersAdded: z.number().int().nonnegative().optional(), charactersRemoved: z.number().int().nonnegative().optional() })
+    .strict(),
+  LARGE_DELETION: z.object({ charactersRemoved: z.number().int().nonnegative().optional() }).strict(),
+  MAJOR_REWRITE: z.object({ replacedRatio: z.number().min(0).max(1).optional() }).strict(),
+  // Deliberately NO text/content field of any kind — a blocked paste
+  // never stores clipboard contents (Part 3).
+  PASTE_ATTEMPT_BLOCKED: z.object({ attemptedInsertedChars: z.number().int().nonnegative().optional() }).strict(),
+  // Only size/count metadata — the actual inserted text is never stored
+  // here (it lives, naturally, in the resulting AnswerDevelopmentVersion
+  // checkpoint text, never duplicated into event metadata).
+  PASTE_INSERTED: z
+    .object({
+      insertedChars: z.number().int().nonnegative(),
+      replacedSelectionLength: z.number().int().nonnegative().optional(),
+      resultingLength: z.number().int().nonnegative().optional(),
+    })
+    .strict(),
+  PASTED_TEXT_SUBSTANTIALLY_REPLACED: z
+    .object({ pastedLength: z.number().int().nonnegative().optional(), replacedRatio: z.number().min(0).max(1).optional() })
+    .strict(),
+  OUTLINE_CREATED: emptyMetadataSchema,
+  OUTLINE_UPDATED: versionedMetadataSchema,
+  CALCULATION_WORKING_CREATED: emptyMetadataSchema,
+  CALCULATION_WORKING_UPDATED: versionedMetadataSchema,
+  CODE_WORKING_CREATED: emptyMetadataSchema,
+  CODE_WORKING_UPDATED: versionedMetadataSchema,
+  CODE_RUN_REQUESTED: exitStatusMetadataSchema,
+  CODE_RUN_COMPLETED: exitStatusMetadataSchema,
+  CODE_RUN_FAILED: exitStatusMetadataSchema,
+  TEST_RUN_COMPLETED: z
+    .object({ testsRun: z.number().int().nonnegative().optional(), testsPassed: z.number().int().nonnegative().optional() })
+    .strict(),
+  SOURCE_DECLARATION_CREATED: z.object({ artifactType: z.string().max(50).optional(), version: z.number().int().positive().optional() }).strict(),
+  SOURCE_DECLARATION_UPDATED: z.object({ artifactType: z.string().max(50).optional(), version: z.number().int().positive().optional() }).strict(),
+  FINAL_ANSWER_SUBMITTED: z.object({ finalCheckpointOutcome: z.string().max(50).optional() }).strict(),
+};
+
+export type DevelopmentEventMetadataValidation =
+  | { success: true; data: Record<string, unknown> }
+  | { success: false; error: string };
+
+/**
+ * The one place event metadata is ever validated against its event
+ * type's own discriminated strict schema — called from BOTH the event
+ * route (primary enforcement, rejects with 400) and, defensively, the
+ * runner itself (never trusts a single application-level check alone).
+ */
+export function validateDevelopmentEventMetadata(eventType: DevelopmentEventType, metadata: unknown): DevelopmentEventMetadataValidation {
+  const schema = DEVELOPMENT_EVENT_METADATA_SCHEMAS[eventType];
+  const result = schema.safeParse(metadata ?? {});
+  if (!result.success) {
+    return { success: false, error: result.error.issues.map((i) => i.message).join("; ") };
+  }
+  return { success: true, data: result.data as Record<string, unknown> };
+}
 
 export const ARTIFACT_TYPES = ["OUTLINE", "CALCULATION_WORKING", "CODE_WORKING", "AI_SOURCE_DECLARATION", "GENERAL_SOURCE_DECLARATION"] as const;
 export type ArtifactType = (typeof ARTIFACT_TYPES)[number];
@@ -255,14 +362,80 @@ export function decideCheckpoint(input: CheckpointDecisionInput): CheckpointDeci
   return { shouldCreate: false, changeType: null, diff, classification, reasonCode: "NOT_ENOUGH_CHANGE_YET" };
 }
 
-/** Part 11 — capacity rule: ONLY routine periodic checkpoints are ever suppressed by the per-question maximum; every other change type is always preserved (never destructive deletion of existing rows — see docs "Known limitations"). */
+export type CapacityLimits = {
+  /** The effective hard maximum for TOTAL developmental (non-exempt) rows for one question — always `versionMaximumPerQuestion - 1`, i.e. the configured maximum MINUS the one slot permanently reserved for the eventual FINAL_SUBMISSION row. */
+  developmentalMax: number;
+  /** The smaller sub-budget LOW-priority change types (periodic/navigation, manual, pre-submission) are held to — always <= developmentalMax, guaranteeing headroom for HIGH-priority (substantial-edit/paste) checkpoints. */
+  lowPriorityMax: number;
+};
+
+/**
+ * Computes the effective, enforced capacity limits from the policy's
+ * configured `versionMaximumPerQuestion` (Part 11 hardening — "clearly
+ * document the effective hard maximum and reserved final slot"):
+ *
+ *   effective hard maximum (total rows ever stored for one question)
+ *     = versionMaximumPerQuestion
+ *   reserved final slot
+ *     = exactly 1 (never consumed by any developmental checkpoint)
+ *   developmental budget (INITIAL_TEXT + every non-exempt checkpoint)
+ *     = versionMaximumPerQuestion - 1
+ *   low-priority sub-budget (periodic/navigation + manual + pre-submission)
+ *     = floor(developmental budget * LOW_PRIORITY_BUDGET_SHARE)
+ *
+ * A question can therefore never accumulate more than
+ * `versionMaximumPerQuestion` AnswerDevelopmentVersion rows in total:
+ * at most `developmentalMax` developmental rows (INITIAL_TEXT counts as
+ * the first of these, consumed naturally at count 0) plus exactly one
+ * FINAL_SUBMISSION row, which is always guaranteed room because it is
+ * never counted against or blocked by the developmental budget.
+ */
+export function computeCapacityLimits(policy: Pick<AnswerProvenancePolicy, "versionMaximumPerQuestion">): CapacityLimits {
+  const developmentalMax = Math.max(1, policy.versionMaximumPerQuestion - 1);
+  const lowPriorityMax = Math.max(1, Math.floor(developmentalMax * LOW_PRIORITY_BUDGET_SHARE));
+  return { developmentalMax, lowPriorityMax };
+}
+
+export type CapacityCounts = {
+  /** Count of existing rows for this question with a non-exempt changeType (i.e. everything except INITIAL_TEXT/FINAL_SUBMISSION). */
+  developmentalCount: number;
+  /** Count of existing rows for this question with a LOW-priority changeType (subset of developmentalCount). */
+  lowPriorityCount: number;
+};
+
+/**
+ * Part 11 hardening — a REAL, enforced total-storage bound, not just a
+ * limit on routine periodic checkpoints:
+ *
+ * - EXEMPT change types (INITIAL_TEXT, FINAL_SUBMISSION) are never
+ *   suppressed — each can only ever occur once per question regardless.
+ * - Once `developmentalCount` reaches `developmentalMax`, EVERY
+ *   non-exempt changeType is suppressed, including SUBSTANTIAL_EDIT and
+ *   POST_PASTE_CHECKPOINT — "repeated paste checkpoints"/"repeated
+ *   substantial edits" cannot grow without bound.
+ * - Below that hard ceiling, LOW-priority change types (periodic/
+ *   navigation, manual, pre-submission — "manual checkpoints cannot
+ *   bypass the limit") are ADDITIONALLY capped at the smaller
+ *   `lowPriorityMax`, so they are suppressed well before HIGH-priority
+ *   checkpoints ever would be — "preferentially retain
+ *   POST_PASTE_CHECKPOINT and SUBSTANTIAL_EDIT."
+ *
+ * Never renumbers or deletes any existing row — this function only ever
+ * decides whether a NEW row gets created; a suppressed attempt simply
+ * never consumes a version number.
+ */
 export function shouldSuppressForCapacity(
   changeType: ChangeType,
-  existingPeriodicCheckpointCount: number,
+  counts: CapacityCounts,
   policy: Pick<AnswerProvenancePolicy, "versionMaximumPerQuestion">,
 ): boolean {
-  if (ALWAYS_PRESERVED_CHANGE_TYPES.has(changeType)) return false;
-  return existingPeriodicCheckpointCount >= policy.versionMaximumPerQuestion;
+  if (EXEMPT_CHANGE_TYPES.has(changeType)) return false;
+  const limits = computeCapacityLimits(policy);
+  if (counts.developmentalCount >= limits.developmentalMax) return true;
+  if (LOW_PRIORITY_CHANGE_TYPES.has(changeType)) {
+    return counts.lowPriorityCount >= limits.lowPriorityMax;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
