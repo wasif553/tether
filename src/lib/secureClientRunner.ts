@@ -399,6 +399,16 @@ export async function issueLaunchManifest(params: IssueLaunchManifestParams) {
 
   const record = await prisma.secureClientLaunchManifest.create({
     data: {
+      // Bug fix (hardening pass — found via disposable-database
+      // validation, see docs/migration-ledger.md): consumeLaunchManifest
+      // below rejects a manifest whose signed manifestId doesn't match
+      // the persisted row's id (defence-in-depth beyond the nonce/
+      // signature checks). Without pinning the row's id to the SAME
+      // manifestId embedded in the manifest, that check could never pass
+      // — every real consumption would fail with NOT_FOUND, since
+      // Prisma's default cuid() has no relation to the manifestId
+      // generated above.
+      id: manifestId,
       institutionId: params.institutionId,
       examId: params.examId,
       submissionId: params.submissionId,

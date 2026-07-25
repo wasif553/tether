@@ -15,6 +15,7 @@ import { prisma } from "@/lib/prisma";
 import { assertSameInstitution, institutionErrorResponse, isPlatformAdmin } from "@/lib/institutionScope";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { addSebAllowedExamKey, maskSebKey, SecureClientError } from "@/lib/secureClientRunner";
+import { SebKeyEncryptionConfigError } from "@/lib/secureClient/sebKeyEncryption";
 
 const bodySchema = z.object({
   configurationId: z.string(),
@@ -67,6 +68,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ ok: true, id: key.id, fingerprint: maskSebKey(key.keyHash) }, { status: 201 });
   } catch (err) {
     if (err instanceof SecureClientError) return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+    // Fails closed without ever echoing the raw key or encryption
+    // configuration state — see sebKeyEncryption.ts.
+    if (err instanceof SebKeyEncryptionConfigError) {
+      return NextResponse.json({ error: "Key encryption is not available. Contact your platform administrator.", code: "SEB_KEY_ENCRYPTION_UNAVAILABLE" }, { status: 503 });
+    }
     throw err;
   }
 }

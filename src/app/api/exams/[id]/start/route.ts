@@ -38,6 +38,13 @@ export async function POST(
       questions: { orderBy: { order: "asc" } },
       // Question Pools v1 — see docs/question-pools-v1.md.
       questionPools: true,
+      // Hardening pass — SEB_OPTIONAL/SEB_REQUIRED availability is
+      // institution-scoped (see isSebRequiredAllowed below); the exam's
+      // OWN institution slug is what matters here, never the requesting
+      // student's (they are always the same institution by this point —
+      // assertSameInstitution below — but the exam's is the semantically
+      // correct value to key the allowlist on).
+      institution: { select: { slug: true } },
     },
   });
   if (!exam || !exam.published) {
@@ -288,7 +295,7 @@ export async function POST(
   // snapshot pattern as the snapshots above. TETHER_CLIENT_OPTIONAL/
   // REQUIRED are downgraded to STANDARD_WEB here (not silently allowed)
   // when not actually available — never a frontend query parameter.
-  const secureClientAvailabilityForExam = secureClientAvailabilityForInstitution(null);
+  const secureClientAvailabilityForExam = secureClientAvailabilityForInstitution(exam.institution?.slug ?? null);
   const effectiveDeliveryMode = resolveEffectiveDeliveryMode(settings.deliveryMode, secureClientAvailabilityForExam);
   if (effectiveDeliveryMode === "SEB_REQUIRED") {
     const activeSebConfig = await prisma.secureClientConfiguration.findFirst({

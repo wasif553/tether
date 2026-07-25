@@ -42,6 +42,13 @@ const baseSettings: RelevantSecureClientSettings = {
   secureClientLecturerOverrideAllowed: true,
 };
 
+// Hardening pass (Part 4): SEB_OPTIONAL/SEB_REQUIRED are now gated by
+// availability exactly like the Tether modes always were — tests below
+// that exercise SEB-specific snapshot behaviour (not the gating itself)
+// must opt in to availability explicitly rather than relying on the
+// (now-restrictive-by-default) DEFAULT_SECURE_CLIENT_AVAILABILITY.
+const SEB_AVAILABLE = { ...DEFAULT_SECURE_CLIENT_AVAILABILITY, sebOptionalAvailable: true, sebRequiredAvailable: true };
+
 describe("delivery mode helpers", () => {
   it("validates known delivery modes only", () => {
     expect(isValidDeliveryMode("STANDARD_WEB")).toBe(true);
@@ -74,13 +81,30 @@ describe("resolveEffectiveDeliveryMode", () => {
   });
 
   it("honours TETHER_CLIENT_OPTIONAL when the availability flag is on", () => {
-    expect(resolveEffectiveDeliveryMode("TETHER_CLIENT_OPTIONAL", { tetherClientOptionalAvailable: true, tetherClientRequiredAvailable: false })).toBe(
-      "TETHER_CLIENT_OPTIONAL",
-    );
+    expect(
+      resolveEffectiveDeliveryMode("TETHER_CLIENT_OPTIONAL", { ...DEFAULT_SECURE_CLIENT_AVAILABILITY, tetherClientOptionalAvailable: true }),
+    ).toBe("TETHER_CLIENT_OPTIONAL");
   });
 
-  it("leaves SEB modes untouched regardless of Tether availability", () => {
-    expect(resolveEffectiveDeliveryMode("SEB_REQUIRED", DEFAULT_SECURE_CLIENT_AVAILABILITY)).toBe("SEB_REQUIRED");
+  it("downgrades SEB_REQUIRED to STANDARD_WEB when unavailable (default availability)", () => {
+    expect(resolveEffectiveDeliveryMode("SEB_REQUIRED", DEFAULT_SECURE_CLIENT_AVAILABILITY)).toBe("STANDARD_WEB");
+  });
+
+  it("downgrades SEB_OPTIONAL to STANDARD_WEB when unavailable (default availability)", () => {
+    expect(resolveEffectiveDeliveryMode("SEB_OPTIONAL", DEFAULT_SECURE_CLIENT_AVAILABILITY)).toBe("STANDARD_WEB");
+  });
+
+  it("honours SEB_REQUIRED/SEB_OPTIONAL when explicitly marked available", () => {
+    expect(resolveEffectiveDeliveryMode("SEB_REQUIRED", SEB_AVAILABLE)).toBe("SEB_REQUIRED");
+    expect(resolveEffectiveDeliveryMode("SEB_OPTIONAL", SEB_AVAILABLE)).toBe("SEB_OPTIONAL");
+  });
+
+  it("an ordinary Production institution (default/no availability override) cannot reach SEB_REQUIRED — it always resolves to STANDARD_WEB", () => {
+    // DEFAULT_SECURE_CLIENT_AVAILABILITY is exactly what a Production
+    // deployment computes (see isSebRequiredAllowed in
+    // secureClientAvailability.ts, which is always false in Production) —
+    // this is the snapshot-building side of that guarantee.
+    expect(resolveEffectiveDeliveryMode("SEB_REQUIRED", DEFAULT_SECURE_CLIENT_AVAILABILITY)).not.toBe("SEB_REQUIRED");
   });
 });
 
@@ -93,8 +117,8 @@ describe("buildSecureClientPolicySnapshot", () => {
     expect(snapshot.allowedClientTypes).toEqual([]);
   });
 
-  it("SEB_REQUIRED produces a restrictive snapshot with conservative defaults", () => {
-    const snapshot = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_REQUIRED" });
+  it("SEB_REQUIRED produces a restrictive snapshot with conservative defaults (when available)", () => {
+    const snapshot = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_REQUIRED" }, SEB_AVAILABLE);
     expect(snapshot.requireVerifiedClient).toBe(true);
     expect(snapshot.studentPreflightRequired).toBe(true);
     expect(snapshot.allowedClientTypes).toEqual(["SAFE_EXAM_BROWSER"]);
@@ -104,11 +128,24 @@ describe("buildSecureClientPolicySnapshot", () => {
     expect(snapshot.allowApplicationSwitching).toBe(false);
   });
 
-  it("SEB_OPTIONAL requires a client but does not force the restrictive defaults", () => {
-    const snapshot = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_OPTIONAL" });
+  it("SEB_OPTIONAL requires a client but does not force the restrictive defaults (when available)", () => {
+    const snapshot = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_OPTIONAL" }, SEB_AVAILABLE);
     expect(snapshot.requireVerifiedClient).toBe(false);
     expect(snapshot.allowedClientTypes).toEqual(["SAFE_EXAM_BROWSER"]);
     expect(snapshot.allowPrinting).toBe(true);
+  });
+
+  it("SEB_REQUIRED downgrades to the disabled STANDARD_WEB policy when not available (default/Production availability)", () => {
+    const snapshot = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_REQUIRED" });
+    expect(snapshot.deliveryMode).toBe("STANDARD_WEB");
+    expect(snapshot.requireVerifiedClient).toBe(false);
+    expect(snapshot.studentPreflightRequired).toBe(false);
+  });
+
+  it("SEB_OPTIONAL downgrades to the disabled STANDARD_WEB policy when not available (default/Production availability)", () => {
+    const snapshot = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_OPTIONAL" });
+    expect(snapshot.deliveryMode).toBe("STANDARD_WEB");
+    expect(snapshot.allowedClientTypes).toEqual([]);
   });
 
   it("downgrades an unavailable TETHER_CLIENT_REQUIRED mode to the disabled policy", () => {
@@ -118,18 +155,21 @@ describe("buildSecureClientPolicySnapshot", () => {
   });
 
   it("clamps out-of-bounds values instead of trusting them verbatim", () => {
-    const snapshot = buildSecureClientPolicySnapshot({
-      ...baseSettings,
-      deliveryMode: "SEB_OPTIONAL",
-      secureClientHeartbeatIntervalSeconds: 999999,
-      secureClientMaximumDisplays: 999,
-    });
+    const snapshot = buildSecureClientPolicySnapshot(
+      {
+        ...baseSettings,
+        deliveryMode: "SEB_OPTIONAL",
+        secureClientHeartbeatIntervalSeconds: 999999,
+        secureClientMaximumDisplays: 999,
+      },
+      SEB_AVAILABLE,
+    );
     expect(snapshot.heartbeatIntervalSeconds).toBeLessThanOrEqual(120);
     expect(snapshot.maximumDisplays).toBeLessThanOrEqual(3);
   });
 
   it("derives allowClipboard from blockCopyPaste (inverted)", () => {
-    const snapshot = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_OPTIONAL", blockCopyPaste: true });
+    const snapshot = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_OPTIONAL", blockCopyPaste: true }, SEB_AVAILABLE);
     expect(snapshot.allowClipboard).toBe(false);
   });
 
@@ -154,7 +194,7 @@ describe("parseSecureClientPolicy", () => {
   });
 
   it("round-trips a snapshot built for SEB_REQUIRED", () => {
-    const built = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_REQUIRED" });
+    const built = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_REQUIRED" }, SEB_AVAILABLE);
     const parsed = parseSecureClientPolicy(built);
     expect(parsed).toEqual(built);
   });

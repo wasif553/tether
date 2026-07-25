@@ -1996,8 +1996,11 @@ model SebAllowedExamKey {
   // request cryptographically requires the RAW key at verification time;
   // a one-way hash of the key alone cannot support this (SHA-256 is not
   // invertible). rawKeyCiphertext stores the raw key AES-256-GCM-encrypted
-  // (iv/authTag/ciphertext hex-packed as one string) using
-  // SEB_KEY_ENCRYPTION_SECRET (server-only env var, never committed) — see
+  // as `scv1:<keyId>:<ivHex>:<authTagHex>:<ciphertextHex>` — an explicit
+  // format version and key id support rotation via the server-only
+  // TETHER_SEB_KEY_ENCRYPTION_KEYS_JSON / _ACTIVE_KEY_ID env vars (never
+  // committed, never a runtime-generated fallback — missing/malformed
+  // configuration fails closed) — see
   // src/lib/secureClient/sebKeyEncryption.ts. Never selected in any
   // student- or lecturer-facing API response, never logged. See
   // docs/secure-client-foundation-seb-v1.md, "Known limitations", for the

@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { parseSecureSettings, secureSettingsInputSchema } from "@/lib/secureExam";
+import { secureClientAvailabilityForInstitution } from "@/lib/secureClientAvailability";
 import type { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 import { assertCanAssignExamToCourse, assertStudentsInCourse, CourseAssignmentError } from "@/lib/courseAssignment";
@@ -72,6 +73,9 @@ export async function GET(
         // must never see pool names/draw counts/which questions are in a
         // pool.
         questionPools: { orderBy: { order: "asc" } },
+        // Hardening pass — institution slug drives SEB_REQUIRED
+        // availability (see secureClientAvailabilityForInstitution below).
+        institution: { select: { slug: true } },
       },
     });
 
@@ -90,6 +94,12 @@ export async function GET(
     // Secure Exam Mode settings are not sensitive — students need them to
     // know whether fullscreen is required, copy/paste is blocked, etc.
     const secureSettings = parseSecureSettings(exam.secureSettings);
+    // Hardening pass (Part 4) — booleans only, no secret material; lets
+    // the lecturer settings UI grey out SEB_OPTIONAL/SEB_REQUIRED and show
+    // "Compatibility validation required" instead of silently letting a
+    // lecturer pick a mode that resolveEffectiveDeliveryMode will
+    // downgrade to STANDARD_WEB at attempt start anyway.
+    const secureClientAvailability = secureClientAvailabilityForInstitution(exam.institution?.slug ?? null);
 
     if (session.user.role === "STUDENT") {
       if (!exam.published) {
@@ -103,12 +113,13 @@ export async function GET(
       const sanitized = {
         ...examWithoutPools,
         secureSettings,
+        secureClientAvailability,
         questions: exam.questions.map((q) => ({ ...q, correctAnswer: undefined, questionPoolId: undefined })),
       };
       return NextResponse.json(sanitized);
     }
 
-    return NextResponse.json({ ...omitAccessCodeHash(exam), secureSettings });
+    return NextResponse.json({ ...omitAccessCodeHash(exam), secureSettings, secureClientAvailability });
   } catch (err) {
     const res = institutionErrorResponse(err);
     if (res) return res;

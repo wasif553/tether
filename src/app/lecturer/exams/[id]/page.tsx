@@ -126,6 +126,18 @@ type SecureSettings = {
   secureClientLecturerOverrideAllowed: boolean;
 };
 
+// Tether Secure Client Foundation + Safe Exam Browser Compatibility v1 —
+// hardening pass. Booleans only, computed server-side from
+// VERCEL_ENV/feature flags/institution allowlist — see
+// src/lib/secureClientAvailability.ts. Never something this page decides
+// on its own.
+type SecureClientAvailability = {
+  tetherClientOptionalAvailable: boolean;
+  tetherClientRequiredAvailable: boolean;
+  sebOptionalAvailable: boolean;
+  sebRequiredAvailable: boolean;
+};
+
 type Exam = {
   id: string;
   title: string;
@@ -134,6 +146,7 @@ type Exam = {
   published: boolean;
   questions: Question[];
   secureSettings: SecureSettings;
+  secureClientAvailability: SecureClientAvailability;
   accessCodeRequired: boolean;
   courseId: string | null;
   assignmentMode: "COURSE" | "SELECTED_STUDENTS";
@@ -2115,11 +2128,23 @@ export default function LecturerExamPage({
             <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
               {(
                 [
-                  { value: "STANDARD_WEB", title: "Standard web", desc: "For ordinary assessments using normal browser delivery.", disabled: false },
-                  { value: "MONITORED_WEB", title: "Monitored web", desc: "Uses Tether's existing camera, screen-sharing and integrity evidence.", disabled: false },
-                  { value: "SEB_OPTIONAL", title: "Safe Exam Browser — optional", desc: "Students may use an approved Safe Exam Browser configuration.", disabled: false },
-                  { value: "SEB_REQUIRED", title: "Safe Exam Browser — required", desc: "Students must use an approved Safe Exam Browser configuration.", disabled: false },
-                  { value: "TETHER_CLIENT_OPTIONAL", title: "Tether Secure Client", desc: "Planned for examinations requiring stronger device controls.", disabled: true },
+                  { value: "STANDARD_WEB", title: "Standard web", desc: "For ordinary assessments using normal browser delivery.", disabled: false, needsValidationNotice: false },
+                  { value: "MONITORED_WEB", title: "Monitored web", desc: "Uses Tether's existing camera, screen-sharing and integrity evidence.", disabled: false, needsValidationNotice: false },
+                  {
+                    value: "SEB_OPTIONAL",
+                    title: "Safe Exam Browser — optional",
+                    desc: "Students may use an approved Safe Exam Browser configuration.",
+                    disabled: !exam.secureClientAvailability.sebOptionalAvailable,
+                    needsValidationNotice: true,
+                  },
+                  {
+                    value: "SEB_REQUIRED",
+                    title: "Safe Exam Browser — required",
+                    desc: "Students must use an approved Safe Exam Browser configuration.",
+                    disabled: !exam.secureClientAvailability.sebRequiredAvailable,
+                    needsValidationNotice: true,
+                  },
+                  { value: "TETHER_CLIENT_OPTIONAL", title: "Tether Secure Client", desc: "Planned for examinations requiring stronger device controls.", disabled: !exam.secureClientAvailability.tetherClientOptionalAvailable, needsValidationNotice: false },
                 ] as const
               ).map((option) => (
                 <label
@@ -2137,7 +2162,20 @@ export default function LecturerExamPage({
                     <span className="font-medium">{option.title}</span>
                   </div>
                   <p className="mt-1 text-xs text-gray-500">{option.desc}</p>
-                  {option.disabled && <p className="mt-1 text-xs text-amber-700">Disabled in production v1.</p>}
+                  {/* Real Safe Exam Browser client compatibility has not yet
+                      been validated against this backend — never claim
+                      "production verified" here regardless of whether the
+                      mode is currently selectable. */}
+                  {option.needsValidationNotice && (
+                    <p className="mt-1 text-xs text-amber-700">Compatibility validation required.</p>
+                  )}
+                  {option.disabled && (
+                    <p className="mt-1 text-xs text-amber-700">
+                      {option.value === "SEB_REQUIRED" || option.value === "SEB_OPTIONAL"
+                        ? "Not enabled for this institution in this environment."
+                        : "Disabled in production v1."}
+                    </p>
+                  )}
                 </label>
               ))}
             </div>

@@ -192,20 +192,38 @@ export type SecureClientAvailability = {
   tetherClientOptionalAvailable: boolean;
   /** TETHER_CLIENT_REQUIRED cannot be selected for real exams until a signed production client exists — always false until that ships. */
   tetherClientRequiredAvailable: boolean;
+  /**
+   * Hardening pass (Part 4): real SEB client compatibility has not yet
+   * been validated against this backend — SEB_OPTIONAL stays behind an
+   * explicit experimental flag and is never true in Production. See
+   * isSebOptionalAvailable() in src/lib/secureClientAvailability.ts.
+   */
+  sebOptionalAvailable: boolean;
+  /**
+   * Even more restrictive than sebOptionalAvailable: also requires the
+   * exam's institution to be on an explicit allowlist, and is never true
+   * in Production. See isSebRequiredAllowed() in
+   * src/lib/secureClientAvailability.ts.
+   */
+  sebRequiredAvailable: boolean;
 };
 
 export const DEFAULT_SECURE_CLIENT_AVAILABILITY: SecureClientAvailability = {
   tetherClientOptionalAvailable: false,
   tetherClientRequiredAvailable: false,
+  sebOptionalAvailable: false,
+  sebRequiredAvailable: false,
 };
 
 /**
  * Resolves the delivery mode actually in effect, downgrading a
- * not-yet-available Tether mode to STANDARD_WEB rather than silently
- * requiring something the platform cannot yet fulfil — never a
- * client-supplied query parameter can influence this (Part 9).
+ * not-yet-available SEB or Tether mode to STANDARD_WEB rather than
+ * silently requiring/offering something the platform cannot yet fulfil —
+ * never a client-supplied query parameter can influence this (Part 9).
  */
 export function resolveEffectiveDeliveryMode(mode: DeliveryMode, availability: SecureClientAvailability): DeliveryMode {
+  if (mode === "SEB_OPTIONAL" && !availability.sebOptionalAvailable) return "STANDARD_WEB";
+  if (mode === "SEB_REQUIRED" && !availability.sebRequiredAvailable) return "STANDARD_WEB";
   if (mode === "TETHER_CLIENT_OPTIONAL" && !availability.tetherClientOptionalAvailable) return "STANDARD_WEB";
   if (mode === "TETHER_CLIENT_REQUIRED" && !availability.tetherClientRequiredAvailable) return "STANDARD_WEB";
   return mode;
