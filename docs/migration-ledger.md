@@ -23,7 +23,7 @@ explicitly — re-run the pre-check query for any of them before assuming
 a second apply is actually needed.
 
 **Confirmed applied — do not re-apply.** As of 2026-07-25, the following
-five migration files have each been applied exactly once to the one
+six migration files have each been applied exactly once to the one
 shared Preview/Production Supabase database (confirmed via the read-only
 verification queries below returning the expected tables/columns/enum
 values):
@@ -33,10 +33,11 @@ values):
 - `docs/answer-similarity-migration.sql` — applied 2026-07-24.
 - `docs/cohort-collusion-graph-v1-migration.sql` — applied 2026-07-24.
 - `docs/answer-development-provenance-v1-migration.sql` — applied 2026-07-25.
+- `docs/secure-client-foundation-seb-v1-migration.sql` — applied 2026-07-25.
 
 Because Preview and Production are the same database, there is no
 separate "now apply it to the other environment" step for any of these
-five — that single application already covers both. **None of these five
+six — that single application already covers both. **None of these six
 files should be run again against this database.** Re-running any of
 them will error on `CREATE TABLE`/`ADD COLUMN` (see each file's own
 idempotency note) at best, or silently duplicate rows at worst if a
@@ -151,7 +152,7 @@ Interpretation:
 | 11 | `docs/screen-share-evidence-migration.sql` | Screen-share Evidence Mode v1 | **Applied 2026-07-23** | **Applied 2026-07-23 (same shared database as Preview)** | Confirmed applied — do not re-apply. No new table — additive columns on the existing `Submission` and `IntegrityEvidenceAsset` tables plus 8 new `IntegrityEventType` enum values. |
 | 12 | `docs/cohort-collusion-graph-v1-migration.sql` | Cohort-Level Collusion Detection and Integrity Graph v1 | **Applied 2026-07-24** | **Applied 2026-07-24 (same shared database as Preview)** | Confirmed applied — do not re-apply. Five new tables (`CohortCollusionAnalysis`, `CollusionPairEdge`, `CollusionSignal`, `CollusionCluster`, `CollusionClusterMember`) — zero columns added to any existing table. |
 | 13 | `docs/answer-development-provenance-v1-migration.sql` | Answer-Development Provenance v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — answer-development provenance migration" below for the full read-only confirmation record. |
-| 14 | `docs/secure-client-foundation-seb-v1-migration.sql` | Tether Secure Client Foundation + Safe Exam Browser Compatibility v1 | **PENDING — NOT APPLIED** | **PENDING — NOT APPLIED** | Additive only. One new nullable `Submission.secureClientPolicySnapshotJson` column plus seven new tables (`SecureClientConfiguration`, `SebAllowedExamKey`, `SecureClientLaunchManifest`, `SecureClientSession`, `SecureClientAttestation`, `SecureClientEvent`, `SecureClientRecoveryGrant`), including two partial unique indexes. Not applied to any environment — see "Deployment procedure" below. |
+| 14 | `docs/secure-client-foundation-seb-v1-migration.sql` | Tether Secure Client Foundation + Safe Exam Browser Compatibility v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — secure client foundation migration" below for the full read-only confirmation record. |
 
 Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -421,12 +422,16 @@ one new nullable column:
 
 ## Deployment procedure — `docs/secure-client-foundation-seb-v1-migration.sql`
 
-**PENDING — NOT APPLIED to any environment.** Do not apply without
-explicit authorization. The steps below are the procedure to follow when
-authorized, not a record that it has already happened.
+**Already applied — 2026-07-25, to the one shared Preview/Production
+database. Do not run this file again.** The steps below are kept as a
+historical record of the procedure that was followed. See "Verification
+— secure client foundation migration" further below for the full
+read-only confirmation record.
 
 Preview and Production currently share ONE Supabase database — this file
-must be applied **once**, not once per environment, when the time comes.
+was applied **once**, not once per environment; there is no separate
+Production application still pending, and it must not be applied a
+second time to either environment.
 
 1. Take a pre-migration backup of the shared database (Supabase project
    → Database → Backups, or a manual `pg_dump`) before applying anything.
@@ -455,6 +460,54 @@ must be applied **once**, not once per environment, when the time comes.
    complete.
 9. Do not apply this file a second time — re-running it after a
    successful apply will error.
+
+### Verification — secure client foundation migration
+
+Confirmed via read-only queries against the shared database on
+2026-07-25, immediately after this migration was applied. **Preview and
+Production point at this same shared Supabase database — this migration
+has now been applied to that one database and must not be applied
+again, in either environment.**
+
+- `Submission.secureClientPolicySnapshotJson` exists as a nullable
+  `jsonb` column (`information_schema.columns`: `data_type = jsonb`,
+  `is_nullable = YES`).
+- All seven new secure-client tables exist: `SecureClientConfiguration`,
+  `SebAllowedExamKey`, `SecureClientLaunchManifest`,
+  `SecureClientSession`, `SecureClientAttestation`, `SecureClientEvent`,
+  `SecureClientRecoveryGrant`.
+- The active-configuration partial unique index exists with its correct
+  `WHERE` clause (confirmed via `pg_indexes.indexdef`, not just
+  `indexname`, so it is genuinely partial, not plain):
+  `SecureClientConfiguration_exam_provider_active_key` —
+  `("examId", provider) WHERE (status = 'ACTIVE'::text)`.
+- The non-terminal-session partial unique index exists with its correct
+  `WHERE` clause: `SecureClientSession_submission_nonterminal_key` —
+  `("submissionId") WHERE (status <> ALL (ARRAY['ENDED'::text, 'REJECTED'::text]))`.
+- `SebAllowedExamKey`'s encrypted-key columns match
+  `prisma/schema.prisma` exactly — a single nullable `rawKeyCiphertext`
+  `text` column (plus `keyHash text NOT NULL` for lookup), consistent
+  with the packed-string format (`scv1:<keyId>:<ivHex>:<authTagHex>:<ciphertextHex>`)
+  used by `src/lib/secureClient/sebKeyEncryption.ts` — no separate
+  encryption-key-id/version column was needed in the schema itself.
+- All seven new tables contained **zero rows** immediately after
+  migration — expected, since nothing writes to them until a lecturer
+  configures secure-client delivery and a student launches.
+- Every existing `Submission` row had
+  `secureClientPolicySnapshotJson IS NULL` immediately after migration
+  (`count(*) WHERE ... IS NOT NULL` returned 0) — no existing submission
+  was retroactively affected; every attempt remains STANDARD_WEB/disabled
+  until a lecturer explicitly enables a stronger delivery mode on a new
+  attempt.
+- Foreign keys were verified: all 18 expected `FOREIGN KEY` constraints
+  across the seven new tables exist with the documented
+  `ON DELETE`/`ON UPDATE` behaviour (`CASCADE` from `Exam`/`Submission`,
+  `RESTRICT`/`SET NULL` from `User` depending on nullability) — confirmed
+  via `pg_constraint`/`pg_get_constraintdef`, matching
+  `docs/secure-client-foundation-seb-v1-migration.sql` section 10
+  exactly.
+
+**This migration must not be applied again.**
 
 ### Rollback — `docs/secure-client-foundation-seb-v1-migration.sql`
 
