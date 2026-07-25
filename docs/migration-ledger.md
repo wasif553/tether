@@ -151,6 +151,7 @@ Interpretation:
 | 11 | `docs/screen-share-evidence-migration.sql` | Screen-share Evidence Mode v1 | **Applied 2026-07-23** | **Applied 2026-07-23 (same shared database as Preview)** | Confirmed applied — do not re-apply. No new table — additive columns on the existing `Submission` and `IntegrityEvidenceAsset` tables plus 8 new `IntegrityEventType` enum values. |
 | 12 | `docs/cohort-collusion-graph-v1-migration.sql` | Cohort-Level Collusion Detection and Integrity Graph v1 | **Applied 2026-07-24** | **Applied 2026-07-24 (same shared database as Preview)** | Confirmed applied — do not re-apply. Five new tables (`CohortCollusionAnalysis`, `CollusionPairEdge`, `CollusionSignal`, `CollusionCluster`, `CollusionClusterMember`) — zero columns added to any existing table. |
 | 13 | `docs/answer-development-provenance-v1-migration.sql` | Answer-Development Provenance v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — answer-development provenance migration" below for the full read-only confirmation record. |
+| 14 | `docs/secure-client-foundation-seb-v1-migration.sql` | Tether Secure Client Foundation + Safe Exam Browser Compatibility v1 | **PENDING — NOT APPLIED** | **PENDING — NOT APPLIED** | Additive only. One new nullable `Submission.secureClientPolicySnapshotJson` column plus seven new tables (`SecureClientConfiguration`, `SebAllowedExamKey`, `SecureClientLaunchManifest`, `SecureClientSession`, `SecureClientAttestation`, `SecureClientEvent`, `SecureClientRecoveryGrant`), including two partial unique indexes. Not applied to any environment — see "Deployment procedure" below. |
 
 Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -417,3 +418,63 @@ one new nullable column:
   `answerProvenanceMode: "OFF"`, ensuring no exam has it enabled is the
   practical "rollback" for almost any issue, rather than reverting the
   schema.
+
+## Deployment procedure — `docs/secure-client-foundation-seb-v1-migration.sql`
+
+**PENDING — NOT APPLIED to any environment.** Do not apply without
+explicit authorization. The steps below are the procedure to follow when
+authorized, not a record that it has already happened.
+
+Preview and Production currently share ONE Supabase database — this file
+must be applied **once**, not once per environment, when the time comes.
+
+1. Take a pre-migration backup of the shared database (Supabase project
+   → Database → Backups, or a manual `pg_dump`) before applying anything.
+2. Run the pre-check query embedded at the top of
+   `docs/secure-client-foundation-seb-v1-migration.sql` first, to confirm
+   the migration has not already been applied.
+3. Open the (shared) Supabase project → SQL Editor.
+4. Paste and run sections 1-10 of the file (the `ALTER TABLE` on
+   `Submission`, then the seven `CREATE TABLE` statements, then indexes
+   — including the two partial unique indexes — then foreign keys) — the
+   file is already in execution order.
+5. Run the file's own "Verification queries" section to confirm the new
+   column, all seven tables, their indexes (including both partial
+   unique indexes, confirmed via `pg_indexes.indexdef` showing their own
+   `WHERE` clause), and their foreign keys landed, and that every
+   existing `Submission` row's new column is NULL.
+6. Record the date in the Ledger table above (row 14) — a single date is
+   sufficient given the shared database.
+7. Do not run the manual Preview smoke-test checklist in
+   docs/secure-client-foundation-seb-v1.md against Production — only
+   against a disposable Preview/test database or an isolated test
+   institution, per that document's own note.
+8. Do not enable Safe Exam Browser requirements, the mock Tether client
+   simulator, or any non-default delivery mode on any real exam until the
+   institutional pilot-readiness checklist in docs/pilot-readiness.md is
+   complete.
+9. Do not apply this file a second time — re-running it after a
+   successful apply will error.
+
+### Rollback — `docs/secure-client-foundation-seb-v1-migration.sql`
+
+Additive-only, and touches no existing table's data at all beyond adding
+one new nullable column:
+
+- **All seven new tables**: safe to drop, in child-to-parent order, if
+  the feature must be fully removed —
+  `DROP TABLE "SecureClientRecoveryGrant"; DROP TABLE "SecureClientEvent"; DROP TABLE "SecureClientAttestation"; DROP TABLE "SecureClientSession"; DROP TABLE "SecureClientLaunchManifest"; DROP TABLE "SebAllowedExamKey"; DROP TABLE "SecureClientConfiguration";`
+  — no other table has a foreign key pointing at any of these seven (they
+  only have OUTGOING foreign keys to `Exam`/`Submission`/`User`), so
+  dropping them cannot cascade into unrelated data loss. This would
+  permanently delete any recorded configurations, keys, launch
+  manifests, sessions, attestations, events, and recovery grants —
+  export/audit first if that data must be retained.
+- **`Submission.secureClientPolicySnapshotJson`**: safe to drop
+  (`ALTER TABLE "Submission" DROP COLUMN "secureClientPolicySnapshotJson";`)
+  — every application code path treats a missing/null value as
+  STANDARD_WEB / disabled.
+- **Preferred approach in practice**: since the feature defaults to
+  `deliveryMode: "STANDARD_WEB"` for every exam, ensuring no exam is
+  switched to a SEB/Tether-required delivery mode is the practical
+  "rollback" for almost any issue, rather than reverting the schema.

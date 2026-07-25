@@ -19,6 +19,8 @@ import { buildExamPolicySnapshot } from "@/lib/examPolicy";
 import { buildAiAssistancePolicySnapshot } from "@/lib/aiAssistancePolicy";
 import { buildScreenSharePolicySnapshot } from "@/lib/screenSharePolicy";
 import { buildAnswerProvenancePolicySnapshot } from "@/lib/answerProvenancePolicy";
+import { buildSecureClientPolicySnapshot, resolveEffectiveDeliveryMode } from "@/lib/secureClientPolicy";
+import { secureClientAvailabilityForInstitution } from "@/lib/secureClientAvailability";
 
 export async function POST(
   req: Request,
@@ -281,6 +283,54 @@ export async function POST(
     allowStudentDevelopmentReview: settings.allowStudentDevelopmentReview,
   });
 
+  // Tether Secure Client Foundation + Safe Exam Browser Compatibility v1
+  // — see docs/secure-client-foundation-seb-v1.md. Same immutable-
+  // snapshot pattern as the snapshots above. TETHER_CLIENT_OPTIONAL/
+  // REQUIRED are downgraded to STANDARD_WEB here (not silently allowed)
+  // when not actually available — never a frontend query parameter.
+  const secureClientAvailabilityForExam = secureClientAvailabilityForInstitution(null);
+  const effectiveDeliveryMode = resolveEffectiveDeliveryMode(settings.deliveryMode, secureClientAvailabilityForExam);
+  if (effectiveDeliveryMode === "SEB_REQUIRED") {
+    const activeSebConfig = await prisma.secureClientConfiguration.findFirst({
+      where: { examId: id, provider: "SAFE_EXAM_BROWSER", status: "ACTIVE" },
+      select: { id: true },
+    });
+    if (!activeSebConfig) {
+      return NextResponse.json(
+        { error: "This exam requires Safe Exam Browser, but no active configuration has been set up yet. Contact your lecturer.", code: "SEB_NOT_CONFIGURED" },
+        { status: 409 },
+      );
+    }
+  }
+  const secureClientPolicySnapshot = buildSecureClientPolicySnapshot(
+    {
+      deliveryMode: settings.deliveryMode,
+      allowedSebPlatforms: settings.allowedSebPlatforms,
+      allowedSebVersions: settings.allowedSebVersions,
+      requireSebBrowserExamKey: settings.requireSebBrowserExamKey,
+      requireSebConfigKey: settings.requireSebConfigKey,
+      allowSebHeaderValidation: settings.allowSebHeaderValidation,
+      allowSebJavascriptApiValidation: settings.allowSebJavascriptApiValidation,
+      secureLaunchTokenTtlSeconds: settings.secureLaunchTokenTtlSeconds,
+      secureClientHeartbeatIntervalSeconds: settings.secureClientHeartbeatIntervalSeconds,
+      secureClientHeartbeatGraceSeconds: settings.secureClientHeartbeatGraceSeconds,
+      requireDisplayCheck: settings.requireDisplayCheck,
+      secureClientMaximumDisplays: settings.secureClientMaximumDisplays,
+      requireRemoteSessionCheck: settings.requireRemoteSessionCheck,
+      requireVirtualMachineCheck: settings.requireVirtualMachineCheck,
+      requireProcessCheck: settings.requireProcessCheck,
+      requireCaptureProtectionCheck: settings.requireCaptureProtectionCheck,
+      blockCopyPaste: settings.blockCopyPaste,
+      secureClientAllowPrinting: settings.secureClientAllowPrinting,
+      secureClientAllowExternalNavigation: settings.secureClientAllowExternalNavigation,
+      secureClientAllowApplicationSwitching: settings.secureClientAllowApplicationSwitching,
+      secureClientAllowRecovery: settings.secureClientAllowRecovery,
+      secureClientEventRetentionDays: settings.secureClientEventRetentionDays,
+      secureClientLecturerOverrideAllowed: settings.secureClientLecturerOverrideAllowed,
+    },
+    secureClientAvailabilityForExam,
+  );
+
   try {
     const submission = await prisma.submission.create({
       data: {
@@ -292,6 +342,7 @@ export async function POST(
         aiAssistancePolicySnapshotJson: aiAssistancePolicySnapshot as unknown as Prisma.InputJsonValue,
         screenSharePolicySnapshotJson: screenSharePolicySnapshot as unknown as Prisma.InputJsonValue,
         answerProvenancePolicySnapshotJson: answerProvenancePolicySnapshot as unknown as Prisma.InputJsonValue,
+        secureClientPolicySnapshotJson: secureClientPolicySnapshot as unknown as Prisma.InputJsonValue,
       },
     });
 

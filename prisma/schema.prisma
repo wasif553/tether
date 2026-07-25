@@ -240,6 +240,14 @@ model User {
   cohortCollusionAnalysesRequested CohortCollusionAnalysis[] @relation("CohortCollusionAnalysisRequestedBy")
   reviewedCollusionClusters        CollusionCluster[]        @relation("CollusionClusterReviewer")
 
+  // Tether Secure Client Foundation + Safe Exam Browser Compatibility v1
+  // (additive, opt-in) — see docs/secure-client-foundation-seb-v1.md.
+  createdSecureClientConfigurations   SecureClientConfiguration[] @relation("SecureClientConfigCreatedBy")
+  activatedSecureClientConfigurations SecureClientConfiguration[] @relation("SecureClientConfigActivatedBy")
+  revokedSecureClientConfigurations   SecureClientConfiguration[] @relation("SecureClientConfigRevokedBy")
+  createdSebAllowedExamKeys           SebAllowedExamKey[]         @relation("SebAllowedExamKeyCreatedBy")
+  issuedSecureClientRecoveryGrants    SecureClientRecoveryGrant[] @relation("SecureClientRecoveryGrantIssuedBy")
+
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
 }
@@ -319,6 +327,14 @@ model Exam {
   // similarity/timing/session-binding features above; does not replace
   // or duplicate them.
   cohortCollusionAnalyses CohortCollusionAnalysis[]
+
+  // Tether Secure Client Foundation + Safe Exam Browser Compatibility v1
+  // (additive, opt-in) — see docs/secure-client-foundation-seb-v1.md. The
+  // web platform remains fully functional without any of this — see
+  // deliveryMode default STANDARD_WEB in src/lib/secureClientPolicy.ts.
+  secureClientConfigurations   SecureClientConfiguration[]
+  secureClientLaunchManifests  SecureClientLaunchManifest[]
+  secureClientSessions         SecureClientSession[]
 
   @@index([institutionId])
   @@index([courseId])
@@ -590,6 +606,20 @@ model Submission {
   answerDevelopmentEvents            AnswerDevelopmentEvent[]
   answerDevelopmentArtifacts         AnswerDevelopmentArtifact[]
   codeExecutionEvents                CodeExecutionEvent[]
+
+  // Tether Secure Client Foundation + Safe Exam Browser Compatibility v1
+  // (additive, opt-in) — see docs/secure-client-foundation-seb-v1.md. Same
+  // immutable-snapshot pattern as examPolicySnapshotJson/
+  // aiAssistancePolicySnapshotJson/screenSharePolicySnapshotJson/
+  // answerProvenancePolicySnapshotJson above. Null means legacy behaviour
+  // / STANDARD_WEB — never silently required. An existing IN_PROGRESS
+  // attempt at deploy time can never retroactively become secure-client-
+  // required, exactly like every other snapshot in this codebase.
+  secureClientPolicySnapshotJson Json?
+  secureClientLaunchManifests     SecureClientLaunchManifest[]
+  secureClientSessions            SecureClientSession[]
+  secureClientEvents              SecureClientEvent[]
+  secureClientRecoveryGrants      SecureClientRecoveryGrant[]
 
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])
@@ -1863,4 +1893,350 @@ model CodeExecutionEvent {
   @@index([submissionId])
   @@index([answerId])
   @@index([questionId])
+}
+
+// ---------------------------------------------------------------------------
+// Tether Secure Client Foundation + Safe Exam Browser Compatibility v1
+// (additive, opt-in) — see docs/secure-client-foundation-seb-v1.md. THIS
+// PHASE DOES NOT BUILD THE PRODUCTION WINDOWS DESKTOP CLIENT — see
+// docs/tether-secure-client-windows-architecture.md for that contract.
+// The web examination platform remains fully functional without SEB or a
+// future Tether client — deliveryMode defaults to STANDARD_WEB
+// everywhere (src/lib/secureClientPolicy.ts). Every status/type/level
+// field below is a validated plain String column, not a Prisma enum,
+// following the SubmissionSimilarityAnalysis convention — validators
+// live in src/lib/secureClientPolicy.ts and src/lib/secureClient/*.ts.
+// institutionId/examId/studentId are plain scoping columns (not
+// navigated Prisma relations) on the lower-level event/session models,
+// mirroring NetworkEvidence.institutionId/IntegrityEvidenceAsset.
+// institutionId above — kept for fast tenant-scoped queries without
+// forcing every read through a join.
+// ---------------------------------------------------------------------------
+
+// One exam-level compatible-client configuration (SEB or a future Tether
+// client). Only one ACTIVE configuration may exist per (examId, provider)
+// — enforced by a partial unique index in
+// docs/secure-client-foundation-seb-v1-migration.sql (not representable
+// as a plain Prisma `@@unique`, same reasoning as
+// AnswerDevelopmentArtifact's partial indexes — see that model's
+// comment). `configurationHash` is set once, at activation, and never
+// changed afterward — activated records may be REVOKED but never
+// silently edited; a genuine change requires a new DRAFT configuration
+// version.
+model SecureClientConfiguration {
+  id            String @id @default(cuid())
+  institutionId String
+  examId        String
+  exam          Exam   @relation(fields: [examId], references: [id], onDelete: Cascade)
+
+  // SAFE_EXAM_BROWSER | TETHER_SECURE_CLIENT
+  provider String
+  // DRAFT | ACTIVE | REVOKED | ARCHIVED
+  status String @default("DRAFT")
+
+  displayName          String?
+  configurationVersion Int     @default(1)
+  // Immutable once status becomes ACTIVE — see
+  // src/lib/secureClient/secureClientConfigRunner.ts.
+  configurationHash String?
+
+  startUrlTemplate String?
+  quitUrlTemplate  String?
+  allowedOriginsJson   Json?
+  allowedPlatformsJson Json?
+  minimumVersionsJson  Json?
+  // Bounded, allowlisted settings only — never arbitrary JSON accepted
+  // from a client; see the strict schema in src/lib/secureClientPolicy.ts.
+  settingsJson Json?
+
+  createdById   String
+  createdBy     User      @relation("SecureClientConfigCreatedBy", fields: [createdById], references: [id])
+  activatedById String?
+  activatedBy   User?     @relation("SecureClientConfigActivatedBy", fields: [activatedById], references: [id])
+  activatedAt   DateTime?
+  revokedById   String?
+  revokedBy     User?     @relation("SecureClientConfigRevokedBy", fields: [revokedById], references: [id])
+  revokedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sebAllowedExamKeys SebAllowedExamKey[]
+  launchManifests    SecureClientLaunchManifest[]
+  sessions           SecureClientSession[]
+
+  @@index([examId])
+  @@index([institutionId])
+  @@index([status])
+}
+
+// Allowed Safe Exam Browser validation keys for one configuration — see
+// docs/secure-client-foundation-seb-v1.md ("Browser Exam Key
+// validation"). Only a normalised SHA-256 hash is ever stored; the raw
+// key value is never persisted, logged, or returned to any client
+// (student or lecturer) after entry — see
+// src/lib/secureClient/sebBrowserExamKey.ts.
+model SebAllowedExamKey {
+  id              String                    @id @default(cuid())
+  configurationId String
+  configuration   SecureClientConfiguration @relation(fields: [configurationId], references: [id], onDelete: Cascade)
+
+  // BROWSER_EXAM_KEY | CONFIG_KEY
+  keyType String
+  // SHA-256 hex digest of the normalised raw key — used for lookup,
+  // deduplication (see @@unique below), and the masked fingerprint shown
+  // in the lecturer UI (Part 11). Never sufficient on its own to verify a
+  // request.
+  keyHash String
+
+  // Deliberate, documented addition beyond the task's literal field list
+  // (justified under "Names may be adjusted... but preserve
+  // responsibilities" for Part 3): the official SEB request-hash protocol
+  // is expectedHash = SHA256(requestUrl + rawKey) — verifying an incoming
+  // request cryptographically requires the RAW key at verification time;
+  // a one-way hash of the key alone cannot support this (SHA-256 is not
+  // invertible). rawKeyCiphertext stores the raw key AES-256-GCM-encrypted
+  // (iv/authTag/ciphertext hex-packed as one string) using
+  // SEB_KEY_ENCRYPTION_SECRET (server-only env var, never committed) — see
+  // src/lib/secureClient/sebKeyEncryption.ts. Never selected in any
+  // student- or lecturer-facing API response, never logged. See
+  // docs/secure-client-foundation-seb-v1.md, "Known limitations", for the
+  // full rationale and the recommended KMS-backed hardening path.
+  rawKeyCiphertext String?
+
+  platform      String?
+  clientVersion String?
+  label         String?
+
+  active Boolean @default(true)
+
+  createdById String
+  createdBy   User      @relation("SebAllowedExamKeyCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+
+  @@unique([configurationId, keyType, keyHash])
+  @@index([configurationId])
+  @@index([keyType])
+  @@index([active])
+}
+
+// One short-lived, single-use secure launch — see
+// docs/secure-client-foundation-seb-v1.md ("Signed secure-launch
+// manifest"). The raw launch nonce is NEVER stored — only nonceHash
+// (Part 6/14: "store only a cryptographic hash of the nonce"). Not a
+// reusable general-purpose exam token: bound to institution, exam,
+// submission, student, policy (policyHash), and client type all at once.
+model SecureClientLaunchManifest {
+  id            String @id @default(cuid())
+  institutionId String
+  examId        String
+  exam          Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
+  submissionId  String
+  submission    Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  studentId     String
+
+  configurationId String?
+  configuration   SecureClientConfiguration? @relation(fields: [configurationId], references: [id], onDelete: SetNull)
+
+  // SAFE_EXAM_BROWSER | TETHER_SECURE_CLIENT | MOCK_TETHER_CLIENT
+  clientType String
+
+  nonceHash    String @unique
+  policyHash   String
+  manifestHash String
+
+  issuedAt   DateTime  @default(now())
+  expiresAt  DateTime
+  consumedAt DateTime?
+  revokedAt  DateTime?
+
+  // Advisory pointer only (no FK) to the SecureClientSession this launch
+  // produced, once consumed — mirrors AnswerActivityEvent.previousEventId.
+  clientSessionId String?
+
+  createdAt DateTime @default(now())
+
+  @@index([submissionId])
+  @@index([examId])
+  @@index([institutionId])
+  @@index([expiresAt])
+}
+
+// One verified or attempted secure-client session per submission — see
+// docs/secure-client-foundation-seb-v1.md ("Session state machine").
+// `clientInstallationIdHash` is a random, hashed, per-installation
+// identifier — never a hardware serial number, MAC address, or
+// unrestricted machine fingerprint (Part 3). Only one CURRENT
+// non-terminal session per submission is allowed — enforced by a partial
+// unique index in the migration (WHERE status NOT IN ('ENDED',
+// 'REJECTED')), so a browser refresh never silently creates a second
+// session; recovery/end must be explicit.
+model SecureClientSession {
+  id            String @id @default(cuid())
+  institutionId String
+  examId        String
+  exam          Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
+  submissionId  String
+  submission    Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  studentId     String
+
+  configurationId String?
+  configuration   SecureClientConfiguration? @relation(fields: [configurationId], references: [id], onDelete: SetNull)
+
+  // SAFE_EXAM_BROWSER | TETHER_SECURE_CLIENT | MOCK_TETHER_CLIENT
+  clientType String
+  // CREATED | PREFLIGHT | ACTIVE | INTERRUPTED | RECOVERY_REQUIRED | ENDED | REJECTED
+  status String @default("CREATED")
+  // NOT_CHECKED | VERIFIED | INVALID_CONFIGURATION | UNSUPPORTED_VERSION |
+  // UNVERIFIED_CLIENT | EXPIRED_LAUNCH | REPLAY_REJECTED |
+  // TECHNICAL_FAILURE | LECTURER_OVERRIDE
+  verificationStatus String @default("NOT_CHECKED")
+
+  platform                 String?
+  clientVersion            String?
+  clientInstallationIdHash String?
+  policyHash               String?
+
+  manifestId String? @unique
+
+  startedAt        DateTime  @default(now())
+  verifiedAt       DateTime?
+  lastHeartbeatAt  DateTime?
+  interruptedAt    DateTime?
+  recoveredAt      DateTime?
+  endedAt          DateTime?
+  endReason        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  attestations    SecureClientAttestation[]
+  events          SecureClientEvent[]
+  recoveryGrants  SecureClientRecoveryGrant[]
+
+  @@index([submissionId])
+  @@index([examId])
+  @@index([institutionId])
+  @@index([status])
+  @@index([studentId])
+}
+
+// One structured preflight/client-verification result — see
+// docs/secure-client-foundation-seb-v1.md ("Attestation and preflight").
+// `detailsJson` uses a strict per-check schema (Part 3/14) — never
+// arbitrary JSON, never a full process list, never command-line
+// arguments, never open-document names, never window titles. Prohibited-
+// process evidence (when present) contains only a configured rule
+// identifier, matched category, a normalised application identifier, and
+// a timestamp — see src/lib/secureClient/attestation.ts.
+model SecureClientAttestation {
+  id                    String              @id @default(cuid())
+  secureClientSessionId String
+  session               SecureClientSession @relation(fields: [secureClientSessionId], references: [id], onDelete: Cascade)
+
+  attestationVersion String @default("v1")
+  // SAFE_EXAM_BROWSER | TETHER_SECURE_CLIENT | MOCK_TETHER_CLIENT
+  clientType String
+  platform      String?
+  osVersion     String?
+  clientVersion String?
+  clientBuild   String?
+
+  // Every *Status field below: PASS | FAIL | WARNING | NOT_CHECKED |
+  // NOT_SUPPORTED | UNKNOWN — see src/lib/secureClient/attestation.ts.
+  clientSignatureStatus            String?
+  configurationVerificationStatus  String?
+  displayCount                     Int?
+  displayCheckStatus               String?
+  remoteSessionStatus              String?
+  virtualMachineStatus             String?
+  processCheckStatus               String?
+  captureProtectionStatus          String?
+  clipboardPolicyStatus            String?
+  printingPolicyStatus             String?
+  externalNavigationPolicyStatus   String?
+
+  // READY | ACTION_REQUIRED | CANNOT_START | NOT_SUPPORTED | TECHNICAL_FAILURE
+  overallStatus String
+
+  detailsJson Json?
+
+  clientReportedAt DateTime?
+  serverReceivedAt DateTime  @default(now())
+  createdAt        DateTime  @default(now())
+
+  @@index([secureClientSessionId])
+  @@index([overallStatus])
+  @@index([serverReceivedAt])
+}
+
+// Structured client/session integrity signal — see
+// docs/secure-client-foundation-seb-v1.md ("Integrity events"). NO EVENT
+// IS ITSELF LABELLED MISCONDUCT — eventLevel is INFORMATIONAL/CONTEXT/
+// ACTION_REQUIRED/REVIEW_CONTEXT, never a violation score. Strict
+// per-eventType metadata schema — see
+// src/lib/secureClient/secureClientEvents.ts (mirrors
+// DEVELOPMENT_EVENT_METADATA_SCHEMAS in src/lib/answerDevelopment.ts).
+model SecureClientEvent {
+  id                    String               @id @default(cuid())
+  secureClientSessionId String?
+  session               SecureClientSession? @relation(fields: [secureClientSessionId], references: [id], onDelete: SetNull)
+  submissionId          String
+  submission            Submission           @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  examId                String
+  institutionId         String
+
+  eventType String
+  // INFORMATIONAL | CONTEXT | ACTION_REQUIRED | REVIEW_CONTEXT
+  eventLevel String
+
+  clientRequestId String? @unique
+  // Server-assigned and checked, never trusted from the client as
+  // authoritative on its own — see src/lib/secureClient/secureClientEvents.ts.
+  sequenceNumber  Int?
+  clientElapsedMs Int?
+
+  serverReceivedAt DateTime @default(now())
+  metadataJson     Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([secureClientSessionId])
+  @@index([submissionId])
+  @@index([examId])
+  @@index([institutionId])
+  @@index([eventType])
+  @@index([serverReceivedAt])
+}
+
+// One lecturer-issued, one-time recovery credential for an interrupted
+// secure-client session — see docs/secure-client-foundation-seb-v1.md
+// ("Recovery"). Only a hash of the grant code/token is ever stored
+// (Part 3/14) — never the raw value after issuance. `reason` is always
+// lecturer-supplied and audited (also written to PlatformAuditLog by the
+// issuing route).
+model SecureClientRecoveryGrant {
+  id                    String              @id @default(cuid())
+  secureClientSessionId String
+  session               SecureClientSession @relation(fields: [secureClientSessionId], references: [id], onDelete: Cascade)
+  submissionId          String
+  submission            Submission          @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  grantCodeHash String @unique
+
+  issuedById String
+  issuedBy   User     @relation("SecureClientRecoveryGrantIssuedBy", fields: [issuedById], references: [id])
+  issuedAt   DateTime @default(now())
+  expiresAt  DateTime
+  consumedAt DateTime?
+  revokedAt  DateTime?
+
+  reason String
+
+  createdAt DateTime @default(now())
+
+  @@index([secureClientSessionId])
+  @@index([submissionId])
+  @@index([expiresAt])
 }

@@ -116,6 +116,14 @@ type SecureSettings = {
   captureCodeRunHistory: boolean;
   requireAiSourceDeclaration: boolean;
   allowStudentDevelopmentReview: boolean;
+  // Tether Secure Client Foundation + Safe Exam Browser Compatibility v1
+  // — see docs/secure-client-foundation-seb-v1.md.
+  deliveryMode: "STANDARD_WEB" | "MONITORED_WEB" | "SEB_OPTIONAL" | "SEB_REQUIRED" | "TETHER_CLIENT_OPTIONAL" | "TETHER_CLIENT_REQUIRED";
+  requireSebBrowserExamKey: boolean;
+  requireSebConfigKey: boolean;
+  requireDisplayCheck: boolean;
+  secureClientMaximumDisplays: number;
+  secureClientLecturerOverrideAllowed: boolean;
 };
 
 type Exam = {
@@ -2091,6 +2099,97 @@ export default function LecturerExamPage({
                     <li>Lecturer judgement remains final; no grade is automatically changed.</li>
                   </ul>
                 </div>
+              </div>
+            )}
+          </div>
+
+          {/* Tether Secure Client Foundation + Safe Exam Browser
+              Compatibility v1 — see
+              docs/secure-client-foundation-seb-v1.md. Cheat-resistant,
+              never cheat-proof/impossible to bypass. */}
+          <div className="border-t border-gray-200 pt-3">
+            <h3 className="text-sm font-medium">Exam delivery</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Choose how students access this exam. The web examination platform remains fully functional in every mode.
+            </p>
+            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {(
+                [
+                  { value: "STANDARD_WEB", title: "Standard web", desc: "For ordinary assessments using normal browser delivery.", disabled: false },
+                  { value: "MONITORED_WEB", title: "Monitored web", desc: "Uses Tether's existing camera, screen-sharing and integrity evidence.", disabled: false },
+                  { value: "SEB_OPTIONAL", title: "Safe Exam Browser — optional", desc: "Students may use an approved Safe Exam Browser configuration.", disabled: false },
+                  { value: "SEB_REQUIRED", title: "Safe Exam Browser — required", desc: "Students must use an approved Safe Exam Browser configuration.", disabled: false },
+                  { value: "TETHER_CLIENT_OPTIONAL", title: "Tether Secure Client", desc: "Planned for examinations requiring stronger device controls.", disabled: true },
+                ] as const
+              ).map((option) => (
+                <label
+                  key={option.value}
+                  className={`rounded border p-3 text-sm ${secureForm.deliveryMode === option.value ? "border-gray-500 bg-gray-50" : "border-gray-200"} ${option.disabled ? "opacity-50" : "cursor-pointer"}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="deliveryMode"
+                      disabled={option.disabled}
+                      checked={secureForm.deliveryMode === option.value}
+                      onChange={() => setSecureForm({ ...secureForm, deliveryMode: option.value })}
+                    />
+                    <span className="font-medium">{option.title}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-500">{option.desc}</p>
+                  {option.disabled && <p className="mt-1 text-xs text-amber-700">Disabled in production v1.</p>}
+                </label>
+              ))}
+            </div>
+
+            {(secureForm.deliveryMode === "SEB_OPTIONAL" || secureForm.deliveryMode === "SEB_REQUIRED") && (
+              <div className="mt-3 space-y-2 pl-1">
+                <label className="flex items-start gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={secureForm.requireSebBrowserExamKey}
+                    onChange={(e) => setSecureForm({ ...secureForm, requireSebBrowserExamKey: e.target.checked })}
+                  />
+                  <span>Require Browser Exam Key verification</span>
+                </label>
+                <label className="flex items-start gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={secureForm.requireSebConfigKey}
+                    onChange={(e) => setSecureForm({ ...secureForm, requireSebConfigKey: e.target.checked })}
+                  />
+                  <span>Require Config Key verification</span>
+                </label>
+                <label className="flex items-start gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={secureForm.requireDisplayCheck}
+                    onChange={(e) => setSecureForm({ ...secureForm, requireDisplayCheck: e.target.checked })}
+                  />
+                  <span>Require single-display check</span>
+                </label>
+                <label className="flex items-start gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={secureForm.secureClientLecturerOverrideAllowed}
+                    onChange={(e) => setSecureForm({ ...secureForm, secureClientLecturerOverrideAllowed: e.target.checked })}
+                  />
+                  <span>Allow lecturer override (e.g. for approved accessibility exceptions)</span>
+                </label>
+                <Link
+                  href={`/lecturer/exams/${id}/secure-client`}
+                  className="mt-2 inline-block rounded border border-gray-300 px-3 py-1.5 text-sm"
+                >
+                  Manage Safe Exam Browser configuration &amp; sessions
+                </Link>
+                <p className="rounded border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">
+                  Secure examination mode provides stronger controls and additional integrity evidence. It is designed to be
+                  cheat-resistant, but no examination technology can prevent every form of unauthorised assistance.
+                </p>
               </div>
             )}
           </div>

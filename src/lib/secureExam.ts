@@ -180,6 +180,44 @@ export const secureExamSettingsSchema = z.object({
   // in src/lib/screenSharePolicy.ts.
   screenShareMaxEvidenceFrames: z.number().int().min(1).max(50).default(20),
 
+  // --- Tether Secure Client Foundation + Safe Exam Browser Compatibility
+  // v1 (additive, opt-in) — see docs/secure-client-foundation-seb-v1.md.
+  // "Cheat-resistant", never "cheat-proof"/"impossible to bypass". The
+  // web platform remains fully functional without any of this — default
+  // STANDARD_WEB never changes any existing exam's behaviour. All later
+  // secure-client decisions for an in-progress attempt must use the
+  // immutable Submission.secureClientPolicySnapshotJson taken at attempt
+  // start, never these live settings directly.
+  deliveryMode: z.enum(["STANDARD_WEB", "MONITORED_WEB", "SEB_OPTIONAL", "SEB_REQUIRED", "TETHER_CLIENT_OPTIONAL", "TETHER_CLIENT_REQUIRED"]).default("STANDARD_WEB"),
+  allowedSebPlatforms: z.array(z.string()).default([]),
+  allowedSebVersions: z.array(z.string()).default([]),
+  requireSebBrowserExamKey: z.boolean().default(false),
+  requireSebConfigKey: z.boolean().default(false),
+  allowSebHeaderValidation: z.boolean().default(true),
+  allowSebJavascriptApiValidation: z.boolean().default(true),
+  // Bounds [60, 900]s — see clampSecureLaunchTokenTtlSeconds() in
+  // src/lib/secureClientPolicy.ts.
+  secureLaunchTokenTtlSeconds: z.number().int().min(60).max(900).default(300),
+  // Bounds [15, 120]s / [30, 300]s.
+  secureClientHeartbeatIntervalSeconds: z.number().int().min(15).max(120).default(30),
+  secureClientHeartbeatGraceSeconds: z.number().int().min(30).max(300).default(90),
+  requireDisplayCheck: z.boolean().default(false),
+  secureClientMaximumDisplays: z.number().int().min(1).max(3).default(1),
+  requireRemoteSessionCheck: z.boolean().default(false),
+  requireVirtualMachineCheck: z.boolean().default(false),
+  requireProcessCheck: z.boolean().default(false),
+  requireCaptureProtectionCheck: z.boolean().default(false),
+  // allowClipboard is deliberately NOT a separate setting — it is always
+  // derived from the existing blockCopyPaste value above (Part 1: "allow
+  // Clipboard: existing exam-policy value") when building the snapshot.
+  secureClientAllowPrinting: z.boolean().default(true),
+  secureClientAllowExternalNavigation: z.boolean().default(true),
+  secureClientAllowApplicationSwitching: z.boolean().default(true),
+  secureClientAllowRecovery: z.boolean().default(true),
+  // Bounds [30, 730] days.
+  secureClientEventRetentionDays: z.number().int().min(30).max(730).default(180),
+  secureClientLecturerOverrideAllowed: z.boolean().default(true),
+
   // --- Answer-Development Provenance v1 (additive, opt-in) — see
   // docs/answer-development-provenance-v1.md. THIS IS PROCESS EVIDENCE,
   // NOT A MISCONDUCT DETECTOR — never keystroke surveillance (see
