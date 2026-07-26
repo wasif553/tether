@@ -16,6 +16,7 @@ import { auth } from "@/auth";
 import { candidateOriginFromHeaders, resolveCanonicalOrigin, buildOriginAllowlist } from "@/lib/secureClient/canonicalOrigin";
 import { buildCanonicalRequestUrl, SEB_REQUEST_HASH_HEADER, SEB_CONFIG_KEY_HASH_HEADER } from "@/lib/secureClient/sebBrowserExamKey";
 import { overallStatusFromChecks, type AttestationChecks, type RequiredChecks } from "@/lib/secureClient/attestation";
+import { describeDisplayRequirement } from "@/lib/secureClientPolicy";
 import { SecureClientError, loadValidatedSecureClientSubmission, validateSebKeyForConfiguration } from "@/lib/secureClientRunner";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -33,8 +34,21 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     throw err;
   }
 
+  // Single Display Requirement v1 — messaging-only, never a live
+  // pass/fail check (there is no trustworthy browser signal for actual
+  // display state — see docs/secure-client-foundation-seb-v1.md). Built
+  // before the SEB-only early return below so STANDARD_WEB/MONITORED_WEB
+  // exams still get an honest "not enforceable" status rather than no
+  // field at all.
+  const displayRequirement = describeDisplayRequirement(context.policy);
+
   if (context.policy.deliveryMode !== "SEB_REQUIRED" && context.policy.deliveryMode !== "SEB_OPTIONAL") {
-    return NextResponse.json({ overallStatus: "NOT_SUPPORTED", reason: "This exam does not use Safe Exam Browser." });
+    return NextResponse.json({
+      overallStatus: "NOT_SUPPORTED",
+      reason: "This exam does not use Safe Exam Browser.",
+      deliveryMode: context.policy.deliveryMode,
+      displayRequirement,
+    });
   }
 
   const config = await prisma.secureClientConfiguration.findFirst({
@@ -89,7 +103,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     technicalFailure: false,
   });
 
-  return NextResponse.json({ overallStatus, checks, deliveryMode: context.policy.deliveryMode });
+  return NextResponse.json({ overallStatus, checks, deliveryMode: context.policy.deliveryMode, displayRequirement });
 }
 
 export const dynamic = "force-dynamic";

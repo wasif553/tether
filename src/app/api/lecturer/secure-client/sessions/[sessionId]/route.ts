@@ -63,6 +63,14 @@ export async function GET(_req: Request, { params }: { params: Promise<{ session
       id: a.id,
       overallStatus: a.overallStatus,
       displayCheckStatus: a.displayCheckStatus,
+      // Single Display Requirement v1 (Part 6) — displayCount is a
+      // dedicated bounded column; displayTopology has no column of its
+      // own and is read back from the existing detailsJson blob (never a
+      // raw monitor name/serial/EDID — see attestation.ts). Both are
+      // null for every SAFE_EXAM_BROWSER attestation (see
+      // recordAttestation in secureClientRunner.ts).
+      displayCount: a.displayCount,
+      displayTopology: (a.detailsJson as { displayTopology?: string } | null)?.displayTopology ?? null,
       remoteSessionStatus: a.remoteSessionStatus,
       virtualMachineStatus: a.virtualMachineStatus,
       processCheckStatus: a.processCheckStatus,

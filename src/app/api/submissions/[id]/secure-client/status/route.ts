@@ -7,7 +7,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import { parseSecureClientPolicy, describeDisplayRequirement } from "@/lib/secureClientPolicy";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await auth();
@@ -30,6 +30,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   return NextResponse.json({
     deliveryMode: policy.deliveryMode,
     studentPreflightRequired: policy.studentPreflightRequired,
+    displayRequirement: describeDisplayRequirement(policy),
     session: current
       ? {
           id: current.id,

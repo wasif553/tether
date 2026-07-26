@@ -203,6 +203,24 @@ export const secureExamSettingsSchema = z.object({
   secureClientHeartbeatGraceSeconds: z.number().int().min(30).max(300).default(90),
   requireDisplayCheck: z.boolean().default(false),
   secureClientMaximumDisplays: z.number().int().min(1).max(3).default(1),
+  // --- Single Display Requirement v1 (additive, opt-in) — see
+  // docs/secure-client-foundation-seb-v1.md, "Display requirement". The
+  // single lecturer-facing control for additional/mirrored/extended
+  // display restriction — supersedes requireDisplayCheck above as the
+  // thing lecturers actually configure (requireDisplayCheck/
+  // secureClientMaximumDisplays remain in this schema for backward
+  // compatibility with anything that already reads them directly, but
+  // buildSecureClientPolicySnapshot() derives the effective values from
+  // displayPolicy, not from a lecturer independently ticking a second,
+  // overlapping checkbox). UNRESTRICTED must be — and remain — the
+  // default for every existing exam and legacy snapshot: it changes
+  // nothing about current behaviour. SINGLE_DISPLAY_REQUIRED is only
+  // meaningful (and only ever enforced) when deliveryMode is SEB_REQUIRED
+  // or SEB_OPTIONAL — see isDisplayPolicyCombinationValid() in
+  // src/lib/secureClientPolicy.ts, which the exam PATCH route enforces
+  // server-side. Standard web delivery can never claim this restriction
+  // is enforced, regardless of what this field says (Part 9 of that doc).
+  displayPolicy: z.enum(["UNRESTRICTED", "SINGLE_DISPLAY_REQUIRED"]).default("UNRESTRICTED"),
   requireRemoteSessionCheck: z.boolean().default(false),
   requireVirtualMachineCheck: z.boolean().default(false),
   requireProcessCheck: z.boolean().default(false),

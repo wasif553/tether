@@ -8,8 +8,19 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { SECURE_CLIENT_EVENT_TYPES, isValidSecureClientEventType } from "@/lib/secureClient/secureClientEvents";
+import { SECURE_CLIENT_EVENT_TYPES, isValidSecureClientEventType, type SecureClientEventType } from "@/lib/secureClient/secureClientEvents";
+import { checksSupportedByClientType } from "@/lib/secureClient/attestation";
 import { SecureClientError, loadValidatedSecureClientSession, recordSecureClientEvent } from "@/lib/secureClientRunner";
+
+/**
+ * Single Display Requirement v1 (Part 7) — "only create a display-related
+ * integrity signal when a trusted supported client actually reports it".
+ * A SAFE_EXAM_BROWSER session has no trustworthy channel to know its own
+ * display count/topology (see SEB_UNSUPPORTED_CHECKS in attestation.ts),
+ * so it must never be able to post one of these event types at all —
+ * doing so could only ever be a browser-side guess or fabrication.
+ */
+const DISPLAY_EVENT_TYPES: ReadonlySet<SecureClientEventType> = new Set(["ADDITIONAL_DISPLAY_PRESENT", "DISPLAY_CONFIGURATION_CHANGED", "DISPLAY_POLICY_RESTORED"]);
 
 const bodySchema = z.object({
   eventType: z.enum(SECURE_CLIENT_EVENT_TYPES),
@@ -42,6 +53,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ session
   } catch (err) {
     if (err instanceof SecureClientError) return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
     throw err;
+  }
+
+  if (DISPLAY_EVENT_TYPES.has(parsed.data.eventType) && !checksSupportedByClientType(loaded.session.clientType).has("displayCheck")) {
+    return NextResponse.json({ error: "This client type cannot report display events" }, { status: 403 });
   }
 
   const recentCount = await prisma.secureClientEvent.count({

@@ -323,6 +323,7 @@ export async function POST(
       secureClientHeartbeatGraceSeconds: settings.secureClientHeartbeatGraceSeconds,
       requireDisplayCheck: settings.requireDisplayCheck,
       secureClientMaximumDisplays: settings.secureClientMaximumDisplays,
+      displayPolicy: settings.displayPolicy,
       requireRemoteSessionCheck: settings.requireRemoteSessionCheck,
       requireVirtualMachineCheck: settings.requireVirtualMachineCheck,
       requireProcessCheck: settings.requireProcessCheck,

@@ -75,6 +75,28 @@ describe("validateSecureClientEventMetadata", () => {
     const result = validateSecureClientEventMetadata("SECURE_CLIENT_INTERRUPTED", { reasonCode: "NETWORK_LOSS" });
     expect(result.success).toBe(true);
   });
+
+  // Single Display Requirement v1 — see docs/secure-client-foundation-seb-v1.md,
+  // "Display requirement", Part 7. DISPLAY_POLICY_RESTORED reuses the
+  // existing displayMetadataSchema also used by ADDITIONAL_DISPLAY_PRESENT
+  // / DISPLAY_CONFIGURATION_CHANGED.
+  it("accepts a bounded displayCount on DISPLAY_POLICY_RESTORED", () => {
+    expect(validateSecureClientEventMetadata("DISPLAY_POLICY_RESTORED", { displayCount: 1 }).success).toBe(true);
+    expect(validateSecureClientEventMetadata("DISPLAY_POLICY_RESTORED", {}).success).toBe(true);
+  });
+
+  it("rejects a raw monitor name/identifier smuggled into display event metadata — strict allowlist only", () => {
+    for (const type of ["ADDITIONAL_DISPLAY_PRESENT", "DISPLAY_CONFIGURATION_CHANGED", "DISPLAY_POLICY_RESTORED"] as const) {
+      expect(validateSecureClientEventMetadata(type, { monitorName: "DELL U2723QE" }).success).toBe(false);
+      expect(validateSecureClientEventMetadata(type, { serialNumber: "ABC123" }).success).toBe(false);
+      expect(validateSecureClientEventMetadata(type, { edid: "00ffffffffffff00" }).success).toBe(false);
+    }
+  });
+
+  it("rejects an arbitrary nested object smuggled into display event metadata", () => {
+    const result = validateSecureClientEventMetadata("ADDITIONAL_DISPLAY_PRESENT", { displays: [{ name: "Monitor 1", id: "abc" }] });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe("checkSequenceNumber", () => {

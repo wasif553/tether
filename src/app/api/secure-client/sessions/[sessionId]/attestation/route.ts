@@ -7,7 +7,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
-import { CHECK_STATUSES, ATTESTATION_CHECK_KEYS } from "@/lib/secureClient/attestation";
+import { CHECK_STATUSES, ATTESTATION_CHECK_KEYS, MAX_REPORTED_DISPLAY_COUNT, DISPLAY_TOPOLOGIES } from "@/lib/secureClient/attestation";
 import { SecureClientError, loadValidatedSecureClientSession, recordAttestation } from "@/lib/secureClientRunner";
 
 const checkStatusSchema = z.enum(CHECK_STATUSES);
@@ -26,6 +26,12 @@ const bodySchema = z.object({
   configurationInvalid: z.boolean().optional(),
   versionUnsupported: z.boolean().optional(),
   technicalFailure: z.boolean().optional(),
+  // Single Display Requirement v1 (Part 6) — bounded and optional; only
+  // ever honoured server-side for a client type that actually supports
+  // displayCheck (see recordAttestation in secureClientRunner.ts, which
+  // silently drops these for a SAFE_EXAM_BROWSER session).
+  displayCount: z.number().int().min(1).max(MAX_REPORTED_DISPLAY_COUNT).optional(),
+  displayTopology: z.enum(DISPLAY_TOPOLOGIES).optional(),
 });
 
 export async function POST(req: Request, { params }: { params: Promise<{ sessionId: string }> }) {
@@ -61,6 +67,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ session
     versionUnsupported: parsed.data.versionUnsupported ?? false,
     technicalFailure: parsed.data.technicalFailure ?? false,
     clientReportedAt: new Date(),
+    displayCount: parsed.data.displayCount ?? null,
+    displayTopology: parsed.data.displayTopology ?? null,
   });
 
   return NextResponse.json({ ok: true, overallStatus: result.overallStatus, attestationId: result.attestation.id }, { status: 201 });

@@ -89,8 +89,23 @@ export function overallStatusFromChecks(input: OverallStatusInput): OverallStatu
  * checks — these always resolve to NOT_SUPPORTED for clientType
  * SAFE_EXAM_BROWSER, regardless of what the policy nominally requires
  * (Part 8).
+ *
+ * `displayCheck` is included here (Single Display Requirement v1, see
+ * docs/secure-client-foundation-seb-v1.md, "Display requirement"): the
+ * official SEB JavaScript API (window.SafeExamBrowser — see
+ * src/lib/secureClient/sebJavascriptApi.ts) exposes only `version` and
+ * `security.updateKeys()`, nothing about connected displays. SEB enforces
+ * its own display-count restriction (`allowedDisplaysMaxNumber`) entirely
+ * client-side, before/without ever reporting the outcome back to this
+ * attestation API — there is no trustworthy channel for a SEB session to
+ * claim PASS or FAIL on this check, so it must never be treated as
+ * something SEB can attest to. The restriction itself is still enforced —
+ * see sebConfigGenerator.ts — just not observable through this endpoint
+ * for SEB. Only a future native Tether client (TETHER_SECURE_CLIENT) or
+ * the dev/mock simulator (MOCK_TETHER_CLIENT) may report it.
  */
 export const SEB_UNSUPPORTED_CHECKS: ReadonlySet<AttestationCheckKey> = new Set([
+  "displayCheck",
   "remoteSession",
   "virtualMachine",
   "processCheck",
@@ -114,6 +129,31 @@ export function normaliseChecksForClientType(checks: AttestationChecks, clientTy
     if (!supported.has(key)) result[key] = "NOT_SUPPORTED";
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Single Display Requirement v1 — bounded, optional display attestation
+// fields for a FUTURE trusted native Tether client (see
+// docs/secure-client-foundation-seb-v1.md, "Display requirement", Part 6).
+// NOT implemented for SAFE_EXAM_BROWSER — see SEB_UNSUPPORTED_CHECKS
+// above; these fields are only ever accepted from TETHER_SECURE_CLIENT/
+// MOCK_TETHER_CLIENT sessions (see recordAttestation in
+// secureClientRunner.ts). Never a raw monitor name, serial number, EDID,
+// device path, or any other hardware identifier — just a small bounded
+// count and a coarse topology classification.
+// ---------------------------------------------------------------------------
+
+/** Small, fixed sanity bound — never a real hardware limit, just a bound against a malformed/huge client-supplied number. */
+export const MAX_REPORTED_DISPLAY_COUNT = 8;
+
+export function isValidReportedDisplayCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_REPORTED_DISPLAY_COUNT;
+}
+
+export const DISPLAY_TOPOLOGIES = ["SINGLE", "CLONE", "EXTEND", "EXTERNAL_ONLY", "UNKNOWN"] as const;
+export type DisplayTopology = (typeof DISPLAY_TOPOLOGIES)[number];
+export function isValidDisplayTopology(value: string): value is DisplayTopology {
+  return (DISPLAY_TOPOLOGIES as readonly string[]).includes(value);
 }
 
 // ---------------------------------------------------------------------------

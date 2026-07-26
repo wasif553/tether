@@ -25,6 +25,16 @@ type Attestation = { id: string; overallStatus: string; serverReceivedAt: string
 type EventRow = { id: string; eventType: string; eventLevel: string; serverReceivedAt: string; metadata: unknown };
 type RecoveryGrant = { id: string; issuedByName: string; issuedAt: string; expiresAt: string; consumedAt: string | null; revokedAt: string | null; reason: string };
 
+// Single Display Requirement v1 — see docs/secure-client-foundation-seb-v1.md,
+// "Display requirement", Part 7. This remains an integrity SIGNAL only —
+// never automatic misconduct, never a mark change, never an auto-submit.
+// Every other event type keeps the existing generic label transform below.
+const DISPLAY_EVENT_LABELS: Record<string, string> = {
+  ADDITIONAL_DISPLAY_PRESENT:
+    "An additional display was reported by the secure exam client. The exam was paused until the display requirement was restored. Needs review.",
+  DISPLAY_POLICY_RESTORED: "Display requirement restored — configuration restored.",
+};
+
 const ALTERNATIVE_EXPLANATIONS = [
   "a shared institutional or accommodation network",
   "a brief connectivity interruption",
@@ -97,7 +107,7 @@ export default function SecureClientSessionDetailPage({ params }: { params: Prom
     detail.interruptedAt ? { at: detail.interruptedAt, label: "Interrupted" } : null,
     detail.recoveredAt ? { at: detail.recoveredAt, label: "Recovered" } : null,
     detail.endedAt ? { at: detail.endedAt, label: `Ended (${detail.endReason ?? "unspecified"})` } : null,
-    ...events.map((e) => ({ at: e.serverReceivedAt, label: e.eventType.replaceAll("_", " ").toLowerCase() })),
+    ...events.map((e) => ({ at: e.serverReceivedAt, label: DISPLAY_EVENT_LABELS[e.eventType] ?? e.eventType.replaceAll("_", " ").toLowerCase() })),
   ]
     .filter((x): x is { at: string; label: string } => x != null)
     .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());

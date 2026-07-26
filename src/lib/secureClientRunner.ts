@@ -30,8 +30,13 @@ import {
 import {
   overallStatusFromChecks,
   normaliseChecksForClientType,
+  checksSupportedByClientType,
+  isValidReportedDisplayCount,
+  isValidDisplayTopology,
+  type AttestationCheckKey,
   type AttestationChecks,
   type RequiredChecks,
+  type DisplayTopology,
 } from "@/lib/secureClient/attestation";
 import {
   DEFAULT_SECURE_CLIENT_EVENT_LEVEL,
@@ -379,13 +384,25 @@ export async function issueLaunchManifest(params: IssueLaunchManifestParams) {
     allowedPlatform: params.policy.allowedSebPlatforms,
     heartbeatIntervalSeconds: params.policy.heartbeatIntervalSeconds,
     heartbeatGraceSeconds: params.policy.heartbeatGraceSeconds,
-    requiredChecks: [
-      params.policy.requireDisplayCheck ? "displayCheck" : null,
-      params.policy.requireRemoteSessionCheck ? "remoteSession" : null,
-      params.policy.requireVirtualMachineCheck ? "virtualMachine" : null,
-      params.policy.requireProcessCheck ? "processCheck" : null,
-      params.policy.requireCaptureProtectionCheck ? "captureProtection" : null,
-    ].filter((v): v is string => v != null),
+    // Filtered through checksSupportedByClientType so a check the client
+    // type genuinely cannot report (e.g. displayCheck for SAFE_EXAM_BROWSER
+    // — see SEB_UNSUPPORTED_CHECKS in attestation.ts) is never marked
+    // REQUIRED here. A required-but-NOT_SUPPORTED check always resolves
+    // the whole attestation to CANNOT_START (see overallStatusFromChecks),
+    // which would make e.g. every SEB + Single Display Requirement exam
+    // permanently unable to reach READY — the display restriction is
+    // still enforced for SEB, just out-of-band via the generated .seb
+    // configuration (see sebConfigGenerator.ts), not through this
+    // attestation channel.
+    requiredChecks: (
+      [
+        params.policy.requireDisplayCheck ? "displayCheck" : null,
+        params.policy.requireRemoteSessionCheck ? "remoteSession" : null,
+        params.policy.requireVirtualMachineCheck ? "virtualMachine" : null,
+        params.policy.requireProcessCheck ? "processCheck" : null,
+        params.policy.requireCaptureProtectionCheck ? "captureProtection" : null,
+      ].filter((v): v is AttestationCheckKey => v != null) as AttestationCheckKey[]
+    ).filter((check) => checksSupportedByClientType(params.clientType).has(check)),
     permittedCapabilities: [
       params.policy.allowClipboard ? "clipboard" : null,
       params.policy.allowPrinting ? "printing" : null,
@@ -542,6 +559,17 @@ export type RecordAttestationInput = {
   versionUnsupported: boolean;
   technicalFailure: boolean;
   clientReportedAt?: Date | null;
+  /**
+   * Single Display Requirement v1 (Part 6) — bounded, optional, and only
+   * ever honoured for a client type that can actually support
+   * displayCheck (TETHER_SECURE_CLIENT/MOCK_TETHER_CLIENT — see
+   * SEB_UNSUPPORTED_CHECKS in attestation.ts). A SAFE_EXAM_BROWSER
+   * session reporting either of these is silently ignored, never stored —
+   * there is no trustworthy channel for SEB to know this, so a claimed
+   * value could only ever be a guess or a fabrication.
+   */
+  displayCount?: number | null;
+  displayTopology?: DisplayTopology | null;
 };
 
 export async function recordAttestation(input: RecordAttestationInput) {
@@ -555,6 +583,13 @@ export async function recordAttestation(input: RecordAttestationInput) {
     technicalFailure: input.technicalFailure,
   });
 
+  // Only a client type that genuinely supports displayCheck may have its
+  // reported displayCount/displayTopology stored — never trusted from a
+  // SAFE_EXAM_BROWSER session (see doc comment on RecordAttestationInput).
+  const displaySupported = checksSupportedByClientType(input.clientType).has("displayCheck");
+  const displayCount = displaySupported && isValidReportedDisplayCount(input.displayCount) ? input.displayCount : null;
+  const displayTopology = displaySupported && typeof input.displayTopology === "string" && isValidDisplayTopology(input.displayTopology) ? input.displayTopology : null;
+
   const attestation = await prisma.secureClientAttestation.create({
     data: {
       secureClientSessionId: input.sessionId,
@@ -564,6 +599,7 @@ export async function recordAttestation(input: RecordAttestationInput) {
       clientVersion: input.clientVersion ?? null,
       clientBuild: input.clientBuild ?? null,
       displayCheckStatus: normalisedChecks.displayCheck ?? null,
+      displayCount,
       remoteSessionStatus: normalisedChecks.remoteSession ?? null,
       virtualMachineStatus: normalisedChecks.virtualMachine ?? null,
       processCheckStatus: normalisedChecks.processCheck ?? null,
@@ -574,7 +610,11 @@ export async function recordAttestation(input: RecordAttestationInput) {
       configurationVerificationStatus: normalisedChecks.configurationVerification ?? null,
       clientSignatureStatus: normalisedChecks.clientSignature ?? null,
       overallStatus,
-      detailsJson: normalisedChecks as Prisma.InputJsonValue,
+      // displayTopology has no dedicated column (Single Display
+      // Requirement v1 deliberately avoids a schema change — see
+      // docs/migration-ledger.md) — stored inside the existing free-form
+      // detailsJson blob alongside the per-check statuses instead.
+      detailsJson: (displayTopology ? { ...normalisedChecks, displayTopology } : normalisedChecks) as Prisma.InputJsonValue,
       clientReportedAt: input.clientReportedAt ?? null,
     },
   });

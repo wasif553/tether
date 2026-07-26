@@ -123,6 +123,10 @@ type SecureSettings = {
   requireSebConfigKey: boolean;
   requireDisplayCheck: boolean;
   secureClientMaximumDisplays: number;
+  // Single Display Requirement v1 — see docs/secure-client-foundation-seb-v1.md,
+  // "Display requirement". The one lecturer-facing control for
+  // additional/mirrored/extended display restriction.
+  displayPolicy: "UNRESTRICTED" | "SINGLE_DISPLAY_REQUIRED";
   secureClientLecturerOverrideAllowed: boolean;
 };
 
@@ -665,6 +669,13 @@ export default function LecturerExamPage({
 
   async function handleSaveSecureSettings() {
     if (!secureForm) return;
+    // Single Display Requirement v1 — prefer preventing the invalid
+    // combination client-side rather than only relying on the server's
+    // 400 (which still applies regardless — see PATCH /api/exams/[id]).
+    if (secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED" && secureForm.deliveryMode !== "SEB_REQUIRED" && secureForm.deliveryMode !== "SEB_OPTIONAL") {
+      setSecureSaveMessage("Single display required needs Safe Exam Browser delivery — choose a Safe Exam Browser delivery mode or remove the display requirement.");
+      return;
+    }
     setSavingSecure(true);
     setSecureSaveMessage(null);
     const res = await fetch(`/api/exams/${id}`, {
@@ -677,7 +688,8 @@ export default function LecturerExamPage({
       setSecureSaveMessage("Safe exam settings saved.");
       await loadExam();
     } else {
-      setSecureSaveMessage("Safe exam settings could not be saved. Please try again.");
+      const body = await res.json().catch(() => null);
+      setSecureSaveMessage(typeof body?.error === "string" ? body.error : "Safe exam settings could not be saved. Please try again.");
     }
   }
 
@@ -2180,6 +2192,62 @@ export default function LecturerExamPage({
               ))}
             </div>
 
+            {/* Single Display Requirement v1 — see
+                docs/secure-client-foundation-seb-v1.md, "Display
+                requirement". Visible for every delivery mode (not just
+                SEB) so the invalid STANDARD_WEB/MONITORED_WEB combination
+                below can actually be surfaced and blocked, rather than
+                hidden where a lecturer could never see why saving fails. */}
+            <div className="mt-3 pl-1">
+              <p className="text-sm font-medium">Display requirement</p>
+              <div className="mt-1 flex flex-col gap-1.5">
+                <label className="flex items-start gap-2 text-sm text-gray-700">
+                  <input
+                    type="radio"
+                    name="displayPolicy"
+                    className="mt-0.5"
+                    checked={secureForm.displayPolicy === "UNRESTRICTED"}
+                    onChange={() => setSecureForm({ ...secureForm, displayPolicy: "UNRESTRICTED" })}
+                  />
+                  <span>
+                    No display restriction
+                    <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                      Students may use the displays permitted by their device and exam client.
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2 text-sm text-gray-700">
+                  <input
+                    type="radio"
+                    name="displayPolicy"
+                    className="mt-0.5"
+                    checked={secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED"}
+                    onChange={() => setSecureForm({ ...secureForm, displayPolicy: "SINGLE_DISPLAY_REQUIRED" })}
+                  />
+                  <span>
+                    Single display required
+                    <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                      Students must use one active display. Safe Exam Browser will enforce the supported display
+                      restrictions before and during the exam.
+                    </span>
+                  </span>
+                </label>
+              </div>
+              <p className="mt-1.5 text-xs text-gray-500">
+                Single-display enforcement requires Safe Exam Browser. Standard web exams cannot reliably verify
+                connected, mirrored or extended displays.
+              </p>
+              {secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED" &&
+                secureForm.deliveryMode !== "SEB_REQUIRED" &&
+                secureForm.deliveryMode !== "SEB_OPTIONAL" && (
+                  <p className="mt-1.5 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+                    Single display required needs Safe Exam Browser delivery. Choose &quot;Safe Exam Browser —
+                    required&quot; or &quot;Safe Exam Browser — optional&quot; above before saving, or this setting
+                    will be rejected.
+                  </p>
+                )}
+            </div>
+
             {(secureForm.deliveryMode === "SEB_OPTIONAL" || secureForm.deliveryMode === "SEB_REQUIRED") && (
               <div className="mt-3 space-y-2 pl-1">
                 <label className="flex items-start gap-2 text-sm text-gray-700">
@@ -2199,15 +2267,6 @@ export default function LecturerExamPage({
                     onChange={(e) => setSecureForm({ ...secureForm, requireSebConfigKey: e.target.checked })}
                   />
                   <span>Require Config Key verification</span>
-                </label>
-                <label className="flex items-start gap-2 text-sm text-gray-700">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5"
-                    checked={secureForm.requireDisplayCheck}
-                    onChange={(e) => setSecureForm({ ...secureForm, requireDisplayCheck: e.target.checked })}
-                  />
-                  <span>Require single-display check</span>
                 </label>
                 <label className="flex items-start gap-2 text-sm text-gray-700">
                   <input

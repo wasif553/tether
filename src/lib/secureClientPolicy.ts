@@ -50,6 +50,37 @@ export function isValidClientType(value: string): value is ClientType {
 }
 
 // ---------------------------------------------------------------------------
+// Single Display Requirement v1 — see docs/secure-client-foundation-seb-v1.md,
+// "Display requirement". This does NOT claim STANDARD_WEB can reliably
+// detect additional, mirrored, or extended displays — see
+// isDisplayPolicyCombinationValid below, which is the enforcement
+// boundary: SINGLE_DISPLAY_REQUIRED is only ever actually wired into a
+// generated SEB configuration (src/lib/secureClient/sebConfigGenerator.ts)
+// when that boundary already holds.
+// ---------------------------------------------------------------------------
+
+export const DISPLAY_POLICIES = ["UNRESTRICTED", "SINGLE_DISPLAY_REQUIRED"] as const;
+export type DisplayPolicy = (typeof DISPLAY_POLICIES)[number];
+export function isValidDisplayPolicy(value: string): value is DisplayPolicy {
+  return (DISPLAY_POLICIES as readonly string[]).includes(value);
+}
+
+/**
+ * A lecturer may only select SINGLE_DISPLAY_REQUIRED alongside a delivery
+ * mode that actually routes the student through Safe Exam Browser
+ * (SEB_REQUIRED or SEB_OPTIONAL) — never STANDARD_WEB or MONITORED_WEB,
+ * which have no mechanism to enforce or even reliably observe display
+ * topology. UNRESTRICTED is always valid regardless of delivery mode.
+ * Called both by the lecturer-settings PATCH route (server-side,
+ * authoritative — see src/app/api/exams/[id]/route.ts) and by the
+ * lecturer UI (client-side convenience only).
+ */
+export function isDisplayPolicyCombinationValid(deliveryMode: DeliveryMode, displayPolicy: DisplayPolicy): boolean {
+  if (displayPolicy !== "SINGLE_DISPLAY_REQUIRED") return true;
+  return deliveryMode === "SEB_REQUIRED" || deliveryMode === "SEB_OPTIONAL";
+}
+
+// ---------------------------------------------------------------------------
 // Server-side hard bounds (Part 1) — the single source of truth. Any
 // lecturer- or client-supplied value outside these is clamped, never
 // trusted verbatim.
@@ -111,6 +142,15 @@ export type SecureClientPolicy = {
   heartbeatGraceSeconds: number;
   requireDisplayCheck: boolean;
   maximumDisplays: number;
+  /**
+   * Single Display Requirement v1 — the lecturer-facing display
+   * requirement actually in effect for THIS attempt, frozen at attempt
+   * start exactly like every other field here. Never re-derive this from
+   * live exam settings after an attempt has started (Part 2/4). Always
+   * UNRESTRICTED when deliveryMode is STANDARD_WEB or MONITORED_WEB —
+   * see isDisplayPolicyCombinationValid.
+   */
+  displayPolicy: DisplayPolicy;
   requireRemoteSessionCheck: boolean;
   requireVirtualMachineCheck: boolean;
   requireProcessCheck: boolean;
@@ -145,6 +185,7 @@ export const DISABLED_SECURE_CLIENT_POLICY: SecureClientPolicy = {
   heartbeatGraceSeconds: DEFAULT_HEARTBEAT_GRACE_SECONDS,
   requireDisplayCheck: false,
   maximumDisplays: DEFAULT_MAXIMUM_DISPLAYS,
+  displayPolicy: "UNRESTRICTED",
   requireRemoteSessionCheck: false,
   requireVirtualMachineCheck: false,
   requireProcessCheck: false,
@@ -173,6 +214,7 @@ export type RelevantSecureClientSettings = {
   secureClientHeartbeatGraceSeconds: number;
   requireDisplayCheck: boolean;
   secureClientMaximumDisplays: number;
+  displayPolicy: DisplayPolicy;
   requireRemoteSessionCheck: boolean;
   requireVirtualMachineCheck: boolean;
   requireProcessCheck: boolean;
@@ -260,6 +302,15 @@ export function buildSecureClientPolicySnapshot(
   // when the setting itself hasn't been reasoned about for this mode.
   const restrictiveDefault = requiresSecureClient;
 
+  // Single Display Requirement v1 — re-validated here (not just trusted
+  // from the PATCH-time check in src/app/api/exams/[id]/route.ts) against
+  // the EFFECTIVE (already-downgraded) deliveryMode, so a SEB_REQUIRED
+  // exam whose availability got downgraded to STANDARD_WEB (see
+  // resolveEffectiveDeliveryMode above) can never freeze a
+  // SINGLE_DISPLAY_REQUIRED snapshot it can't actually enforce.
+  const displayPolicy: DisplayPolicy = isDisplayPolicyCombinationValid(deliveryMode, settings.displayPolicy) ? settings.displayPolicy : "UNRESTRICTED";
+  const singleDisplayRequired = displayPolicy === "SINGLE_DISPLAY_REQUIRED";
+
   return {
     schemaVersion: SECURE_CLIENT_SNAPSHOT_SCHEMA_VERSION,
     policyVersion: SECURE_CLIENT_POLICY_VERSION,
@@ -275,8 +326,9 @@ export function buildSecureClientPolicySnapshot(
     secureLaunchTokenTtlSeconds: clampSecureLaunchTokenTtlSeconds(settings.secureLaunchTokenTtlSeconds),
     heartbeatIntervalSeconds: clampHeartbeatIntervalSeconds(settings.secureClientHeartbeatIntervalSeconds),
     heartbeatGraceSeconds: clampHeartbeatGraceSeconds(settings.secureClientHeartbeatGraceSeconds),
-    requireDisplayCheck: settings.requireDisplayCheck,
-    maximumDisplays: clampMaximumDisplays(settings.secureClientMaximumDisplays),
+    requireDisplayCheck: settings.requireDisplayCheck || singleDisplayRequired,
+    maximumDisplays: singleDisplayRequired ? 1 : clampMaximumDisplays(settings.secureClientMaximumDisplays),
+    displayPolicy,
     requireRemoteSessionCheck: settings.requireRemoteSessionCheck,
     requireVirtualMachineCheck: settings.requireVirtualMachineCheck,
     requireProcessCheck: settings.requireProcessCheck,
@@ -311,6 +363,13 @@ export function parseSecureClientPolicy(raw: unknown): SecureClientPolicy {
 
   const requiresSecureClient = deliveryModeRequiresSecureClient(deliveryMode);
   const restrictiveDefault = requiresSecureClient;
+  // Re-derived from the stored deliveryMode (never trusted as an
+  // independent stored value) — the same tamper-safety pattern as
+  // restrictiveDefault above: a hand-edited/corrupted stored snapshot
+  // claiming SINGLE_DISPLAY_REQUIRED for a mode that can't enforce it
+  // (e.g. MONITORED_WEB) is always read back as UNRESTRICTED.
+  const storedDisplayPolicy = typeof obj.displayPolicy === "string" && isValidDisplayPolicy(obj.displayPolicy) ? obj.displayPolicy : "UNRESTRICTED";
+  const displayPolicy: DisplayPolicy = isDisplayPolicyCombinationValid(deliveryMode, storedDisplayPolicy) ? storedDisplayPolicy : "UNRESTRICTED";
   const strArray = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
   const clientTypeArray = (v: unknown): ClientType[] =>
     Array.isArray(v) ? v.filter((x): x is ClientType => typeof x === "string" && isValidClientType(x)) : [];
@@ -336,8 +395,12 @@ export function parseSecureClientPolicy(raw: unknown): SecureClientPolicy {
     heartbeatGraceSeconds: clampHeartbeatGraceSeconds(
       typeof obj.heartbeatGraceSeconds === "number" ? obj.heartbeatGraceSeconds : DEFAULT_HEARTBEAT_GRACE_SECONDS,
     ),
-    requireDisplayCheck: obj.requireDisplayCheck === true,
-    maximumDisplays: clampMaximumDisplays(typeof obj.maximumDisplays === "number" ? obj.maximumDisplays : DEFAULT_MAXIMUM_DISPLAYS),
+    requireDisplayCheck: obj.requireDisplayCheck === true || displayPolicy === "SINGLE_DISPLAY_REQUIRED",
+    maximumDisplays:
+      displayPolicy === "SINGLE_DISPLAY_REQUIRED"
+        ? 1
+        : clampMaximumDisplays(typeof obj.maximumDisplays === "number" ? obj.maximumDisplays : DEFAULT_MAXIMUM_DISPLAYS),
+    displayPolicy,
     requireRemoteSessionCheck: obj.requireRemoteSessionCheck === true,
     requireVirtualMachineCheck: obj.requireVirtualMachineCheck === true,
     requireProcessCheck: obj.requireProcessCheck === true,
@@ -364,4 +427,52 @@ export function isSecureClientRequired(policy: Pick<SecureClientPolicy, "deliver
 }
 export function isSecureClientOffered(policy: Pick<SecureClientPolicy, "deliveryMode">): boolean {
   return deliveryModeOffersSecureClient(policy.deliveryMode);
+}
+
+// ---------------------------------------------------------------------------
+// Single Display Requirement v1 — student-facing status. See
+// docs/secure-client-foundation-seb-v1.md, "Display requirement" and
+// Part 5 (student preflight). This is purely a MESSAGING helper — it
+// never queries or guesses at real display state (there is no
+// trustworthy browser signal for that; see the prohibition list in
+// docs/secure-client-foundation-seb-v1.md). It only describes what is
+// (or isn't) being enforced, from the immutable per-attempt snapshot.
+// ---------------------------------------------------------------------------
+
+export const DISPLAY_REQUIREMENT_STATUSES = ["NOT_APPLICABLE", "ENFORCED_BY_SECURE_CLIENT", "NOT_ENFORCEABLE_STANDARD_WEB"] as const;
+export type DisplayRequirementStatus = (typeof DISPLAY_REQUIREMENT_STATUSES)[number];
+
+export type DisplayRequirementInfo = {
+  displayPolicy: DisplayPolicy;
+  status: DisplayRequirementStatus;
+  title: string | null;
+  instruction: string | null;
+};
+
+/**
+ * Describes the display requirement for student-facing UI/API responses.
+ * Never claims STANDARD_WEB enforces anything — the NOT_ENFORCEABLE_STANDARD_WEB
+ * branch below is defensive (isDisplayPolicyCombinationValid and the
+ * snapshot builder/parser already prevent SINGLE_DISPLAY_REQUIRED from
+ * ever coexisting with a non-SEB delivery mode), never something a
+ * caller needs to construct a fake PASS/FAIL check result for.
+ */
+export function describeDisplayRequirement(policy: Pick<SecureClientPolicy, "deliveryMode" | "displayPolicy">): DisplayRequirementInfo {
+  if (policy.displayPolicy !== "SINGLE_DISPLAY_REQUIRED") {
+    return { displayPolicy: policy.displayPolicy, status: "NOT_APPLICABLE", title: null, instruction: null };
+  }
+  if (policy.deliveryMode === "SEB_REQUIRED" || policy.deliveryMode === "SEB_OPTIONAL") {
+    return {
+      displayPolicy: policy.displayPolicy,
+      status: "ENFORCED_BY_SECURE_CLIENT",
+      title: "Single display required",
+      instruction: "Disconnect additional monitors, projectors, televisions and wireless displays before starting the exam.",
+    };
+  }
+  return {
+    displayPolicy: policy.displayPolicy,
+    status: "NOT_ENFORCEABLE_STANDARD_WEB",
+    title: "Single display required",
+    instruction: "Not enforceable in standard web mode.",
+  };
 }

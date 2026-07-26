@@ -40,14 +40,18 @@ This feature and its UI consistently use: secure examination mode,
 stronger device controls, secure-client session, client verification,
 preflight check, integrity signal, action required, needs lecturer
 review, possible technical issue, human decision, alternative
-explanation, cheat-resistant.
+explanation, cheat-resistant. The Single Display Requirement adds:
+additional display, mirrored display, extended display, display
+requirement, needs review, secure exam requirement, configuration
+restored.
 
 It never claims: cheat-proof, impossible to bypass, proof of cheating,
 detected cheating, automatic misconduct, that a student is guilty,
-guaranteed screenshot prevention, or complete lockdown. No examination
-technology described here can prevent every form of unauthorised
-assistance, and the UI says so explicitly (see the student compatibility
-page).
+guaranteed screenshot prevention, guaranteed blocking, or complete
+lockdown. No examination technology described here can prevent every
+form of unauthorised assistance, and the UI says so explicitly (see the
+student compatibility page). STANDARD_WEB never claims to reliably detect
+a second monitor.
 
 ## Delivery modes
 
@@ -138,6 +142,117 @@ resolve the canonical origin from an explicit allowlist (`APP_URL`) —
 never a trusted raw/forwarded `Host` header, since this app runs behind
 Vercel's proxy.
 
+## Display requirement (Single Display Requirement v1)
+
+Lets a lecturer require students to use a single active display for an
+exam — "additional display", "mirrored display", and "extended display"
+are all rejected the same way: by refusing to run at all with more than
+one display connected. This does **not** distinguish mirror vs. extend at
+the topology level — see the capability table below for exactly what is
+and isn't implemented.
+
+**Model.** `displayPolicy: "UNRESTRICTED" | "SINGLE_DISPLAY_REQUIRED"` —
+see `DISPLAY_POLICIES`/`isValidDisplayPolicy` in
+[`src/lib/secureClientPolicy.ts`](../src/lib/secureClientPolicy.ts). Lives
+in the same JSON policy model as every other secure-client setting (no new
+database column, no migration) — `secureExamSettingsSchema` in
+[`src/lib/secureExam.ts`](../src/lib/secureExam.ts), frozen into the
+immutable per-attempt `Submission.secureClientPolicySnapshotJson` snapshot
+by `buildSecureClientPolicySnapshot()` exactly like `deliveryMode` itself.
+Defaults to `UNRESTRICTED` for every existing exam and every legacy
+snapshot that predates this field.
+
+**Valid combinations.** `isDisplayPolicyCombinationValid()` allows
+`SINGLE_DISPLAY_REQUIRED` only alongside `SEB_REQUIRED` or `SEB_OPTIONAL`
+— never `STANDARD_WEB` or `MONITORED_WEB`, which have no mechanism to
+enforce or even observe display topology. Enforced twice: server-side in
+`PATCH /api/exams/[id]` (400 if invalid) and again inside
+`buildSecureClientPolicySnapshot()`/`parseSecureClientPolicy()` themselves
+(so a SEB_REQUIRED exam whose availability gets downgraded to
+STANDARD_WEB at attempt start — see `resolveEffectiveDeliveryMode()` —
+can never freeze a `SINGLE_DISPLAY_REQUIRED` snapshot it can't actually
+enforce).
+
+**Capability table:**
+
+| Delivery mode | Can it verify display topology? | What this feature does |
+|---|---|---|
+| `STANDARD_WEB` | **No.** Cannot reliably verify the number or topology of connected displays — no legitimate browser API exposes this, and `screen.availWidth`/window position/CSS media queries are not trustworthy security signals (they describe the browser window, not the display hardware). | `displayPolicy` is always `UNRESTRICTED` here; the preflight/status APIs and student UI report "Not enforceable in standard web mode," never a false PASS. |
+| `SCREEN_SHARE_REQUIRED` (Screen-share Evidence Mode v1, a separate feature — see `docs/screen-share-evidence-v1.md`) | **Partial.** Can require sharing an entire display as evidence. **Cannot prove another display is absent** — a student can share one display while a second, unshared display sits next to it. | Unrelated to `displayPolicy`; not a substitute for it. |
+| `SEB_REQUIRED` with `displayPolicy: SINGLE_DISPLAY_REQUIRED` | **Count-based, plus mirroring explicitly disabled.** SEB's official `allowedDisplaysMaxNumber` setting (see below) limits the allowed display count to one where SEB's display validation supports it; `allowDisplayMirroring=false` explicitly disables display mirroring on supported SEB platforms. Neither setting performs direct topology classification. Requires real Safe Exam Browser validation before any Production claim (see the manual checklist below) — not yet performed in this implementation pass. | `sebConfigGenerator.ts` sets both `allowDisplayMirroring` (`false`) and `allowedDisplaysMaxNumber` (`1`) in the generated `.seb` configuration; `SEB_OPTIONAL` gets the same treatment when a student actually launches via SEB. |
+| Future native Tether client (Windows) | **Would be able to report trusted display count and topology** (`SINGLE`/`CLONE`/`EXTEND`/`EXTERNAL_ONLY`/`UNKNOWN`) via the bounded, optional attestation fields already reserved for it (`SecureClientAttestation.displayCount`, `displayTopology` inside `detailsJson`) — see "Secure-client attestation" below. **Not implemented in this task** — see `docs/tether-secure-client-windows-architecture.md`. |
+
+**Safe Exam Browser configuration keys.** `allowDisplayMirroring`
+(boolean) and `allowedDisplaysMaxNumber` (integer) — both confirmed by the
+official SEB developer config-key reference
+(`safeexambrowser.org/developer/seb-config-key.html`, which lists them
+together: `allowDisplayMirroring` example value `false`,
+`allowedDisplaysMaxNumber` example value `1`, described there as
+"specifies the maximum number of displays that can be connected") and an
+official demo `.seb` file published by the SafeExamBrowser GitHub
+organisation. What this codebase claims about them, and no more:
+`allowedDisplaysMaxNumber` is the documented SEB
+maximum-connected-display setting; `allowDisplayMirroring=false`
+explicitly disables display mirroring on supported SEB platforms;
+limiting the allowed display count to one prevents operation with more
+than one display where SEB's display validation supports it; real-device
+validation against an actual SEB installation is still required before
+relying on this for a live exam. `allowedDisplayBuiltin` is deliberately
+**not** set — the policy requires one active display, not specifically
+the device's built-in display. No other display-related SEB key (no
+`maxDisplays` or `allowExternalScreen` — neither is a real SEB setting) is
+used anywhere in this codebase. `UNRESTRICTED` omits both keys entirely
+from the generated configuration rather than guessing an
+"unlimited"/"allowed" sentinel value that isn't documented anywhere — see
+`SINGLE_DISPLAY_MAX_COUNT` in
+[`src/lib/secureClient/sebConfigGenerator.ts`](../src/lib/secureClient/sebConfigGenerator.ts).
+
+**Why this cannot be observed through attestation for SEB.** The official
+SEB JavaScript API (`window.SafeExamBrowser` — see
+[`src/lib/secureClient/sebJavascriptApi.ts`](../src/lib/secureClient/sebJavascriptApi.ts))
+exposes only `version` and `security.updateKeys()` — nothing about
+displays. SEB enforces `allowedDisplaysMaxNumber` entirely client-side,
+before/without ever reporting the outcome back to this application. For
+this reason `displayCheck` has been added to `SEB_UNSUPPORTED_CHECKS` in
+[`src/lib/secureClient/attestation.ts`](../src/lib/secureClient/attestation.ts)
+— a SEB session can never claim PASS or FAIL for this check, and the
+signed launch manifest's `requiredChecks` list is filtered through
+`checksSupportedByClientType()` so `displayCheck` is never marked REQUIRED
+for a SEB session (a required-but-unsupported check would otherwise
+permanently force every such attestation to `CANNOT_START`). The
+restriction is still enforced for SEB — just out-of-band, via the
+generated `.seb` file, not through this attestation channel. Only a
+future native Tether client (`TETHER_SECURE_CLIENT`) or the dev/mock
+simulator (`MOCK_TETHER_CLIENT`) may report `displayCheck` and the bounded
+`displayCount`/`displayTopology` fields.
+
+**Manual real-device validation checklist.** None of the scenarios below
+have been executed against a real Safe Exam Browser installation as part
+of this implementation pass — do not describe SEB single-display
+enforcement as production-verified until they have been:
+
+- [ ] 1. Laptop internal display only — exam starts normally.
+- [ ] 2. Laptop plus an HDMI monitor in **extended** mode — SEB refuses to
+      run (or blanks) with `allowedDisplaysMaxNumber: 1` configured.
+- [ ] 3. Laptop plus an HDMI monitor in **duplicate/mirrored** mode — same
+      expected refusal.
+- [ ] 4. A projector connected — same expected refusal.
+- [ ] 5. A wireless display (e.g. Miracast/AirPlay) connected — same
+      expected refusal.
+- [ ] 6. External display disconnected before launch — exam starts
+      normally.
+- [ ] 7. A display connected **during** an active exam — confirm SEB's
+      own live re-validation behaviour (blank/refuse) and whatever, if
+      anything, reaches this application (see "why this cannot be
+      observed through attestation for SEB" above — expect nothing to
+      reach the server for a SEB session).
+- [ ] 8. Display removed and configuration restored — confirm the exam
+      resumes/recovers correctly.
+- [ ] 9. Sleep/resume with the display configuration unchanged.
+- [ ] 10. Secure-client restart and recovery (existing session
+      interruption/recovery flow, unrelated to this feature but must
+      keep working).
+
 ## Signed secure-launch manifest
 
 [`src/lib/secureClient/secureLaunchManifest.ts`](../src/lib/secureClient/secureLaunchManifest.ts):
@@ -226,10 +341,19 @@ category, a normalised application identifier, and a timestamp — never
 an unrestricted process inventory, command-line arguments, open document
 names, or window titles (operating rules #15/#18).
 
+`SecureClientAttestation.displayCount` (bounded integer, 1 to
+`MAX_REPORTED_DISPLAY_COUNT`) and `displayTopology`
+(`SINGLE`/`CLONE`/`EXTEND`/`EXTERNAL_ONLY`/`UNKNOWN`, stored inside the
+existing `detailsJson` blob rather than a new column) are reserved for a
+future trusted native Tether client — see "Display requirement" above.
+Both are silently dropped, never persisted, for a `SAFE_EXAM_BROWSER`
+session, since `displayCheck` is one of the checks SEB genuinely cannot
+report. Never a raw monitor name, serial number, EDID, or device path.
+
 ## Integrity event taxonomy
 
 [`src/lib/secureClient/secureClientEvents.ts`](../src/lib/secureClient/secureClientEvents.ts)
-defines 31 event types (session lifecycle, attestation results, key
+defines 32 event types (session lifecycle, attestation results, key
 verification outcomes, manifest validation failures, recovery actions,
 etc.), each with a strict discriminated Zod metadata schema — mirrors
 `DEVELOPMENT_EVENT_METADATA_SCHEMAS` in `src/lib/answerDevelopment.ts`.
@@ -241,6 +365,20 @@ column, find-before-create, `P2002` recovery — same idempotency pattern
 used throughout this codebase); `sequenceNumber` is checked server-side
 via `checkSequenceNumber()`, never trusted as authoritative from the
 client alone.
+
+`ADDITIONAL_DISPLAY_PRESENT` and `DISPLAY_CONFIGURATION_CHANGED` (both
+pre-existing) plus `DISPLAY_POLICY_RESTORED` (Single Display Requirement
+v1) cover the display requirement — see "Display requirement" above.
+These can only ever be recorded by a session whose `clientType` supports
+`displayCheck` (never `SAFE_EXAM_BROWSER` — enforced in
+`POST /api/secure-client/sessions/[sessionId]/events`, which rejects any
+attempt with 403), so an ordinary browser page can never fabricate one.
+Lecturer-facing copy for `ADDITIONAL_DISPLAY_PRESENT` reads: "An
+additional display was reported by the secure exam client. The exam was
+paused until the display requirement was restored. Needs review." — a
+neutral integrity signal, never automatic misconduct, never a mark
+change, never an automatic submit; recovery follows the existing
+session interruption/recovery model.
 
 ## Heartbeat and recovery
 
@@ -394,6 +532,17 @@ human decision always overrides an automated signal for these cases.
   SEB client was available to exercise it end-to-end. Preview
   verification (see below) covers the mock client and API contracts
   only.
+- **Single Display Requirement (`displayPolicy: SINGLE_DISPLAY_REQUIRED`)
+  has not been validated against a real Safe Exam Browser installation**
+  — see the "Display requirement" section above for the exact SEB config
+  keys used (`allowDisplayMirroring`, `allowedDisplaysMaxNumber` — neither
+  performs direct mirror-vs-extend topology classification) and its own
+  manual real-device checklist, none of which has been executed yet.
+  `STANDARD_WEB` and
+  `MONITORED_WEB` never claim to enforce or observe this at all. A future
+  native Tether client could report trusted display count/topology (the
+  bounded `SecureClientAttestation.displayCount`/`displayTopology` fields
+  already exist for exactly this) but that client does not exist yet.
 
 ## Migration procedure
 

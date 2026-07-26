@@ -28,6 +28,14 @@ export const SECURE_CLIENT_EVENT_TYPES = [
   "PREFLIGHT_CANNOT_START",
   "ADDITIONAL_DISPLAY_PRESENT",
   "DISPLAY_CONFIGURATION_CHANGED",
+  // Single Display Requirement v1 — see docs/secure-client-foundation-seb-v1.md,
+  // "Display requirement", Part 7. Paired with ADDITIONAL_DISPLAY_PRESENT/
+  // DISPLAY_CONFIGURATION_CHANGED above: recorded once the secure client
+  // reports the display requirement is satisfied again after previously
+  // reporting it was not — mirrors the SECURE_CLIENT_INTERRUPTED /
+  // SECURE_CLIENT_RECOVERED pairing already used for session-level
+  // interruption/recovery.
+  "DISPLAY_POLICY_RESTORED",
   "REMOTE_SESSION_SIGNAL",
   "VIRTUAL_MACHINE_SIGNAL",
   "PROHIBITED_PROCESS_SIGNAL",
@@ -73,6 +81,7 @@ export const DEFAULT_SECURE_CLIENT_EVENT_LEVEL: Record<SecureClientEventType, Se
   PREFLIGHT_CANNOT_START: "ACTION_REQUIRED",
   ADDITIONAL_DISPLAY_PRESENT: "ACTION_REQUIRED",
   DISPLAY_CONFIGURATION_CHANGED: "CONTEXT",
+  DISPLAY_POLICY_RESTORED: "CONTEXT",
   REMOTE_SESSION_SIGNAL: "REVIEW_CONTEXT",
   VIRTUAL_MACHINE_SIGNAL: "REVIEW_CONTEXT",
   PROHIBITED_PROCESS_SIGNAL: "REVIEW_CONTEXT",
@@ -129,6 +138,7 @@ export const SECURE_CLIENT_EVENT_METADATA_SCHEMAS: Record<SecureClientEventType,
   PREFLIGHT_CANNOT_START: reasonMetadataSchema,
   ADDITIONAL_DISPLAY_PRESENT: displayMetadataSchema,
   DISPLAY_CONFIGURATION_CHANGED: displayMetadataSchema,
+  DISPLAY_POLICY_RESTORED: displayMetadataSchema,
   REMOTE_SESSION_SIGNAL: reasonMetadataSchema,
   VIRTUAL_MACHINE_SIGNAL: reasonMetadataSchema,
   PROHIBITED_PROCESS_SIGNAL: prohibitedProcessMetadataSchema,

@@ -54,7 +54,12 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     allowPrinting: context.policy.allowPrinting,
     allowClipboard: context.policy.allowClipboard,
     allowExternalNavigation: context.policy.allowExternalNavigation,
-    maximumDisplays: context.policy.maximumDisplays,
+    // Single Display Requirement v1 — context.policy is the immutable
+    // per-attempt snapshot, already validated at build time (see
+    // buildSecureClientPolicySnapshot in src/lib/secureClientPolicy.ts)
+    // to only ever be SINGLE_DISPLAY_REQUIRED when the effective delivery
+    // mode actually routes through SEB.
+    singleDisplayRequired: context.policy.displayPolicy === "SINGLE_DISPLAY_REQUIRED",
     configurationName: config.displayName ?? "Tether Exam",
   });
 

@@ -64,6 +64,7 @@ const {
   issueLaunchManifest,
   consumeLaunchManifest,
   recordSecureClientEvent,
+  recordAttestation,
 } = await import("./secureClientRunner");
 const { computeExpectedRequestHash } = await import("./secureClient/sebBrowserExamKey");
 
@@ -372,5 +373,60 @@ describe("SEB allowed key encryption round trip against the real database", () =
     const suppliedHash = computeExpectedRequestHash(canonicalUrl, rawKey);
     const result = await validateSebKeyForConfiguration(config.id, "BROWSER_EXAM_KEY", suppliedHash, canonicalUrl);
     expect(result.status).not.toBe("VALID");
+  });
+});
+
+describe("Single Display Requirement v1 — attestation display fields against the real database", () => {
+  async function makeSessionOfType(tag: string, clientType: "SAFE_EXAM_BROWSER" | "MOCK_TETHER_CLIENT") {
+    const inst = await makeInstitution(`disp-attest-${tag}-${stamp}`);
+    const lecturer = await makeLecturer(inst.id, `disp-attest-${tag}-${stamp}`);
+    const student = await makeStudent(inst.id, `disp-attest-${tag}-${stamp}`);
+    const exam = await makeExam(inst.id, lecturer.id, `disp-attest-${tag}`);
+    const submission = await makeSubmission(exam.id, student.id);
+    const session = await prisma.secureClientSession.create({
+      data: { institutionId: inst.id, examId: exam.id, submissionId: submission.id, studentId: student.id, clientType, status: "PREFLIGHT" },
+    });
+    return session;
+  }
+
+  it("a MOCK_TETHER_CLIENT session's reported displayCount and displayTopology are actually persisted", async () => {
+    const session = await makeSessionOfType("mock", "MOCK_TETHER_CLIENT");
+    await recordAttestation({
+      sessionId: session.id,
+      clientType: "MOCK_TETHER_CLIENT",
+      checks: { displayCheck: "FAIL" },
+      required: { displayCheck: true },
+      clientVerificationFailed: false,
+      configurationInvalid: false,
+      versionUnsupported: false,
+      technicalFailure: false,
+      displayCount: 2,
+      displayTopology: "EXTEND",
+    });
+    const stored = await prisma.secureClientAttestation.findFirstOrThrow({ where: { secureClientSessionId: session.id } });
+    expect(stored.displayCount).toBe(2);
+    expect((stored.detailsJson as { displayTopology?: string } | null)?.displayTopology).toBe("EXTEND");
+  });
+
+  it("a SAFE_EXAM_BROWSER session's claimed displayCount/displayTopology is silently dropped, never persisted", async () => {
+    const session = await makeSessionOfType("seb", "SAFE_EXAM_BROWSER");
+    await recordAttestation({
+      sessionId: session.id,
+      clientType: "SAFE_EXAM_BROWSER",
+      checks: { displayCheck: "PASS" },
+      required: {},
+      clientVerificationFailed: false,
+      configurationInvalid: false,
+      versionUnsupported: false,
+      technicalFailure: false,
+      displayCount: 1,
+      displayTopology: "SINGLE",
+    });
+    const stored = await prisma.secureClientAttestation.findFirstOrThrow({ where: { secureClientSessionId: session.id } });
+    expect(stored.displayCount).toBeNull();
+    expect((stored.detailsJson as { displayTopology?: string } | null)?.displayTopology).toBeUndefined();
+    // The claimed displayCheck: "PASS" is also force-corrected to
+    // NOT_SUPPORTED — SEB has no trustworthy channel to report this.
+    expect(stored.displayCheckStatus).toBe("NOT_SUPPORTED");
   });
 });

@@ -2,13 +2,25 @@
 
 import { use as usePromise, useEffect, useState } from "react";
 
+// Single Display Requirement v1 — see docs/secure-client-foundation-seb-v1.md,
+// "Display requirement". Status/instruction text only — never a live
+// pass/fail check computed in this browser (there is no trustworthy
+// browser signal for connected/mirrored/extended displays).
+type DisplayRequirement = {
+  displayPolicy: "UNRESTRICTED" | "SINGLE_DISPLAY_REQUIRED";
+  status: "NOT_APPLICABLE" | "ENFORCED_BY_SECURE_CLIENT" | "NOT_ENFORCEABLE_STANDARD_WEB";
+  title: string | null;
+  instruction: string | null;
+};
+
 type StatusResponse = {
   deliveryMode: string;
   studentPreflightRequired: boolean;
+  displayRequirement: DisplayRequirement;
   session: { id: string; status: string; verificationStatus: string; clientType: string; lastHeartbeatAt: string | null } | null;
 };
 
-type PreflightResponse = { overallStatus: string; checks: Record<string, string>; deliveryMode: string };
+type PreflightResponse = { overallStatus: string; checks: Record<string, string>; deliveryMode: string; displayRequirement: DisplayRequirement };
 
 const STATUS_LABELS: Record<string, { label: string; className: string }> = {
   READY: { label: "READY", className: "bg-green-100 text-green-800" },
@@ -70,6 +82,20 @@ export default function SecureClientCompatibilityPage({ params }: { params: Prom
         <div className="mt-4 rounded border border-gray-200 p-4">
           <p className="text-sm text-gray-600">Required delivery mode</p>
           <p className="text-lg font-medium">{status.deliveryMode.replaceAll("_", " ")}</p>
+        </div>
+      )}
+
+      {status && status.displayRequirement.status !== "NOT_APPLICABLE" && (
+        <div
+          className={`mt-4 rounded border p-4 text-sm ${
+            status.displayRequirement.status === "ENFORCED_BY_SECURE_CLIENT" ? "border-gray-200" : "border-amber-200 bg-amber-50"
+          }`}
+        >
+          <p className="font-semibold">{status.displayRequirement.title}</p>
+          <p className="mt-1 text-gray-700">{status.displayRequirement.instruction}</p>
+          {status.displayRequirement.status === "ENFORCED_BY_SECURE_CLIENT" && (
+            <p className="mt-1 text-xs text-gray-500">Enforced by the secure exam client.</p>
+          )}
         </div>
       )}
 

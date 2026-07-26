@@ -13,6 +13,9 @@ import {
   DEFAULT_SECURE_CLIENT_AVAILABILITY,
   clampHeartbeatIntervalSeconds,
   clampMaximumDisplays,
+  isDisplayPolicyCombinationValid,
+  isValidDisplayPolicy,
+  describeDisplayRequirement,
   type RelevantSecureClientSettings,
 } from "./secureClientPolicy";
 
@@ -29,6 +32,7 @@ const baseSettings: RelevantSecureClientSettings = {
   secureClientHeartbeatGraceSeconds: 90,
   requireDisplayCheck: false,
   secureClientMaximumDisplays: 1,
+  displayPolicy: "UNRESTRICTED",
   requireRemoteSessionCheck: false,
   requireVirtualMachineCheck: false,
   requireProcessCheck: false,
@@ -241,5 +245,138 @@ describe("bounds clamping", () => {
 
   it("non-finite input falls back to the documented default rather than propagating NaN", () => {
     expect(clampHeartbeatIntervalSeconds(Number.NaN)).toBe(30);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Single Display Requirement v1 — see docs/secure-client-foundation-seb-v1.md,
+// "Display requirement". This does NOT test that SEB itself actually
+// blocks a second monitor — see docs/secure-client-foundation-seb-v1.md's
+// manual real-device checklist for that. These tests only cover the pure
+// policy logic: safe legacy defaults, immutable snapshot behaviour, and
+// the STANDARD_WEB/MONITORED_WEB combination guard.
+// ---------------------------------------------------------------------------
+
+describe("isValidDisplayPolicy", () => {
+  it("accepts only the two documented values", () => {
+    expect(isValidDisplayPolicy("UNRESTRICTED")).toBe(true);
+    expect(isValidDisplayPolicy("SINGLE_DISPLAY_REQUIRED")).toBe(true);
+    expect(isValidDisplayPolicy("MAXIMUM_SECURITY")).toBe(false);
+    expect(isValidDisplayPolicy("")).toBe(false);
+  });
+});
+
+describe("isDisplayPolicyCombinationValid", () => {
+  it("UNRESTRICTED is valid with every delivery mode", () => {
+    for (const mode of ["STANDARD_WEB", "MONITORED_WEB", "SEB_OPTIONAL", "SEB_REQUIRED", "TETHER_CLIENT_OPTIONAL", "TETHER_CLIENT_REQUIRED"] as const) {
+      expect(isDisplayPolicyCombinationValid(mode, "UNRESTRICTED")).toBe(true);
+    }
+  });
+
+  it("SINGLE_DISPLAY_REQUIRED is valid only with SEB_REQUIRED or SEB_OPTIONAL", () => {
+    expect(isDisplayPolicyCombinationValid("SEB_REQUIRED", "SINGLE_DISPLAY_REQUIRED")).toBe(true);
+    expect(isDisplayPolicyCombinationValid("SEB_OPTIONAL", "SINGLE_DISPLAY_REQUIRED")).toBe(true);
+  });
+
+  it("SINGLE_DISPLAY_REQUIRED is rejected with STANDARD_WEB — never implies enforcement there", () => {
+    expect(isDisplayPolicyCombinationValid("STANDARD_WEB", "SINGLE_DISPLAY_REQUIRED")).toBe(false);
+  });
+
+  it("SINGLE_DISPLAY_REQUIRED is rejected with MONITORED_WEB and Tether modes (no SEB involved)", () => {
+    expect(isDisplayPolicyCombinationValid("MONITORED_WEB", "SINGLE_DISPLAY_REQUIRED")).toBe(false);
+    expect(isDisplayPolicyCombinationValid("TETHER_CLIENT_OPTIONAL", "SINGLE_DISPLAY_REQUIRED")).toBe(false);
+    expect(isDisplayPolicyCombinationValid("TETHER_CLIENT_REQUIRED", "SINGLE_DISPLAY_REQUIRED")).toBe(false);
+  });
+});
+
+describe("displayPolicy in buildSecureClientPolicySnapshot / parseSecureClientPolicy", () => {
+  it("legacy settings without displayPolicy default to UNRESTRICTED (STANDARD_WEB baseline)", () => {
+    const snapshot = buildSecureClientPolicySnapshot(baseSettings);
+    expect(snapshot.displayPolicy).toBe("UNRESTRICTED");
+  });
+
+  it("a legacy stored snapshot with no displayPolicy key at all parses back as UNRESTRICTED", () => {
+    // Simulates a snapshot written before this field existed.
+    const legacy = { deliveryMode: "SEB_REQUIRED", requireVerifiedClient: true };
+    expect(parseSecureClientPolicy(legacy).displayPolicy).toBe("UNRESTRICTED");
+  });
+
+  it("SINGLE_DISPLAY_REQUIRED round-trips through build -> parse when the delivery mode supports it", () => {
+    const built = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_REQUIRED", displayPolicy: "SINGLE_DISPLAY_REQUIRED" }, SEB_AVAILABLE);
+    expect(built.displayPolicy).toBe("SINGLE_DISPLAY_REQUIRED");
+    expect(built.requireDisplayCheck).toBe(true);
+    expect(built.maximumDisplays).toBe(1);
+    const parsed = parseSecureClientPolicy(built);
+    expect(parsed).toEqual(built);
+  });
+
+  it("an unavailable SEB_REQUIRED downgrade also resets displayPolicy to UNRESTRICTED (never freezes an unenforceable requirement)", () => {
+    // DEFAULT_SECURE_CLIENT_AVAILABILITY denies SEB_REQUIRED, so the
+    // effective delivery mode downgrades to STANDARD_WEB.
+    const snapshot = buildSecureClientPolicySnapshot(
+      { ...baseSettings, deliveryMode: "SEB_REQUIRED", displayPolicy: "SINGLE_DISPLAY_REQUIRED" },
+      DEFAULT_SECURE_CLIENT_AVAILABILITY,
+    );
+    expect(snapshot.deliveryMode).toBe("STANDARD_WEB");
+    expect(snapshot.displayPolicy).toBe("UNRESTRICTED");
+  });
+
+  it("a tampered stored snapshot claiming SINGLE_DISPLAY_REQUIRED for MONITORED_WEB is read back as UNRESTRICTED", () => {
+    const tampered = { deliveryMode: "MONITORED_WEB", displayPolicy: "SINGLE_DISPLAY_REQUIRED" };
+    expect(parseSecureClientPolicy(tampered).displayPolicy).toBe("UNRESTRICTED");
+  });
+
+  it("an unrecognised displayPolicy string falls back to UNRESTRICTED, never throws", () => {
+    const tampered = { deliveryMode: "SEB_REQUIRED", displayPolicy: "SOMETHING_FUTURE_AND_UNKNOWN" };
+    expect(parseSecureClientPolicy(tampered).displayPolicy).toBe("UNRESTRICTED");
+  });
+
+  it("editing the exam's settings after an attempt has started never changes the already-built snapshot (immutability)", () => {
+    const built = buildSecureClientPolicySnapshot({ ...baseSettings, deliveryMode: "SEB_REQUIRED", displayPolicy: "SINGLE_DISPLAY_REQUIRED" }, SEB_AVAILABLE);
+    // Simulate the lecturer later disabling the requirement — a fresh
+    // build call with different settings must not be confused with
+    // re-parsing the ALREADY-STORED snapshot from the earlier build.
+    const laterSettings = { ...baseSettings, deliveryMode: "SEB_REQUIRED" as const, displayPolicy: "UNRESTRICTED" as const };
+    const laterBuild = buildSecureClientPolicySnapshot(laterSettings, SEB_AVAILABLE);
+    expect(built.displayPolicy).toBe("SINGLE_DISPLAY_REQUIRED");
+    expect(laterBuild.displayPolicy).toBe("UNRESTRICTED");
+    // The original snapshot, once parsed back (as if read from the DB),
+    // is completely unaffected by the later settings change.
+    expect(parseSecureClientPolicy(built).displayPolicy).toBe("SINGLE_DISPLAY_REQUIRED");
+  });
+});
+
+describe("describeDisplayRequirement", () => {
+  it("UNRESTRICTED is NOT_APPLICABLE regardless of delivery mode, with no title/instruction", () => {
+    const result = describeDisplayRequirement({ deliveryMode: "SEB_REQUIRED", displayPolicy: "UNRESTRICTED" });
+    expect(result.status).toBe("NOT_APPLICABLE");
+    expect(result.title).toBeNull();
+    expect(result.instruction).toBeNull();
+  });
+
+  it("STANDARD_WEB never claims display enforcement, even defensively if displayPolicy were somehow SINGLE_DISPLAY_REQUIRED", () => {
+    const result = describeDisplayRequirement({ deliveryMode: "STANDARD_WEB", displayPolicy: "SINGLE_DISPLAY_REQUIRED" });
+    expect(result.status).toBe("NOT_ENFORCEABLE_STANDARD_WEB");
+    expect(result.instruction).toBe("Not enforceable in standard web mode.");
+    expect(result.status).not.toBe("ENFORCED_BY_SECURE_CLIENT");
+  });
+
+  it("SEB_REQUIRED + SINGLE_DISPLAY_REQUIRED reports enforcement by the secure exam client with the exact required copy", () => {
+    const result = describeDisplayRequirement({ deliveryMode: "SEB_REQUIRED", displayPolicy: "SINGLE_DISPLAY_REQUIRED" });
+    expect(result.status).toBe("ENFORCED_BY_SECURE_CLIENT");
+    expect(result.title).toBe("Single display required");
+    expect(result.instruction).toBe(
+      "Disconnect additional monitors, projectors, televisions and wireless displays before starting the exam.",
+    );
+  });
+
+  it("SEB_OPTIONAL + SINGLE_DISPLAY_REQUIRED also reports enforcement by the secure exam client", () => {
+    const result = describeDisplayRequirement({ deliveryMode: "SEB_OPTIONAL", displayPolicy: "SINGLE_DISPLAY_REQUIRED" });
+    expect(result.status).toBe("ENFORCED_BY_SECURE_CLIENT");
+  });
+
+  it("MONITORED_WEB + SINGLE_DISPLAY_REQUIRED (should not occur, but defensive) is reported as not enforceable, never as enforced", () => {
+    const result = describeDisplayRequirement({ deliveryMode: "MONITORED_WEB", displayPolicy: "SINGLE_DISPLAY_REQUIRED" });
+    expect(result.status).toBe("NOT_ENFORCEABLE_STANDARD_WEB");
   });
 });

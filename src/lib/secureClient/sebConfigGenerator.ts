@@ -33,9 +33,49 @@ export type SebConfigInput = {
   allowPrinting: boolean;
   allowClipboard: boolean;
   allowExternalNavigation: boolean;
-  maximumDisplays: number;
+  /**
+   * Single Display Requirement v1 — see
+   * docs/secure-client-foundation-seb-v1.md, "Display requirement", and
+   * isDisplayPolicyCombinationValid() in src/lib/secureClientPolicy.ts
+   * (the caller must already have confirmed this combination is valid —
+   * this generator does not re-validate delivery mode). When true, the
+   * generated configuration sets both `allowDisplayMirroring` (false) and
+   * `allowedDisplaysMaxNumber` (see SINGLE_DISPLAY_MAX_COUNT below); when
+   * false, both keys are omitted entirely rather than guessing an
+   * "unlimited"/"allowed" sentinel value that isn't documented anywhere.
+   */
+  singleDisplayRequired: boolean;
   configurationName: string;
 };
+
+/**
+ * SEB's own documented display-restriction settings. Both
+ * `allowDisplayMirroring` and `allowedDisplaysMaxNumber` are confirmed by
+ * the official SEB developer config-key reference
+ * (safeexambrowser.org/developer/seb-config-key.html), which lists them
+ * together — `allowDisplayMirroring` (example value `false`) and
+ * `allowedDisplaysMaxNumber` (example value `1`, described there as
+ * "specifies the maximum number of displays that can be connected") — and
+ * by an official SafeExamBrowser demo `.seb` file (SafeExamBrowser/
+ * SafeExamBrowser-Website on GitHub) using
+ * `<key>allowedDisplaysMaxNumber</key><integer>3</integer>`.
+ *
+ * What this codebase claims, and no more:
+ *   - `allowedDisplaysMaxNumber` is the documented SEB
+ *     maximum-connected-display setting.
+ *   - `allowDisplayMirroring=false` explicitly disables display mirroring
+ *     on supported SEB platforms.
+ *   - Limiting the allowed display count to one prevents operation with
+ *     more than one display where SEB's display validation supports it.
+ *   - Real-device validation against an actual SEB installation is still
+ *     required before relying on this for a live exam — see the manual
+ *     checklist in docs/secure-client-foundation-seb-v1.md.
+ * Value is an integer; this codebase only ever writes 1 (omitting both
+ * keys entirely for "no restriction" — see
+ * SebConfigInput.singleDisplayRequired above) since a "0 means unlimited"
+ * sentinel is not documented anywhere this project could verify.
+ */
+export const SINGLE_DISPLAY_MAX_COUNT = 1;
 
 /** The exact, documented set of plist keys this generator ever writes — nothing outside this list, and never a secret validation key in a student-readable field. */
 export const SUPPORTED_SEB_CONFIG_KEYS = [
@@ -52,6 +92,7 @@ export const SUPPORTED_SEB_CONFIG_KEYS = [
   "enablePrintScreen",
   "allowPrintScreen",
   "browserWindowAllowExternalNavigation",
+  "allowDisplayMirroring",
   "allowedDisplaysMaxNumber",
   "originatorVersion",
   "sebConfigPurpose",
@@ -90,7 +131,15 @@ function plistNode(value: PlistValue, indent: string): string {
 function buildSebConfigDict(input: SebConfigInput): Record<string, PlistValue> {
   // Built strictly in SUPPORTED_SEB_CONFIG_KEYS order — deterministic
   // output regardless of caller-supplied field order.
-  return {
+  // allowDisplayMirroring/allowedDisplaysMaxNumber (see
+  // SINGLE_DISPLAY_MAX_COUNT above) are the two conditional keys: only
+  // added together — at their documented position, right before
+  // originatorVersion — when singleDisplayRequired is true; both omitted
+  // entirely otherwise ("UNRESTRICTED does not add single-display
+  // enforcement"). Deliberately does NOT set allowedDisplayBuiltin — the
+  // policy requires one active display, not specifically the device's
+  // built-in display.
+  const dict: Record<string, PlistValue> = {
     startURL: input.startUrl,
     quitURL: input.quitUrl,
     quitURLConfirm: true,
@@ -109,10 +158,14 @@ function buildSebConfigDict(input: SebConfigInput): Record<string, PlistValue> {
     enablePrintScreen: input.allowPrinting,
     allowPrintScreen: input.allowPrinting,
     browserWindowAllowExternalNavigation: input.allowExternalNavigation,
-    allowedDisplaysMaxNumber: input.maximumDisplays,
-    originatorVersion: "Tether Secure Client Foundation v1",
-    sebConfigPurpose: 0,
   };
+  if (input.singleDisplayRequired) {
+    dict.allowDisplayMirroring = false;
+    dict.allowedDisplaysMaxNumber = SINGLE_DISPLAY_MAX_COUNT;
+  }
+  dict.originatorVersion = "Tether Secure Client Foundation v1";
+  dict.sebConfigPurpose = 0;
+  return dict;
 }
 
 /** Generates the plain (unencrypted) `.seb` file bytes (UTF-8 XML plist) — deterministic for a given input. Clipboard policy is enforced via urlFilter/navigation restriction, not a dedicated documented plist key in this conservative key set — see "Known limitations". */

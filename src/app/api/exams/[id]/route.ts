@@ -5,6 +5,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { parseSecureSettings, secureSettingsInputSchema } from "@/lib/secureExam";
 import { secureClientAvailabilityForInstitution } from "@/lib/secureClientAvailability";
+import { isDisplayPolicyCombinationValid } from "@/lib/secureClientPolicy";
 import type { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 import { assertCanAssignExamToCourse, assertStudentsInCourse, CourseAssignmentError } from "@/lib/courseAssignment";
@@ -163,6 +164,23 @@ export async function PATCH(
     const mergedSecureSettings = secureSettings
       ? parseSecureSettings({ ...parseSecureSettings(exam.secureSettings), ...secureSettings })
       : undefined;
+
+    // Single Display Requirement v1 — server-side authoritative check
+    // (never just the lecturer UI's own client-side guard). Validated
+    // against the MERGED settings (not the raw PATCH body alone) so a
+    // request that only updates displayPolicy, leaving a
+    // previously-saved STANDARD_WEB deliveryMode untouched, is still
+    // caught — see isDisplayPolicyCombinationValid in
+    // src/lib/secureClientPolicy.ts.
+    if (mergedSecureSettings && !isDisplayPolicyCombinationValid(mergedSecureSettings.deliveryMode, mergedSecureSettings.displayPolicy)) {
+      return NextResponse.json(
+        {
+          error:
+            "Single display required needs Safe Exam Browser delivery (SEB required or SEB optional). Change the exam delivery mode first, or choose No display restriction.",
+        },
+        { status: 400 },
+      );
+    }
 
     // accessCode: undefined leaves it untouched, null clears it, a string
     // sets a new one. The plaintext code is never stored — only its hash.
