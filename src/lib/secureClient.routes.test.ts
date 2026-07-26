@@ -1,5 +1,5 @@
-/**
- * Tether Secure Client Foundation v1 — MOCKED route tests. See
+﻿/**
+ * Tether Secure Client Foundation v1 â€” MOCKED route tests. See
  * docs/secure-client-foundation-seb-v1.md.
  *
  * Hardening pass (see docs/migration-ledger.md hardening commit): this
@@ -7,12 +7,12 @@
  * Production Supabase database (the only reachable database in this
  * environment) and relied on an afterAll cleanup to remove them. That is
  * no longer acceptable practice for this repository, regardless of which
- * tables are pre-existing — see the corrected policy in
- * docs/migration-ledger.md. Every Prisma call is now mocked (vi.fn()) —
+ * tables are pre-existing â€” see the corrected policy in
+ * docs/migration-ledger.md. Every Prisma call is now mocked (vi.fn()) â€”
  * nothing in this file ever opens a real database connection, matching
  * the already-established pattern in
  * src/lib/answerDevelopment.routes.test.ts. This also means these tests
- * no longer depend on the still-PENDING secure-client migration at all —
+ * no longer depend on the still-PENDING secure-client migration at all â€”
  * they exercise only the auth/ownership/institution GATES that run
  * before any new table is ever touched, using canned fixture objects
  * instead of real rows.
@@ -26,7 +26,7 @@
  * that genuinely require a real, migrated Postgres database are covered
  * in src/lib/secureClientRunner.disposable.test.ts, which is explicitly
  * excluded from the default test run and must only ever be pointed at a
- * disposable database — never this shared one.
+ * disposable database â€” never this shared one.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -44,10 +44,10 @@ const mockPrisma = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/prisma", () => ({ prisma: mockPrisma }));
 
-const configurationRoute = await import("../app/api/lecturer/exams/[id]/secure-client/configuration/route");
+const configurationRoute = await import("../app/api/lecturer/exams/[examId]/secure-client/configuration/route");
 const preflightRoute = await import("../app/api/submissions/[id]/secure-client/preflight/route");
 const mockLaunchRoute = await import("../app/api/submissions/[id]/secure-client/mock-launch/route");
-const lecturerSessionsRoute = await import("../app/api/lecturer/exams/[id]/secure-client/sessions/route");
+const lecturerSessionsRoute = await import("../app/api/lecturer/exams/[examId]/secure-client/sessions/route");
 
 const EXAM_ID = "exam-1";
 
@@ -76,24 +76,24 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-describe("GET/PUT /api/lecturer/exams/[id]/secure-client/configuration — permission layer (no new table touched on rejection)", () => {
+describe("GET/PUT /api/lecturer/exams/[examId]/secure-client/configuration â€” permission layer (no new table touched on rejection)", () => {
   it("a student cannot read configuration (401)", async () => {
     mockAuth.mockResolvedValue(studentSession("student-a", "inst-a"));
-    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: EXAM_ID }) });
+    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: EXAM_ID }) });
     expect(res.status).toBe(401);
     expect(mockPrisma.exam.findUnique).not.toHaveBeenCalled();
   });
 
   it("a student cannot write configuration (401)", async () => {
     mockAuth.mockResolvedValue(studentSession("student-a", "inst-a"));
-    const res = await configurationRoute.PUT(jsonRequest("PUT", { provider: "SAFE_EXAM_BROWSER" }), { params: Promise.resolve({ id: EXAM_ID }) });
+    const res = await configurationRoute.PUT(jsonRequest("PUT", { provider: "SAFE_EXAM_BROWSER" }), { params: Promise.resolve({ examId: EXAM_ID }) });
     expect(res.status).toBe(401);
     expect(mockPrisma.exam.findUnique).not.toHaveBeenCalled();
   });
 
   it("an unauthenticated request is rejected (401)", async () => {
     mockAuth.mockResolvedValue(null);
-    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: EXAM_ID }) });
+    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: EXAM_ID }) });
     expect(res.status).toBe(401);
     expect(mockPrisma.exam.findUnique).not.toHaveBeenCalled();
   });
@@ -101,21 +101,21 @@ describe("GET/PUT /api/lecturer/exams/[id]/secure-client/configuration — permi
   it("a lecturer from a different institution gets 404, never 403, for another institution's exam (does not confirm existence)", async () => {
     mockAuth.mockResolvedValue(lecturerSession("lecturer-b", "inst-b"));
     mockPrisma.exam.findUnique.mockResolvedValue(examFixture());
-    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: EXAM_ID }) });
+    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: EXAM_ID }) });
     expect(res.status).toBe(404);
   });
 
   it("a lecturer who does not own the exam (same institution, different creator) gets 404", async () => {
     mockAuth.mockResolvedValue(lecturerSession("other-lecturer-a", "inst-a"));
     mockPrisma.exam.findUnique.mockResolvedValue(examFixture());
-    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: EXAM_ID }) });
+    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: EXAM_ID }) });
     expect(res.status).toBe(404);
   });
 
   it("a nonexistent exam id returns 404 for the owning lecturer's own institution", async () => {
     mockAuth.mockResolvedValue(lecturerSession("lecturer-a", "inst-a"));
     mockPrisma.exam.findUnique.mockResolvedValue(null);
-    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: "nonexistent-exam-id" }) });
+    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: "nonexistent-exam-id" }) });
     expect(res.status).toBe(404);
   });
 
@@ -123,16 +123,16 @@ describe("GET/PUT /api/lecturer/exams/[id]/secure-client/configuration — permi
     mockAuth.mockResolvedValue(lecturerSession("lecturer-a", "inst-a"));
     mockPrisma.exam.findUnique.mockResolvedValue(examFixture());
     mockPrisma.secureClientConfiguration.findMany.mockResolvedValue([]);
-    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: EXAM_ID }) });
+    const res = await configurationRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: EXAM_ID }) });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ configurations: [] });
   });
 });
 
-describe("GET /api/lecturer/exams/[id]/secure-client/sessions — permission layer", () => {
+describe("GET /api/lecturer/exams/[examId]/secure-client/sessions â€” permission layer", () => {
   it("a student cannot list sessions (401)", async () => {
     mockAuth.mockResolvedValue(studentSession("student-a", "inst-a"));
-    const res = await lecturerSessionsRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: EXAM_ID }) });
+    const res = await lecturerSessionsRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: EXAM_ID }) });
     expect(res.status).toBe(401);
     expect(mockPrisma.exam.findUnique).not.toHaveBeenCalled();
   });
@@ -140,12 +140,12 @@ describe("GET /api/lecturer/exams/[id]/secure-client/sessions — permission lay
   it("a lecturer from a different institution gets 404 for another institution's exam sessions", async () => {
     mockAuth.mockResolvedValue(lecturerSession("lecturer-b", "inst-b"));
     mockPrisma.exam.findUnique.mockResolvedValue(examFixture());
-    const res = await lecturerSessionsRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: EXAM_ID }) });
+    const res = await lecturerSessionsRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: EXAM_ID }) });
     expect(res.status).toBe(404);
   });
 });
 
-describe("POST /api/submissions/[id]/secure-client/preflight — role check (before any Submission column read)", () => {
+describe("POST /api/submissions/[id]/secure-client/preflight â€” role check (before any Submission column read)", () => {
   it("a lecturer cannot run a student's preflight check (401)", async () => {
     mockAuth.mockResolvedValue(lecturerSession("lecturer-a", "inst-a"));
     const res = await preflightRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: "some-submission-id" }) });
@@ -161,7 +161,7 @@ describe("POST /api/submissions/[id]/secure-client/preflight — role check (bef
   });
 });
 
-describe("POST /api/submissions/[id]/secure-client/mock-launch — role check (before any Submission column read)", () => {
+describe("POST /api/submissions/[id]/secure-client/mock-launch â€” role check (before any Submission column read)", () => {
   it("a lecturer cannot request a mock launch (401)", async () => {
     mockAuth.mockResolvedValue(lecturerSession("lecturer-a", "inst-a"));
     const res = await mockLaunchRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: "some-submission-id" }) });
@@ -176,10 +176,10 @@ describe("POST /api/submissions/[id]/secure-client/mock-launch — role check (b
     expect(mockPrisma.submission.findUnique).not.toHaveBeenCalled();
   });
 
-  it("cannot be enabled via a frontend-supplied query parameter — mock-launch availability is resolved server-side only", async () => {
+  it("cannot be enabled via a frontend-supplied query parameter â€” mock-launch availability is resolved server-side only", async () => {
     // Even a well-formed request from an authenticated STUDENT who owns
     // the submission must still fail if isMockSecureClientAllowed's
-    // server-side checks (env flags + institution allowlist) deny it —
+    // server-side checks (env flags + institution allowlist) deny it â€”
     // this route never reads a query/body parameter to decide
     // availability (see src/lib/secureClientAvailability.ts).
     mockAuth.mockResolvedValue(studentSession("student-a", "inst-a"));

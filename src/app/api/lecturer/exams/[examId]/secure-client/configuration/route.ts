@@ -1,5 +1,5 @@
-/**
- * Tether Secure Client Foundation v1 — see
+﻿/**
+ * Tether Secure Client Foundation v1 â€” see
  * docs/secure-client-foundation-seb-v1.md.
  *
  * GET/PUT /api/lecturer/exams/[id]/secure-client/configuration
@@ -49,8 +49,8 @@ const configInputSchema = z.object({
   settings: z.record(z.string(), z.unknown()).optional(),
 });
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+export async function GET(_req: Request, { params }: { params: Promise<{ examId: string }> }) {
+  const { examId: id } = await params;
   const permission = await requireExamPermission(id);
   if ("response" in permission) return permission.response;
 
@@ -76,8 +76,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   return NextResponse.json({ configurations: withKeys });
 }
 
-export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+export async function PUT(req: Request, { params }: { params: Promise<{ examId: string }> }) {
+  const { examId: id } = await params;
   const permission = await requireExamPermission(id);
   if ("response" in permission) return permission.response;
   const { session, exam } = permission;

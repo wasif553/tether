@@ -1,10 +1,10 @@
-/**
- * Tether Secure Client Foundation v1 — see
+﻿/**
+ * Tether Secure Client Foundation v1 â€” see
  * docs/secure-client-foundation-seb-v1.md.
  *
  * DELETE /api/lecturer/exams/[id]/secure-client/seb-keys/[keyId]
  *
- * Revokes an allowed key — never deletes the historical record.
+ * Revokes an allowed key â€” never deletes the historical record.
  */
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
@@ -13,12 +13,12 @@ import { assertSameInstitution, institutionErrorResponse, isPlatformAdmin } from
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { revokeSebAllowedExamKey } from "@/lib/secureClientRunner";
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string; keyId: string }> }) {
+export async function DELETE(_req: Request, { params }: { params: Promise<{ examId: string; keyId: string }> }) {
   const session = await auth();
   if (!session || (session.user.role !== "LECTURER" && session.user.role !== "PLATFORM_ADMIN")) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const { id, keyId } = await params;
+  const { examId: id, keyId } = await params;
 
   const exam = await prisma.exam.findUnique({ where: { id }, select: { createdById: true, institutionId: true } });
   if (!exam || (!isPlatformAdmin(session) && exam.createdById !== session.user.id)) {

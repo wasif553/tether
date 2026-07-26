@@ -1,18 +1,18 @@
-/**
- * Cohort-Level Collusion Detection and Integrity Graph v1 — DB-backed
+﻿/**
+ * Cohort-Level Collusion Detection and Integrity Graph v1 â€” DB-backed
  * route tests. See docs/cohort-collusion-graph-v1.md.
  *
  * Requires the five new tables from
  * docs/cohort-collusion-graph-v1-migration.sql to exist in the connected
  * database. That migration has NOT been applied to any environment (per
- * the operating rules for this feature) — the only reachable database in
+ * the operating rules for this feature) â€” the only reachable database in
  * this environment is the shared Preview/Production Supabase instance,
  * which correctly does not yet have these tables. Tests that only
  * exercise the auth/permission layer (which never touches the new
  * tables) are expected to pass; tests that exercise the full
  * analysis/persistence path are expected to fail with a
  * "relation does not exist" error until the migration is applied
- * somewhere reachable — this mirrors every other DB-backed suite added
+ * somewhere reachable â€” this mirrors every other DB-backed suite added
  * alongside a not-yet-applied migration in this repo (see
  * docs/migration-ledger.md rows 10-11 and their session notes).
  *
@@ -29,7 +29,7 @@ vi.mock("@/auth", () => ({ auth: mockAuth }));
 
 const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
-const collusionAnalysisRoute = await import("../app/api/lecturer/exams/[id]/collusion-analysis/route");
+const collusionAnalysisRoute = await import("../app/api/lecturer/exams/[examId]/collusion-analysis/route");
 const collusionClusterRoute = await import("../app/api/lecturer/collusion-clusters/[clusterId]/route");
 const collusionClusterReviewRoute = await import("../app/api/lecturer/collusion-clusters/[clusterId]/review/route");
 
@@ -104,39 +104,39 @@ async function createExamWithSubmissions(count: number) {
   return exam;
 }
 
-describe("POST/GET /api/lecturer/exams/[id]/collusion-analysis — access control (auth-only path, no new table required)", () => {
+describe("POST/GET /api/lecturer/exams/[examId]/collusion-analysis â€” access control (auth-only path, no new table required)", () => {
   it("a student cannot start analysis (401)", async () => {
     const exam = await createExamWithSubmissions(1);
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
-    const res = await collusionAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) });
+    const res = await collusionAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
     expect(res.status).toBe(401);
   });
 
   it("a student cannot read the analysis (401)", async () => {
     const exam = await createExamWithSubmissions(1);
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
-    const res = await collusionAnalysisRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    const res = await collusionAnalysisRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: exam.id }) });
     expect(res.status).toBe(401);
   });
 
   it("no session at all is unauthorized (401)", async () => {
     const exam = await createExamWithSubmissions(1);
     mockAuth.mockResolvedValue(null);
-    const res = await collusionAnalysisRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    const res = await collusionAnalysisRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: exam.id }) });
     expect(res.status).toBe(401);
   });
 
   it("a lecturer from another institution cannot access this exam's analysis (404)", async () => {
     const exam = await createExamWithSubmissions(1);
     mockAuth.mockResolvedValue(sessionFor(lecturerB.id, "LECTURER", instB));
-    const getRes = await collusionAnalysisRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    const getRes = await collusionAnalysisRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: exam.id }) });
     expect(getRes.status).toBe(404);
-    const postRes = await collusionAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) });
+    const postRes = await collusionAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
     expect(postRes.status).toBe(404);
   });
 });
 
-describe("GET /api/lecturer/collusion-clusters/[clusterId] — access control (auth-only path)", () => {
+describe("GET /api/lecturer/collusion-clusters/[clusterId] â€” access control (auth-only path)", () => {
   it("a student cannot read cluster detail (401)", async () => {
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     const res = await collusionClusterRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ clusterId: "nonexistent" }) });
@@ -156,7 +156,7 @@ describe("GET /api/lecturer/collusion-clusters/[clusterId] — access control (a
   });
 });
 
-describe("PATCH /api/lecturer/collusion-clusters/[clusterId]/review — access control (auth-only path)", () => {
+describe("PATCH /api/lecturer/collusion-clusters/[clusterId]/review â€” access control (auth-only path)", () => {
   it("a student cannot review a cluster (401)", async () => {
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     const res = await collusionClusterReviewRoute.PATCH(jsonRequest("PATCH", { reviewStatus: "REVIEWED_NO_CONCERN" }), {
@@ -166,19 +166,19 @@ describe("PATCH /api/lecturer/collusion-clusters/[clusterId]/review — access c
   });
 });
 
-describe("Full analysis flow (requires the new tables — migration not yet applied anywhere reachable)", () => {
+describe("Full analysis flow (requires the new tables â€” migration not yet applied anywhere reachable)", () => {
   it(
     "an exam with fewer than 3 submissions returns INSUFFICIENT_DATA and never modifies existing data",
     async () => {
       const exam = await createExamWithSubmissions(1);
       mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
-      const res = await collusionAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) });
+      const res = await collusionAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
       if (res.status !== 200) {
         // Expected until docs/cohort-collusion-graph-v1-migration.sql is applied to a reachable database.
         expect(res.status).toBe(500);
         return;
       }
-      const getRes = await collusionAnalysisRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+      const getRes = await collusionAnalysisRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ examId: exam.id }) });
       const body = await getRes.json();
       expect(body.analysis.status).toBe("INSUFFICIENT_DATA");
       expect(body.analysis.clusterCount).toBe(0);
@@ -192,7 +192,7 @@ describe("Full analysis flow (requires the new tables — migration not yet appl
       const exam = await createExamWithSubmissions(3);
       const submissionsBefore = await prisma.submission.findMany({ where: { examId: exam.id }, include: { answers: true } });
       mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
-      await collusionAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) });
+      await collusionAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
       const submissionsAfter = await prisma.submission.findMany({ where: { examId: exam.id }, include: { answers: true } });
       expect(submissionsAfter.map((s) => ({ status: s.status, totalScore: s.totalScore }))).toEqual(
         submissionsBefore.map((s) => ({ status: s.status, totalScore: s.totalScore })),

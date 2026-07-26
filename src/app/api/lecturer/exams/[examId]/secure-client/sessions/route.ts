@@ -1,5 +1,5 @@
-/**
- * Tether Secure Client Foundation v1 — see
+﻿/**
+ * Tether Secure Client Foundation v1 â€” see
  * docs/secure-client-foundation-seb-v1.md and Part 11 of the spec.
  *
  * GET /api/lecturer/exams/[id]/secure-client/sessions
@@ -9,12 +9,12 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { assertSameInstitution, institutionErrorResponse, isPlatformAdmin } from "@/lib/institutionScope";
 
-export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ examId: string }> }) {
   const session = await auth();
   if (!session || (session.user.role !== "LECTURER" && session.user.role !== "PLATFORM_ADMIN")) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const { id } = await params;
+  const { examId: id } = await params;
 
   const exam = await prisma.exam.findUnique({ where: { id }, select: { createdById: true, institutionId: true } });
   if (!exam || (!isPlatformAdmin(session) && exam.createdById !== session.user.id)) {

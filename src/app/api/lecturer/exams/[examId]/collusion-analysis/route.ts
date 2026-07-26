@@ -1,20 +1,20 @@
-/**
- * Cohort-Level Collusion Detection and Integrity Graph v1 — see
+﻿/**
+ * Cohort-Level Collusion Detection and Integrity Graph v1 â€” see
  * docs/cohort-collusion-graph-v1.md.
  *
- * POST /api/lecturer/exams/[id]/collusion-analysis — runs (or re-runs)
+ * POST /api/lecturer/exams/[id]/collusion-analysis â€” runs (or re-runs)
  * cohort collusion analysis for the exam's submitted cohort.
  * Lecturer-triggered and synchronous in v1, exactly like
- * similarity-analysis and timing-analysis; cohort size is hard-capped —
+ * similarity-analysis and timing-analysis; cohort size is hard-capped â€”
  * see MAX_COLLUSION_ANALYSIS_SUBMISSIONS in
  * src/lib/cohortCollusionThresholds.ts. Idempotent/safely reusable: a
  * repeated request reuses the same analysis row and never duplicates
- * lecturer review history on clusters — see
+ * lecturer review history on clusters â€” see
  * src/lib/cohortCollusionAnalysisRunner.ts.
  *
- * GET — returns the analysis, its clusters (with per-cluster signal-
+ * GET â€” returns the analysis, its clusters (with per-cluster signal-
  * family matrix and edges), and the pair edges. Lecturer (exam owner) or
- * platform admin, same institution — students always receive 401/403.
+ * platform admin, same institution â€” students always receive 401/403.
  * Never returns a raw IP address, device token, browser-session token, or
  * correct answer; every signal's evidenceJson is already minimal and
  * explainable by construction (see src/lib/cohortCollusion/*.ts).
@@ -51,8 +51,8 @@ async function requireCollusionPermission(examId: string): Promise<CollusionPerm
   return { session, exam };
 }
 
-export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }): Promise<NextResponse> {
-  const { id } = await params;
+export async function POST(_req: Request, { params }: { params: Promise<{ examId: string }> }): Promise<NextResponse> {
+  const { examId: id } = await params;
   const permission = await requireCollusionPermission(id);
   if ("response" in permission) return permission.response;
 
@@ -81,14 +81,14 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     }
     console.error("Cohort collusion analysis failed", err);
     return NextResponse.json(
-      { error: "Cohort collusion analysis failed. This exam's submissions and grades are unaffected — you can retry." },
+      { error: "Cohort collusion analysis failed. This exam's submissions and grades are unaffected â€” you can retry." },
       { status: 500 },
     );
   }
 }
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+export async function GET(_req: Request, { params }: { params: Promise<{ examId: string }> }) {
+  const { examId: id } = await params;
   const permission = await requireCollusionPermission(id);
   if ("response" in permission) return permission.response;
 

@@ -1,11 +1,11 @@
-/**
- * Tether Secure Client Foundation v1 — see
+﻿/**
+ * Tether Secure Client Foundation v1 â€” see
  * docs/secure-client-foundation-seb-v1.md and Part 4 of the spec.
  *
  * POST /api/lecturer/exams/[id]/secure-client/seb-keys
  *
  * Adds an allowed Browser Exam Key or Config Key. The raw key value is
- * accepted here, once, then never returned again in any response —
+ * accepted here, once, then never returned again in any response â€”
  * subsequent reads only ever see a masked fingerprint.
  */
 import { NextResponse } from "next/server";
@@ -26,12 +26,12 @@ const bodySchema = z.object({
   label: z.string().max(100).optional(),
 });
 
-export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(req: Request, { params }: { params: Promise<{ examId: string }> }) {
   const session = await auth();
   if (!session || (session.user.role !== "LECTURER" && session.user.role !== "PLATFORM_ADMIN")) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const { id } = await params;
+  const { examId: id } = await params;
   const body = await req.json().catch(() => null);
   const parsed = bodySchema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
@@ -56,7 +56,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       { configurationId: parsed.data.configurationId, keyType: parsed.data.keyType, rawKey: parsed.data.rawKey, platform: parsed.data.platform, clientVersion: parsed.data.clientVersion, label: parsed.data.label },
       session.user.id,
     );
-    // Audited without the raw key value — never logged, never included in metadata.
+    // Audited without the raw key value â€” never logged, never included in metadata.
     createPlatformAuditLog({
       actorId: session.user.id,
       action: "SEB_ALLOWED_EXAM_KEY_ADDED",
@@ -69,7 +69,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   } catch (err) {
     if (err instanceof SecureClientError) return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
     // Fails closed without ever echoing the raw key or encryption
-    // configuration state — see sebKeyEncryption.ts.
+    // configuration state â€” see sebKeyEncryption.ts.
     if (err instanceof SebKeyEncryptionConfigError) {
       return NextResponse.json({ error: "Key encryption is not available. Contact your platform administrator.", code: "SEB_KEY_ENCRYPTION_UNAVAILABLE" }, { status: 503 });
     }
