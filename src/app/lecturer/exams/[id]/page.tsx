@@ -934,7 +934,6 @@ export default function LecturerExamPage({
     sebOptionalAvailable: exam.secureClientAvailability.sebOptionalAvailable,
     sebRequiredAvailable: exam.secureClientAvailability.sebRequiredAvailable,
   });
-  const singleDisplayRequiredDisabled = displayRequirementUiState.kind !== "AVAILABLE";
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -2248,13 +2247,13 @@ export default function LecturerExamPage({
               <p className="text-sm font-medium">Display requirement</p>
               <div className="mt-1 flex flex-col gap-1.5">
                 <label
-                  className={`flex items-start gap-2 text-sm text-gray-700 ${singleDisplayRequiredDisabled ? "opacity-50" : ""}`}
+                  className={`flex items-start gap-2 text-sm text-gray-700 ${displayRequirementUiState.unrestrictedDisabled ? "opacity-50" : ""}`}
                 >
                   <input
                     type="radio"
                     name="displayPolicy"
                     className="mt-0.5"
-                    disabled={singleDisplayRequiredDisabled}
+                    disabled={displayRequirementUiState.unrestrictedDisabled}
                     checked={secureForm.displayPolicy === "UNRESTRICTED"}
                     onChange={() => {
                       setSecureForm({ ...secureForm, displayPolicy: "UNRESTRICTED" });
@@ -2269,13 +2268,13 @@ export default function LecturerExamPage({
                   </span>
                 </label>
                 <label
-                  className={`flex items-start gap-2 text-sm text-gray-700 ${singleDisplayRequiredDisabled ? "opacity-50" : ""}`}
+                  className={`flex items-start gap-2 text-sm text-gray-700 ${displayRequirementUiState.singleDisplayRequiredDisabled ? "opacity-50" : ""}`}
                 >
                   <input
                     type="radio"
                     name="displayPolicy"
                     className="mt-0.5"
-                    disabled={singleDisplayRequiredDisabled}
+                    disabled={displayRequirementUiState.singleDisplayRequiredDisabled}
                     checked={secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED"}
                     onChange={() => {
                       // Availability-gating fix: this handler can only ever
@@ -2307,9 +2306,13 @@ export default function LecturerExamPage({
                   </span>
                 </label>
               </div>
+              {/* Concise, general Standard-web limitation only — the
+                  institution/environment-specific "why is it unavailable
+                  right now" fact lives solely in the notice below
+                  (displayRequirementUiState.notice), never repeated here,
+                  so the two no longer say the same thing twice. */}
               <p className="mt-1.5 text-xs text-gray-500">
-                Single-display enforcement requires Safe Exam Browser. Standard web exams cannot reliably verify
-                connected, mirrored or extended displays.
+                Standard web exams cannot reliably verify connected, mirrored or extended displays.
               </p>
               {displayPolicyAutoSwitchNotice && (
                 <p className="mt-1.5 rounded border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800">
@@ -2317,14 +2320,16 @@ export default function LecturerExamPage({
                 </p>
               )}
               {/* Only shown when SEB is actually available — if it weren't,
-                  the UNAVAILABLE/STORED_BUT_UNAVAILABLE message below
-                  already explains why, and telling the lecturer to "choose
-                  Safe Exam Browser above" would repeat the exact
-                  contradiction this fix removes. This covers the ordinary
-                  (non-manipulated) path where a lecturer enables Single
-                  display required — which auto-switches deliveryMode to a
-                  SEB mode — and then separately switches deliveryMode back
-                  to Standard/Monitored web via the radios above. */}
+                  displayRequirementUiState.notice below already explains
+                  why, and telling the lecturer to "choose Safe Exam
+                  Browser above" would repeat the exact contradiction this
+                  fix removes. This covers the ordinary (non-manipulated)
+                  path where a lecturer enables Single display required —
+                  which auto-switches deliveryMode to a SEB mode — and then
+                  separately switches deliveryMode back to Standard/
+                  Monitored web via the radios above. This IS a genuine,
+                  actionable validation error (unlike the notice below), so
+                  it stays red. */}
               {displayRequirementUiState.kind === "AVAILABLE" &&
                 secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED" &&
                 secureForm.deliveryMode !== "SEB_REQUIRED" &&
@@ -2335,10 +2340,17 @@ export default function LecturerExamPage({
                     will be rejected.
                   </p>
                 )}
-              {(displayRequirementUiState.kind === "UNAVAILABLE" || displayRequirementUiState.kind === "STORED_BUT_UNAVAILABLE") && (
-                <p className="mt-1.5 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-800">
-                  <span className="block font-medium">{displayRequirementUiState.title}</span>
-                  {displayRequirementUiState.message}
+              {/* Neither UNAVAILABLE nor STORED_BUT_UNAVAILABLE is a
+                  lecturer-caused validation error — both are ordinary
+                  environment/institution availability facts, so this is
+                  styled as an amber/informational notice, never a red
+                  error (Standard web + No display restriction remains a
+                  perfectly valid, saveable configuration in the
+                  UNAVAILABLE case). */}
+              {displayRequirementUiState.notice && (
+                <p className="mt-1.5 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                  <span className="block font-medium">{displayRequirementUiState.notice.title}</span>
+                  {displayRequirementUiState.notice.message}
                 </p>
               )}
             </div>

@@ -394,67 +394,114 @@ describe("describeDisplayRequirement", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolveDisplayRequirementUiState", () => {
-  it("SEB unavailable and nothing stored: control is unavailable, with the exact required title/message", () => {
+  it("SEB unavailable + UNRESTRICTED stored: No display restriction stays enabled, only Single display required is disabled, notice is informational (not blocking)", () => {
     const result = resolveDisplayRequirementUiState({
       storedDisplayPolicy: "UNRESTRICTED",
       sebOptionalAvailable: false,
       sebRequiredAvailable: false,
     });
     expect(result.kind).toBe("UNAVAILABLE");
-    if (result.kind !== "AVAILABLE") {
-      expect(result.title).toBe("Single-display enforcement unavailable");
-      expect(result.message).toBe(
-        "This setting requires Safe Exam Browser, which is not enabled for this institution or environment.",
-      );
-      // Must never instruct the lecturer to pick a delivery mode that is
-      // itself disabled — this is the exact contradiction being fixed.
-      expect(result.message).not.toMatch(/choose/i);
-      expect(result.message).not.toMatch(/safe exam browser — required/i);
-      expect(result.message).not.toMatch(/safe exam browser — optional/i);
-    }
+    // Standard web + No display restriction remains a fully valid,
+    // saveable configuration — this radio must NOT be disabled.
+    expect(result.unrestrictedDisabled).toBe(false);
+    expect(result.singleDisplayRequiredDisabled).toBe(true);
+    expect(result.notice).not.toBeNull();
+    expect(result.notice?.tone).toBe("INFO");
+    expect(result.notice?.title).toBe("Single-display enforcement unavailable");
+    expect(result.notice?.message).toBe("Safe Exam Browser is not enabled for this institution or environment.");
+    // Must never instruct the lecturer to pick a delivery mode that is
+    // itself disabled — this is the exact contradiction being fixed.
+    expect(result.notice?.message).not.toMatch(/choose/i);
+    expect(result.notice?.message).not.toMatch(/safe exam browser — required/i);
+    expect(result.notice?.message).not.toMatch(/safe exam browser — optional/i);
+    // isDisplayPolicySaveBlocked (the actual save gate) agrees this must
+    // not block saving.
+    expect(
+      isDisplayPolicySaveBlocked({ deliveryMode: "STANDARD_WEB", displayPolicy: "UNRESTRICTED", sebOptionalAvailable: false, sebRequiredAvailable: false }),
+    ).toBe(false);
   });
 
-  it("only SEB_REQUIRED available: control is available", () => {
+  it("only SEB_REQUIRED available: both display choices operate normally (nothing disabled, no notice)", () => {
     const result = resolveDisplayRequirementUiState({
       storedDisplayPolicy: "UNRESTRICTED",
       sebOptionalAvailable: false,
       sebRequiredAvailable: true,
     });
     expect(result.kind).toBe("AVAILABLE");
+    expect(result.unrestrictedDisabled).toBe(false);
+    expect(result.singleDisplayRequiredDisabled).toBe(false);
+    expect(result.notice).toBeNull();
   });
 
-  it("only SEB_OPTIONAL available: control is available", () => {
+  it("only SEB_OPTIONAL available: both display choices operate normally (nothing disabled, no notice)", () => {
     const result = resolveDisplayRequirementUiState({
       storedDisplayPolicy: "UNRESTRICTED",
       sebOptionalAvailable: true,
       sebRequiredAvailable: false,
     });
     expect(result.kind).toBe("AVAILABLE");
+    expect(result.unrestrictedDisabled).toBe(false);
+    expect(result.singleDisplayRequiredDisabled).toBe(false);
+    expect(result.notice).toBeNull();
   });
 
-  it("both SEB modes available: control is available", () => {
+  it("both SEB modes available: both display choices operate normally (nothing disabled, no notice), including when SINGLE_DISPLAY_REQUIRED is already stored", () => {
     const result = resolveDisplayRequirementUiState({
-      storedDisplayPolicy: "UNRESTRICTED",
+      storedDisplayPolicy: "SINGLE_DISPLAY_REQUIRED",
       sebOptionalAvailable: true,
       sebRequiredAvailable: true,
     });
     expect(result.kind).toBe("AVAILABLE");
+    expect(result.unrestrictedDisabled).toBe(false);
+    expect(result.singleDisplayRequiredDisabled).toBe(false);
+    expect(result.notice).toBeNull();
   });
 
-  it("SINGLE_DISPLAY_REQUIRED already stored but SEB has since become unavailable: reported read-only, not silently cleared", () => {
+  it("SEB unavailable + stored SINGLE_DISPLAY_REQUIRED: both options locked read-only, notice states it cannot be changed or re-saved, and never claims removal", () => {
     const result = resolveDisplayRequirementUiState({
       storedDisplayPolicy: "SINGLE_DISPLAY_REQUIRED",
       sebOptionalAvailable: false,
       sebRequiredAvailable: false,
     });
     expect(result.kind).toBe("STORED_BUT_UNAVAILABLE");
-    if (result.kind !== "AVAILABLE") {
-      expect(result.title).toBe("Single-display enforcement unavailable");
-      expect(result.message).toMatch(/cannot be re-saved/i);
-      // The message reassures the lecturer the stored policy has not been
-      // silently removed or downgraded, never claims that it HAS been.
-      expect(result.message).not.toMatch(/has been removed|has been cleared|disabled automatically/i);
-    }
+    // Both options are locked in this exceptional state — the lecturer
+    // cannot even switch back to UNRESTRICTED through this control while
+    // SEB is down, so the stored policy is never edited out from under it.
+    expect(result.unrestrictedDisabled).toBe(true);
+    expect(result.singleDisplayRequiredDisabled).toBe(true);
+    expect(result.notice).not.toBeNull();
+    expect(result.notice?.tone).toBe("LOCKED");
+    expect(result.notice?.title).toBe("Single-display enforcement unavailable");
+    expect(result.notice?.message).toMatch(/cannot be changed or re-saved/i);
+    expect(result.notice?.message).toMatch(/restored/i);
+    // The message reassures the lecturer the stored policy has not been
+    // silently removed or downgraded, never claims that it HAS been.
+    expect(result.notice?.message).not.toMatch(/has been removed|has been cleared|disabled automatically/i);
+    // isDisplayPolicySaveBlocked (the actual save gate) agrees this must
+    // block saving/re-saving.
+    expect(
+      isDisplayPolicySaveBlocked({
+        deliveryMode: "SEB_REQUIRED",
+        displayPolicy: "SINGLE_DISPLAY_REQUIRED",
+        sebOptionalAvailable: false,
+        sebRequiredAvailable: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not repeat the same explanation between the UNAVAILABLE and STORED_BUT_UNAVAILABLE notices' titles vs. their institution/environment-specific detail", () => {
+    // Both share the same short title (by design — same underlying
+    // reason), but the messages must differ because they describe
+    // different lecturer-facing consequences (nothing at stake vs. a
+    // stored policy frozen in place).
+    const unavailable = resolveDisplayRequirementUiState({ storedDisplayPolicy: "UNRESTRICTED", sebOptionalAvailable: false, sebRequiredAvailable: false });
+    const storedButUnavailable = resolveDisplayRequirementUiState({
+      storedDisplayPolicy: "SINGLE_DISPLAY_REQUIRED",
+      sebOptionalAvailable: false,
+      sebRequiredAvailable: false,
+    });
+    expect(unavailable.notice?.title).toBe(storedButUnavailable.notice?.title);
+    expect(unavailable.notice?.message).not.toBe(storedButUnavailable.notice?.message);
   });
 });
 
