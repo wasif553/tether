@@ -489,27 +489,54 @@ export function describeDisplayRequirement(policy: Pick<SecureClientPolicy, "del
 // ---------------------------------------------------------------------------
 
 export const DISPLAY_REQUIREMENT_UNAVAILABLE_TITLE = "Single-display enforcement unavailable";
-export const DISPLAY_REQUIREMENT_UNAVAILABLE_MESSAGE =
-  "This setting requires Safe Exam Browser, which is not enabled for this institution or environment.";
+/**
+ * Deliberately does NOT restate "this setting requires Safe Exam
+ * Browser" — that general capability limitation belongs in the
+ * always-visible explanatory text next to the radios (see the lecturer
+ * exam page), not here. Repeating it in both places was the duplicated-
+ * explanation UX bug this fix removes; this message states only the
+ * institution/environment-specific fact the general text can't know.
+ */
+export const DISPLAY_REQUIREMENT_UNAVAILABLE_MESSAGE = "Safe Exam Browser is not enabled for this institution or environment.";
 export const DISPLAY_REQUIREMENT_STORED_BUT_UNAVAILABLE_MESSAGE =
-  "Single display required is saved for this exam, but Safe Exam Browser is not currently enabled for this institution or environment. This setting cannot be re-saved until Safe Exam Browser access is restored, and it has not been removed.";
-
-export type DisplayRequirementUiState =
-  | { kind: "AVAILABLE" }
-  | { kind: "UNAVAILABLE"; title: string; message: string }
-  | { kind: "STORED_BUT_UNAVAILABLE"; title: string; message: string };
+  "Single display required is already saved for this exam, but Safe Exam Browser is not currently enabled for this institution or environment. This setting cannot be changed or re-saved until Safe Exam Browser access is restored.";
 
 /**
- * Decides how the lecturer's "Single display required" control should
- * render, given the authoritative SEB availability result and the
- * DISPLAY POLICY CURRENTLY STORED on the exam (not the lecturer's
- * unsaved draft — this must stay correct even if the lecturer has since
- * toggled the radio locally). `storedDisplayPolicy` distinguishes the two
- * unavailable cases: a lecturer opening the settings for the first time
- * with SEB unavailable (UNAVAILABLE — control disabled, no stored value
- * to protect) versus one whose exam already has SINGLE_DISPLAY_REQUIRED
- * saved from when SEB was available (STORED_BUT_UNAVAILABLE — must be
- * shown read-only, never silently erased or downgraded).
+ * INFO: an ordinary, non-blocking fact — UNRESTRICTED remains selected
+ * and saving is unaffected, so this must never render as a red error.
+ * LOCKED: a stored SINGLE_DISPLAY_REQUIRED policy that can't currently be
+ * changed or re-saved — still not a validation error the lecturer caused,
+ * but stronger than a passive info note since both controls are frozen.
+ */
+export type DisplayRequirementNoticeTone = "INFO" | "LOCKED";
+
+export type DisplayRequirementNotice = { title: string; message: string; tone: DisplayRequirementNoticeTone };
+
+export type DisplayRequirementUiState = {
+  kind: "AVAILABLE" | "UNAVAILABLE" | "STORED_BUT_UNAVAILABLE";
+  /** Whether the "No display restriction" (UNRESTRICTED) radio may be selected. */
+  unrestrictedDisabled: boolean;
+  /** Whether the "Single display required" radio may be selected. */
+  singleDisplayRequiredDisabled: boolean;
+  notice: DisplayRequirementNotice | null;
+};
+
+/**
+ * Decides how the lecturer's display-requirement radios should render,
+ * given the authoritative SEB availability result and the DISPLAY POLICY
+ * CURRENTLY STORED on the exam (not the lecturer's unsaved draft — this
+ * must stay correct even if the lecturer has since toggled a radio
+ * locally). `storedDisplayPolicy` distinguishes the two unavailable
+ * cases:
+ *  - UNAVAILABLE: SEB unavailable, nothing stored to protect. Only
+ *    "Single display required" is disabled — Standard web + "No display
+ *    restriction" remains a fully valid, selectable, saveable
+ *    configuration, so that radio (and saving) must stay enabled.
+ *  - STORED_BUT_UNAVAILABLE: SEB unavailable, but SINGLE_DISPLAY_REQUIRED
+ *    is already saved from when SEB was available. Both radios are
+ *    locked read-only — never silently erased or downgraded, and never
+ *    editable back to UNRESTRICTED through this control while SEB is
+ *    down, either — so the lecturer sees exactly what's enforced.
  */
 export function resolveDisplayRequirementUiState(params: {
   storedDisplayPolicy: DisplayPolicy;
@@ -517,11 +544,23 @@ export function resolveDisplayRequirementUiState(params: {
   sebRequiredAvailable: boolean;
 }): DisplayRequirementUiState {
   const sebAvailable = params.sebOptionalAvailable || params.sebRequiredAvailable;
-  if (sebAvailable) return { kind: "AVAILABLE" };
-  if (params.storedDisplayPolicy === "SINGLE_DISPLAY_REQUIRED") {
-    return { kind: "STORED_BUT_UNAVAILABLE", title: DISPLAY_REQUIREMENT_UNAVAILABLE_TITLE, message: DISPLAY_REQUIREMENT_STORED_BUT_UNAVAILABLE_MESSAGE };
+  if (sebAvailable) {
+    return { kind: "AVAILABLE", unrestrictedDisabled: false, singleDisplayRequiredDisabled: false, notice: null };
   }
-  return { kind: "UNAVAILABLE", title: DISPLAY_REQUIREMENT_UNAVAILABLE_TITLE, message: DISPLAY_REQUIREMENT_UNAVAILABLE_MESSAGE };
+  if (params.storedDisplayPolicy === "SINGLE_DISPLAY_REQUIRED") {
+    return {
+      kind: "STORED_BUT_UNAVAILABLE",
+      unrestrictedDisabled: true,
+      singleDisplayRequiredDisabled: true,
+      notice: { title: DISPLAY_REQUIREMENT_UNAVAILABLE_TITLE, message: DISPLAY_REQUIREMENT_STORED_BUT_UNAVAILABLE_MESSAGE, tone: "LOCKED" },
+    };
+  }
+  return {
+    kind: "UNAVAILABLE",
+    unrestrictedDisabled: false,
+    singleDisplayRequiredDisabled: true,
+    notice: { title: DISPLAY_REQUIREMENT_UNAVAILABLE_TITLE, message: DISPLAY_REQUIREMENT_UNAVAILABLE_MESSAGE, tone: "INFO" },
+  };
 }
 
 /**
