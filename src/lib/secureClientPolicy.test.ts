@@ -16,6 +16,9 @@ import {
   isDisplayPolicyCombinationValid,
   isValidDisplayPolicy,
   describeDisplayRequirement,
+  resolveDisplayRequirementUiState,
+  resolveDeliveryModeForSingleDisplayRequired,
+  isDisplayPolicySaveBlocked,
   type RelevantSecureClientSettings,
 } from "./secureClientPolicy";
 
@@ -378,5 +381,210 @@ describe("describeDisplayRequirement", () => {
   it("MONITORED_WEB + SINGLE_DISPLAY_REQUIRED (should not occur, but defensive) is reported as not enforceable, never as enforced", () => {
     const result = describeDisplayRequirement({ deliveryMode: "MONITORED_WEB", displayPolicy: "SINGLE_DISPLAY_REQUIRED" });
     expect(result.status).toBe("NOT_ENFORCEABLE_STANDARD_WEB");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lecturer-page availability-gating fix — see
+// src/app/lecturer/exams/[id]/page.tsx, "Display requirement". Fixes the
+// contradiction where "Single display required" was always selectable and
+// unconditionally told the lecturer to choose a Safe Exam Browser delivery
+// mode, even when both SEB delivery modes were disabled by
+// environment/institution availability gating.
+// ---------------------------------------------------------------------------
+
+describe("resolveDisplayRequirementUiState", () => {
+  it("SEB unavailable and nothing stored: control is unavailable, with the exact required title/message", () => {
+    const result = resolveDisplayRequirementUiState({
+      storedDisplayPolicy: "UNRESTRICTED",
+      sebOptionalAvailable: false,
+      sebRequiredAvailable: false,
+    });
+    expect(result.kind).toBe("UNAVAILABLE");
+    if (result.kind !== "AVAILABLE") {
+      expect(result.title).toBe("Single-display enforcement unavailable");
+      expect(result.message).toBe(
+        "This setting requires Safe Exam Browser, which is not enabled for this institution or environment.",
+      );
+      // Must never instruct the lecturer to pick a delivery mode that is
+      // itself disabled — this is the exact contradiction being fixed.
+      expect(result.message).not.toMatch(/choose/i);
+      expect(result.message).not.toMatch(/safe exam browser — required/i);
+      expect(result.message).not.toMatch(/safe exam browser — optional/i);
+    }
+  });
+
+  it("only SEB_REQUIRED available: control is available", () => {
+    const result = resolveDisplayRequirementUiState({
+      storedDisplayPolicy: "UNRESTRICTED",
+      sebOptionalAvailable: false,
+      sebRequiredAvailable: true,
+    });
+    expect(result.kind).toBe("AVAILABLE");
+  });
+
+  it("only SEB_OPTIONAL available: control is available", () => {
+    const result = resolveDisplayRequirementUiState({
+      storedDisplayPolicy: "UNRESTRICTED",
+      sebOptionalAvailable: true,
+      sebRequiredAvailable: false,
+    });
+    expect(result.kind).toBe("AVAILABLE");
+  });
+
+  it("both SEB modes available: control is available", () => {
+    const result = resolveDisplayRequirementUiState({
+      storedDisplayPolicy: "UNRESTRICTED",
+      sebOptionalAvailable: true,
+      sebRequiredAvailable: true,
+    });
+    expect(result.kind).toBe("AVAILABLE");
+  });
+
+  it("SINGLE_DISPLAY_REQUIRED already stored but SEB has since become unavailable: reported read-only, not silently cleared", () => {
+    const result = resolveDisplayRequirementUiState({
+      storedDisplayPolicy: "SINGLE_DISPLAY_REQUIRED",
+      sebOptionalAvailable: false,
+      sebRequiredAvailable: false,
+    });
+    expect(result.kind).toBe("STORED_BUT_UNAVAILABLE");
+    if (result.kind !== "AVAILABLE") {
+      expect(result.title).toBe("Single-display enforcement unavailable");
+      expect(result.message).toMatch(/cannot be re-saved/i);
+      // The message reassures the lecturer the stored policy has not been
+      // silently removed or downgraded, never claims that it HAS been.
+      expect(result.message).not.toMatch(/has been removed|has been cleared|disabled automatically/i);
+    }
+  });
+});
+
+describe("resolveDeliveryModeForSingleDisplayRequired", () => {
+  it("SEB_REQUIRED available (with or without SEB_OPTIONAL): switches STANDARD_WEB to SEB_REQUIRED", () => {
+    const result = resolveDeliveryModeForSingleDisplayRequired({
+      currentDeliveryMode: "STANDARD_WEB",
+      sebOptionalAvailable: true,
+      sebRequiredAvailable: true,
+    });
+    expect(result).toEqual({ deliveryMode: "SEB_REQUIRED", changed: true });
+  });
+
+  it("only SEB_OPTIONAL available: switches STANDARD_WEB to SEB_OPTIONAL", () => {
+    const result = resolveDeliveryModeForSingleDisplayRequired({
+      currentDeliveryMode: "STANDARD_WEB",
+      sebOptionalAvailable: true,
+      sebRequiredAvailable: false,
+    });
+    expect(result).toEqual({ deliveryMode: "SEB_OPTIONAL", changed: true });
+  });
+
+  it("switches MONITORED_WEB to a SEB mode too, not just STANDARD_WEB", () => {
+    const result = resolveDeliveryModeForSingleDisplayRequired({
+      currentDeliveryMode: "MONITORED_WEB",
+      sebOptionalAvailable: false,
+      sebRequiredAvailable: true,
+    });
+    expect(result).toEqual({ deliveryMode: "SEB_REQUIRED", changed: true });
+  });
+
+  it("already on SEB_REQUIRED or SEB_OPTIONAL: no change reported", () => {
+    expect(
+      resolveDeliveryModeForSingleDisplayRequired({ currentDeliveryMode: "SEB_REQUIRED", sebOptionalAvailable: true, sebRequiredAvailable: true }),
+    ).toEqual({ deliveryMode: "SEB_REQUIRED", changed: false });
+    expect(
+      resolveDeliveryModeForSingleDisplayRequired({ currentDeliveryMode: "SEB_OPTIONAL", sebOptionalAvailable: true, sebRequiredAvailable: true }),
+    ).toEqual({ deliveryMode: "SEB_OPTIONAL", changed: false });
+  });
+
+  it("neither SEB mode available (defensive — UI disables the control before this can be reached): echoes the current mode back unchanged", () => {
+    const result = resolveDeliveryModeForSingleDisplayRequired({
+      currentDeliveryMode: "STANDARD_WEB",
+      sebOptionalAvailable: false,
+      sebRequiredAvailable: false,
+    });
+    expect(result).toEqual({ deliveryMode: "STANDARD_WEB", changed: false });
+  });
+});
+
+describe("isDisplayPolicySaveBlocked", () => {
+  it("SEB unavailable: blocks saving SINGLE_DISPLAY_REQUIRED even with a nominally-valid delivery mode", () => {
+    expect(
+      isDisplayPolicySaveBlocked({
+        deliveryMode: "SEB_REQUIRED",
+        displayPolicy: "SINGLE_DISPLAY_REQUIRED",
+        sebOptionalAvailable: false,
+        sebRequiredAvailable: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("SEB required available: does not block saving", () => {
+    expect(
+      isDisplayPolicySaveBlocked({
+        deliveryMode: "SEB_REQUIRED",
+        displayPolicy: "SINGLE_DISPLAY_REQUIRED",
+        sebOptionalAvailable: false,
+        sebRequiredAvailable: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("only SEB optional available: does not block saving when SEB_OPTIONAL is selected", () => {
+    expect(
+      isDisplayPolicySaveBlocked({
+        deliveryMode: "SEB_OPTIONAL",
+        displayPolicy: "SINGLE_DISPLAY_REQUIRED",
+        sebOptionalAvailable: true,
+        sebRequiredAvailable: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("Standard web cannot save Single display required even through manipulated client state (SEB fully available)", () => {
+    // Simulates a manipulated/bypassed disabled-radio state: deliveryMode
+    // is STANDARD_WEB even though SEB is available and normally the UI
+    // would have auto-switched it — the combination itself is what's
+    // invalid, independent of availability.
+    expect(
+      isDisplayPolicySaveBlocked({
+        deliveryMode: "STANDARD_WEB",
+        displayPolicy: "SINGLE_DISPLAY_REQUIRED",
+        sebOptionalAvailable: true,
+        sebRequiredAvailable: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("Standard web with SEB unavailable is also blocked (both the combination rule and the availability rule agree)", () => {
+    expect(
+      isDisplayPolicySaveBlocked({
+        deliveryMode: "STANDARD_WEB",
+        displayPolicy: "SINGLE_DISPLAY_REQUIRED",
+        sebOptionalAvailable: false,
+        sebRequiredAvailable: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("UNRESTRICTED is never blocked, regardless of delivery mode or availability", () => {
+    expect(
+      isDisplayPolicySaveBlocked({
+        deliveryMode: "STANDARD_WEB",
+        displayPolicy: "UNRESTRICTED",
+        sebOptionalAvailable: false,
+        sebRequiredAvailable: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("stored Single display required is not silently removed when availability changes: the underlying displayPolicy value is untouched by this check", () => {
+    // isDisplayPolicySaveBlocked only reports whether a save attempt
+    // should be rejected — it never mutates or clears displayPolicy
+    // itself, so a caller that reads it back after SEB becomes
+    // unavailable still sees SINGLE_DISPLAY_REQUIRED, never a silently
+    // downgraded UNRESTRICTED.
+    const draft = { deliveryMode: "SEB_REQUIRED" as const, displayPolicy: "SINGLE_DISPLAY_REQUIRED" as const };
+    const blocked = isDisplayPolicySaveBlocked({ ...draft, sebOptionalAvailable: false, sebRequiredAvailable: false });
+    expect(blocked).toBe(true);
+    expect(draft.displayPolicy).toBe("SINGLE_DISPLAY_REQUIRED");
   });
 });
