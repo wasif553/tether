@@ -2,6 +2,7 @@
 
 import { use as usePromise, useEffect, useState } from "react";
 import Link from "next/link";
+import { resolveSebConfigurationWorkflowAction, isAddSebKeyDisabled } from "@/lib/secureClientConfigurationUi";
 
 type MaskedKey = {
   id: string;
@@ -55,6 +56,9 @@ export default function SecureClientConfigurationPage({ params }: { params: Prom
   const [newKeyPlatform, setNewKeyPlatform] = useState("");
   const [newKeyLabel, setNewKeyLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [creatingConfig, setCreatingConfig] = useState(false);
+  const [activatingConfig, setActivatingConfig] = useState(false);
+  const [revokingConfig, setRevokingConfig] = useState(false);
 
   function loadConfigurations() {
     fetch(`/api/lecturer/exams/${id}/secure-client/configuration`)
@@ -78,6 +82,12 @@ export default function SecureClientConfigurationPage({ params }: { params: Prom
   }, [id, filter]);
 
   const sebConfig = configurations.find((c) => c.provider === "SAFE_EXAM_BROWSER");
+  // SEB configuration create/activate/revoke workflow fix — see
+  // docs/secure-client-foundation-seb-v1.md. Derived purely from
+  // sebConfig.status (never from key state — Browser Exam Keys / Config
+  // Keys must remain optional, see isAddSebKeyDisabled below) so the
+  // section always shows exactly one actionable next step.
+  const sebWorkflowAction = resolveSebConfigurationWorkflowAction(sebConfig?.status);
 
   async function createDraftIfNeeded() {
     if (sebConfig) return sebConfig.id;
@@ -94,6 +104,33 @@ export default function SecureClientConfigurationPage({ params }: { params: Prom
     }
     loadConfigurations();
     return body.configurationId as string;
+  }
+
+  /**
+   * The one path that creates the SAFE_EXAM_BROWSER configuration
+   * without requiring a Browser Exam Key or Config Key first — the
+   * "Create SEB configuration" button, shown whenever sebWorkflowAction
+   * is CREATE (i.e. no configuration exists yet for this exam).
+   */
+  async function createConfiguration() {
+    if (creatingConfig) return;
+    setCreatingConfig(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/lecturer/exams/${id}/secure-client/configuration`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "SAFE_EXAM_BROWSER" }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setError(body?.error ?? "Failed to create configuration");
+        return;
+      }
+      loadConfigurations();
+    } finally {
+      setCreatingConfig(false);
+    }
   }
 
   async function addKey() {
@@ -122,26 +159,45 @@ export default function SecureClientConfigurationPage({ params }: { params: Prom
   }
 
   async function activate() {
-    if (!sebConfig) return;
+    if (!sebConfig || activatingConfig) return;
+    setActivatingConfig(true);
     setError(null);
-    const res = await fetch(`/api/lecturer/exams/${id}/secure-client/configuration/activate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ configurationId: sebConfig.id }),
-    });
-    const body = await res.json();
-    if (!res.ok) setError(body.error ?? "Failed to activate");
-    loadConfigurations();
+    try {
+      const res = await fetch(`/api/lecturer/exams/${id}/secure-client/configuration/activate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ configurationId: sebConfig.id }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setError(body?.error ?? "Failed to activate");
+        return;
+      }
+      loadConfigurations();
+    } finally {
+      setActivatingConfig(false);
+    }
   }
 
   async function revoke() {
-    if (!sebConfig) return;
-    await fetch(`/api/lecturer/exams/${id}/secure-client/configuration/revoke`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ configurationId: sebConfig.id }),
-    });
-    loadConfigurations();
+    if (!sebConfig || revokingConfig) return;
+    setRevokingConfig(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/lecturer/exams/${id}/secure-client/configuration/revoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ configurationId: sebConfig.id }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        setError(body?.error ?? "Failed to revoke");
+        return;
+      }
+      loadConfigurations();
+    } finally {
+      setRevokingConfig(false);
+    }
   }
 
   return (
@@ -179,19 +235,40 @@ export default function SecureClientConfigurationPage({ params }: { params: Prom
         </div>
 
         <div className="mt-3 flex gap-2">
-          {sebConfig?.status !== "ACTIVE" && (
-            <button onClick={activate} className="rounded border border-gray-300 px-3 py-1.5 text-sm">
-              Activate
+          {sebWorkflowAction === "CREATE" && (
+            <button
+              onClick={createConfiguration}
+              disabled={creatingConfig}
+              className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+            >
+              {creatingConfig ? "Creating…" : "Create SEB configuration"}
             </button>
           )}
-          {sebConfig?.status === "ACTIVE" && (
-            <button onClick={revoke} className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700">
-              Revoke
+          {sebWorkflowAction === "ACTIVATE" && (
+            <button
+              onClick={activate}
+              disabled={activatingConfig}
+              className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+            >
+              {activatingConfig ? "Activating…" : "Activate configuration"}
+            </button>
+          )}
+          {sebWorkflowAction === "REVOKE" && (
+            <button
+              onClick={revoke}
+              disabled={revokingConfig}
+              className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 disabled:opacity-50"
+            >
+              {revokingConfig ? "Revoking…" : "Revoke"}
             </button>
           )}
         </div>
 
-        <h3 className="mt-4 text-sm font-medium">Accepted Browser Exam Keys / Config Keys</h3>
+        <h3 className="mt-4 text-sm font-medium">Advanced SEB verification keys (optional)</h3>
+        <p className="text-xs text-gray-500">
+          Only add these keys when this exam explicitly requires Browser Exam Key or Config Key verification. They
+          are not required for basic Safe Exam Browser or single-display testing.
+        </p>
         <p className="text-xs text-gray-500">Only a masked fingerprint is ever shown — full key values are never displayed after entry.</p>
         <table className="mt-2 w-full text-sm">
           <thead>
@@ -253,7 +330,7 @@ export default function SecureClientConfigurationPage({ params }: { params: Prom
             onChange={(e) => setNewKeyLabel(e.target.value)}
           />
         </div>
-        <button onClick={addKey} disabled={newKeyValue.length < 8} className="mt-2 rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50">
+        <button onClick={addKey} disabled={isAddSebKeyDisabled(newKeyValue)} className="mt-2 rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50">
           Add key
         </button>
       </section>
