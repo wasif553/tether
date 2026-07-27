@@ -9,7 +9,12 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "seed": "tsx --env-file=.env prisma/seed.ts"
+    "seed": "tsx --env-file=.env prisma/seed.ts",
+    "validate:typecheck": "npm run typecheck",
+    "validate:lint": "npm run lint",
+    "validate:tests": "npm run test",
+    "validate:build": "npm run build",
+    "release:validate": "tsx scripts/release-validate.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.106.0",
