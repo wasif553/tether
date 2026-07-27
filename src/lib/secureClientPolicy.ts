@@ -476,3 +476,98 @@ export function describeDisplayRequirement(policy: Pick<SecureClientPolicy, "del
     instruction: "Not enforceable in standard web mode.",
   };
 }
+
+// ---------------------------------------------------------------------------
+// Single Display Requirement v1 — lecturer-facing availability gating.
+// Fixes a contradiction in the lecturer exam-settings UI: the "Single
+// display required" control must never invite a lecturer into a state
+// that isDisplayPolicyCombinationValid (and the PATCH route) will reject.
+// It is gated on the SAME SecureClientAvailability booleans already used
+// to disable the SEB_OPTIONAL/SEB_REQUIRED delivery-mode radios (Part 4/9
+// of the Secure Client Foundation hardening pass) — never a separate,
+// possibly-divergent source of truth.
+// ---------------------------------------------------------------------------
+
+export const DISPLAY_REQUIREMENT_UNAVAILABLE_TITLE = "Single-display enforcement unavailable";
+export const DISPLAY_REQUIREMENT_UNAVAILABLE_MESSAGE =
+  "This setting requires Safe Exam Browser, which is not enabled for this institution or environment.";
+export const DISPLAY_REQUIREMENT_STORED_BUT_UNAVAILABLE_MESSAGE =
+  "Single display required is saved for this exam, but Safe Exam Browser is not currently enabled for this institution or environment. This setting cannot be re-saved until Safe Exam Browser access is restored, and it has not been removed.";
+
+export type DisplayRequirementUiState =
+  | { kind: "AVAILABLE" }
+  | { kind: "UNAVAILABLE"; title: string; message: string }
+  | { kind: "STORED_BUT_UNAVAILABLE"; title: string; message: string };
+
+/**
+ * Decides how the lecturer's "Single display required" control should
+ * render, given the authoritative SEB availability result and the
+ * DISPLAY POLICY CURRENTLY STORED on the exam (not the lecturer's
+ * unsaved draft — this must stay correct even if the lecturer has since
+ * toggled the radio locally). `storedDisplayPolicy` distinguishes the two
+ * unavailable cases: a lecturer opening the settings for the first time
+ * with SEB unavailable (UNAVAILABLE — control disabled, no stored value
+ * to protect) versus one whose exam already has SINGLE_DISPLAY_REQUIRED
+ * saved from when SEB was available (STORED_BUT_UNAVAILABLE — must be
+ * shown read-only, never silently erased or downgraded).
+ */
+export function resolveDisplayRequirementUiState(params: {
+  storedDisplayPolicy: DisplayPolicy;
+  sebOptionalAvailable: boolean;
+  sebRequiredAvailable: boolean;
+}): DisplayRequirementUiState {
+  const sebAvailable = params.sebOptionalAvailable || params.sebRequiredAvailable;
+  if (sebAvailable) return { kind: "AVAILABLE" };
+  if (params.storedDisplayPolicy === "SINGLE_DISPLAY_REQUIRED") {
+    return { kind: "STORED_BUT_UNAVAILABLE", title: DISPLAY_REQUIREMENT_UNAVAILABLE_TITLE, message: DISPLAY_REQUIREMENT_STORED_BUT_UNAVAILABLE_MESSAGE };
+  }
+  return { kind: "UNAVAILABLE", title: DISPLAY_REQUIREMENT_UNAVAILABLE_TITLE, message: DISPLAY_REQUIREMENT_UNAVAILABLE_MESSAGE };
+}
+
+/**
+ * When a lecturer turns on "Single display required" while the draft
+ * delivery mode is not already SEB_REQUIRED/SEB_OPTIONAL, picks the
+ * delivery mode to switch to: SEB_REQUIRED is preferred when available,
+ * falling back to SEB_OPTIONAL as the only other mode
+ * isDisplayPolicyCombinationValid accepts. Returns `changed: false` (and
+ * echoes the current mode back) both when no switch is needed and — as a
+ * defensive fallback that should be unreachable because the calling UI
+ * disables the control in this case (see resolveDisplayRequirementUiState)
+ * — when neither SEB mode is available.
+ */
+export function resolveDeliveryModeForSingleDisplayRequired(params: {
+  currentDeliveryMode: DeliveryMode;
+  sebOptionalAvailable: boolean;
+  sebRequiredAvailable: boolean;
+}): { deliveryMode: DeliveryMode; changed: boolean } {
+  if (params.currentDeliveryMode === "SEB_REQUIRED" || params.currentDeliveryMode === "SEB_OPTIONAL") {
+    return { deliveryMode: params.currentDeliveryMode, changed: false };
+  }
+  if (params.sebRequiredAvailable) return { deliveryMode: "SEB_REQUIRED", changed: true };
+  if (params.sebOptionalAvailable) return { deliveryMode: "SEB_OPTIONAL", changed: true };
+  return { deliveryMode: params.currentDeliveryMode, changed: false };
+}
+
+/**
+ * Single source of truth for whether the lecturer's current draft
+ * (deliveryMode, displayPolicy) must be blocked from saving because of
+ * SINGLE_DISPLAY_REQUIRED — combining the base combination rule
+ * (isDisplayPolicyCombinationValid, which alone already blocks e.g.
+ * STANDARD_WEB regardless of availability — including if the disabled
+ * radio were bypassed via manipulated client state) with the
+ * availability-gating rule this fix adds (a valid SEB_REQUIRED/
+ * SEB_OPTIONAL combination that has since lost SEB availability). Used by
+ * both the lecturer UI's pre-save guard and is safe to reuse server-side;
+ * either way the PATCH route's own isDisplayPolicyCombinationValid check
+ * remains the final authority (Part 7 — server-side validation retained).
+ */
+export function isDisplayPolicySaveBlocked(params: {
+  deliveryMode: DeliveryMode;
+  displayPolicy: DisplayPolicy;
+  sebOptionalAvailable: boolean;
+  sebRequiredAvailable: boolean;
+}): boolean {
+  if (params.displayPolicy !== "SINGLE_DISPLAY_REQUIRED") return false;
+  if (!isDisplayPolicyCombinationValid(params.deliveryMode, params.displayPolicy)) return true;
+  return !params.sebOptionalAvailable && !params.sebRequiredAvailable;
+}

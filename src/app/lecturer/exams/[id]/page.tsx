@@ -26,6 +26,11 @@ import {
   type ExamMode,
 } from "@/lib/examPolicy";
 import { buildStudentJoinLink } from "@/lib/examShareLink";
+import {
+  resolveDisplayRequirementUiState,
+  resolveDeliveryModeForSingleDisplayRequired,
+  isDisplayPolicySaveBlocked,
+} from "@/lib/secureClientPolicy";
 
 type Question = {
   id: string;
@@ -231,6 +236,12 @@ export default function LecturerExamPage({
 
   const [savingSecure, setSavingSecure] = useState(false);
   const [secureSaveMessage, setSecureSaveMessage] = useState<string | null>(null);
+  // Single Display Requirement v1 availability-gating fix — transient
+  // notice shown when enabling "Single display required" auto-switches
+  // deliveryMode (see resolveDeliveryModeForSingleDisplayRequired).
+  // Cleared on any further deliveryMode/displayPolicy edit so it never
+  // lingers describing a switch that no longer reflects the draft.
+  const [displayPolicyAutoSwitchNotice, setDisplayPolicyAutoSwitchNotice] = useState<string | null>(null);
   const [accessCodeInput, setAccessCodeInput] = useState("");
   const [savingAccessCode, setSavingAccessCode] = useState(false);
   const [accessCodeMessage, setAccessCodeMessage] = useState<string | null>(null);
@@ -668,12 +679,28 @@ export default function LecturerExamPage({
   }
 
   async function handleSaveSecureSettings() {
-    if (!secureForm) return;
+    if (!secureForm || !exam) return;
     // Single Display Requirement v1 — prefer preventing the invalid
     // combination client-side rather than only relying on the server's
     // 400 (which still applies regardless — see PATCH /api/exams/[id]).
-    if (secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED" && secureForm.deliveryMode !== "SEB_REQUIRED" && secureForm.deliveryMode !== "SEB_OPTIONAL") {
-      setSecureSaveMessage("Single display required needs Safe Exam Browser delivery — choose a Safe Exam Browser delivery mode or remove the display requirement.");
+    // isDisplayPolicySaveBlocked also blocks the availability-gating case
+    // this fix adds: a previously-valid SEB_REQUIRED/SEB_OPTIONAL +
+    // SINGLE_DISPLAY_REQUIRED combination whose SEB availability has
+    // since been withdrawn — even if the disabled radio were bypassed via
+    // manipulated client state, this check still blocks the save.
+    if (
+      isDisplayPolicySaveBlocked({
+        deliveryMode: secureForm.deliveryMode,
+        displayPolicy: secureForm.displayPolicy,
+        sebOptionalAvailable: exam.secureClientAvailability.sebOptionalAvailable,
+        sebRequiredAvailable: exam.secureClientAvailability.sebRequiredAvailable,
+      })
+    ) {
+      setSecureSaveMessage(
+        secureForm.deliveryMode !== "SEB_REQUIRED" && secureForm.deliveryMode !== "SEB_OPTIONAL"
+          ? "Single display required needs Safe Exam Browser delivery — choose a Safe Exam Browser delivery mode or remove the display requirement."
+          : "Single display required cannot be saved because Safe Exam Browser is not currently enabled for this institution or environment.",
+      );
       return;
     }
     setSavingSecure(true);
@@ -892,6 +919,22 @@ export default function LecturerExamPage({
     secureForm != null && secureSettingsChanged(exam.secureSettings, secureForm);
   const safeModeStatus = safeExamModeStatusLabel(exam.secureSettings);
   const activeSafeModeControls = activeSafeExamControlLabels(exam.secureSettings);
+  // Single Display Requirement v1 availability-gating fix — the SAME
+  // authoritative availability result already used to disable the
+  // SEB_OPTIONAL/SEB_REQUIRED delivery-mode radios above, reused here so
+  // the "Single display required" control can never invite a lecturer
+  // into a state the server will reject (see
+  // src/lib/secureClientPolicy.ts, resolveDisplayRequirementUiState).
+  // storedDisplayPolicy comes from exam.secureSettings (the persisted
+  // value), not secureForm (the lecturer's unsaved draft), so this
+  // correctly distinguishes "SEB unavailable, nothing at stake" from
+  // "SEB unavailable, but SINGLE_DISPLAY_REQUIRED is already saved".
+  const displayRequirementUiState = resolveDisplayRequirementUiState({
+    storedDisplayPolicy: exam.secureSettings.displayPolicy,
+    sebOptionalAvailable: exam.secureClientAvailability.sebOptionalAvailable,
+    sebRequiredAvailable: exam.secureClientAvailability.sebRequiredAvailable,
+  });
+  const singleDisplayRequiredDisabled = displayRequirementUiState.kind !== "AVAILABLE";
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -2169,7 +2212,10 @@ export default function LecturerExamPage({
                       name="deliveryMode"
                       disabled={option.disabled}
                       checked={secureForm.deliveryMode === option.value}
-                      onChange={() => setSecureForm({ ...secureForm, deliveryMode: option.value })}
+                      onChange={() => {
+                        setSecureForm({ ...secureForm, deliveryMode: option.value });
+                        setDisplayPolicyAutoSwitchNotice(null);
+                      }}
                     />
                     <span className="font-medium">{option.title}</span>
                   </div>
@@ -2201,13 +2247,19 @@ export default function LecturerExamPage({
             <div className="mt-3 pl-1">
               <p className="text-sm font-medium">Display requirement</p>
               <div className="mt-1 flex flex-col gap-1.5">
-                <label className="flex items-start gap-2 text-sm text-gray-700">
+                <label
+                  className={`flex items-start gap-2 text-sm text-gray-700 ${singleDisplayRequiredDisabled ? "opacity-50" : ""}`}
+                >
                   <input
                     type="radio"
                     name="displayPolicy"
                     className="mt-0.5"
+                    disabled={singleDisplayRequiredDisabled}
                     checked={secureForm.displayPolicy === "UNRESTRICTED"}
-                    onChange={() => setSecureForm({ ...secureForm, displayPolicy: "UNRESTRICTED" })}
+                    onChange={() => {
+                      setSecureForm({ ...secureForm, displayPolicy: "UNRESTRICTED" });
+                      setDisplayPolicyAutoSwitchNotice(null);
+                    }}
                   />
                   <span>
                     No display restriction
@@ -2216,13 +2268,35 @@ export default function LecturerExamPage({
                     </span>
                   </span>
                 </label>
-                <label className="flex items-start gap-2 text-sm text-gray-700">
+                <label
+                  className={`flex items-start gap-2 text-sm text-gray-700 ${singleDisplayRequiredDisabled ? "opacity-50" : ""}`}
+                >
                   <input
                     type="radio"
                     name="displayPolicy"
                     className="mt-0.5"
+                    disabled={singleDisplayRequiredDisabled}
                     checked={secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED"}
-                    onChange={() => setSecureForm({ ...secureForm, displayPolicy: "SINGLE_DISPLAY_REQUIRED" })}
+                    onChange={() => {
+                      // Availability-gating fix: this handler can only ever
+                      // fire while the radio is enabled (singleDisplayRequiredDisabled
+                      // === false, i.e. displayRequirementUiState.kind ===
+                      // "AVAILABLE"), so at least one SEB mode is available
+                      // here — resolveDeliveryModeForSingleDisplayRequired's
+                      // "neither available" branch is unreachable via this
+                      // path, only relevant to callers that skip the disabled check.
+                      const { deliveryMode, changed } = resolveDeliveryModeForSingleDisplayRequired({
+                        currentDeliveryMode: secureForm.deliveryMode,
+                        sebOptionalAvailable: exam.secureClientAvailability.sebOptionalAvailable,
+                        sebRequiredAvailable: exam.secureClientAvailability.sebRequiredAvailable,
+                      });
+                      setSecureForm({ ...secureForm, displayPolicy: "SINGLE_DISPLAY_REQUIRED", deliveryMode });
+                      setDisplayPolicyAutoSwitchNotice(
+                        changed
+                          ? `Exam delivery switched to "${deliveryMode === "SEB_REQUIRED" ? "Safe Exam Browser — required" : "Safe Exam Browser — optional"}" because single display required needs Safe Exam Browser delivery.`
+                          : null,
+                      );
+                    }}
                   />
                   <span>
                     Single display required
@@ -2237,7 +2311,22 @@ export default function LecturerExamPage({
                 Single-display enforcement requires Safe Exam Browser. Standard web exams cannot reliably verify
                 connected, mirrored or extended displays.
               </p>
-              {secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED" &&
+              {displayPolicyAutoSwitchNotice && (
+                <p className="mt-1.5 rounded border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800">
+                  {displayPolicyAutoSwitchNotice}
+                </p>
+              )}
+              {/* Only shown when SEB is actually available — if it weren't,
+                  the UNAVAILABLE/STORED_BUT_UNAVAILABLE message below
+                  already explains why, and telling the lecturer to "choose
+                  Safe Exam Browser above" would repeat the exact
+                  contradiction this fix removes. This covers the ordinary
+                  (non-manipulated) path where a lecturer enables Single
+                  display required — which auto-switches deliveryMode to a
+                  SEB mode — and then separately switches deliveryMode back
+                  to Standard/Monitored web via the radios above. */}
+              {displayRequirementUiState.kind === "AVAILABLE" &&
+                secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED" &&
                 secureForm.deliveryMode !== "SEB_REQUIRED" &&
                 secureForm.deliveryMode !== "SEB_OPTIONAL" && (
                   <p className="mt-1.5 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-800">
@@ -2246,6 +2335,12 @@ export default function LecturerExamPage({
                     will be rejected.
                   </p>
                 )}
+              {(displayRequirementUiState.kind === "UNAVAILABLE" || displayRequirementUiState.kind === "STORED_BUT_UNAVAILABLE") && (
+                <p className="mt-1.5 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+                  <span className="block font-medium">{displayRequirementUiState.title}</span>
+                  {displayRequirementUiState.message}
+                </p>
+              )}
             </div>
 
             {(secureForm.deliveryMode === "SEB_OPTIONAL" || secureForm.deliveryMode === "SEB_REQUIRED") && (
