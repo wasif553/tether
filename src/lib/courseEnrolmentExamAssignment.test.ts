@@ -171,7 +171,11 @@ describe("POST /api/exams/[id]/start — assignment and scheduling enforcement",
 
     mockAuth.mockResolvedValue(sessionFor(studentInCourse, "STUDENT", instA));
     const { POST } = await import("@/app/api/exams/[id]/start/route");
-    const req = new Request(`http://localhost/api/exams/${exam.id}/start`, { method: "POST" });
+    const req = new Request(`http://localhost/api/exams/${exam.id}/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ policyAcknowledged: true }),
+    });
     const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
     expect(res.status).toBe(201);
   });
@@ -201,7 +205,11 @@ describe("POST /api/exams/[id]/start — assignment and scheduling enforcement",
 
     mockAuth.mockResolvedValue(sessionFor(studentInCourse, "STUDENT", instA));
     const { POST } = await import("@/app/api/exams/[id]/start/route");
-    const req = new Request(`http://localhost/api/exams/${exam.id}/start`, { method: "POST" });
+    const req = new Request(`http://localhost/api/exams/${exam.id}/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ policyAcknowledged: true }),
+    });
     const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
     expect(res.status).toBe(201);
   });
@@ -261,7 +269,7 @@ describe("POST /api/exams/[id]/start — assignment and scheduling enforcement",
     const rightReq = new Request(`http://localhost/api/exams/${exam.id}/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accessCode: "secret123" }),
+      body: JSON.stringify({ accessCode: "secret123", policyAcknowledged: true }),
     });
     const rightRes = await POST(rightReq, { params: Promise.resolve({ id: exam.id }) });
     expect(rightRes.status).toBe(201);
@@ -281,7 +289,7 @@ describe("POST /api/exams/[id]/start — assignment and scheduling enforcement",
     const req = new Request(`http://localhost/api/exams/${exam.id}/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accessCode: "legacycode" }),
+      body: JSON.stringify({ accessCode: "legacycode", policyAcknowledged: true }),
     });
     const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
     expect(res.status).toBe(201);

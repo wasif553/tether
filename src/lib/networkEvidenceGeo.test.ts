@@ -87,7 +87,8 @@ describe("Exam start — geolocation failure does not block student", () => {
     const { POST } = await import("@/app/api/exams/[id]/start/route");
     const req = new Request(`http://localhost/api/exams/${exam.id}/start`, {
       method: "POST",
-      headers: { "x-forwarded-for": "203.0.113.10" },
+      headers: { "x-forwarded-for": "203.0.113.10", "Content-Type": "application/json" },
+      body: JSON.stringify({ policyAcknowledged: true }),
     });
     const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
 
@@ -125,7 +126,8 @@ describe("Exam start — country stored when provider returns it", () => {
     const { POST } = await import("@/app/api/exams/[id]/start/route");
     const req = new Request(`http://localhost/api/exams/${exam.id}/start`, {
       method: "POST",
-      headers: { "x-forwarded-for": "203.0.113.11" },
+      headers: { "x-forwarded-for": "203.0.113.11", "Content-Type": "application/json" },
+      body: JSON.stringify({ policyAcknowledged: true }),
     });
     const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
     expect(res.status).toBe(201);

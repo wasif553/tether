@@ -39,6 +39,24 @@ function jsonRequest(method: string, body?: unknown) {
   });
 }
 
+/**
+ * createPlatformAuditLog(...) is written fire-and-forget
+ * (`.catch(() => {})`, never awaited) in every route that calls it — the
+ * route response can return before the write lands, so a query
+ * immediately after is a genuine race, not a product defect. Bounded
+ * polling makes the test deterministic without weakening the
+ * "audit logging never blocks the response" behaviour itself.
+ */
+async function waitForCondition<T>(check: () => Promise<T>, isReady: (value: T) => boolean, { timeoutMs = 2000, intervalMs = 25 } = {}): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let last: T = await check();
+  while (!isReady(last) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    last = await check();
+  }
+  return last;
+}
+
 const stamp = Date.now();
 const cleanup = { users: [] as string[], exams: [] as string[] };
 
@@ -198,9 +216,10 @@ describe("PATCH /api/lecturer/similarity-matches/[matchId]/review", () => {
     );
     expect(res.status).toBe(200);
 
-    const log = await prisma.platformAuditLog.findFirst({
-      where: { targetType: "SubmissionSimilarityMatch", targetId: matchId, action: "SIMILARITY_MATCH_REVIEW_UPDATED" },
-    });
+    const log = await waitForCondition(
+      () => prisma.platformAuditLog.findFirst({ where: { targetType: "SubmissionSimilarityMatch", targetId: matchId, action: "SIMILARITY_MATCH_REVIEW_UPDATED" } }),
+      (row) => row != null,
+    );
     expect(log).not.toBeNull();
     expect(JSON.stringify(log?.metadata ?? {})).not.toContain("coincidence");
   });
@@ -220,9 +239,10 @@ describe("POST /api/lecturer/submissions/[id]/oral-verification", () => {
     expect(Array.isArray(body.generatedQuestionsJson)).toBe(true);
     expect(body.generatedQuestionsJson.length).toBeGreaterThanOrEqual(3);
 
-    const log = await prisma.platformAuditLog.findFirst({
-      where: { targetType: "OralVerification", targetId: body.id, action: "ORAL_VERIFICATION_REQUIRED" },
-    });
+    const log = await waitForCondition(
+      () => prisma.platformAuditLog.findFirst({ where: { targetType: "OralVerification", targetId: body.id, action: "ORAL_VERIFICATION_REQUIRED" } }),
+      (row) => row != null,
+    );
     expect(log).not.toBeNull();
     void exam;
   });

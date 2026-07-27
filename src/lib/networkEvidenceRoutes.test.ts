@@ -97,7 +97,9 @@ describe("Network evidence — exam start (POST /api/exams/[id]/start)", () => {
       headers: {
         "x-forwarded-for": "203.0.113.42",
         "user-agent": "Mozilla/5.0 Chrome/120",
+        "Content-Type": "application/json",
       },
+      body: JSON.stringify({ policyAcknowledged: true }),
     });
     const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
     expect(res.status).toBe(201);
@@ -125,9 +127,11 @@ describe("Network evidence — exam start (POST /api/exams/[id]/start)", () => {
     const { POST } = await import("@/app/api/exams/[id]/start/route");
     const req = new Request(`http://localhost/api/exams/${exam.id}/start`, {
       method: "POST",
-      headers: { "x-forwarded-for": "203.0.113.99" },
+      headers: { "x-forwarded-for": "203.0.113.99", "Content-Type": "application/json" },
+      body: JSON.stringify({ policyAcknowledged: true }),
     });
     const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(201);
     const body = await res.json();
     cleanupSubmissionIds.push(body.id);
     expect(JSON.stringify(body)).not.toContain("203.0.113.99");
