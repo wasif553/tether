@@ -42,6 +42,24 @@ function jsonRequest(method: string, body?: unknown, cookie?: string) {
   });
 }
 
+/**
+ * createPlatformAuditLog(...) is written fire-and-forget
+ * (`.catch(() => {})`, never awaited) in every route that calls it — the
+ * route response can return before the write lands, so a query
+ * immediately after is a genuine race, not a product defect. Bounded
+ * polling makes the test deterministic without weakening the
+ * "audit logging never blocks the response" behaviour itself.
+ */
+async function waitForCondition<T>(check: () => Promise<T>, isReady: (value: T) => boolean, { timeoutMs = 2000, intervalMs = 25 } = {}): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let last: T = await check();
+  while (!isReady(last) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    last = await check();
+  }
+  return last;
+}
+
 const stamp = Date.now();
 const cleanup = { users: [] as string[], exams: [] as string[] };
 
@@ -328,9 +346,10 @@ describe("PATCH session-signals/[signalId]/review and timing-signals/[signalId]/
     );
     expect(res.status).toBe(200);
 
-    const log = await prisma.platformAuditLog.findFirst({
-      where: { targetType: "SessionIntegritySignal", targetId: signal!.id, action: "SESSION_SIGNAL_REVIEW_UPDATED" },
-    });
+    const log = await waitForCondition(
+      () => prisma.platformAuditLog.findFirst({ where: { targetType: "SessionIntegritySignal", targetId: signal!.id, action: "SESSION_SIGNAL_REVIEW_UPDATED" } }),
+      (row) => row != null,
+    );
     expect(log).not.toBeNull();
     expect(JSON.stringify(log?.metadata ?? {})).not.toContain("Private note text");
   });
@@ -367,9 +386,10 @@ describe("PATCH session-signals/[signalId]/review and timing-signals/[signalId]/
         params: Promise.resolve({ signalId: signal.id }),
       });
       expect(res.status).toBe(200);
-      const log = await prisma.platformAuditLog.findFirst({
-        where: { targetType: "TimingIntegritySignal", targetId: signal.id, action: "TIMING_SIGNAL_REVIEW_UPDATED" },
-      });
+      const log = await waitForCondition(
+        () => prisma.platformAuditLog.findFirst({ where: { targetType: "TimingIntegritySignal", targetId: signal.id, action: "TIMING_SIGNAL_REVIEW_UPDATED" } }),
+        (row) => row != null,
+      );
       expect(log).not.toBeNull();
     }
   });

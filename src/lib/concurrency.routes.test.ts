@@ -89,8 +89,8 @@ describe("concurrent exam-start requests cannot create duplicate submissions", (
 
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT"));
     const [res1, res2] = await Promise.all([
-      startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) }),
-      startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) }),
+      startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) }),
+      startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) }),
     ]);
 
     expect([res1.status, res2.status].sort()).toEqual([200, 201]);

@@ -380,6 +380,11 @@ describe("buildEvidenceReport — evidenceFrame mapping (lecturer evidence repor
     expect(reportedEvent?.eventType).toBe("POSSIBLE_PHONE_VISIBLE");
     expect(reportedEvent?.evidenceFrame).toEqual({
       id: evidenceAssetId,
+      // Screen-share Evidence Mode v1 added `kind` to distinguish this
+      // shared IntegrityEvidenceAsset table's rows from screen-share
+      // evidence frames (see screenShareEvidence.ts) — part of the
+      // current, intended EvidenceReportEventEvidenceFrame contract.
+      kind: "AI_CAMERA_EVIDENCE_FRAME",
       contentType: "image/jpeg",
       byteSize: 2048,
       capturedAt: expect.any(String),
@@ -462,6 +467,9 @@ describe("buildEvidenceReport — evidenceFrame mapping (lecturer evidence repor
       id: evidenceAssetId,
       eventId: event.id,
       eventType: "POSSIBLE_PHONE_VISIBLE",
+      // See the "kind" comment on the evidenceFrame assertion above —
+      // part of the current, intended EvidenceReportEvidenceFrame contract.
+      kind: "AI_CAMERA_EVIDENCE_FRAME",
       occurredAt: expect.any(String),
       contentType: "image/jpeg",
       byteSize: 4096,

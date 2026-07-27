@@ -45,6 +45,24 @@ function jsonRequest(method: string, body?: unknown) {
   });
 }
 
+/**
+ * createPlatformAuditLog(...) is written fire-and-forget
+ * (`.catch(() => {})`, never awaited) in every route that calls it — the
+ * route response can return before the write lands, so a query
+ * immediately after is a genuine race, not a product defect. Bounded
+ * polling makes the test deterministic without weakening the
+ * "audit logging never blocks the response" behaviour itself.
+ */
+async function waitForCondition<T>(check: () => Promise<T>, isReady: (value: T) => boolean, { timeoutMs = 2000, intervalMs = 25 } = {}): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let last: T = await check();
+  while (!isReady(last) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    last = await check();
+  }
+  return last;
+}
+
 const stamp = Date.now();
 const cleanup = { users: [] as string[], exams: [] as string[] };
 
@@ -280,9 +298,10 @@ describe("PATCH /api/lecturer/ai-use-review-signals/[signalId]/review", () => {
     );
     expect(res.status).toBe(200);
 
-    const log = await prisma.platformAuditLog.findFirst({
-      where: { targetType: "AiUseReviewSignal", targetId: signalId, action: "AI_USE_REVIEW_SIGNAL_REVIEW_UPDATED" },
-    });
+    const log = await waitForCondition(
+      () => prisma.platformAuditLog.findFirst({ where: { targetType: "AiUseReviewSignal", targetId: signalId, action: "AI_USE_REVIEW_SIGNAL_REVIEW_UPDATED" } }),
+      (row) => row != null,
+    );
     expect(log).not.toBeNull();
     expect(JSON.stringify(log?.metadata ?? {})).not.toContain("informally");
   });

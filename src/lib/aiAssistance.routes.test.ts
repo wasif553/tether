@@ -17,7 +17,19 @@ const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
 vi.mock("@/lib/aiAssistanceGenerator", async () => {
   const actual = await vi.importActual<typeof import("./aiAssistanceGenerator")>("./aiAssistanceGenerator");
-  return { ...actual, generateBrainstormResponse: vi.fn().mockResolvedValue("What concept do you think this question is testing?") };
+  return {
+    ...actual,
+    generateBrainstormResponse: vi.fn().mockResolvedValue("What concept do you think this question is testing?"),
+    // Deterministic default for every route test below: the optional
+    // Anthropic provider is treated as configured, so these tests exercise
+    // ownership/limits/persistence logic without needing a real
+    // ANTHROPIC_API_KEY. isAnthropicConfigured() itself (the real,
+    // unmocked implementation) is separately re-verified — see "provider
+    // configuration" describe block below — to confirm the actual 503
+    // fail-closed path still works when the provider is genuinely
+    // unavailable.
+    isAnthropicConfigured: vi.fn().mockReturnValue(true),
+  };
 });
 vi.mock("@/lib/aiAssistanceVerifier", async () => {
   const actual = await vi.importActual<typeof import("./aiAssistanceVerifier")>("./aiAssistanceVerifier");
@@ -486,5 +498,28 @@ describe("4/5/7/8. FAILED status — a genuine provider failure never shows gene
     expect(rows[0].approvedResponse).toBeNull();
 
     mocked.mockResolvedValue("What concept do you think this question is testing?"); // restore default
+  });
+});
+
+describe("provider configuration — the optional Anthropic provider being genuinely unavailable", () => {
+  it("returns 503 without consuming a prompt slot when isAnthropicConfigured() is false — the real fail-closed path, not a mocked shortcut", async () => {
+    const { isAnthropicConfigured } = await import("./aiAssistanceGenerator");
+    vi.mocked(isAnthropicConfigured).mockReturnValueOnce(false);
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toMatch(/not configured/i);
+
+    // A missing provider must never consume the student's prompt allowance
+    // (Part 3) — no interaction row at all, reserved or otherwise.
+    const rows = await prisma.aiAssistanceInteraction.findMany({
+      where: { submissionId: submission.id, questionId: question.id },
+    });
+    expect(rows).toHaveLength(0);
   });
 });

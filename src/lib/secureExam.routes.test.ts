@@ -32,6 +32,25 @@ function jsonRequest(method: string, body?: unknown) {
   });
 }
 
+/**
+ * Several routes record best-effort audit/integrity events fire-and-forget
+ * (e.g. `prisma.integrityEvent.create(...).catch(() => {})` in
+ * question-progress/route.ts) — deliberately not awaited, so the route
+ * response can return before the write lands. Querying for that row
+ * immediately after the response is therefore a genuine race, not a
+ * product defect — bounded polling here makes the test deterministic
+ * without weakening the "never blocks the response" behaviour itself.
+ */
+async function waitForCondition<T>(check: () => Promise<T>, isReady: (value: T) => boolean, { timeoutMs = 2000, intervalMs = 25 } = {}): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let last: T = await check();
+  while (!isReady(last) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    last = await check();
+  }
+  return last;
+}
+
 let lecturer: { id: string };
 let otherLecturer: { id: string };
 let platformAdmin: { id: string };
@@ -137,11 +156,11 @@ describe("maxAttempts enforcement (v1: single attempt)", () => {
     });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
-    const first = await startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) });
+    const first = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
     expect(first.status).toBe(201);
     const firstBody = await first.json();
 
-    const second = await startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) });
+    const second = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
     expect(second.status).toBe(200);
     const secondBody = await second.json();
     expect(secondBody.id).toBe(firstBody.id);
@@ -176,7 +195,7 @@ describe("maxAttempts enforcement (v1: single attempt)", () => {
     });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
-    const res = await startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) });
+    const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
     expect(res.status).toBe(409);
   });
 
@@ -206,7 +225,7 @@ describe("maxAttempts enforcement (v1: single attempt)", () => {
     });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
-    const res = await startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) });
+    const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.attemptNumber).toBe(2);
@@ -240,12 +259,12 @@ describe("maxAttempts enforcement (v1: single attempt)", () => {
     });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
-    const blocked = await startRoute.POST(jsonRequest("POST", {}), {
+    const blocked = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), {
       params: Promise.resolve({ id: exam.id }),
     });
     expect(blocked.status).toBe(403);
 
-    const allowed = await startRoute.POST(jsonRequest("POST", { accessCode: "TRY-2" }), {
+    const allowed = await startRoute.POST(jsonRequest("POST", { accessCode: "TRY-2", policyAcknowledged: true }), {
       params: Promise.resolve({ id: exam.id }),
     });
     expect(allowed.status).toBe(201);
@@ -380,7 +399,7 @@ describe("non-secure exam flow is unaffected", () => {
     });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
-    const startRes = await startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: exam.id }) });
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
     const submission = await startRes.json();
 
     const saveRes = await answersRoute.PATCH(
@@ -393,7 +412,17 @@ describe("non-secure exam flow is unaffected", () => {
     expect(submitRes.status).toBe(200);
     const body = await submitRes.json();
     expect(body.status).toBe("GRADED");
-    expect(body.totalScore).toBe(1);
+    // Marks-release gating (see studentSubmitResponse in submit/route.ts):
+    // the student-facing response never includes totalScore until the
+    // lecturer explicitly releases marks — matching the same convention
+    // already used elsewhere in this file (see the marks-release tests
+    // below). This test is about grading happening correctly on submit,
+    // not about marks-release visibility, so it asserts the actually
+    // persisted score directly.
+    expect(body.totalScore).toBeNull();
+    expect(body.marksReleased).toBe(false);
+    const stored = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(stored.totalScore).toBe(1);
   });
 });
 
@@ -656,7 +685,7 @@ describe("One-Question-At-A-Time Exam Delivery v1", () => {
 
   async function startAsStudent(examId: string, studentUser: { id: string } = student) {
     mockAuth.mockResolvedValue(sessionFor(studentUser.id, "STUDENT"));
-    const res = await startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: examId }) });
+    const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: examId }) });
     return res.json();
   }
 
@@ -831,9 +860,14 @@ describe("One-Question-At-A-Time Exam Delivery v1", () => {
     expect(blockedBody.currentIndex).toBe(1);
     expect(blockedBody.canGoPrevious).toBe(false);
 
-    const events = await prisma.integrityEvent.findMany({
-      where: { submissionId: submission.id, eventType: "QUESTION_BACK_NAVIGATION_BLOCKED" },
-    });
+    // QUESTION_BACK_NAVIGATION_BLOCKED is written fire-and-forget (see
+    // question-progress/route.ts) — bounded poll rather than a single
+    // immediate query, since the write can legitimately still be in
+    // flight when the response above already resolved.
+    const events = await waitForCondition(
+      () => prisma.integrityEvent.findMany({ where: { submissionId: submission.id, eventType: "QUESTION_BACK_NAVIGATION_BLOCKED" } }),
+      (rows) => rows.length >= 1,
+    );
     expect(events.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -942,7 +976,7 @@ describe("Question Pools v1", () => {
 
   async function startAsStudent(examId: string, studentUser: { id: string } = student) {
     mockAuth.mockResolvedValue(sessionFor(studentUser.id, "STUDENT"));
-    const res = await startRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: examId }) });
+    const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: examId }) });
     return res.json();
   }
 

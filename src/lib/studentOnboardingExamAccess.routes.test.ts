@@ -310,7 +310,7 @@ describe("11-15. Student exam list and start with access codes", () => {
     createdExamIds.push(exam.id);
 
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA.id));
-    const res = await startRoute.POST(jsonRequest("POST", { accessCode: "CORRECT-CODE" }), {
+    const res = await startRoute.POST(jsonRequest("POST", { accessCode: "CORRECT-CODE", policyAcknowledged: true }), {
       params: Promise.resolve({ id: exam.id }),
     });
     expect(res.status).toBe(201);
@@ -355,7 +355,7 @@ describe("16-17. Regression: exams without an access code, and existing secure-e
     createdExamIds.push(exam.id);
 
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA.id));
-    const res = await startRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: exam.id }) });
+    const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
     expect(res.status).toBe(201);
   });
 
