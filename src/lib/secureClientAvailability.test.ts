@@ -5,6 +5,7 @@ import {
   isMockSecureClientAllowed,
   isSebOptionalAvailable,
   isSebRequiredAllowed,
+  isTetherSecureClientBypassAllowed,
 } from "./secureClientAvailability";
 
 afterEach(() => {
@@ -50,11 +51,42 @@ describe("deploymentEnvironment", () => {
 });
 
 describe("secureClientAvailability", () => {
-  it("TETHER_CLIENT_REQUIRED is unconditionally unavailable regardless of any flag", () => {
+  it("TETHER_CLIENT_REQUIRED is available by default in local development", () => {
     vi.stubEnv("VERCEL_ENV", undefined);
     vi.stubEnv("NODE_ENV", "development");
-    vi.stubEnv("TETHER_CLIENT_OPTIONAL_ENABLED", "true");
+    vi.stubEnv("TETHER_CLIENT_REQUIRED_DISABLED", undefined);
+    expect(secureClientAvailability().tetherClientRequiredAvailable).toBe(true);
+  });
+
+  it("TETHER_CLIENT_REQUIRED is available by default on Preview", () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("TETHER_CLIENT_REQUIRED_DISABLED", undefined);
+    expect(secureClientAvailability().tetherClientRequiredAvailable).toBe(true);
+  });
+
+  it("TETHER_CLIENT_REQUIRED is available by default in Production — Tether Secure Browser is now the normal final-exam delivery path", () => {
+    vi.stubEnv("VERCEL_ENV", "production");
+    vi.stubEnv("TETHER_CLIENT_REQUIRED_DISABLED", undefined);
+    expect(secureClientAvailability().tetherClientRequiredAvailable).toBe(true);
+  });
+
+  it("TETHER_CLIENT_REQUIRED is disabled everywhere, including Production, only by the explicit kill-switch", () => {
+    vi.stubEnv("VERCEL_ENV", "production");
+    vi.stubEnv("TETHER_CLIENT_REQUIRED_DISABLED", "true");
     expect(secureClientAvailability().tetherClientRequiredAvailable).toBe(false);
+
+    vi.stubEnv("VERCEL_ENV", "preview");
+    expect(secureClientAvailability().tetherClientRequiredAvailable).toBe(false);
+
+    vi.stubEnv("VERCEL_ENV", undefined);
+    vi.stubEnv("NODE_ENV", "development");
+    expect(secureClientAvailability().tetherClientRequiredAvailable).toBe(false);
+  });
+
+  it("a truthy-looking but non-'true' kill-switch value does not disable it (only the exact string 'true' does)", () => {
+    vi.stubEnv("VERCEL_ENV", "production");
+    vi.stubEnv("TETHER_CLIENT_REQUIRED_DISABLED", "1");
+    expect(secureClientAvailability().tetherClientRequiredAvailable).toBe(true);
   });
 
   it("TETHER_CLIENT_OPTIONAL is unavailable without the explicit flag", () => {
@@ -240,5 +272,72 @@ describe("isSebRequiredAllowed", () => {
     vi.stubEnv("TETHER_SEB_EXPERIMENTAL_ENABLED", "true");
     vi.stubEnv("TETHER_SEB_REQUIRED_ALLOWED_INSTITUTION_SLUGS", "authorised-institution");
     expect(isSebRequiredAllowed(null)).toBe(false);
+  });
+});
+
+describe("isTetherSecureClientBypassAllowed", () => {
+  it("is NEVER allowed in Vercel Production, regardless of every other flag — Production bypass is always denied", () => {
+    vi.stubEnv("VERCEL_ENV", "production");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ENABLED", "true");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ALLOWED_INSTITUTION_SLUGS", "test-institution");
+    expect(isTetherSecureClientBypassAllowed("test-institution")).toBe(false);
+  });
+
+  it("is denied when the deployment environment is unknown", () => {
+    vi.stubEnv("VERCEL_ENV", "staging");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ENABLED", "true");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ALLOWED_INSTITUTION_SLUGS", "test-institution");
+    expect(isTetherSecureClientBypassAllowed("test-institution")).toBe(false);
+  });
+
+  it("is denied on preview without the explicit flag, even with the institution allowlisted", () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ENABLED", undefined);
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ALLOWED_INSTITUTION_SLUGS", "test-institution");
+    expect(isTetherSecureClientBypassAllowed("test-institution")).toBe(false);
+  });
+
+  it("is denied on preview with the flag but without the institution being allowlisted", () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ENABLED", "true");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ALLOWED_INSTITUTION_SLUGS", undefined);
+    expect(isTetherSecureClientBypassAllowed("test-institution")).toBe(false);
+  });
+
+  it("is denied for an institution not on the allowlist", () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ENABLED", "true");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ALLOWED_INSTITUTION_SLUGS", "authorised-institution");
+    expect(isTetherSecureClientBypassAllowed("some-other-institution")).toBe(false);
+  });
+
+  it("is allowed on Preview with the flag enabled and the institution allowlisted — the authorised local/Preview development bypass works", () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ENABLED", "true");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ALLOWED_INSTITUTION_SLUGS", "authorised-institution, another-one");
+    expect(isTetherSecureClientBypassAllowed("authorised-institution")).toBe(true);
+  });
+
+  it("is allowed in genuine local development with the flag enabled and the institution allowlisted", () => {
+    vi.stubEnv("VERCEL_ENV", undefined);
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ENABLED", "true");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ALLOWED_INSTITUTION_SLUGS", "test-institution");
+    expect(isTetherSecureClientBypassAllowed("test-institution")).toBe(true);
+  });
+
+  it("is denied for a null institution slug even when the flag is on", () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ENABLED", "true");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ALLOWED_INSTITUTION_SLUGS", "test-institution");
+    expect(isTetherSecureClientBypassAllowed(null)).toBe(false);
+  });
+
+  it("cannot be enabled by an attacker-supplied slug — never reads a header/query parameter, only the server-resolved institution slug against the server-configured allowlist", () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ENABLED", "true");
+    vi.stubEnv("TETHER_SECURE_CLIENT_BYPASS_ALLOWED_INSTITUTION_SLUGS", "test-institution");
+    expect(isTetherSecureClientBypassAllowed("?bypass=true")).toBe(false);
+    expect(isTetherSecureClientBypassAllowed("attacker-controlled-value")).toBe(false);
   });
 });

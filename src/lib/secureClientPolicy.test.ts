@@ -55,6 +55,12 @@ const baseSettings: RelevantSecureClientSettings = {
 // must opt in to availability explicitly rather than relying on the
 // (now-restrictive-by-default) DEFAULT_SECURE_CLIENT_AVAILABILITY.
 const SEB_AVAILABLE = { ...DEFAULT_SECURE_CLIENT_AVAILABILITY, sebOptionalAvailable: true, sebRequiredAvailable: true };
+// Tether launch/install flow v1 — tetherClientRequiredAvailable is now
+// true by default in secureClientAvailability() (see
+// src/lib/secureClientAvailability.ts), but this test fixture stays
+// explicit rather than importing that module, since this file tests the
+// pure policy layer in isolation from the availability-gating layer.
+const TETHER_AVAILABLE = { ...DEFAULT_SECURE_CLIENT_AVAILABILITY, tetherClientRequiredAvailable: true, tetherClientOptionalAvailable: true };
 
 describe("delivery mode helpers", () => {
   it("validates known delivery modes only", () => {
@@ -276,19 +282,22 @@ describe("isDisplayPolicyCombinationValid", () => {
     }
   });
 
-  it("SINGLE_DISPLAY_REQUIRED is valid only with SEB_REQUIRED or SEB_OPTIONAL", () => {
+  it("SINGLE_DISPLAY_REQUIRED is valid with SEB_REQUIRED or SEB_OPTIONAL", () => {
     expect(isDisplayPolicyCombinationValid("SEB_REQUIRED", "SINGLE_DISPLAY_REQUIRED")).toBe(true);
     expect(isDisplayPolicyCombinationValid("SEB_OPTIONAL", "SINGLE_DISPLAY_REQUIRED")).toBe(true);
+  });
+
+  it("Tether launch/install flow v1 — SINGLE_DISPLAY_REQUIRED is also valid with TETHER_CLIENT_REQUIRED or TETHER_CLIENT_OPTIONAL", () => {
+    expect(isDisplayPolicyCombinationValid("TETHER_CLIENT_REQUIRED", "SINGLE_DISPLAY_REQUIRED")).toBe(true);
+    expect(isDisplayPolicyCombinationValid("TETHER_CLIENT_OPTIONAL", "SINGLE_DISPLAY_REQUIRED")).toBe(true);
   });
 
   it("SINGLE_DISPLAY_REQUIRED is rejected with STANDARD_WEB — never implies enforcement there", () => {
     expect(isDisplayPolicyCombinationValid("STANDARD_WEB", "SINGLE_DISPLAY_REQUIRED")).toBe(false);
   });
 
-  it("SINGLE_DISPLAY_REQUIRED is rejected with MONITORED_WEB and Tether modes (no SEB involved)", () => {
+  it("SINGLE_DISPLAY_REQUIRED is rejected with MONITORED_WEB (no secure client involved at all)", () => {
     expect(isDisplayPolicyCombinationValid("MONITORED_WEB", "SINGLE_DISPLAY_REQUIRED")).toBe(false);
-    expect(isDisplayPolicyCombinationValid("TETHER_CLIENT_OPTIONAL", "SINGLE_DISPLAY_REQUIRED")).toBe(false);
-    expect(isDisplayPolicyCombinationValid("TETHER_CLIENT_REQUIRED", "SINGLE_DISPLAY_REQUIRED")).toBe(false);
   });
 });
 
@@ -311,6 +320,22 @@ describe("displayPolicy in buildSecureClientPolicySnapshot / parseSecureClientPo
     expect(built.maximumDisplays).toBe(1);
     const parsed = parseSecureClientPolicy(built);
     expect(parsed).toEqual(built);
+  });
+
+  it("Tether launch/install flow v1 — TETHER_CLIENT_REQUIRED + SINGLE_DISPLAY_REQUIRED freezes the exact 6 required fields into the immutable snapshot", () => {
+    const snapshot = buildSecureClientPolicySnapshot(
+      { ...baseSettings, deliveryMode: "TETHER_CLIENT_REQUIRED", displayPolicy: "SINGLE_DISPLAY_REQUIRED" },
+      TETHER_AVAILABLE,
+    );
+    expect(snapshot.deliveryMode).toBe("TETHER_CLIENT_REQUIRED");
+    expect(snapshot.allowedClientTypes).toEqual(["TETHER_SECURE_CLIENT"]);
+    expect(snapshot.requireVerifiedClient).toBe(true);
+    expect(snapshot.displayPolicy).toBe("SINGLE_DISPLAY_REQUIRED");
+    expect(snapshot.requireDisplayCheck).toBe(true);
+    expect(snapshot.maximumDisplays).toBe(1);
+    // Round-trips identically through parseSecureClientPolicy, exactly
+    // like the SEB case above.
+    expect(parseSecureClientPolicy(snapshot)).toEqual(snapshot);
   });
 
   it("an unavailable SEB_REQUIRED downgrade also resets displayPolicy to UNRESTRICTED (never freezes an unenforceable requirement)", () => {
@@ -381,6 +406,20 @@ describe("describeDisplayRequirement", () => {
   it("MONITORED_WEB + SINGLE_DISPLAY_REQUIRED (should not occur, but defensive) is reported as not enforceable, never as enforced", () => {
     const result = describeDisplayRequirement({ deliveryMode: "MONITORED_WEB", displayPolicy: "SINGLE_DISPLAY_REQUIRED" });
     expect(result.status).toBe("NOT_ENFORCEABLE_STANDARD_WEB");
+  });
+
+  it("Tether launch/install flow v1 — TETHER_CLIENT_REQUIRED + SINGLE_DISPLAY_REQUIRED reports enforcement by the secure exam client with the exact required copy", () => {
+    const result = describeDisplayRequirement({ deliveryMode: "TETHER_CLIENT_REQUIRED", displayPolicy: "SINGLE_DISPLAY_REQUIRED" });
+    expect(result.status).toBe("ENFORCED_BY_SECURE_CLIENT");
+    expect(result.title).toBe("Single display required");
+    expect(result.instruction).toBe(
+      "Disconnect additional monitors, projectors, televisions and wireless displays before starting the exam.",
+    );
+  });
+
+  it("TETHER_CLIENT_OPTIONAL + SINGLE_DISPLAY_REQUIRED also reports enforcement by the secure exam client", () => {
+    const result = describeDisplayRequirement({ deliveryMode: "TETHER_CLIENT_OPTIONAL", displayPolicy: "SINGLE_DISPLAY_REQUIRED" });
+    expect(result.status).toBe("ENFORCED_BY_SECURE_CLIENT");
   });
 });
 

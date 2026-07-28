@@ -4,7 +4,11 @@
  * the two bundles.
  */
 
-export const LOCKDOWN_VERSION = "1.0.0";
+// Tether launch/install flow v1 — minor bump: adds the tether:// deep
+// link, live single-display enforcement, and launch-manifest-aware
+// navigation. No breaking change to the existing window.sesLockdown
+// bridge contract — every prior field/method is still present.
+export const LOCKDOWN_VERSION = "1.1.0";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see
@@ -14,7 +18,35 @@ export const USER_AGENT_SUFFIX = `TetherSecureBrowser/${LOCKDOWN_VERSION}`;
 
 export const DEFAULT_SES_BASE_URL = "https://tether-murex.vercel.app";
 
-export const DEEP_LINK_PROTOCOL = "ses";
+/**
+ * Tether launch/install flow v1 — the branded `tether://` protocol is
+ * now primary; `ses://` is preserved for existing pilot installations
+ * that haven't updated yet (Requirement 4). Both are registered and
+ * handled identically — see registerDeepLinkProtocol/isDeepLinkArg in
+ * main.ts.
+ */
+export const DEEP_LINK_PROTOCOLS = ["tether", "ses"] as const;
+export type DeepLinkProtocol = (typeof DEEP_LINK_PROTOCOLS)[number];
+export const PRIMARY_DEEP_LINK_PROTOCOL: DeepLinkProtocol = "tether";
+
+/** True for any string beginning with one of the registered deep-link protocols (`tether://...` or `ses://...`). */
+export function isDeepLinkArg(value: string): boolean {
+  return DEEP_LINK_PROTOCOLS.some((protocol) => value.startsWith(`${protocol}://`));
+}
+
+/**
+ * Resolves the web app path a deep link should land on — the fix for
+ * the confirmed bug where buildLoadUrl always returned `/student`
+ * regardless of examId. Landing on the Tether launch page (rather than
+ * directly on `/student/exams/[examId]`, which doesn't exist as a route
+ * — the app is keyed by submissionId, not examId) lets that page run
+ * the full access-check -> acknowledgement -> start -> launch -> consume
+ * sequence automatically once inside Tether and authenticated (see
+ * src/app/student/exams/[id]/tether-launch/page.tsx in the main repo).
+ */
+export function buildTetherLaunchPath(examId: string): string {
+  return `/student/exams/${examId}/tether-launch`;
+}
 
 /**
  * IntegrityEventType values this client may report, restricted to values

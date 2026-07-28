@@ -103,6 +103,16 @@ export default function JoinExamPage({
       return;
     }
     const submission = await res.json();
+    // Tether launch/install flow v1 — see secureClientStartGate.ts. When
+    // this exam requires Tether Secure Browser and no verified
+    // secure-client session exists yet, the submission is still created
+    // (needed to later issue a launch manifest) but the student must not
+    // proceed into the exam UI in this ordinary browser — send them to
+    // the Tether launch page instead.
+    if (submission.secureClientLaunch?.required && submission.secureClientLaunch.kind === "REDIRECT_TO_TETHER_LAUNCH") {
+      router.push(submission.secureClientLaunch.redirectTo);
+      return;
+    }
     router.push(`/student/exams/${submission.id}`);
   }
 

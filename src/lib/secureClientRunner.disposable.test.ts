@@ -67,6 +67,7 @@ const {
   recordAttestation,
 } = await import("./secureClientRunner");
 const { computeExpectedRequestHash } = await import("./secureClient/sebBrowserExamKey");
+const { computeStudentSubjectHash } = await import("./secureClient/secureLaunchManifest");
 
 const stamp = Date.now();
 const cleanup = { institutions: [] as string[], users: [] as string[], exams: [] as string[] };
@@ -289,6 +290,79 @@ describe("launch manifest consumption", () => {
 
     const sessionCount = await prisma.secureClientSession.count({ where: { submissionId: (await prisma.secureClientLaunchManifest.findUniqueOrThrow({ where: { id: manifest.manifestId } })).submissionId } });
     expect(sessionCount).toBe(1);
+  });
+
+  it("Tether launch/install flow v1 — installed-client protocol launch uses a short-lived token bound to policy.secureLaunchTokenTtlSeconds", async () => {
+    const inst = await makeInstitution(`ttl-${stamp}`);
+    const lecturer = await makeLecturer(inst.id, `ttl-${stamp}`);
+    const student = await makeStudent(inst.id, `ttl-${stamp}`);
+    const exam = await makeExam(inst.id, lecturer.id, "ttl");
+    const submission = await makeSubmission(exam.id, student.id);
+    const { DISABLED_SECURE_CLIENT_POLICY } = await import("./secureClientPolicy");
+    const ttlSeconds = 120;
+
+    const before = Date.now();
+    const { manifest } = await issueLaunchManifest({
+      institutionId: inst.id,
+      examId: exam.id,
+      submissionId: submission.id,
+      studentId: student.id,
+      configurationId: null,
+      clientType: "TETHER_SECURE_CLIENT",
+      policy: { ...DISABLED_SECURE_CLIENT_POLICY, secureLaunchTokenTtlSeconds: ttlSeconds },
+      canonicalExamOrigin: "https://example.test",
+      launchPath: `/student/exams/${exam.id}/tether-launch`,
+      audience: "tether-secure-client",
+    });
+    const after = Date.now();
+
+    const issuedAtMs = Date.parse(manifest.issuedAt);
+    const expiresAtMs = Date.parse(manifest.expiresAt);
+    // Exactly the configured TTL, never a longer-lived or unbounded token.
+    expect(expiresAtMs - issuedAtMs).toBe(ttlSeconds * 1000);
+    // issuedAt itself is genuinely server time at issuance, not something
+    // a caller could stretch out — bounded by the wall-clock window this
+    // test ran in.
+    expect(issuedAtMs).toBeGreaterThanOrEqual(before);
+    expect(issuedAtMs).toBeLessThanOrEqual(after);
+  });
+});
+
+describe("wrong authenticated student cannot consume another student's launch", () => {
+  it("the manifest's studentSubjectHash is bound to the original student and never matches a different student's hash", async () => {
+    const inst = await makeInstitution(`wrong-student-${stamp}`);
+    const lecturer = await makeLecturer(inst.id, `wrong-student-${stamp}`);
+    const owningStudent = await makeStudent(inst.id, `wrong-student-owner-${stamp}`);
+    const otherStudent = await makeStudent(inst.id, `wrong-student-other-${stamp}`);
+    const exam = await makeExam(inst.id, lecturer.id, "wrong-student");
+    const submission = await makeSubmission(exam.id, owningStudent.id);
+    const { DISABLED_SECURE_CLIENT_POLICY } = await import("./secureClientPolicy");
+
+    const { manifest } = await issueLaunchManifest({
+      institutionId: inst.id,
+      examId: exam.id,
+      submissionId: submission.id,
+      studentId: owningStudent.id,
+      configurationId: null,
+      clientType: "TETHER_SECURE_CLIENT",
+      policy: { ...DISABLED_SECURE_CLIENT_POLICY, secureLaunchTokenTtlSeconds: 300 },
+      canonicalExamOrigin: "https://example.test",
+      launchPath: `/student/exams/${exam.id}/tether-launch`,
+      audience: "tether-secure-client",
+    });
+
+    expect(manifest.studentSubjectHash).toBe(computeStudentSubjectHash(owningStudent.id));
+    expect(manifest.studentSubjectHash).not.toBe(computeStudentSubjectHash(otherStudent.id));
+
+    // This is the exact invariant POST /api/secure-client/launch/[manifestId]/consume
+    // depends on (see consume/route.ts: `owning.studentId !== session.user.id`
+    // -> 404, checked BEFORE consumeLaunchManifest is ever called) — the
+    // submission this manifest is bound to resolves to exactly one
+    // student, never the other one, regardless of who is currently
+    // authenticated when the consume request arrives.
+    const owning = await prisma.submission.findUniqueOrThrow({ where: { id: manifest.submissionId }, select: { studentId: true } });
+    expect(owning.studentId).toBe(owningStudent.id);
+    expect(owning.studentId).not.toBe(otherStudent.id);
   });
 });
 

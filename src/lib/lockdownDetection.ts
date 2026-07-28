@@ -20,6 +20,12 @@ type SesLockdownBridge = {
   setExamContext(context: { examId?: string | null; submissionId?: string | null }): void;
   logEvent(eventType: string, metadata?: Record<string, unknown>): void;
   onWarning(callback: (message: string) => void): void;
+  // Tether launch/install flow v1 — see apps/lockdown/src/preload.ts.
+  // Optional: older packaged installs (pre-1.1.0) won't expose these —
+  // callers must feature-detect before use, never assume presence.
+  setDisplayPolicyEnforced?(required: boolean): void;
+  getDisplayCount?(): Promise<number>;
+  onDisplayEnforcementEvent?(callback: (payload: { eventType: string; displayCount: number }) => void): void;
 };
 
 declare global {

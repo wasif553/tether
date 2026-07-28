@@ -16,7 +16,12 @@ export default defineConfig({
     // test` / CI. Run them explicitly with DATABASE_URL pointed at a
     // throwaway database, e.g.:
     //   DATABASE_URL="postgresql://...disposable..." npx vitest run src/lib/secureClientRunner.disposable.test.ts
-    exclude: [...configDefaults.exclude, "**/*.disposable.test.ts"],
+    // apps/* are separate packages with their own build output and their
+    // own vitest config (see apps/lockdown/vitest.config.ts) — this root
+    // config must never scan into them, including compiled dist/ or
+    // packaged release/ output that could otherwise be picked up as
+    // stray CommonJS "test" files.
+    exclude: [...configDefaults.exclude, "**/*.disposable.test.ts", "apps/**"],
   },
   resolve: {
     alias: {

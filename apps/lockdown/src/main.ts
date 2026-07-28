@@ -10,7 +10,6 @@
 import {
   app,
   BrowserWindow,
-  screen,
   ipcMain,
   session as electronSession,
 } from "electron";
@@ -18,12 +17,16 @@ import path from "node:path";
 import Store from "electron-store";
 import {
   DEFAULT_SES_BASE_URL,
-  DEEP_LINK_PROTOCOL,
+  DEEP_LINK_PROTOCOLS,
   LOCKDOWN_VERSION,
   USER_AGENT_SUFFIX,
+  isDeepLinkArg,
+  buildTetherLaunchPath,
   type ExamContext,
   type QueuedLockdownEvent,
 } from "./shared";
+import { DisplayEnforcement } from "./displayEnforcement";
+import type { DisplayEnforcementEventType } from "./displayEnforcementLogic";
 
 const SES_BASE_URL = process.env.SES_BASE_URL ?? DEFAULT_SES_BASE_URL;
 
@@ -34,10 +37,22 @@ if (!gotLock) {
 
 type StoreSchema = {
   queuedEvents: QueuedLockdownEvent[];
+  // Cold-start convenience only (Tether launch/install flow v1): if the
+  // OS launches the app via protocol before any window exists yet, and
+  // the process is later killed/relaunched mid-login, this lets a fresh
+  // launch still resolve back to the exam the student was headed to —
+  // never used for authorization, only for choosing which page to load.
+  lastExamId: string | null;
 };
 
 const store = new Store<StoreSchema>({
-  defaults: { queuedEvents: [] },
+  defaults: { queuedEvents: [], lastExamId: null },
+});
+
+const displayEnforcement = new DisplayEnforcement({
+  onEventType: (eventType: DisplayEnforcementEventType, displayCount: number) => {
+    mainWindow?.webContents.send("lockdown:display-enforcement-event", { eventType, displayCount });
+  },
 });
 
 let mainWindow: BrowserWindow | null = null;
@@ -135,15 +150,24 @@ function recordEvent(
 }
 
 function buildLoadUrl(examId: string | null): string {
-  // The deployed SES web app keys the student exam page by submissionId,
-  // not examId (a student starts an exam via POST /api/exams/[id]/start,
-  // which returns the submission). There is no /student/exams/[examId]
-  // route. v1 adapts the deep link by landing on the dashboard — the
-  // student still completes the start-exam click there themselves; this
-  // is a deliberate adaptation to the real app routes, documented in
-  // apps/lockdown/README.md.
+  // Tether launch/install flow v1 — fixes the confirmed bug where this
+  // always returned the dashboard regardless of examId. The web app
+  // still keys the exam-taking page by submissionId, not examId (there
+  // is no /student/exams/[examId] route) — but the Tether launch page
+  // (buildTetherLaunchPath) resolves examId -> the correct submission
+  // and exam content automatically, once inside Tether and
+  // authenticated (see src/app/student/exams/[id]/tether-launch/page.tsx
+  // in the main repo), so the student never has to find it themselves.
   if (examId) {
-    return `${SES_BASE_URL}/student`;
+    store.set("lastExamId", examId);
+    return `${SES_BASE_URL}${buildTetherLaunchPath(examId)}`;
+  }
+  // No examId on this launch — fall back to the last one we know about
+  // (cold-start convenience only, e.g. the app was killed and relaunched
+  // mid-login), then finally the plain dashboard.
+  const lastExamId = store.get("lastExamId", null);
+  if (lastExamId) {
+    return `${SES_BASE_URL}${buildTetherLaunchPath(lastExamId)}`;
   }
   return `${SES_BASE_URL}/student`;
 }
@@ -180,8 +204,15 @@ function createWindow(examId: string | null) {
 
   mainWindow.webContents.once("did-finish-load", () => {
     mainWindow?.webContents.send("lockdown:content-protection-status", contentProtectionEnabled);
-    checkDisplays();
   });
+
+  // Tether launch/install flow v1 — live for the whole session (not
+  // gated on did-finish-load), replacing the old one-shot
+  // checkDisplays()/MANUAL_WARNING check. Starts with
+  // requireSingleDisplay=false (harmless — see displayEnforcement.ts)
+  // until the hosted page opts in via
+  // window.sesLockdown.setDisplayPolicyEnforced(true).
+  displayEnforcement.start(mainWindow);
 
   mainWindow.on("blur", () => {
     recordEvent("WINDOW_BLUR", "The lockdown browser window lost focus.", "window-blur");
@@ -218,20 +249,8 @@ function createWindow(examId: string | null) {
 
   mainWindow.on("closed", () => {
     mainWindow = null;
+    displayEnforcement.stop();
   });
-}
-
-function checkDisplays() {
-  const displays = screen.getAllDisplays();
-  if (displays.length > 1) {
-    recordEvent(
-      "MANUAL_WARNING",
-      "Multiple displays were detected at exam launch.",
-      "multiple-displays-detected",
-      { displayCount: displays.length },
-    );
-    emitWarning("Secure exam mode: multiple displays detected. This has been recorded.");
-  }
 }
 
 /**
@@ -260,8 +279,10 @@ function monitorNetworkRequests() {
 }
 
 function registerDeepLinkProtocol() {
-  if (!app.isDefaultProtocolClient(DEEP_LINK_PROTOCOL)) {
-    app.setAsDefaultProtocolClient(DEEP_LINK_PROTOCOL);
+  for (const protocol of DEEP_LINK_PROTOCOLS) {
+    if (!app.isDefaultProtocolClient(protocol)) {
+      app.setAsDefaultProtocolClient(protocol);
+    }
   }
 }
 
@@ -313,6 +334,19 @@ ipcMain.handle("lockdown:get-session-info", async () => {
   return { authenticated };
 });
 
+// Tether launch/install flow v1 — the hosted page tells main whether
+// THIS exam's policy actually requires single-display enforcement (main
+// has no policy awareness of its own — see displayEnforcement.ts doc
+// comment). Reporting the resulting events back to the server stays
+// page-driven (the page already has an authenticated fetch); only the
+// blocking overlay itself is main-owned.
+ipcMain.on("lockdown:set-display-policy-enforced", (_event, required: boolean) => {
+  if (typeof required !== "boolean") return;
+  displayEnforcement.setRequireSingleDisplay(required);
+});
+
+ipcMain.handle("lockdown:get-display-count", () => displayEnforcement.getCurrentDisplayCount());
+
 app.whenReady().then(() => {
   registerDeepLinkProtocol();
   monitorNetworkRequests();
@@ -325,11 +359,11 @@ app.whenReady().then(() => {
     if (isOnline) void flushQueue();
   });
 
-  const initialExamId = parseExamIdFromDeepLink(process.argv.find((a) => a.startsWith(`${DEEP_LINK_PROTOCOL}://`)) ?? "");
+  const initialExamId = parseExamIdFromDeepLink(process.argv.find((a) => isDeepLinkArg(a)) ?? "");
   createWindow(initialExamId);
 
   app.on("second-instance", (_event, argv) => {
-    const deepLinkArg = argv.find((a) => a.startsWith(`${DEEP_LINK_PROTOCOL}://`));
+    const deepLinkArg = argv.find((a) => isDeepLinkArg(a));
     if (deepLinkArg) handleDeepLink(deepLinkArg);
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();

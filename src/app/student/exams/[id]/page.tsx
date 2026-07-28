@@ -761,6 +761,15 @@ export default function TakeExamPage({
       const res = await fetch(`/api/submissions/${id}`);
       if (!res.ok) {
         const body = await res.json().catch(() => null);
+        // Tether launch/install flow v1 — see secureClientStartGate.ts.
+        // This exam requires a verified Tether Secure Browser session
+        // and none exists yet (e.g. the student reached this page
+        // directly, outside Tether) — send them to the Tether launch
+        // page instead of showing a dead-end access error.
+        if (res.status === 403 && body?.code === "TETHER_SESSION_REQUIRED" && typeof body?.action?.redirectTo === "string") {
+          router.replace(body.action.redirectTo);
+          return null;
+        }
         setLoadError(
           res.status === 404
             ? "This exam submission could not be found."
@@ -780,7 +789,7 @@ export default function TakeExamPage({
       setLoadError("Could not load this exam — check your connection and try refreshing the page.");
       return null;
     }
-  }, [id, applySubmissionData]);
+  }, [id, applySubmissionData, router]);
 
   // One-Question-At-A-Time Exam Delivery v1 — see
   // docs/one-question-delivery-v1.md. Declared early (ahead of
@@ -1049,6 +1058,52 @@ export default function TakeExamPage({
     if (!data) return;
     window.sesLockdown?.setExamContext({ examId: data.exam.id, submissionId: data.id });
   }, [data]);
+
+  // Tether launch/install flow v1 — see apps/lockdown/src/displayEnforcement.ts.
+  // Only relevant inside Tether Secure Browser, and only once this
+  // exam's AUTHORITATIVE, server-frozen policy (never live settings)
+  // confirms the display requirement actually applies — the Electron
+  // main process has no policy awareness of its own and never trusts
+  // anything from this page except this one boolean. Depends on
+  // data?.id (stable for the lifetime of one attempt) rather than the
+  // whole `data` object, so this registers exactly once per submission
+  // even if `data` is re-fetched/replaced by polling elsewhere on this
+  // page — window.sesLockdown.onDisplayEnforcementEvent has no
+  // remove-listener API, so re-registering on every re-fetch would leak
+  // duplicate listeners and duplicate event reports.
+  useEffect(() => {
+    if (!data?.id || !inLockdownBrowser) return;
+    const submissionId = data.id;
+    let cancelled = false;
+    let sessionId: string | null = null;
+
+    fetch(`/api/submissions/${submissionId}/secure-client/status`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((status: { displayRequirement?: { status?: string } | null; session?: { id: string } | null } | null) => {
+        if (cancelled || !status) return;
+        sessionId = status.session?.id ?? null;
+        const enforced = status.displayRequirement?.status === "ENFORCED_BY_SECURE_CLIENT";
+        window.sesLockdown?.setDisplayPolicyEnforced?.(enforced);
+      })
+      .catch(() => {});
+
+    window.sesLockdown?.onDisplayEnforcementEvent?.((payload) => {
+      if (cancelled || !sessionId) return;
+      // Bounded evidence only — displayCount, event type, timestamp
+      // (server-assigned) — never display names, serials, EDID or
+      // device paths, matching the existing displayMetadataSchema in
+      // src/lib/secureClient/secureClientEvents.ts.
+      fetch(`/api/secure-client/sessions/${sessionId}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventType: payload.eventType, metadata: { displayCount: payload.displayCount } }),
+      }).catch(() => {});
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [data?.id, inLockdownBrowser]);
 
   const secureSettings = data?.exam.secureSettings;
   const secureModeEnabled = secureSettings?.secureModeEnabled ?? false;

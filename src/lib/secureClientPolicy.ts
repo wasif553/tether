@@ -67,17 +67,23 @@ export function isValidDisplayPolicy(value: string): value is DisplayPolicy {
 
 /**
  * A lecturer may only select SINGLE_DISPLAY_REQUIRED alongside a delivery
- * mode that actually routes the student through Safe Exam Browser
- * (SEB_REQUIRED or SEB_OPTIONAL) — never STANDARD_WEB or MONITORED_WEB,
- * which have no mechanism to enforce or even reliably observe display
- * topology. UNRESTRICTED is always valid regardless of delivery mode.
- * Called both by the lecturer-settings PATCH route (server-side,
- * authoritative — see src/app/api/exams/[id]/route.ts) and by the
- * lecturer UI (client-side convenience only).
+ * mode that actually routes the student through a secure client capable
+ * of observing display topology — the two SEB modes, or (Tether
+ * launch/install flow v1) the two Tether Secure Browser modes — never
+ * STANDARD_WEB or MONITORED_WEB, which have no mechanism to enforce or
+ * even reliably observe display topology. UNRESTRICTED is always valid
+ * regardless of delivery mode. Called both by the lecturer-settings PATCH
+ * route (server-side, authoritative — see src/app/api/exams/[id]/route.ts)
+ * and by the lecturer UI (client-side convenience only).
  */
 export function isDisplayPolicyCombinationValid(deliveryMode: DeliveryMode, displayPolicy: DisplayPolicy): boolean {
   if (displayPolicy !== "SINGLE_DISPLAY_REQUIRED") return true;
-  return deliveryMode === "SEB_REQUIRED" || deliveryMode === "SEB_OPTIONAL";
+  return (
+    deliveryMode === "SEB_REQUIRED" ||
+    deliveryMode === "SEB_OPTIONAL" ||
+    deliveryMode === "TETHER_CLIENT_REQUIRED" ||
+    deliveryMode === "TETHER_CLIENT_OPTIONAL"
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +467,12 @@ export function describeDisplayRequirement(policy: Pick<SecureClientPolicy, "del
   if (policy.displayPolicy !== "SINGLE_DISPLAY_REQUIRED") {
     return { displayPolicy: policy.displayPolicy, status: "NOT_APPLICABLE", title: null, instruction: null };
   }
-  if (policy.deliveryMode === "SEB_REQUIRED" || policy.deliveryMode === "SEB_OPTIONAL") {
+  if (
+    policy.deliveryMode === "SEB_REQUIRED" ||
+    policy.deliveryMode === "SEB_OPTIONAL" ||
+    policy.deliveryMode === "TETHER_CLIENT_REQUIRED" ||
+    policy.deliveryMode === "TETHER_CLIENT_OPTIONAL"
+  ) {
     return {
       displayPolicy: policy.displayPolicy,
       status: "ENFORCED_BY_SECURE_CLIENT",

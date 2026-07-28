@@ -33,8 +33,28 @@ export function isSafeJoinCallbackUrl(value: string | null | undefined): value i
  */
 const LECTURER_PATH_RE = /^\/lecturer(\/[A-Za-z0-9_-]+)*$/;
 
+/**
+ * Tether launch/install flow v1 — see
+ * src/app/student/exams/[id]/tether-launch/page.tsx. Same purpose as
+ * JOIN_PATH_RE: when Tether Secure Browser's deep link lands on this
+ * exact page while the student is unauthenticated, the existing
+ * proxy.ts/login callback-URL mechanism (already proven by the join-link
+ * feature — see the module doc comment above) returns them here
+ * automatically after signing in, with no additional Electron-side
+ * pending-launch state needed. Exactly one path segment (the examId)
+ * after `/tether-launch` is never present — this is the terminal
+ * segment of the path, matching JOIN_PATH_RE's shape.
+ */
+const TETHER_LAUNCH_PATH_RE = /^\/student\/exams\/[A-Za-z0-9_-]+\/tether-launch$/;
+
+export function isSafeTetherLaunchCallbackUrl(value: string | null | undefined): value is string {
+  if (!value) return false;
+  if (!value.startsWith("/") || value.startsWith("//")) return false;
+  return TETHER_LAUNCH_PATH_RE.test(value);
+}
+
 export function isSafeAppCallbackUrl(value: string | null | undefined): value is string {
   if (!value) return false;
   if (!value.startsWith("/") || value.startsWith("//")) return false;
-  return JOIN_PATH_RE.test(value) || LECTURER_PATH_RE.test(value);
+  return JOIN_PATH_RE.test(value) || LECTURER_PATH_RE.test(value) || TETHER_LAUNCH_PATH_RE.test(value);
 }

@@ -4,6 +4,10 @@ import { prisma } from "@/lib/prisma";
 import { parseSecureSettings, questionPoolsActive } from "@/lib/secureExam";
 import { canStudentViewMarks, submissionDeadline } from "@/lib/assessmentLifecycle";
 import { resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
+import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
+import { isTetherSecureClientBypassAllowed } from "@/lib/secureClientAvailability";
+import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
 
 export async function GET(
   _req: Request,
@@ -16,7 +20,7 @@ export async function GET(
   const submission = await prisma.submission.findUnique({
     where: { id },
     include: {
-      exam: { include: { questions: { orderBy: { order: "asc" } } } },
+      exam: { include: { questions: { orderBy: { order: "asc" } }, institution: { select: { slug: true } } } },
       answers: true,
       gradePassback: true,
       student: { select: { id: true, name: true, email: true, institutionStudentId: true } },
@@ -30,6 +34,41 @@ export async function GET(
     session.user.role === "LECTURER" && submission.exam.createdById === session.user.id;
   if (!isOwner && !isExamOwner) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Tether launch/install flow v1 — Requirement 9 ("Production start
+  // protection"). The actual content-exposure boundary: GET
+  // /api/submissions/[id] is what serves question text/options (see
+  // `questions` below), so this is where "reject an ordinary browser"
+  // gets real teeth, unlike POST /api/exams/[id]/start (which can't
+  // block here — no SecureClientSession can exist before the submission
+  // does). Reads the IMMUTABLE per-attempt policy snapshot — never
+  // re-derived from the exam's current settings — so this can never
+  // retroactively change what an in-progress attempt requires. Only ever
+  // applies to the student's own IN_PROGRESS view: the lecturer's
+  // grading view (isExamOwner) is always unaffected, and a
+  // SUBMITTED/GRADED submission is a historical record the student may
+  // still review normally. Only ever triggers for TETHER_CLIENT_REQUIRED
+  // (resolveSecureClientStartGate) — every SEB/STANDARD_WEB/MONITORED_WEB
+  // submission is completely unaffected.
+  if (isOwner && !isExamOwner && submission.status === "IN_PROGRESS") {
+    const policy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
+    if (policy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
+      const currentSession = await getCurrentSessionForSubmission(submission.id);
+      const hasVerifiedTetherSession = currentSession?.verificationStatus === "VERIFIED";
+      const devBypassAllowed = isTetherSecureClientBypassAllowed(submission.exam.institution?.slug ?? null);
+      const gate = resolveSecureClientStartGate({ effectiveDeliveryMode: policy.deliveryMode, hasVerifiedTetherSession, devBypassAllowed });
+      if (gate.kind === "REDIRECT_TO_TETHER_LAUNCH") {
+        return NextResponse.json(
+          {
+            error: "This exam requires Tether Secure Browser.",
+            code: "TETHER_SESSION_REQUIRED",
+            action: { redirectTo: buildTetherLaunchPagePath(submission.examId) },
+          },
+          { status: 403 },
+        );
+      }
+    }
   }
 
   const deadline = submissionDeadline(submission.startedAt, submission.exam.durationMins);

@@ -12,6 +12,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { candidateOriginFromHeaders, resolveCanonicalOrigin, buildOriginAllowlist } from "@/lib/secureClient/canonicalOrigin";
+import { resolveLaunchClientType } from "@/lib/secureClient/launchClientType";
 import { SecureClientError, loadValidatedSecureClientSubmission, issueLaunchManifest } from "@/lib/secureClientRunner";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -37,7 +38,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const candidateOrigin = candidateOriginFromHeaders(req.headers);
   const canonicalOrigin = resolveCanonicalOrigin(candidateOrigin, allowlist);
 
-  const clientType = activeConfig?.provider === "TETHER_SECURE_CLIENT" ? "TETHER_SECURE_CLIENT" : "SAFE_EXAM_BROWSER";
+  const clientType = resolveLaunchClientType(context.policy, activeConfig?.provider ?? null);
 
   const { manifest, signature } = await issueLaunchManifest({
     institutionId: context.submission.institutionId ?? "",

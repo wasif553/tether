@@ -19,6 +19,11 @@ function isNonEmptyString(value: unknown): value is string {
 }
 
 const warningListeners: Array<(message: string) => void> = [];
+// Tether launch/install flow v1 — fed by main's debounced, policy-aware
+// display-count evaluation (displayEnforcement.ts). The blocking overlay
+// itself is entirely main-owned; this only lets the hosted page report
+// the corresponding integrity signal via its own authenticated fetch.
+const displayEnforcementListeners: Array<(payload: { eventType: string; displayCount: number }) => void> = [];
 
 ipcRenderer.on("lockdown:warning", (_event, message: string) => {
   for (const listener of warningListeners) listener(message);
@@ -27,6 +32,10 @@ ipcRenderer.on("lockdown:warning", (_event, message: string) => {
 
 ipcRenderer.on("lockdown:event-recorded", (_event, count: number) => {
   updateStatusBarCount(count);
+});
+
+ipcRenderer.on("lockdown:display-enforcement-event", (_event, payload: { eventType: string; displayCount: number }) => {
+  for (const listener of displayEnforcementListeners) listener(payload);
 });
 
 contextBridge.exposeInMainWorld("sesLockdown", {
@@ -56,6 +65,24 @@ contextBridge.exposeInMainWorld("sesLockdown", {
 
   onWarning(callback: (message: string) => void): void {
     if (typeof callback === "function") warningListeners.push(callback);
+  },
+
+  /**
+   * Tether launch/install flow v1 — the hosted page calls this once it
+   * knows (from GET /api/submissions/[id]/secure-client/status) whether
+   * this exam's display requirement actually applies. Main has no policy
+   * awareness of its own; this is the one input it accepts from the page.
+   */
+  setDisplayPolicyEnforced(required: boolean): void {
+    ipcRenderer.send("lockdown:set-display-policy-enforced", Boolean(required));
+  },
+
+  async getDisplayCount(): Promise<number> {
+    return ipcRenderer.invoke("lockdown:get-display-count");
+  },
+
+  onDisplayEnforcementEvent(callback: (payload: { eventType: string; displayCount: number }) => void): void {
+    if (typeof callback === "function") displayEnforcementListeners.push(callback);
   },
 });
 

@@ -19,8 +19,40 @@ import { buildExamPolicySnapshot } from "@/lib/examPolicy";
 import { buildAiAssistancePolicySnapshot } from "@/lib/aiAssistancePolicy";
 import { buildScreenSharePolicySnapshot } from "@/lib/screenSharePolicy";
 import { buildAnswerProvenancePolicySnapshot } from "@/lib/answerProvenancePolicy";
-import { buildSecureClientPolicySnapshot, resolveEffectiveDeliveryMode } from "@/lib/secureClientPolicy";
-import { secureClientAvailabilityForInstitution } from "@/lib/secureClientAvailability";
+import { buildSecureClientPolicySnapshot, resolveEffectiveDeliveryMode, type DeliveryMode, type SecureClientAvailability } from "@/lib/secureClientPolicy";
+import { secureClientAvailabilityForInstitution, isTetherSecureClientBypassAllowed } from "@/lib/secureClientAvailability";
+import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
+import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
+
+// Tether launch/install flow v1 — Requirement 9 ("Production start
+// protection"). Additive response field: `{required: false}` for every
+// non-Tether exam (the overwhelming majority today), so existing
+// callers reading only submission fields (id, examId, etc.) are
+// completely unaffected. Only ever computed for TETHER_CLIENT_REQUIRED —
+// see resolveSecureClientStartGate, which never touches STANDARD_WEB,
+// MONITORED_WEB or any SEB mode.
+type SecureClientLaunchField = { required: false } | { required: true; kind: "ALLOW" | "REDIRECT_TO_TETHER_LAUNCH"; redirectTo: string | null };
+
+async function resolveSecureClientLaunchField(params: {
+  deliveryMode: DeliveryMode;
+  availability: SecureClientAvailability;
+  submissionId: string;
+  examId: string;
+  institutionSlug: string | null;
+}): Promise<SecureClientLaunchField> {
+  const effectiveDeliveryMode = resolveEffectiveDeliveryMode(params.deliveryMode, params.availability);
+  if (effectiveDeliveryMode !== "TETHER_CLIENT_REQUIRED") return { required: false };
+
+  const currentSession = await getCurrentSessionForSubmission(params.submissionId);
+  const hasVerifiedTetherSession = currentSession?.verificationStatus === "VERIFIED";
+  const devBypassAllowed = isTetherSecureClientBypassAllowed(params.institutionSlug);
+  const gate = resolveSecureClientStartGate({ effectiveDeliveryMode, hasVerifiedTetherSession, devBypassAllowed });
+  return {
+    required: true,
+    kind: gate.kind,
+    redirectTo: gate.kind === "REDIRECT_TO_TETHER_LAUNCH" ? buildTetherLaunchPagePath(params.examId) : null,
+  };
+}
 
 export async function POST(
   req: Request,
@@ -99,13 +131,30 @@ export async function POST(
     return NextResponse.json({ error: "Exam window has closed" }, { status: 403 });
   }
 
+  const settings = parseSecureSettings(exam.secureSettings);
+  // Tether Secure Client Foundation + Safe Exam Browser Compatibility v1
+  // — see docs/secure-client-foundation-seb-v1.md. Computed once, up
+  // front, so both the idempotent-resume branch below and the
+  // submission-creation path further down share the exact same
+  // availability result. TETHER_CLIENT_OPTIONAL/REQUIRED are downgraded
+  // to STANDARD_WEB (not silently allowed) when not actually available
+  // — never a frontend query parameter.
+  const secureClientAvailabilityForExam = secureClientAvailabilityForInstitution(exam.institution?.slug ?? null);
+
   const existingInProgress = await prisma.submission.findFirst({
     where: { examId: id, studentId: session.user.id, status: "IN_PROGRESS" },
     orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
   });
-  if (existingInProgress) return NextResponse.json(existingInProgress);
-
-  const settings = parseSecureSettings(exam.secureSettings);
+  if (existingInProgress) {
+    const secureClientLaunch = await resolveSecureClientLaunchField({
+      deliveryMode: settings.deliveryMode,
+      availability: secureClientAvailabilityForExam,
+      submissionId: existingInProgress.id,
+      examId: id,
+      institutionSlug: exam.institution?.slug ?? null,
+    });
+    return NextResponse.json({ ...existingInProgress, secureClientLaunch });
+  }
   const attempts = await prisma.submission.findMany({
     where: { examId: id, studentId: session.user.id },
     select: { attemptNumber: true, status: true },
@@ -290,12 +339,8 @@ export async function POST(
     allowStudentDevelopmentReview: settings.allowStudentDevelopmentReview,
   });
 
-  // Tether Secure Client Foundation + Safe Exam Browser Compatibility v1
-  // — see docs/secure-client-foundation-seb-v1.md. Same immutable-
-  // snapshot pattern as the snapshots above. TETHER_CLIENT_OPTIONAL/
-  // REQUIRED are downgraded to STANDARD_WEB here (not silently allowed)
-  // when not actually available — never a frontend query parameter.
-  const secureClientAvailabilityForExam = secureClientAvailabilityForInstitution(exam.institution?.slug ?? null);
+  // Same immutable-snapshot pattern as the snapshots above — reuses
+  // secureClientAvailabilityForExam computed up front.
   const effectiveDeliveryMode = resolveEffectiveDeliveryMode(settings.deliveryMode, secureClientAvailabilityForExam);
   if (effectiveDeliveryMode === "SEB_REQUIRED") {
     const activeSebConfig = await prisma.secureClientConfiguration.findFirst({
@@ -411,14 +456,30 @@ export async function POST(
       });
     }
 
-    return NextResponse.json(submission, { status: 201 });
+    const secureClientLaunch = await resolveSecureClientLaunchField({
+      deliveryMode: settings.deliveryMode,
+      availability: secureClientAvailabilityForExam,
+      submissionId: submission.id,
+      examId: id,
+      institutionSlug: exam.institution?.slug ?? null,
+    });
+    return NextResponse.json({ ...submission, secureClientLaunch }, { status: 201 });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       const winner = await prisma.submission.findFirst({
         where: { examId: id, studentId: session.user.id, status: "IN_PROGRESS" },
         orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
       });
-      if (winner) return NextResponse.json(winner);
+      if (winner) {
+        const secureClientLaunch = await resolveSecureClientLaunchField({
+          deliveryMode: settings.deliveryMode,
+          availability: secureClientAvailabilityForExam,
+          submissionId: winner.id,
+          examId: id,
+          institutionSlug: exam.institution?.slug ?? null,
+        });
+        return NextResponse.json({ ...winner, secureClientLaunch });
+      }
     }
     throw err;
   }
