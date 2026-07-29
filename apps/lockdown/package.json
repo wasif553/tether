@@ -1,18 +1,19 @@
 {
   "name": "ses-lockdown",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
-  "description": "Tether Secure Browser v1.2 (secure exam client with launch/install flow, live single-display enforcement including Windows Duplicate/Clone detection, and face-visibility false-positive fixes for Safe Exam System)",
+  "description": "Tether Secure Browser v1.2.1 (corrective pass: fail-closed display-enforcement default posture, dev-only diagnostic panel/log, packaging verification, and direct-launch-path parity, on top of the v1.2 launch/install flow, live single-display enforcement with Windows Duplicate/Clone detection, and face-visibility false-positive fixes)",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "start": "npm run build && electron .",
-    "pack": "npm run build && electron-builder --dir",
+    "pack": "npm run build && electron-builder --dir && npm run verify:package",
     "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac"
+    "dist:win": "npm run build && electron-builder --win && npm run verify:package -- release/win-unpacked",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "verify:package": "node dist/verifyPackagedRelease.js"
   },
   "dependencies": {
     "electron-store": "^8.2.0"

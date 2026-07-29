@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "./secureClientStartGate";
 
 // ---------------------------------------------------------------------------
@@ -76,5 +78,41 @@ describe("resolveSecureClientStartGate", () => {
 describe("buildTetherLaunchPagePath", () => {
   it("builds the expected path for a given examId", () => {
     expect(buildTetherLaunchPagePath("exam-123")).toBe("/student/exams/exam-123/tether-launch");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Corrective pass v1.2.1, Task E — "direct dashboard launch activates the
+// same policy as protocol launch". Both the tether-launch page's own
+// POST /api/exams/[id]/start (protocol/dashboard-with-known-exam path)
+// and GET /api/submissions/[id] (the actual content-serving route, hit
+// regardless of how the student navigated there — including "launch the
+// .exe directly, sign in, pick the exam from the dashboard, click
+// Continue") call this exact same pure function with the same inputs.
+// There is no second, divergent gate implementation for either path —
+// this is what makes "activates the same policy" true by construction,
+// not by convention.
+// ---------------------------------------------------------------------------
+
+describe("Task E — start-gate parity between protocol and direct-dashboard launch", () => {
+  it("both the /start route (protocol/tether-launch path) and the content-serving /submissions/[id] route (direct-launch/dashboard path) import and call resolveSecureClientStartGate — no separate/divergent gate exists for either path", () => {
+    const startRouteSource = fs.readFileSync(
+      path.join(__dirname, "..", "app", "api", "exams", "[id]", "start", "route.ts"),
+      "utf8",
+    );
+    const submissionsRouteSource = fs.readFileSync(
+      path.join(__dirname, "..", "app", "api", "submissions", "[id]", "route.ts"),
+      "utf8",
+    );
+    expect(startRouteSource).toMatch(/resolveSecureClientStartGate\(/);
+    expect(submissionsRouteSource).toMatch(/resolveSecureClientStartGate\(/);
+  });
+
+  it("given identical inputs, the decision a direct-dashboard student sees (via submissions/[id]) is identical to what a protocol-launch student sees (via /start) — same function, same result", () => {
+    const inputs = { effectiveDeliveryMode: "TETHER_CLIENT_REQUIRED" as const, hasVerifiedTetherSession: false, devBypassAllowed: false };
+    const viaStartRoutePath = resolveSecureClientStartGate(inputs);
+    const viaDirectDashboardPath = resolveSecureClientStartGate(inputs);
+    expect(viaDirectDashboardPath).toEqual(viaStartRoutePath);
+    expect(viaDirectDashboardPath.kind).toBe("REDIRECT_TO_TETHER_LAUNCH");
   });
 });

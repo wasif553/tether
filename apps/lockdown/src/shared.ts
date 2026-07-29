@@ -4,16 +4,29 @@
  * the two bundles.
  */
 
-// Corrective pass v1.2.0 — minor bump: fixes the Extend-mode enforcement
-// activation bug (debounce was silently dropping policy-driven
-// evaluation), adds Windows-native Duplicate/Clone topology detection
-// and periodic re-checking, and separates lighting/uncertainty from
-// confirmed face-absence in the on-device AI camera integrity check
-// (web-app-side; unrelated to this Electron bridge but shipped in the
-// same corrective pass). No breaking change to the existing
-// window.sesLockdown bridge contract — every prior field/method is
-// still present.
-export const LOCKDOWN_VERSION = "1.2.0";
+// Corrective pass v1.2.1 — fixes the actual reported root cause of
+// "still does not detect or block a second display in physical testing":
+// the display-enforcement default posture was fail-OPEN (inactive until
+// the hosted page's async policy fetch resolved). Replaces the plain
+// requireSingleDisplay boolean with an explicit {active, ready,
+// requireSingleDisplay} contract that fails CLOSED for any
+// TETHER_CLIENT_REQUIRED exam (see displayEnforcementLogic.ts's
+// SecureClientEnforcementState). Also adds: a temporary, explicit
+// opt-in diagnostic panel + local log file (dev-only, never
+// Production — see tetherDiagnosticsSnapshot.ts), an automated
+// packaging-content assertion (verifyPackagedRelease.ts), and confirms
+// the direct-dashboard-launch path activates the identical gate as a
+// protocol launch. This IS a breaking change to the
+// window.sesLockdown bridge: setDisplayPolicyEnforced is replaced by
+// setSecureClientEnforcementState (no known deployed installs predate
+// this still-unreleased pass, so no dual-method shim is carried).
+//
+// v1.2.0 (previous) — fixed the Extend-mode enforcement activation bug
+// (debounce was silently dropping policy-driven evaluation), added
+// Windows-native Duplicate/Clone topology detection and periodic
+// re-checking, and separated lighting/uncertainty from confirmed
+// face-absence in the on-device AI camera integrity check (web-app-side).
+export const LOCKDOWN_VERSION = "1.2.1";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

@@ -30,6 +30,12 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   return NextResponse.json({
     deliveryMode: policy.deliveryMode,
     studentPreflightRequired: policy.studentPreflightRequired,
+    // Corrective pass v1.2.1, Task A — bounded, non-secret policy fields
+    // the local diagnostic panel needs verbatim (never a token/cookie/
+    // manifest/PII, just the same enum/boolean/number already visible via
+    // displayRequirement below in a different shape).
+    requireDisplayCheck: policy.requireDisplayCheck,
+    maximumDisplays: policy.maximumDisplays,
     displayRequirement: describeDisplayRequirement(policy),
     session: current
       ? {

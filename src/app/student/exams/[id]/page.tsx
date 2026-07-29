@@ -738,9 +738,26 @@ export default function TakeExamPage({
 
   const [inLockdownBrowser, setInLockdownBrowser] = useState(false);
 
+  // Corrective pass v1.2.1, Task C — the actual reported root cause: the
+  // old code only told Electron about the display policy AFTER `data`
+  // and /secure-client/status both resolved (see the effect below),
+  // leaving a fail-open window from window-creation through that entire
+  // fetch chain during which a second display would not be covered even
+  // for a TETHER_CLIENT_REQUIRED exam. Fixed by calling
+  // setSecureClientEnforcementState({active:true, ready:false, ...}) in
+  // THIS SAME mount-time effect, synchronously with detection — before
+  // `data` has even started loading — so Electron covers the window from
+  // the earliest possible moment and only uncovers once the effect below
+  // confirms the real policy. Harmless for a non-gated (STANDARD_WEB)
+  // exam opened inside Tether: it clears again as soon as that effect's
+  // fetch resolves, below.
   useEffect(() => {
+    const detected = isRunningInLockdownBrowser();
+    if (detected) {
+      window.sesLockdown?.setSecureClientEnforcementState?.({ active: true, ready: false, requireSingleDisplay: false });
+    }
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setInLockdownBrowser(isRunningInLockdownBrowser());
+    setInLockdownBrowser(detected);
   }, []);
 
   const applySubmissionData = useCallback((d: SubmissionData) => {
@@ -1067,32 +1084,83 @@ export default function TakeExamPage({
   }, [data]);
 
   // Tether launch/install flow v1 — see apps/lockdown/src/displayEnforcement.ts.
-  // Only relevant inside Tether Secure Browser, and only once this
-  // exam's AUTHORITATIVE, server-frozen policy (never live settings)
-  // confirms the display requirement actually applies — the Electron
-  // main process has no policy awareness of its own and never trusts
-  // anything from this page except this one boolean. Depends on
-  // data?.id (stable for the lifetime of one attempt) rather than the
-  // whole `data` object, so this registers exactly once per submission
-  // even if `data` is re-fetched/replaced by polling elsewhere on this
-  // page — window.sesLockdown.onDisplayEnforcementEvent has no
-  // remove-listener API, so re-registering on every re-fetch would leak
-  // duplicate listeners and duplicate event reports.
+  // Only relevant inside Tether Secure Browser. Resolves the readiness
+  // gate the mount-time effect above opened with {active:true,
+  // ready:false} — the Electron main process has no policy awareness of
+  // its own and never trusts anything from this page except this one
+  // state object (corrective pass v1.2.1, Task C). Depends on data?.id
+  // (stable for the lifetime of one attempt) rather than the whole
+  // `data` object, so this registers exactly once per submission even if
+  // `data` is re-fetched/replaced by polling elsewhere on this page —
+  // window.sesLockdown.onDisplayEnforcementEvent has no remove-listener
+  // API, so re-registering on every re-fetch would leak duplicate
+  // listeners and duplicate event reports.
   useEffect(() => {
     if (!data?.id || !inLockdownBrowser) return;
     const submissionId = data.id;
     let cancelled = false;
     let sessionId: string | null = null;
 
+    type StatusResponse = {
+      deliveryMode?: unknown;
+      requireDisplayCheck?: unknown;
+      maximumDisplays?: unknown;
+      displayRequirement?: { status?: unknown; displayPolicy?: unknown } | null;
+      session?: { id: string; verificationStatus?: unknown } | null;
+    };
+
     fetch(`/api/submissions/${submissionId}/secure-client/status`)
       .then((res) => (res.ok ? res.json() : null))
-      .then((status: { displayRequirement?: { status?: string } | null; session?: { id: string } | null } | null) => {
-        if (cancelled || !status) return;
+      .then((status: StatusResponse | null) => {
+        if (cancelled) return;
+        // Task C: "if displayPolicy is missing or invalid, cover the
+        // exam" — a non-ok response or an unexpectedly shaped body both
+        // land here as a rejection, matching the .catch below.
+        if (!status || typeof status.deliveryMode !== "string" || typeof status.displayRequirement?.status !== "string") {
+          throw new Error("malformed_status_response");
+        }
         sessionId = status.session?.id ?? null;
+        const gated = status.deliveryMode === "TETHER_CLIENT_REQUIRED";
+        // For a gated exam, reaching this point already implies a
+        // verified secure-client session: GET /api/submissions/[id] (the
+        // route that produced `data` above) 403s with
+        // TETHER_SESSION_REQUIRED for a TETHER_CLIENT_REQUIRED exam with
+        // no verified session, redirecting to the Tether launch page
+        // instead of ever setting `data` — see
+        // src/app/api/submissions/[id]/route.ts and this page's
+        // loadSubmission redirect handling.
+        const verified = !gated || status.session?.verificationStatus === "VERIFIED";
         const enforced = status.displayRequirement?.status === "ENFORCED_BY_SECURE_CLIENT";
-        window.sesLockdown?.setDisplayPolicyEnforced?.(enforced);
+        window.sesLockdown?.setSecureClientEnforcementState?.({
+          active: gated,
+          ready: !gated || verified,
+          requireSingleDisplay: enforced,
+        });
+        window.sesLockdown?.reportDiagnosticContext?.({
+          submissionIdPresent: true,
+          verifiedSecureClientSession: verified,
+          deliveryMode: status.deliveryMode,
+          displayPolicy: typeof status.displayRequirement?.displayPolicy === "string" ? status.displayRequirement.displayPolicy : null,
+          requireDisplayCheck: typeof status.requireDisplayCheck === "boolean" ? status.requireDisplayCheck : null,
+          maximumDisplays: typeof status.maximumDisplays === "number" ? status.maximumDisplays : null,
+        });
       })
-      .catch(() => {});
+      .catch(() => {
+        if (cancelled) return;
+        // Fail closed: never silently leave the previous (or default)
+        // state in place on a failed/malformed status fetch — explicitly
+        // re-assert the covering state so the exam stays covered until a
+        // genuinely successful determination is made.
+        window.sesLockdown?.setSecureClientEnforcementState?.({ active: true, ready: false, requireSingleDisplay: false });
+        window.sesLockdown?.reportDiagnosticContext?.({
+          submissionIdPresent: true,
+          verifiedSecureClientSession: false,
+          deliveryMode: null,
+          displayPolicy: null,
+          requireDisplayCheck: null,
+          maximumDisplays: null,
+        });
+      });
 
     window.sesLockdown?.onDisplayEnforcementEvent?.((payload) => {
       if (cancelled || !sessionId) return;

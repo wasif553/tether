@@ -14,6 +14,7 @@ import {
   session as electronSession,
 } from "electron";
 import path from "node:path";
+import fs from "node:fs";
 import Store from "electron-store";
 import {
   DEFAULT_SES_BASE_URL,
@@ -26,7 +27,15 @@ import {
   type QueuedLockdownEvent,
 } from "./shared";
 import { DisplayEnforcement } from "./displayEnforcement";
-import type { DisplayEnforcementEventType } from "./displayEnforcementLogic";
+import type { DisplayEnforcementEventType, SecureClientEnforcementState } from "./displayEnforcementLogic";
+import {
+  isDiagnosticsPanelEnabled,
+  snapshotsEqualIgnoringTimestamp,
+  formatDiagnosticLogLine,
+  type TetherDiagnosticsSnapshot,
+} from "./tetherDiagnosticsSnapshot";
+
+export const DIAGNOSTIC_LOG_FILE_NAME = "tether-secure-browser-diagnostics.log";
 
 const SES_BASE_URL = process.env.SES_BASE_URL ?? DEFAULT_SES_BASE_URL;
 
@@ -53,11 +62,108 @@ const displayEnforcement = new DisplayEnforcement({
   onEventType: (eventType: DisplayEnforcementEventType, displayCount: number) => {
     mainWindow?.webContents.send("lockdown:display-enforcement-event", { eventType, displayCount });
   },
+  onDiagnosticsChanged: () => maybeEmitDiagnostics(),
 });
 
 let mainWindow: BrowserWindow | null = null;
 let examContext: ExamContext = { examId: null, submissionId: null };
 let isOnline = true;
+
+// Corrective pass v1.2.1, Tasks A/B — a temporary, explicit, local-only
+// diagnostic surface. Never activates from anything Vercel controls: this
+// flag lives entirely in the LOCAL Electron process's own environment,
+// checked once at startup, never fetched from or influenced by the
+// hosted web app in any way.
+const diagnosticsPanelEnabled = isDiagnosticsPanelEnabled(process.env.TETHER_SECURE_CLIENT_DIAGNOSTICS_ENABLED);
+
+type PageReportedDiagnosticContext = {
+  submissionIdPresent: boolean;
+  verifiedSecureClientSession: boolean;
+  deliveryMode: string | null;
+  displayPolicy: string | null;
+  requireDisplayCheck: boolean | null;
+  maximumDisplays: number | null;
+};
+
+let pageReportedContext: PageReportedDiagnosticContext = {
+  submissionIdPresent: false,
+  verifiedSecureClientSession: false,
+  deliveryMode: null,
+  displayPolicy: null,
+  requireDisplayCheck: null,
+  maximumDisplays: null,
+};
+
+let lastEmittedDiagnosticsSnapshot: TetherDiagnosticsSnapshot | null = null;
+
+function diagnosticLogFilePath(): string {
+  return path.join(app.getPath("userData"), DIAGNOSTIC_LOG_FILE_NAME);
+}
+
+function buildCurrentDiagnosticsSnapshot(): TetherDiagnosticsSnapshot {
+  const de = displayEnforcement.getDiagnosticsSnapshot();
+  return {
+    browserVersion: LOCKDOWN_VERSION,
+    submissionIdPresent: pageReportedContext.submissionIdPresent,
+    tetherBrowserDetected: true,
+    verifiedSecureClientSession: pageReportedContext.verifiedSecureClientSession,
+    deliveryMode: pageReportedContext.deliveryMode,
+    displayPolicy: pageReportedContext.displayPolicy,
+    requireDisplayCheck: pageReportedContext.requireDisplayCheck,
+    maximumDisplays: pageReportedContext.maximumDisplays,
+    electronDisplayCount: de.electronDisplayCount,
+    windowsTopologyClassification: de.windowsTopologyClassification,
+    activeWindowsTargetCount: de.activeWindowsTargetCount,
+    enforcementEnabled: de.enforcementState.active,
+    currentDecision: de.currentDecision === "BLOCKED" ? "BLOCK" : "ALLOW",
+    overlayVisible: de.overlayVisible,
+    lastDisplayCheckAt: de.lastDisplayCheckAt,
+    lastErrorCode: de.lastErrorCode,
+  };
+}
+
+/**
+ * Task A/B shared emit path — pushes the current snapshot to the
+ * diagnostic panel (if one is listening) and appends one line to the
+ * on-disk log, but ONLY when something other than the timestamp actually
+ * changed (Task B: "one line only when state changes, not every polling
+ * cycle" — the periodic 2s recheck in displayEnforcement.ts would
+ * otherwise call this every tick). No-ops entirely when diagnostics are
+ * not enabled — this must add zero overhead and zero disk writes for a
+ * real exam attempt.
+ */
+function maybeEmitDiagnostics(): void {
+  if (!diagnosticsPanelEnabled) return;
+  const snapshot = buildCurrentDiagnosticsSnapshot();
+  if (lastEmittedDiagnosticsSnapshot && snapshotsEqualIgnoringTimestamp(lastEmittedDiagnosticsSnapshot, snapshot)) return;
+  lastEmittedDiagnosticsSnapshot = snapshot;
+  mainWindow?.webContents.send("lockdown:diagnostics-snapshot", snapshot);
+  try {
+    fs.mkdirSync(app.getPath("userData"), { recursive: true });
+    fs.appendFileSync(diagnosticLogFilePath(), `${formatDiagnosticLogLine(snapshot)}\n`, "utf8");
+  } catch {
+    // Best-effort only — a disk/log failure must never block or crash the exam window.
+  }
+}
+
+function isValidEnforcementState(value: unknown): value is SecureClientEnforcementState {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.active === "boolean" && typeof v.ready === "boolean" && typeof v.requireSingleDisplay === "boolean";
+}
+
+function isValidDiagnosticContext(value: unknown): value is PageReportedDiagnosticContext {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.submissionIdPresent === "boolean" &&
+    typeof v.verifiedSecureClientSession === "boolean" &&
+    (v.deliveryMode === null || typeof v.deliveryMode === "string") &&
+    (v.displayPolicy === null || typeof v.displayPolicy === "string") &&
+    (v.requireDisplayCheck === null || typeof v.requireDisplayCheck === "boolean") &&
+    (v.maximumDisplays === null || typeof v.maximumDisplays === "number")
+  );
+}
 
 function getQueue(): QueuedLockdownEvent[] {
   return store.get("queuedEvents", []);
@@ -208,10 +314,13 @@ function createWindow(examId: string | null) {
 
   // Tether launch/install flow v1 — live for the whole session (not
   // gated on did-finish-load), replacing the old one-shot
-  // checkDisplays()/MANUAL_WARNING check. Starts with
-  // requireSingleDisplay=false (harmless — see displayEnforcement.ts)
-  // until the hosted page opts in via
-  // window.sesLockdown.setDisplayPolicyEnforced(true).
+  // checkDisplays()/MANUAL_WARNING check. Starts inactive
+  // ({active:false} — harmless on the dashboard/login/tether-launch
+  // pages, which never call setSecureClientEnforcementState) until the
+  // exam page itself opts in on mount via
+  // window.sesLockdown.setSecureClientEnforcementState({active:true,...})
+  // — see displayEnforcementLogic.ts's SecureClientEnforcementState doc
+  // comment (corrective pass v1.2.1, Task C).
   displayEnforcement.start(mainWindow);
 
   mainWindow.on("blur", () => {
@@ -334,18 +443,33 @@ ipcMain.handle("lockdown:get-session-info", async () => {
   return { authenticated };
 });
 
-// Tether launch/install flow v1 — the hosted page tells main whether
-// THIS exam's policy actually requires single-display enforcement (main
-// has no policy awareness of its own — see displayEnforcement.ts doc
-// comment). Reporting the resulting events back to the server stays
-// page-driven (the page already has an authenticated fetch); only the
-// blocking overlay itself is main-owned.
-ipcMain.on("lockdown:set-display-policy-enforced", (_event, required: boolean) => {
-  if (typeof required !== "boolean") return;
-  displayEnforcement.setRequireSingleDisplay(required);
+// Corrective pass v1.2.1, Task C — the hosted page tells main the full
+// {active, ready, requireSingleDisplay} state (main has no policy
+// awareness of its own — see displayEnforcement.ts doc comment).
+// Reporting the resulting events back to the server stays page-driven
+// (the page already has an authenticated fetch); only the blocking
+// overlay itself is main-owned.
+ipcMain.on("lockdown:set-secure-client-enforcement-state", (_event, state: unknown) => {
+  if (!isValidEnforcementState(state)) return;
+  displayEnforcement.setEnforcementState(state);
+  maybeEmitDiagnostics();
 });
 
 ipcMain.handle("lockdown:get-display-count", () => displayEnforcement.getCurrentDisplayCount());
+
+// Tasks A/B — the hosted page reports the bounded, non-secret policy
+// context it knows (deliveryMode, displayPolicy, requireDisplayCheck,
+// maximumDisplays, submissionId presence, verified-session boolean) so
+// the diagnostic panel/log can show the full picture without main ever
+// fetching or trusting policy on its own.
+ipcMain.on("lockdown:report-diagnostic-context", (_event, context: unknown) => {
+  if (!isValidDiagnosticContext(context)) return;
+  pageReportedContext = context;
+  maybeEmitDiagnostics();
+});
+
+ipcMain.handle("lockdown:get-diagnostics-enabled", () => diagnosticsPanelEnabled);
+ipcMain.handle("lockdown:get-diagnostics-snapshot", () => buildCurrentDiagnosticsSnapshot());
 
 app.whenReady().then(() => {
   registerDeepLinkProtocol();

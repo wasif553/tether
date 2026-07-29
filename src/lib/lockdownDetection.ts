@@ -23,9 +23,28 @@ type SesLockdownBridge = {
   // Tether launch/install flow v1 — see apps/lockdown/src/preload.ts.
   // Optional: older packaged installs (pre-1.1.0) won't expose these —
   // callers must feature-detect before use, never assume presence.
-  setDisplayPolicyEnforced?(required: boolean): void;
   getDisplayCount?(): Promise<number>;
   onDisplayEnforcementEvent?(callback: (payload: { eventType: string; displayCount: number }) => void): void;
+  // Corrective pass v1.2.1, Task C — replaces the old plain-boolean
+  // setDisplayPolicyEnforced (removed; no known deployed installs
+  // predate this still-unreleased corrective pass, so no dual-method
+  // back-compat shim is carried). See
+  // apps/lockdown/src/displayEnforcementLogic.ts's SecureClientEnforcementState.
+  setSecureClientEnforcementState?(state: { active: boolean; ready: boolean; requireSingleDisplay: boolean }): void;
+  // Tasks A/B — bounded, non-secret diagnostic surface. Optional: only
+  // meaningfully present in a v1.2.1+ packaged build with
+  // TETHER_SECURE_CLIENT_DIAGNOSTICS_ENABLED=true; harmless no-op calls
+  // otherwise (older installs won't expose these methods at all).
+  reportDiagnosticContext?(context: {
+    submissionIdPresent: boolean;
+    verifiedSecureClientSession: boolean;
+    deliveryMode: string | null;
+    displayPolicy: string | null;
+    requireDisplayCheck: boolean | null;
+    maximumDisplays: number | null;
+  }): void;
+  isDiagnosticsPanelEnabled?(): Promise<boolean>;
+  onDiagnosticsSnapshot?(callback: (snapshot: Record<string, unknown>) => void): void;
 };
 
 declare global {

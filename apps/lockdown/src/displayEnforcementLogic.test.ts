@@ -4,9 +4,11 @@ import path from "node:path";
 import {
   resolveDisplayEnforcementState,
   resolveCombinedDisplayEnforcementState,
+  resolveReadinessGatedDisplayEnforcementState,
   debounceDisplayEvent,
   resolveDisplayEnforcementEventType,
   DEFAULT_DISPLAY_EVENT_DEBOUNCE_MS,
+  INITIAL_SECURE_CLIENT_ENFORCEMENT_STATE,
 } from "./displayEnforcementLogic";
 
 // ---------------------------------------------------------------------------
@@ -85,6 +87,85 @@ describe("resolveCombinedDisplayEnforcementState", () => {
   it("topology restored to INTERNAL_ONLY after being blocked -> allowed again", () => {
     expect(resolveCombinedDisplayEnforcementState(1, true, "CLONE_OR_DUPLICATE")).toBe("BLOCKED");
     expect(resolveCombinedDisplayEnforcementState(1, true, "INTERNAL_ONLY")).toBe("OK");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Corrective pass v1.2.1, Task C/F — the reported root cause of "still
+// does not detect or block a second display in physical testing": the old
+// plain `requireSingleDisplay` boolean defaulted to `false` (fail-OPEN)
+// from window creation until the hosted page's async status fetch
+// resolved. resolveReadinessGatedDisplayEnforcementState replaces it with
+// an explicit {active, ready, requireSingleDisplay} contract that fails
+// CLOSED whenever the exam is active but not yet confirmed ready.
+// ---------------------------------------------------------------------------
+
+describe("resolveReadinessGatedDisplayEnforcementState", () => {
+  it("inactive (not an exam context, e.g. dashboard/login/tether-launch) never blocks, regardless of ready/display/topology", () => {
+    expect(resolveReadinessGatedDisplayEnforcementState({ active: false, ready: false, requireSingleDisplay: false }, 2, "EXTEND")).toBe("OK");
+    expect(resolveReadinessGatedDisplayEnforcementState({ active: false, ready: true, requireSingleDisplay: true }, 2, "EXTEND")).toBe("OK");
+  });
+
+  it("Task F: policy loading state (active, not yet ready) is blocked even on a single internal display", () => {
+    expect(
+      resolveReadinessGatedDisplayEnforcementState({ active: true, ready: false, requireSingleDisplay: false }, 1, "INTERNAL_ONLY"),
+    ).toBe("BLOCKED");
+  });
+
+  it("Task F: missing verified session (reported by the page as ready=false) is blocked the same way as policy-loading", () => {
+    // The page never distinguishes "policy still loading" from
+    // "verification incomplete" to Electron — both map to ready=false,
+    // by design (see displayEnforcementLogic.ts's SecureClientEnforcementState
+    // doc comment) — this test documents that intentional collapse.
+    expect(
+      resolveReadinessGatedDisplayEnforcementState({ active: true, ready: false, requireSingleDisplay: true }, 1, "INTERNAL_ONLY"),
+    ).toBe("BLOCKED");
+  });
+
+  it("the INITIAL state (before the page has said anything at all) is inactive, matching a fresh DisplayEnforcement instance", () => {
+    expect(INITIAL_SECURE_CLIENT_ENFORCEMENT_STATE).toEqual({ active: false, ready: false, requireSingleDisplay: false });
+  });
+
+  it("ready + non-gated exam (requireSingleDisplay=false) is never blocked even with 2 displays", () => {
+    expect(resolveReadinessGatedDisplayEnforcementState({ active: true, ready: true, requireSingleDisplay: false }, 2, "EXTEND")).toBe("OK");
+  });
+
+  it("ready + gated + one internal display -> allowed", () => {
+    expect(resolveReadinessGatedDisplayEnforcementState({ active: true, ready: true, requireSingleDisplay: true }, 1, "INTERNAL_ONLY")).toBe(
+      "OK",
+    );
+  });
+
+  it("Task F: ready + gated + Electron count=2 -> blocked", () => {
+    expect(resolveReadinessGatedDisplayEnforcementState({ active: true, ready: true, requireSingleDisplay: true }, 2, "INTERNAL_ONLY")).toBe(
+      "BLOCKED",
+    );
+  });
+
+  it("Task F: ready + gated + native EXTEND -> blocked", () => {
+    expect(resolveReadinessGatedDisplayEnforcementState({ active: true, ready: true, requireSingleDisplay: true }, 1, "EXTEND")).toBe("BLOCKED");
+  });
+
+  it("Task F: ready + gated + native CLONE_OR_DUPLICATE -> blocked", () => {
+    expect(
+      resolveReadinessGatedDisplayEnforcementState({ active: true, ready: true, requireSingleDisplay: true }, 1, "CLONE_OR_DUPLICATE"),
+    ).toBe("BLOCKED");
+  });
+
+  it("ready + gated + topology cannot be established (ERROR/UNKNOWN) -> fails closed, blocked", () => {
+    expect(resolveReadinessGatedDisplayEnforcementState({ active: true, ready: true, requireSingleDisplay: true }, 1, "ERROR")).toBe("BLOCKED");
+    expect(resolveReadinessGatedDisplayEnforcementState({ active: true, ready: true, requireSingleDisplay: true }, 1, "UNKNOWN")).toBe(
+      "BLOCKED",
+    );
+  });
+
+  it("full lifecycle: loading (blocked) -> ready+compliant (allowed) -> a display is added (blocked again)", () => {
+    let state = resolveReadinessGatedDisplayEnforcementState({ active: true, ready: false, requireSingleDisplay: false }, 1, "INTERNAL_ONLY");
+    expect(state).toBe("BLOCKED");
+    state = resolveReadinessGatedDisplayEnforcementState({ active: true, ready: true, requireSingleDisplay: true }, 1, "INTERNAL_ONLY");
+    expect(state).toBe("OK");
+    state = resolveReadinessGatedDisplayEnforcementState({ active: true, ready: true, requireSingleDisplay: true }, 2, "EXTEND");
+    expect(state).toBe("BLOCKED");
   });
 });
 
@@ -231,18 +312,18 @@ describe("end-to-end sequences (mirrors how displayEnforcement.ts drives these f
 const displayEnforcementSource = fs.readFileSync(path.join(__dirname, "displayEnforcement.ts"), "utf8");
 
 describe("displayEnforcement.ts source guarantees", () => {
-  it("display-added with count=2 -> immediately blocked: start(), setRequireSingleDisplay(), and the periodic recheck all bypass the debounce (the confirmed Extend-mode bug: applying the same debounce to policy activation as to raw OS events silently dropped the crucial evaluation)", () => {
+  it("display-added with count=2 -> immediately blocked: start(), setEnforcementState(), and the periodic recheck all bypass the debounce (the confirmed Extend-mode bug: applying the same debounce to policy activation as to raw OS events silently dropped the crucial evaluation)", () => {
     const startMethod = displayEnforcementSource.slice(
       displayEnforcementSource.indexOf("start(targetWindow"),
       displayEnforcementSource.indexOf("stop(): void"),
     );
     expect(startMethod).toMatch(/evaluate\(\{\s*bypassDebounce:\s*true\s*\}\)/);
 
-    const setRequireSingleDisplayMethod = displayEnforcementSource.slice(
-      displayEnforcementSource.indexOf("setRequireSingleDisplay(required"),
+    const setEnforcementStateMethod = displayEnforcementSource.slice(
+      displayEnforcementSource.indexOf("setEnforcementState(state"),
       displayEnforcementSource.indexOf("getCurrentDisplayCount()"),
     );
-    expect(setRequireSingleDisplayMethod).toMatch(/evaluate\(\{\s*bypassDebounce:\s*true\s*\}\)/);
+    expect(setEnforcementStateMethod).toMatch(/evaluate\(\{\s*bypassDebounce:\s*true\s*\}\)/);
   });
 
   it("periodic check catches a change missed by a raw Electron event: a setInterval is registered in start() and cleared in stop(), also bypassing the debounce", () => {

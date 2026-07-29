@@ -47,6 +47,68 @@ export function resolveCombinedDisplayEnforcementState(
   return "OK";
 }
 
+/**
+ * Corrective pass v1.2.1, Task C — the actual reported root cause: the
+ * previous single boolean (`requireSingleDisplay`, defaulting `false`)
+ * meant enforcement was silently INACTIVE from window-creation until the
+ * hosted page's async `/secure-client/status` fetch resolved and called
+ * setDisplayPolicyEnforced(true) — a fail-OPEN gap. A second display
+ * already connected during that window (page load, `data` fetch,
+ * `status` fetch — plausibly 1-2+ seconds, longer on a slow network)
+ * would not be covered even though the exam is a TETHER_CLIENT_REQUIRED
+ * exam. This type/function replace that boolean with an explicit
+ * three-state contract so "we don't know yet" fails CLOSED, not open.
+ *
+ * `active` — true whenever the current page is (or is about to become)
+ * exam content that this policy might apply to. `false` (dashboard,
+ * login, tether-launch acknowledgement screen — see
+ * src/app/student/exams/[id]/page.tsx's own-mount effect for exactly
+ * when this becomes true) never blocks, regardless of ready/display
+ * state — this is what keeps the rest of the app usable.
+ *
+ * `ready` — true only once the AUTHORITATIVE per-attempt policy has been
+ * loaded AND (for TETHER_CLIENT_REQUIRED) a verified secure-client
+ * session is confirmed to exist. `active && !ready` always BLOCKS — this
+ * is the fail-closed default posture Task C requires ("while the
+ * authoritative policy is loading, cover the exam"; "while secure-client
+ * verification is incomplete, cover the exam"; a failed/malformed status
+ * fetch is also reported as `ready: false` by the page, satisfying
+ * "if displayPolicy is missing or invalid, cover the exam").
+ *
+ * `requireSingleDisplay` — only meaningful once `ready` is true; feeds
+ * the existing resolveCombinedDisplayEnforcementState the same as before.
+ */
+export type SecureClientEnforcementState = {
+  active: boolean;
+  ready: boolean;
+  requireSingleDisplay: boolean;
+};
+
+export const INITIAL_SECURE_CLIENT_ENFORCEMENT_STATE: SecureClientEnforcementState = {
+  active: false,
+  ready: false,
+  requireSingleDisplay: false,
+};
+
+/**
+ * The ONE function displayEnforcement.ts's evaluate() calls to make the
+ * actual block/unblock decision as of v1.2.1 — layers the Task C
+ * readiness gate on top of the existing (unchanged)
+ * resolveCombinedDisplayEnforcementState, so every scenario the v1.2.0
+ * tests already cover (Electron count > 1, EXTEND, CLONE_OR_DUPLICATE,
+ * ERROR/UNKNOWN topology) is untouched and still reachable once
+ * `ready === true`.
+ */
+export function resolveReadinessGatedDisplayEnforcementState(
+  enforcementState: SecureClientEnforcementState,
+  displayCount: number,
+  topologyClassification: WindowsDisplayTopologyClassification,
+): DisplayEnforcementState {
+  if (!enforcementState.active) return "OK";
+  if (!enforcementState.ready) return "BLOCKED";
+  return resolveCombinedDisplayEnforcementState(displayCount, enforcementState.requireSingleDisplay, topologyClassification);
+}
+
 export const DEFAULT_DISPLAY_EVENT_DEBOUNCE_MS = 500;
 
 /**
