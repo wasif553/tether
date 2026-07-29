@@ -88,16 +88,36 @@ export function classifyFrameQuality(
 export class DetectionCooldownTracker {
   private lastEmittedAt: Partial<Record<string, number>> = {};
   private consecutiveCounts: Partial<Record<string, number>> = {};
+  private streakStartedAt: Partial<Record<string, number>> = {};
 
-  /** Increments (or resets) a consecutive-detection counter for a signal that occurred this check. */
-  recordObservation(key: string, observedThisCheck: boolean): number {
+  /**
+   * Increments (or resets) a consecutive-detection counter for a signal
+   * that occurred this check. `nowMs`, when supplied, also tracks when
+   * the CURRENT streak began, so callers can additionally require a
+   * minimum sustained duration (see MIN_NO_PERSON_SUSTAINED_DURATION_MS
+   * below) — not just a minimum tick count, which is sensitive to the
+   * adaptive detection cadence.
+   */
+  recordObservation(key: string, observedThisCheck: boolean, nowMs?: number): number {
     const next = observedThisCheck ? (this.consecutiveCounts[key] ?? 0) + 1 : 0;
     this.consecutiveCounts[key] = next;
+    if (!observedThisCheck) {
+      delete this.streakStartedAt[key];
+    } else if (next === 1 && nowMs != null) {
+      this.streakStartedAt[key] = nowMs;
+    }
     return next;
   }
 
   getConsecutiveCount(key: string): number {
     return this.consecutiveCounts[key] ?? 0;
+  }
+
+  /** How long (ms) the current streak for `key` has been running, or 0 if there is no active streak or no start time was ever recorded for it. */
+  getStreakDurationMs(key: string, nowMs: number): number {
+    const startedAt = this.streakStartedAt[key];
+    if (startedAt == null) return 0;
+    return Math.max(0, nowMs - startedAt);
   }
 
   /** True if `cooldownMs` has elapsed since the last time this key was emitted (or it was never emitted). */
@@ -114,6 +134,7 @@ export class DetectionCooldownTracker {
   reset(): void {
     this.lastEmittedAt = {};
     this.consecutiveCounts = {};
+    this.streakStartedAt = {};
   }
 }
 
@@ -251,6 +272,15 @@ export type PersonDetectionResult = {
   noPersonDetected: boolean;
   multiplePersons: boolean;
   multiplePersonsHighConfidence: boolean;
+  /**
+   * Highest raw person-class confidence score among ALL person-class
+   * detections this tick, regardless of `minConfidence` — 0 when there
+   * is no person-class detection at all. Used by decideNoPersonEmission
+   * (Part 4 low-light/false-positive fix) to distinguish "genuinely no
+   * one there" from "the detector is uncertain" (a near-threshold
+   * score), which must never be reported as confirmed absence.
+   */
+  bestPersonScore: number;
 };
 
 /** Counts person-class detections at or above `minConfidence`, and separately at or above `highConfidence`. */
@@ -259,16 +289,17 @@ export function evaluatePersonDetections(
   minConfidence = 0.6,
   highConfidence = 0.75,
 ): PersonDetectionResult {
-  const atMinConfidence = detections.filter(
-    (d) => d.className.toLowerCase() === "person" && d.score >= minConfidence,
-  );
+  const personDetections = detections.filter((d) => d.className.toLowerCase() === "person");
+  const atMinConfidence = personDetections.filter((d) => d.score >= minConfidence);
   const personCount = atMinConfidence.length;
   const highConfidenceCount = atMinConfidence.filter((d) => d.score >= highConfidence).length;
+  const bestPersonScore = personDetections.reduce((max, d) => Math.max(max, d.score), 0);
   return {
     personCount,
     noPersonDetected: personCount === 0,
     multiplePersons: personCount >= 2,
     multiplePersonsHighConfidence: highConfidenceCount >= 2,
+    bestPersonScore,
   };
 }
 
@@ -305,26 +336,109 @@ export function decideSecondPersonEmission(
   return { conditionMet, shouldEmit, confidenceBand };
 }
 
+/**
+ * Face-visibility false-positive fix (Part 4): a person-class score in
+ * this band means the detector saw SOMETHING person-shaped but isn't
+ * confident — this must be reported as "temporarily uncertain," never
+ * as confirmed absence. Below this band (near-zero score, or no
+ * person-class detection at all) is treated as genuine absence, not
+ * uncertainty.
+ */
+export const UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND = 0.4;
+
+/**
+ * NO_PERSON_VISIBLE must additionally hold for at least this long (not
+ * just a fixed tick count, which is sensitive to the adaptive detection
+ * cadence — see computeNextDetectionDelayMs) before being confirmed.
+ * With the default ~1-1.5s cadence, 3 consecutive ticks already implies
+ * roughly this much elapsed time in the common case; this is an
+ * explicit floor independent of cadence drift.
+ */
+export const MIN_NO_PERSON_SUSTAINED_DURATION_MS = 3_000;
+
+/**
+ * Distinguishes WHY the no-person condition is (or is not) currently
+ * met — separates "adequate image + sustained face absent" from
+ * "insufficient lighting" and "detector uncertain" (Part 4). Never
+ * null when a reason exists; only CONFIRMED drives NO_PERSON_VISIBLE.
+ */
+export type CameraVisibilityQualifier = "CONFIRMED" | "LIGHTING_INSUFFICIENT" | "UNCERTAIN";
+
+/**
+ * Exact required neutral, non-accusatory copy per qualifier (Part 4).
+ * LIGHTING_INSUFFICIENT/CONFIRMED are shown via the existing
+ * CAMERA_TOO_DARK/NO_PERSON_VISIBLE overlay+toast paths (see page.tsx
+ * MESSAGES and aiCameraViolationOverlay.ts); UNCERTAIN is deliberately
+ * NOT wired into the blocking violation overlay (never automatically
+ * accuse on a merely-ambiguous reading) — exported here so the copy is
+ * defined once and available to any lightweight, non-blocking status
+ * indicator that surfaces it.
+ */
+export const NEUTRAL_CAMERA_VISIBILITY_MESSAGES: Record<CameraVisibilityQualifier, string> = {
+  LIGHTING_INSUFFICIENT: "Lighting is too low to verify camera visibility.",
+  UNCERTAIN: "Camera visibility is temporarily uncertain.",
+  CONFIRMED: "Face not visible for a sustained period.",
+};
+
 export type NoPersonEmissionDecision = {
-  /** Whether the no-person confirmation rule (≥3 consecutive no-person ticks) is satisfied — independent of cooldown. */
+  /** Whether the no-person confirmation rule (adequate lighting + confident absence + sustained duration/tick count) is satisfied — independent of cooldown. */
   conditionMet: boolean;
   /** Whether this tick should send a NEW backend integrity event: conditionMet AND the cooldown has elapsed. */
   shouldEmit: boolean;
+  /** Why conditionMet is (or isn't) true this tick — null only when the streak simply hasn't been sustained long/consistently enough yet, with no other qualifying reason. */
+  qualifier: CameraVisibilityQualifier | null;
 };
 
 /**
- * NO_PERSON_VISIBLE requires 3 consecutive no-person checks — unchanged
- * confirmation rule, factored out as its own decision function (mirroring
- * decidePhoneEmission/decideSecondPersonEmission) so `conditionMet` can
- * drive the local overlay independent of the backend cooldown.
+ * NO_PERSON_VISIBLE (Part 4 fix — corrective pass v1.2.0): a dark or
+ * blocked frame can no longer itself produce "No student visible
+ * appears" — CAMERA_TOO_DARK/CAMERA_VIEW_BLOCKED already report that
+ * separately (see classifyFrameQuality/decideFrameQualityEmission) and
+ * this function now defers to them instead of racing them. A
+ * near-threshold ("uncertain") person-class score is reported neither
+ * as visible nor as confirmed-absent. Both LIGHTING_INSUFFICIENT and
+ * UNCERTAIN ticks freeze (never increment or reset) the no-person
+ * streak — the caller achieves this by not calling
+ * DetectionCooldownTracker.recordObservation for a frozen tick and
+ * instead reading getConsecutiveCount/getStreakDurationMs directly
+ * (hysteresis). CONFIRMED additionally requires BOTH ≥3 consecutive
+ * ticks AND ≥MIN_NO_PERSON_SUSTAINED_DURATION_MS elapsed.
  */
 export function decideNoPersonEmission(
   person: PersonDetectionResult,
+  frameQuality: FrameQuality,
   consecutiveCount: number,
+  streakDurationMs: number,
   cooldownOk: boolean,
 ): NoPersonEmissionDecision {
-  const conditionMet = person.noPersonDetected && consecutiveCount >= 3;
-  return { conditionMet, shouldEmit: conditionMet && cooldownOk };
+  if (frameQuality !== "ok") {
+    return { conditionMet: false, shouldEmit: false, qualifier: "LIGHTING_INSUFFICIENT" };
+  }
+  if (person.noPersonDetected && person.bestPersonScore >= UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND) {
+    return { conditionMet: false, shouldEmit: false, qualifier: "UNCERTAIN" };
+  }
+  const conditionMet = person.noPersonDetected && consecutiveCount >= 3 && streakDurationMs >= MIN_NO_PERSON_SUSTAINED_DURATION_MS;
+  return { conditionMet, shouldEmit: conditionMet && cooldownOk, qualifier: conditionMet ? "CONFIRMED" : null };
+}
+
+export type VisibilityRestoredDecision = { shouldEmit: boolean };
+
+/**
+ * The "stable recovery event" (Part 4) — mirrors the
+ * DISPLAY_POLICY_RESTORED / SCREEN_SHARE_RESTORED pattern already used
+ * elsewhere in this codebase: fired once when a genuinely CONFIRMED
+ * no-person episode resolves back to a confidently-visible person,
+ * never merely because lighting/uncertainty caused the streak to
+ * freeze (those were never confirmed absent in the first place, so
+ * there is nothing to report as "restored"). Has its own cooldown so a
+ * flickering borderline case can't flood the timeline.
+ */
+export function decideVisibilityRestoredEmission(
+  wasConfirmedAbsent: boolean,
+  personConfidentlyVisibleNow: boolean,
+  cooldownOk: boolean,
+): VisibilityRestoredDecision {
+  return { shouldEmit: wasConfirmedAbsent && personConfidentlyVisibleNow && cooldownOk };
 }
 
 export type FrameQualityEmissionDecision = {

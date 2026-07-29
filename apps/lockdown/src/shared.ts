@@ -4,11 +4,16 @@
  * the two bundles.
  */
 
-// Tether launch/install flow v1 — minor bump: adds the tether:// deep
-// link, live single-display enforcement, and launch-manifest-aware
-// navigation. No breaking change to the existing window.sesLockdown
-// bridge contract — every prior field/method is still present.
-export const LOCKDOWN_VERSION = "1.1.0";
+// Corrective pass v1.2.0 — minor bump: fixes the Extend-mode enforcement
+// activation bug (debounce was silently dropping policy-driven
+// evaluation), adds Windows-native Duplicate/Clone topology detection
+// and periodic re-checking, and separates lighting/uncertainty from
+// confirmed face-absence in the on-device AI camera integrity check
+// (web-app-side; unrelated to this Electron bridge but shipped in the
+// same corrective pass). No breaking change to the existing
+// window.sesLockdown bridge contract — every prior field/method is
+// still present.
+export const LOCKDOWN_VERSION = "1.2.0";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

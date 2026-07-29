@@ -14,6 +14,7 @@ import { prisma } from "@/lib/prisma";
 import { candidateOriginFromHeaders, resolveCanonicalOrigin, buildOriginAllowlist } from "@/lib/secureClient/canonicalOrigin";
 import { resolveLaunchClientType } from "@/lib/secureClient/launchClientType";
 import { SecureClientError, loadValidatedSecureClientSubmission, issueLaunchManifest } from "@/lib/secureClientRunner";
+import { logServerTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await auth();
@@ -40,6 +41,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const clientType = resolveLaunchClientType(context.policy, activeConfig?.provider ?? null);
 
+  // Bounded, dev-only diagnostic checkpoint — never the nonce/signature.
+  logServerTetherDiagnostic("policy_loaded", {
+    submissionId: context.submission.id,
+    deliveryMode: context.policy.deliveryMode,
+    displayPolicy: context.policy.displayPolicy,
+    requireDisplayCheck: context.policy.requireDisplayCheck,
+    maximumDisplays: context.policy.maximumDisplays,
+    clientType,
+  });
+
   const { manifest, signature } = await issueLaunchManifest({
     institutionId: context.submission.institutionId ?? "",
     examId: context.submission.examId,
@@ -62,6 +73,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       eventLevel: "INFORMATIONAL",
     },
   }).catch(() => {});
+
+  logServerTetherDiagnostic("launch_manifest_issued", { manifestId: manifest.manifestId, clientType });
 
   return NextResponse.json({ manifest, signature }, { status: 201 });
 }

@@ -1,8 +1,8 @@
 {
   "name": "ses-lockdown",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "Tether Secure Browser v1.1 (secure exam client with launch/install flow and live single-display enforcement for Safe Exam System)",
+  "description": "Tether Secure Browser v1.2 (secure exam client with launch/install flow, live single-display enforcement including Windows Duplicate/Clone detection, and face-visibility false-positive fixes for Safe Exam System)",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",

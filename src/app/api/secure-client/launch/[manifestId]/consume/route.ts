@@ -14,6 +14,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { consumeLaunchManifest } from "@/lib/secureClientRunner";
 import type { SecureLaunchManifest } from "@/lib/secureClient/secureLaunchManifest";
+import { logServerTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 
 const manifestSchema = z.object({
   schemaVersion: z.number(),
@@ -82,6 +83,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ manifes
         eventLevel: "INFORMATIONAL",
       },
     }).catch(() => {});
+    logServerTetherDiagnostic("launch_manifest_consumed_session_created", {
+      manifestId,
+      sessionId: outcome.sessionId,
+      outcome: outcome.outcome,
+    });
     return NextResponse.json({ ok: true, sessionId: outcome.sessionId }, { status: 200 });
   }
 

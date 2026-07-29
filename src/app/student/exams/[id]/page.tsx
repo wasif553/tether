@@ -22,6 +22,7 @@ import {
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   PHONE_CONFIDENCE_THRESHOLD,
+  UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND,
   type DetectedObject,
 } from "@/lib/cameraIntegrityDetection";
 // Camera Startup Lifecycle v2 — see
@@ -332,9 +333,15 @@ const MESSAGES: Record<IntegrityEventType, string> = {
   POSSIBLE_PHONE_VISIBLE: "Possible mobile phone visible in camera view. Lecturer review required.",
   POSSIBLE_SECOND_PERSON_VISIBLE:
     "Possible additional person visible in camera view. Lecturer review required.",
-  NO_PERSON_VISIBLE: "No student appears visible in the camera view. Lecturer review required.",
+  // Face-visibility false-positive fix (Part 4) — exact required neutral
+  // copy, shared with NEUTRAL_CAMERA_VISIBILITY_MESSAGES in
+  // cameraIntegrityDetection.ts. NO_PERSON_VISIBLE is only ever reported
+  // now when the frame quality was adequate AND the condition was
+  // sustained (see decideNoPersonEmission) — never merely because the
+  // room was dark or the detector was uncertain.
+  NO_PERSON_VISIBLE: "Face not visible for a sustained period.",
   CAMERA_VIEW_BLOCKED: "Camera view appears blocked or covered. Lecturer review required.",
-  CAMERA_TOO_DARK: "Camera view appears too dark or unusable. Lecturer review required.",
+  CAMERA_TOO_DARK: "Lighting is too low to verify camera visibility.",
   AI_CAMERA_CHECK_UNAVAILABLE: "On-device camera integrity checks are unavailable.",
 };
 
@@ -2352,10 +2359,11 @@ export default function TakeExamPage({
           noPersonDetected: false,
           multiplePersons: false,
           multiplePersonsHighConfidence: false,
+          bestPersonScore: 0,
         };
         let phoneDecision = decidePhoneEmission({ detected: false, confidence: 0 }, true);
         let secondPersonDecision = decideSecondPersonEmission(noFreshPersonData, 0, true);
-        let noPersonDecision = decideNoPersonEmission(noFreshPersonData, 0, true);
+        let noPersonDecision = decideNoPersonEmission(noFreshPersonData, quality, 0, 0, true);
 
         if (!detector) {
           logAiCameraDebug("tick: model not loaded", { modelLoaded: false });
@@ -2393,7 +2401,20 @@ export default function TakeExamPage({
             const phoneCooldownOk = cooldown.canEmit("POSSIBLE_PHONE_VISIBLE", now, 45_000);
             const secondPersonCount = cooldown.recordObservation("secondPerson", person.multiplePersons);
             const secondPersonCooldownOk = cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000);
-            const noPersonCount = cooldown.recordObservation("noPerson", person.noPersonDetected);
+            // Face-visibility false-positive fix (Part 4): the no-person
+            // streak FREEZES (neither increments nor resets — hysteresis)
+            // on a tick where the frame quality isn't "ok" (dark/blocked —
+            // CAMERA_TOO_DARK/CAMERA_VIEW_BLOCKED already report that
+            // separately) or where the detector is merely "uncertain"
+            // (a near-threshold person-class score) — recordObservation is
+            // simply not called for those ticks, so the existing streak is
+            // read back unchanged via getConsecutiveCount instead.
+            const isNoPersonStreakFrozen =
+              quality !== "ok" || (person.noPersonDetected && person.bestPersonScore >= UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND);
+            const noPersonCount = isNoPersonStreakFrozen
+              ? cooldown.getConsecutiveCount("noPerson")
+              : cooldown.recordObservation("noPerson", person.noPersonDetected, now);
+            const noPersonStreakDurationMs = cooldown.getStreakDurationMs("noPerson", now);
             const noPersonCooldownOk = cooldown.canEmit("NO_PERSON_VISIBLE", now, 45_000);
 
             // Camera Startup Readiness v1 — counters above keep tracking
@@ -2406,8 +2427,8 @@ export default function TakeExamPage({
               ? { conditionMet: false, shouldEmit: false, confidenceBand: null }
               : decideSecondPersonEmission(person, secondPersonCount, secondPersonCooldownOk);
             noPersonDecision = suppressStartup
-              ? { conditionMet: false, shouldEmit: false }
-              : decideNoPersonEmission(person, noPersonCount, noPersonCooldownOk);
+              ? { conditionMet: false, shouldEmit: false, qualifier: null }
+              : decideNoPersonEmission(person, quality, noPersonCount, noPersonStreakDurationMs, noPersonCooldownOk);
 
             // Strengthened phone detection (multi-scale + temporal
             // tracking) — see docs/phone-detection-calibration-v1.md.

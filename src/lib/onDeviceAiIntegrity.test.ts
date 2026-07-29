@@ -23,18 +23,33 @@ import {
   decideSecondPersonEmission,
   decideNoPersonEmission,
   decideFrameQualityEmission,
+  decideVisibilityRestoredEmission,
   shouldLogAiCameraDebug,
   shouldLogAiIntegrityEvent,
   shouldShowLocalAiOverlay,
   DetectionCooldownTracker,
   PHONE_CONFIDENCE_THRESHOLD,
+  UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND,
+  MIN_NO_PERSON_SUSTAINED_DURATION_MS,
+  NEUTRAL_CAMERA_VISIBILITY_MESSAGES,
   assertSafeIntegrityMetadata,
   isVideoFrameReady,
   shouldSuppressCameraIntegrityDuringStartup,
   cameraStartupPhase,
   CAMERA_STARTUP_GRACE_PERIOD_MS,
   CAMERA_READY_TIMEOUT_MS,
+  type PersonDetectionResult,
 } from "./cameraIntegrityDetection";
+
+/** Test-fixture helper — fills in bestPersonScore consistently with noPersonDetected/personCount unless a case deliberately overrides it (e.g. an "uncertain" near-threshold reading). */
+function personResult(overrides: Partial<PersonDetectionResult> & Pick<PersonDetectionResult, "personCount" | "noPersonDetected">): PersonDetectionResult {
+  return {
+    multiplePersons: false,
+    multiplePersonsHighConfidence: false,
+    bestPersonScore: overrides.noPersonDetected ? 0 : 0.8,
+    ...overrides,
+  };
+}
 
 describe("shouldLogAiCameraDebug", () => {
   it("is false in production regardless of the debug flag", () => {
@@ -247,6 +262,25 @@ describe("evaluatePersonDetections", () => {
     expect(result.personCount).toBe(0);
     expect(result.noPersonDetected).toBe(true);
     expect(result.multiplePersons).toBe(false);
+    expect(result.bestPersonScore).toBe(0);
+  });
+
+  it("bestPersonScore (Part 4) reports the highest raw person-class score even when it's below minConfidence — the 'detector uncertain' signal", () => {
+    const result = evaluatePersonDetections([{ className: "person", score: 0.45 }], 0.6);
+    expect(result.noPersonDetected).toBe(true);
+    expect(result.bestPersonScore).toBe(0.45);
+  });
+
+  it("bestPersonScore reports the highest of several person-class scores, not just the first", () => {
+    const result = evaluatePersonDetections(
+      [
+        { className: "person", score: 0.2 },
+        { className: "person", score: 0.55 },
+        { className: "cell phone", score: 0.9 },
+      ],
+      0.6,
+    );
+    expect(result.bestPersonScore).toBe(0.55);
   });
 
   it("does not treat a single confident person as multiplePersons", () => {
@@ -285,7 +319,7 @@ describe("evaluatePersonDetections", () => {
 describe("decideSecondPersonEmission", () => {
   it("allows immediate emission for high-confidence multi-person detection", () => {
     const decision = decideSecondPersonEmission(
-      { personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: true },
+      personResult({ personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: true }),
       0,
       true,
     );
@@ -295,7 +329,7 @@ describe("decideSecondPersonEmission", () => {
 
   it("6. second-person logic still requires 2 consecutive checks at normal confidence (unchanged by the phone speed-up)", () => {
     const decision = decideSecondPersonEmission(
-      { personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: false },
+      personResult({ personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: false }),
       1,
       true,
     );
@@ -304,7 +338,7 @@ describe("decideSecondPersonEmission", () => {
 
   it("emits on second consecutive tick for normal-confidence multi-person", () => {
     const decision = decideSecondPersonEmission(
-      { personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: false },
+      personResult({ personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: false }),
       2,
       true,
     );
@@ -314,7 +348,7 @@ describe("decideSecondPersonEmission", () => {
 
   it("respects cooldown even for high-confidence detection", () => {
     const decision = decideSecondPersonEmission(
-      { personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: true },
+      personResult({ personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: true }),
       0,
       false,
     );
@@ -324,7 +358,7 @@ describe("decideSecondPersonEmission", () => {
 
   it("does not emit when multiplePersons is false", () => {
     const decision = decideSecondPersonEmission(
-      { personCount: 1, noPersonDetected: false, multiplePersons: false, multiplePersonsHighConfidence: false },
+      personResult({ personCount: 1, noPersonDetected: false, multiplePersons: false, multiplePersonsHighConfidence: false }),
       2,
       true,
     );
@@ -333,7 +367,7 @@ describe("decideSecondPersonEmission", () => {
 
   it("2. backend cooldown does not suppress conditionMet for high-confidence second-person", () => {
     const decision = decideSecondPersonEmission(
-      { personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: true },
+      personResult({ personCount: 2, noPersonDetected: false, multiplePersons: true, multiplePersonsHighConfidence: true }),
       0,
       false,
     );
@@ -342,12 +376,12 @@ describe("decideSecondPersonEmission", () => {
   });
 
   it("5. second-person overlay can reopen after acknowledgement if the second person remains visible", () => {
-    const twoPeopleNormalConfidence = {
+    const twoPeopleNormalConfidence = personResult({
       personCount: 2,
       noPersonDetected: false,
       multiplePersons: true,
       multiplePersonsHighConfidence: false,
-    };
+    });
     // Tick 1 and 2: consecutive-check rule satisfied on the 2nd tick, cooldown fresh — emits.
     decideSecondPersonEmission(twoPeopleNormalConfidence, 1, true);
     const confirmingTick = decideSecondPersonEmission(twoPeopleNormalConfidence, 2, true);
@@ -363,7 +397,7 @@ describe("decideSecondPersonEmission", () => {
 
   it("stays cleared after acknowledgement once the second person leaves frame", () => {
     const decision = decideSecondPersonEmission(
-      { personCount: 1, noPersonDetected: false, multiplePersons: false, multiplePersonsHighConfidence: false },
+      personResult({ personCount: 1, noPersonDetected: false, multiplePersons: false, multiplePersonsHighConfidence: false }),
       0,
       false,
     );
@@ -371,38 +405,109 @@ describe("decideSecondPersonEmission", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Face-visibility false-positive fix (corrective pass v1.2.0, Part 4):
+// decideNoPersonEmission now takes (person, frameQuality, consecutiveCount,
+// streakDurationMs, cooldownOk) and separates FIVE states — adequate image
+// + face visible; adequate image + sustained face absent (CONFIRMED);
+// insufficient lighting; detector uncertain; camera interruption (handled
+// upstream by suppressStartup, unchanged) — never conflating "the room is
+// dark" or "the detector isn't sure" with "no student visible appears".
+// ---------------------------------------------------------------------------
+
 describe("decideNoPersonEmission", () => {
-  it("requires 3 consecutive no-person checks before the condition is met (unchanged confirmation rule)", () => {
-    const noPerson = { personCount: 0, noPersonDetected: true, multiplePersons: false, multiplePersonsHighConfidence: false };
-    expect(decideNoPersonEmission(noPerson, 1, true).conditionMet).toBe(false);
-    expect(decideNoPersonEmission(noPerson, 2, true).conditionMet).toBe(false);
-    expect(decideNoPersonEmission(noPerson, 3, true).conditionMet).toBe(true);
+  const SUSTAINED = MIN_NO_PERSON_SUSTAINED_DURATION_MS;
+  const noPersonConfident = personResult({ personCount: 0, noPersonDetected: true, multiplePersons: false, multiplePersonsHighConfidence: false, bestPersonScore: 0 });
+
+  it("adequate image + face visible: never confirms absence, regardless of streak bookkeeping", () => {
+    const personVisible = personResult({ personCount: 1, noPersonDetected: false });
+    const decision = decideNoPersonEmission(personVisible, "ok", 5, SUSTAINED, true);
+    expect(decision.conditionMet).toBe(false);
+    expect(decision.qualifier).toBeNull();
+  });
+
+  it("requires 3 consecutive no-person checks AND the sustained duration before the condition is met (adequate lighting throughout)", () => {
+    expect(decideNoPersonEmission(noPersonConfident, "ok", 1, SUSTAINED, true).conditionMet).toBe(false);
+    expect(decideNoPersonEmission(noPersonConfident, "ok", 2, SUSTAINED, true).conditionMet).toBe(false);
+    const confirmed = decideNoPersonEmission(noPersonConfident, "ok", 3, SUSTAINED, true);
+    expect(confirmed.conditionMet).toBe(true);
+    expect(confirmed.qualifier).toBe("CONFIRMED");
+  });
+
+  it("sustained-duration requirement: 3 consecutive ticks is not enough on its own if the streak hasn't run long enough yet", () => {
+    const decision = decideNoPersonEmission(noPersonConfident, "ok", 3, SUSTAINED - 1, true);
+    expect(decision.conditionMet).toBe(false);
   });
 
   it("1/8. shouldEmit additionally requires the cooldown to have elapsed (backend spam prevention, unchanged)", () => {
-    const noPerson = { personCount: 0, noPersonDetected: true, multiplePersons: false, multiplePersonsHighConfidence: false };
-    const cooldownBlocked = decideNoPersonEmission(noPerson, 3, false);
+    const cooldownBlocked = decideNoPersonEmission(noPersonConfident, "ok", 3, SUSTAINED, false);
     expect(cooldownBlocked.conditionMet).toBe(true);
     expect(cooldownBlocked.shouldEmit).toBe(false);
   });
 
   it("6. no-person overlay can reopen after acknowledgement if no person remains visible", () => {
-    const noPerson = { personCount: 0, noPersonDetected: true, multiplePersons: false, multiplePersonsHighConfidence: false };
     // Tick 3: confirmation rule satisfied, cooldown fresh — emits and the overlay shows.
-    const confirmingTick = decideNoPersonEmission(noPerson, 3, true);
+    const confirmingTick = decideNoPersonEmission(noPersonConfident, "ok", 3, SUSTAINED, true);
     expect(confirmingTick.shouldEmit).toBe(true);
     // Acknowledged locally. Tick 4: still no person, cooldown still
     // active (backend suppressed), but conditionMet stays true so the
     // local overlay reopens.
-    const afterAcknowledge = decideNoPersonEmission(noPerson, 4, false);
+    const afterAcknowledge = decideNoPersonEmission(noPersonConfident, "ok", 4, SUSTAINED + 1000, false);
     expect(afterAcknowledge.shouldEmit).toBe(false);
     expect(afterAcknowledge.conditionMet).toBe(true);
   });
 
-  it("stays cleared after acknowledgement once a person reappears (consecutive count resets to 0)", () => {
-    const personVisible = { personCount: 1, noPersonDetected: false, multiplePersons: false, multiplePersonsHighConfidence: false };
-    const decision = decideNoPersonEmission(personVisible, 0, false);
+  it("stays cleared after acknowledgement once a person reappears (consecutive count/streak duration reset to 0)", () => {
+    const personVisible = personResult({ personCount: 1, noPersonDetected: false });
+    const decision = decideNoPersonEmission(personVisible, "ok", 0, 0, false);
     expect(decision.conditionMet).toBe(false);
+  });
+
+  it("insufficient lighting must not produce 'No student visible' — the bug this fix corrects: a dark frame previously satisfied the no-person streak on its own", () => {
+    for (const quality of ["dark", "blocked"] as const) {
+      const decision = decideNoPersonEmission(noPersonConfident, quality, 5, SUSTAINED, true);
+      expect(decision.conditionMet).toBe(false);
+      expect(decision.shouldEmit).toBe(false);
+      expect(decision.qualifier).toBe("LIGHTING_INSUFFICIENT");
+    }
+  });
+
+  it("detector uncertain: a near-threshold person-class score is never reported as confirmed absence", () => {
+    const uncertain = personResult({ personCount: 0, noPersonDetected: true, bestPersonScore: UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND });
+    const decision = decideNoPersonEmission(uncertain, "ok", 5, SUSTAINED, true);
+    expect(decision.conditionMet).toBe(false);
+    expect(decision.qualifier).toBe("UNCERTAIN");
+  });
+
+  it("a genuinely empty room (score well below the uncertain band) still confirms absence given adequate lighting and a sustained streak", () => {
+    const genuinelyEmpty = personResult({ personCount: 0, noPersonDetected: true, bestPersonScore: UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND - 0.1 });
+    const decision = decideNoPersonEmission(genuinelyEmpty, "ok", 3, SUSTAINED, true);
+    expect(decision.conditionMet).toBe(true);
+    expect(decision.qualifier).toBe("CONFIRMED");
+  });
+
+  it("uses the exact required neutral copy for each qualifier", () => {
+    expect(NEUTRAL_CAMERA_VISIBILITY_MESSAGES.LIGHTING_INSUFFICIENT).toBe("Lighting is too low to verify camera visibility.");
+    expect(NEUTRAL_CAMERA_VISIBILITY_MESSAGES.UNCERTAIN).toBe("Camera visibility is temporarily uncertain.");
+    expect(NEUTRAL_CAMERA_VISIBILITY_MESSAGES.CONFIRMED).toBe("Face not visible for a sustained period.");
+  });
+});
+
+describe("decideVisibilityRestoredEmission", () => {
+  it("fires only after a genuinely CONFIRMED no-person episode resolves to a confidently-visible person", () => {
+    expect(decideVisibilityRestoredEmission(true, true, true).shouldEmit).toBe(true);
+  });
+
+  it("never fires if the previous episode was never CONFIRMED (e.g. it was only LIGHTING_INSUFFICIENT/UNCERTAIN and froze)", () => {
+    expect(decideVisibilityRestoredEmission(false, true, true).shouldEmit).toBe(false);
+  });
+
+  it("never fires while no person is currently confidently visible", () => {
+    expect(decideVisibilityRestoredEmission(true, false, true).shouldEmit).toBe(false);
+  });
+
+  it("respects its own cooldown", () => {
+    expect(decideVisibilityRestoredEmission(true, true, false).shouldEmit).toBe(false);
   });
 });
 
@@ -498,6 +603,40 @@ describe("DetectionCooldownTracker", () => {
     tracker.reset();
     expect(tracker.canEmit("PHONE", 0, 1000)).toBe(true);
     expect(tracker.getConsecutiveCount("PHONE")).toBe(0);
+  });
+
+  // Sustained-duration requirement (Part 4 of the corrective pass) —
+  // getStreakDurationMs tracks how long the CURRENT streak has been
+  // running, independent of the tick count, so decideNoPersonEmission
+  // can require a minimum elapsed time (not just a minimum tick count,
+  // which is sensitive to the adaptive detection cadence).
+  describe("getStreakDurationMs", () => {
+    it("is 0 when there is no active streak", () => {
+      const tracker = new DetectionCooldownTracker();
+      expect(tracker.getStreakDurationMs("noPerson", 10_000)).toBe(0);
+    });
+
+    it("tracks elapsed time since the streak began, not since the last observation", () => {
+      const tracker = new DetectionCooldownTracker();
+      tracker.recordObservation("noPerson", true, 1_000);
+      tracker.recordObservation("noPerson", true, 2_000);
+      tracker.recordObservation("noPerson", true, 3_000);
+      expect(tracker.getStreakDurationMs("noPerson", 4_000)).toBe(3_000);
+    });
+
+    it("resets to 0 the moment the streak breaks (a single missed tick)", () => {
+      const tracker = new DetectionCooldownTracker();
+      tracker.recordObservation("noPerson", true, 1_000);
+      tracker.recordObservation("noPerson", false, 2_000);
+      expect(tracker.getStreakDurationMs("noPerson", 3_000)).toBe(0);
+    });
+
+    it("reset() also clears streak-start bookkeeping", () => {
+      const tracker = new DetectionCooldownTracker();
+      tracker.recordObservation("noPerson", true, 1_000);
+      tracker.reset();
+      expect(tracker.getStreakDurationMs("noPerson", 5_000)).toBe(0);
+    });
   });
 });
 

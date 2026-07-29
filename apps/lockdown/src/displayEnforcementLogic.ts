@@ -5,6 +5,7 @@
  * tooling runs under plain vitest/node) — see displayEnforcement.ts for
  * the main-process glue that calls these functions.
  */
+import { isBlockingTopology, type WindowsDisplayTopologyClassification } from "./windowsDisplayTopologyClassifier";
 
 export type DisplayEnforcementState = "OK" | "BLOCKED";
 
@@ -19,6 +20,31 @@ export type DisplayEnforcementState = "OK" | "BLOCKED";
 export function resolveDisplayEnforcementState(displayCount: number, requireSingleDisplay: boolean): DisplayEnforcementState {
   if (!requireSingleDisplay) return "OK";
   return displayCount > 1 ? "BLOCKED" : "OK";
+}
+
+/**
+ * Corrective pass v1.2.0, Part 2 — combines Electron's own logical
+ * display count (insufficient alone: confirmed by physical testing to
+ * continuously report 1 in Windows Duplicate/Clone mode) with the
+ * Windows-native topology classification (see
+ * windowsDisplayTopologyClassifier.ts). BLOCKED whenever EITHER signal
+ * alone would block: Electron count > 1, OR the Windows topology is
+ * EXTEND/CLONE_OR_DUPLICATE/MULTIPLE_ACTIVE_TARGETS, OR the topology
+ * could not be authoritatively established (ERROR/UNKNOWN — fails
+ * closed, never silently passes). This is the ONE function
+ * displayEnforcement.ts's evaluate() calls to make the actual
+ * block/unblock decision — kept pure and separate from the class so it
+ * is directly unit-testable without spawning PowerShell or Electron.
+ */
+export function resolveCombinedDisplayEnforcementState(
+  displayCount: number,
+  requireSingleDisplay: boolean,
+  topologyClassification: WindowsDisplayTopologyClassification,
+): DisplayEnforcementState {
+  if (!requireSingleDisplay) return "OK";
+  if (displayCount > 1) return "BLOCKED";
+  if (isBlockingTopology(topologyClassification)) return "BLOCKED";
+  return "OK";
 }
 
 export const DEFAULT_DISPLAY_EVENT_DEBOUNCE_MS = 500;

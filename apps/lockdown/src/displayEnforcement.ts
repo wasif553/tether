@@ -18,16 +18,35 @@
  * is the one input the hosted page controls, via
  * window.sesLockdown.setDisplayPolicyEnforced(true) once it has learned
  * from the server that this exam's display requirement applies.
+ *
+ * Corrective pass v1.2.0 — fixes a real bug found by physical testing:
+ * the previous version applied the same 500ms debounce to EVERY call to
+ * evaluate(), including the deliberate, single, authoritative calls from
+ * start() and setRequireSingleDisplay(). A real Extend/Duplicate mode
+ * transition fires several raw display-added/display-removed/
+ * display-metrics-changed events over 1-2+ seconds as Windows settles,
+ * and setDisplayPolicyEnforced(true)'s
+ * IPC call can easily land inside that same debounce window — silently
+ * dropping the one evaluation that actually mattered (requireSingleDisplay
+ * got set, but the overlay never showed for an already-connected second
+ * display). Policy activation, startup, and the periodic recheck below
+ * now always bypass the debounce; only raw OS event callbacks debounce.
+ * Also adds a periodic ~2s recheck (bypassing debounce) as a second line
+ * of defense and to satisfy the Windows-topology polling requirement
+ * (Part 2 of the corrective pass) via the same code path.
  */
 import { screen, BrowserWindow } from "electron";
 import {
-  resolveDisplayEnforcementState,
+  resolveCombinedDisplayEnforcementState,
   debounceDisplayEvent,
   resolveDisplayEnforcementEventType,
   DEFAULT_DISPLAY_EVENT_DEBOUNCE_MS,
   type DisplayEnforcementState,
   type DisplayEnforcementEventType,
 } from "./displayEnforcementLogic";
+import { getWindowsDisplayTopology } from "./windowsDisplayTopology";
+import { classifyWindowsDisplayTopology, type WindowsDisplayTopologyClassification } from "./windowsDisplayTopologyClassifier";
+import { diagnosticLog } from "./diagnosticLog";
 
 // Bundled inline (a data: URL) rather than a separate packaged asset, so
 // the overlay renders even if offline and packaging never needs to know
@@ -52,6 +71,9 @@ const OVERLAY_HTML = `<!doctype html>
 </body>
 </html>`;
 
+/** Windows topology transitions may not always produce the same Electron display event — this periodic recheck is the backstop (Part 2 of the corrective pass). */
+const PERIODIC_RECHECK_MS = 2_000;
+
 export type DisplayEnforcementCallbacks = {
   onEventType?: (eventType: DisplayEnforcementEventType, displayCount: number) => void;
 };
@@ -61,54 +83,114 @@ export class DisplayEnforcement {
   private lastHandledAtMs: number | null = null;
   private previousState: DisplayEnforcementState | null = null;
   private previousDisplayCount: number | null = null;
+  private previousTopology: WindowsDisplayTopologyClassification | null = null;
   private overlayWindow: BrowserWindow | null = null;
   private targetWindow: BrowserWindow | null = null;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private evaluateInFlight: Promise<void> | null = null;
   private readonly callbacks: DisplayEnforcementCallbacks;
-  private readonly handleChange = () => this.evaluate();
+  private readonly handleChange = () => {
+    void this.evaluate({ bypassDebounce: false });
+  };
 
   constructor(callbacks: DisplayEnforcementCallbacks = {}) {
     this.callbacks = callbacks;
   }
 
-  /** Registers the live listeners and evaluates the current state immediately. Call once per app session, as soon as the exam window exists — not gated on the page finishing load. */
+  /** Registers the live listeners, evaluates the current state immediately (never debounced — see corrective-pass note above), and starts the periodic native-topology recheck. Call once per app session, as soon as the exam window exists — not gated on the page finishing load. */
   start(targetWindow: BrowserWindow): void {
     this.targetWindow = targetWindow;
     screen.on("display-added", this.handleChange);
     screen.on("display-removed", this.handleChange);
     screen.on("display-metrics-changed", this.handleChange);
-    this.evaluate();
+    diagnosticLog("displayEnforcement.start() called", { requireSingleDisplay: this.requireSingleDisplay });
+    void this.evaluate({ bypassDebounce: true });
+    this.pollTimer = setInterval(() => {
+      void this.evaluate({ bypassDebounce: true });
+    }, PERIODIC_RECHECK_MS);
   }
 
   stop(): void {
     screen.removeListener("display-added", this.handleChange);
     screen.removeListener("display-removed", this.handleChange);
     screen.removeListener("display-metrics-changed", this.handleChange);
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     this.hideOverlay();
     this.targetWindow = null;
   }
 
-  /** Set by the hosted page once it knows (from the server) that this exam's display requirement applies. Re-evaluates immediately with the new policy. */
+  /** Set by the hosted page once it knows (from the server) that this exam's display requirement applies. Always re-evaluates immediately — a deliberate policy-activation call must never be silently dropped by the debounce (the corrective-pass fix). */
   setRequireSingleDisplay(required: boolean): void {
     this.requireSingleDisplay = required;
-    this.evaluate();
+    diagnosticLog("setRequireSingleDisplay called", { required });
+    void this.evaluate({ bypassDebounce: true });
   }
 
   getCurrentDisplayCount(): number {
     return screen.getAllDisplays().length;
   }
 
-  private evaluate(): void {
+  /**
+   * `bypassDebounce: false` is used ONLY by the raw `screen.on(...)`
+   * listener (rapid-fire duplicate OS events genuinely need debouncing);
+   * every other caller (start, setRequireSingleDisplay, the periodic
+   * recheck) always bypasses — see the corrective-pass doc comment above
+   * for why conflating these was the actual Extend-mode bug.
+   */
+  private async evaluate(options: { bypassDebounce: boolean }): Promise<void> {
     const now = Date.now();
-    if (!debounceDisplayEvent(this.lastHandledAtMs, now)) return;
+    if (!options.bypassDebounce && !debounceDisplayEvent(this.lastHandledAtMs, now, DEFAULT_DISPLAY_EVENT_DEBOUNCE_MS)) return;
     this.lastHandledAtMs = now;
 
+    // A native topology query can be in flight when another evaluate()
+    // call arrives (e.g. the periodic timer firing while a raw event's
+    // async check is still resolving) — serialise rather than overlap,
+    // so two concurrent PowerShell spawns never race each other's
+    // overlay show/hide decisions.
+    if (this.evaluateInFlight) {
+      await this.evaluateInFlight;
+    }
+    const run = this.evaluateNow();
+    this.evaluateInFlight = run.finally(() => {
+      if (this.evaluateInFlight === run) this.evaluateInFlight = null;
+    });
+    await run;
+  }
+
+  private async evaluateNow(): Promise<void> {
     const displayCount = this.getCurrentDisplayCount();
-    const nextState = resolveDisplayEnforcementState(displayCount, this.requireSingleDisplay);
+    const topology = await getWindowsDisplayTopology();
+    // Display.internal is only populated on some platforms/Electron
+    // versions — undefined falls back to the classifier's own
+    // conservative "assume internal" default, which never affects the
+    // SINGLE_DISPLAY_REQUIRED enforcement decision either way (neither
+    // INTERNAL_ONLY nor EXTERNAL_ONLY ever blocks — see isBlockingTopology).
+    const primaryIsInternal = (screen.getPrimaryDisplay() as { internal?: boolean }).internal;
+    const classification = classifyWindowsDisplayTopology(topology, { primaryIsInternal });
+
+    const nextState: DisplayEnforcementState = resolveCombinedDisplayEnforcementState(
+      displayCount,
+      this.requireSingleDisplay,
+      classification.classification,
+    );
+
     const eventType = resolveDisplayEnforcementEventType({
       previousState: this.previousState,
       nextState,
       previousDisplayCount: this.previousDisplayCount,
       nextDisplayCount: displayCount,
+    });
+
+    diagnosticLog("evaluate: decision", {
+      requireSingleDisplay: this.requireSingleDisplay,
+      electronDisplayCount: displayCount,
+      windowsTopology: classification.classification,
+      windowsActiveTargetCount: classification.activeTargetCount,
+      nextState,
+      previousState: this.previousState,
     });
 
     if (nextState === "BLOCKED") this.showOverlay();
@@ -118,12 +200,14 @@ export class DisplayEnforcement {
 
     this.previousState = nextState;
     this.previousDisplayCount = displayCount;
+    this.previousTopology = classification.classification;
   }
 
   private showOverlay(): void {
     if (!this.targetWindow || this.targetWindow.isDestroyed()) return;
     if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
       this.overlayWindow.show();
+      diagnosticLog("overlay: show (already existed)", { result: "shown" });
       return;
     }
     const bounds = this.targetWindow.getBounds();
@@ -149,11 +233,13 @@ export class DisplayEnforcement {
       if (this.overlayWindow === overlay) this.overlayWindow = null;
     });
     this.overlayWindow = overlay;
+    diagnosticLog("overlay: create", { result: "created", bounds: { width: bounds.width, height: bounds.height } });
   }
 
   private hideOverlay(): void {
     if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
       this.overlayWindow.close();
+      diagnosticLog("overlay: hide", { result: "closed" });
     }
     this.overlayWindow = null;
   }

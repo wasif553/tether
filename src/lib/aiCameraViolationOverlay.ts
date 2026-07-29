@@ -24,10 +24,15 @@ export const AI_CAMERA_VIOLATION_OVERLAY_TITLE = "Integrity check needs attentio
  */
 const AI_CAMERA_VIOLATION_REASONS: Record<string, string> = {
   POSSIBLE_SECOND_PERSON_VISIBLE: "Possible second person visible",
-  NO_PERSON_VISIBLE: "No person visible",
+  // Face-visibility false-positive fix (Part 4 of the corrective pass) —
+  // exact required neutral copy. NO_PERSON_VISIBLE only ever drives this
+  // overlay now when the frame quality was adequate AND the condition
+  // was sustained (see decideNoPersonEmission in cameraIntegrityDetection.ts)
+  // — never merely because the room was dark or the detector was unsure.
+  NO_PERSON_VISIBLE: "Face not visible for a sustained period.",
   POSSIBLE_PHONE_VISIBLE: "Possible phone visible",
   CAMERA_VIEW_BLOCKED: "Camera view may be blocked",
-  CAMERA_TOO_DARK: "Camera view is too dark",
+  CAMERA_TOO_DARK: "Lighting is too low to verify camera visibility.",
 };
 
 /** True only for the AI camera signal event types that should trigger the local exam-content overlay. */

@@ -42,6 +42,7 @@ import { useEffect, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
 import { buildTetherDeepLink, shouldShowInstallerFallback, resolveTetherLaunchFailureMessage } from "@/lib/tetherLaunch";
+import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 
 // Exam Design Policy v1 — see docs/exam-design-policy-v1.md. Mirrors the
 // join page's own local type — this codebase does not share a central
@@ -84,8 +85,10 @@ export default function TetherLaunchPage({ params }: { params: Promise<{ id: str
   const [inTether, setInTether] = useState<boolean | null>(null);
 
   useEffect(() => {
+    const detected = isRunningInLockdownBrowser();
+    logClientTetherDiagnostic("tether_browser_detected", { detected });
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setInTether(isRunningInLockdownBrowser());
+    setInTether(detected);
   }, []);
 
   if (inTether === null) {
@@ -211,6 +214,15 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         return;
       }
       const submission: StartResponse = await startRes.json();
+      // A successful /start response implies an authenticated STUDENT
+      // session (the route 401s otherwise) — logged together since
+      // there is no separate client-side session check on this page.
+      logClientTetherDiagnostic("session_present_and_submission_known", {
+        authenticated: true,
+        hasSubmissionId: Boolean(submission.id),
+        secureClientLaunchRequired: submission.secureClientLaunch?.required ?? false,
+        secureClientLaunchKind: submission.secureClientLaunch?.required ? submission.secureClientLaunch.kind : null,
+      });
 
       if (!submission.secureClientLaunch?.required || submission.secureClientLaunch.kind === "ALLOW") {
         // Either this exam doesn't require Tether after all (shouldn't
@@ -229,6 +241,11 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         return;
       }
       const { manifest, signature } = await launchRes.json();
+      // manifestId only — never the nonce, signature, or full manifest
+      // contents (the manifest is the launch token; see
+      // secureLaunchManifest.ts's own doc comment on why the raw nonce
+      // must never be persisted, let alone logged).
+      logClientTetherDiagnostic("launch_manifest_issued", { manifestId: manifest.manifestId, clientType: manifest.clientType });
 
       const consumeRes = await fetch(`/api/secure-client/launch/${manifest.manifestId}/consume`, {
         method: "POST",
@@ -240,6 +257,11 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         setError(resolveTetherLaunchFailureMessage(typeof body?.code === "string" ? body.code : ""));
         return;
       }
+      const consumed: { ok: boolean; sessionId?: string } = await consumeRes.json();
+      logClientTetherDiagnostic("launch_manifest_consumed_session_created", {
+        outcome: "CONSUMED",
+        hasSessionId: Boolean(consumed.sessionId),
+      });
 
       // Consumed successfully — a verified secure-client session now
       // exists for this submission. Land directly in the exam; the
