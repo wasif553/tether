@@ -153,6 +153,11 @@ function OutsideTetherPrompt({ examId }: { examId: string }) {
       <button onClick={attemptLaunch} className="mt-4 w-full rounded bg-black px-4 py-2 text-sm text-white">
         Open Tether Secure Browser
       </button>
+      {/* Tether System Check and Exam Readiness v1 — see
+          docs/tether-system-check-v1.md. */}
+      <a href="/student/system-check" className="mt-2 block w-full rounded border border-gray-300 px-4 py-2 text-center text-sm text-gray-800">
+        Check this computer
+      </a>
       {attemptedAt != null && !showFallback && <p className="mt-3 text-center text-xs text-gray-500">Opening Tether Secure Browser…</p>}
       {showFallback && (
         <div className="mt-5 border-t border-gray-200 pt-4">

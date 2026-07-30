@@ -14,7 +14,37 @@ type SubmissionRow = {
   submittedAt: string | null;
   student: { id: string; name: string; email: string };
   canvasStatus: CanvasStatus;
+  // Tether System Check and Exam Readiness v1 — see
+  // docs/tether-system-check-v1.md. The student's most recent check,
+  // regardless of which exam it was run for; null means not checked yet.
+  systemCheck: { overallStatus: "READY" | "READY_WITH_WARNINGS" | "NOT_READY"; checkedAt: string; clientVersion: string | null } | null;
 };
+
+const SYSTEM_CHECK_LABELS: Record<"READY" | "READY_WITH_WARNINGS" | "NOT_READY", string> = {
+  READY: "Ready",
+  READY_WITH_WARNINGS: "Ready, with warnings",
+  NOT_READY: "Not ready",
+};
+
+const SYSTEM_CHECK_STYLES: Record<"READY" | "READY_WITH_WARNINGS" | "NOT_READY", string> = {
+  READY: "bg-green-100 text-green-700",
+  READY_WITH_WARNINGS: "bg-amber-100 text-amber-800",
+  NOT_READY: "bg-red-100 text-red-700",
+};
+
+function SystemCheckBadge({ systemCheck }: { systemCheck: SubmissionRow["systemCheck"] }) {
+  if (!systemCheck) {
+    return <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500">Not checked</span>;
+  }
+  return (
+    <span
+      className={`rounded px-2 py-0.5 text-xs ${SYSTEM_CHECK_STYLES[systemCheck.overallStatus]}`}
+      title={`Checked ${new Date(systemCheck.checkedAt).toLocaleString()}${systemCheck.clientVersion ? ` — client ${systemCheck.clientVersion}` : ""}`}
+    >
+      {SYSTEM_CHECK_LABELS[systemCheck.overallStatus]}
+    </span>
+  );
+}
 
 const CANVAS_STATUS_LABELS: Record<NonNullable<CanvasStatus>, string> = {
   NOT_READY: "Not ready to send",
@@ -81,6 +111,7 @@ export default function SubmissionsListPage({
                 {s.status === "GRADED" ? `Score: ${s.totalScore}` : s.status}
               </span>
               <CanvasBadge status={s.canvasStatus} />
+              <SystemCheckBadge systemCheck={s.systemCheck} />
               <Link
                 href={`/lecturer/submissions/${s.id}/evidence`}
                 className="text-sm underline"

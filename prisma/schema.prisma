@@ -262,6 +262,10 @@ model User {
   createdSebAllowedExamKeys           SebAllowedExamKey[]         @relation("SebAllowedExamKeyCreatedBy")
   issuedSecureClientRecoveryGrants    SecureClientRecoveryGrant[] @relation("SecureClientRecoveryGrantIssuedBy")
 
+  // Tether System Check and Exam Readiness v1 (additive) — see
+  // docs/tether-system-check-v1.md.
+  tetherSystemCheckRuns TetherSystemCheckRun[]
+
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
 }
@@ -2256,4 +2260,48 @@ model SecureClientRecoveryGrant {
   @@index([secureClientSessionId])
   @@index([submissionId])
   @@index([expiresAt])
+}
+
+// Tether System Check and Exam Readiness v1 (additive) — see
+// docs/tether-system-check-v1.md. One row per completed "Check this
+// computer" run. This is a TECHNICAL READINESS record, not an integrity
+// signal — never joined against or interpreted as misconduct evidence,
+// and never itself a source of exam-content authorization (the real
+// exam-start preflight and verified secure-client session checks always
+// run again — see src/lib/systemCheck/readiness.ts). `secureClientSessionId`
+// is an advisory pointer only (no FK), mirroring
+// SecureClientLaunchManifest.clientSessionId above — a system check runs
+// standalone, outside any submission, so there is usually no session to
+// point at. `resultsJson` holds one bounded {status, reasonCode} object
+// per check id (see SYSTEM_CHECK_IDS in readiness.ts) — never an image,
+// audio sample, raw permission object, biometric template, or full
+// launch manifest.
+model TetherSystemCheckRun {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  // READY | READY_WITH_WARNINGS | NOT_READY
+  overallStatus String
+  // BROWSER | TETHER_SECURE_CLIENT
+  sourceClientType String
+
+  clientVersion          String?
+  operatingSystem        String?
+  operatingSystemVersion String?
+
+  // Advisory only — see doc comment above.
+  secureClientSessionId String?
+
+  checkedAt DateTime @default(now())
+  expiresAt DateTime
+
+  resultsJson Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, checkedAt])
+  @@index([userId, expiresAt])
+  @@index([secureClientSessionId])
 }

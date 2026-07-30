@@ -39,7 +39,15 @@
 // v1.2.0 — fixed the Extend-mode enforcement activation bug (debounce
 // was silently dropping policy-driven evaluation), added Windows-native
 // Duplicate/Clone topology detection and periodic re-checking.
-export const LOCKDOWN_VERSION = "1.2.2";
+//
+// v1.3.0 — Tether System Check and Exam Readiness v1 (see
+// docs/tether-system-check-v1.md): adds four narrowly scoped, read-only
+// preload methods (getClientVersion, getOperatingSystemInfo,
+// getDisplayTopology, getSecureClientCapabilities) so the new
+// /student/system-check page can report genuine native readiness
+// signals. Purely additive — no change to contextIsolation,
+// nodeIntegration, sandbox, or any existing IPC channel.
+export const LOCKDOWN_VERSION = "1.3.0";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

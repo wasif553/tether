@@ -15,6 +15,7 @@ import {
 } from "electron";
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 import Store from "electron-store";
 import {
   DEFAULT_SES_BASE_URL,
@@ -456,6 +457,27 @@ ipcMain.on("lockdown:set-secure-client-enforcement-state", (_event, state: unkno
 });
 
 ipcMain.handle("lockdown:get-display-count", () => displayEnforcement.getCurrentDisplayCount());
+
+// Tether System Check and Exam Readiness v1 — see
+// docs/tether-system-check-v1.md. Four narrowly scoped, read-only
+// readiness methods. None expose shell execution, filesystem access,
+// arbitrary IPC, environment-variable dumps, process lists, or secrets —
+// each handler below returns only the specific bounded value named.
+ipcMain.handle("lockdown:get-client-version", () => LOCKDOWN_VERSION);
+
+ipcMain.handle("lockdown:get-os-info", () => ({
+  platform: process.platform,
+  release: os.release(),
+}));
+
+ipcMain.handle("lockdown:get-display-topology", () => displayEnforcement.getOnDemandDisplayTopology());
+
+ipcMain.handle("lockdown:get-secure-client-capabilities", () => ({
+  getClientVersion: true,
+  getOperatingSystemInfo: true,
+  getDisplayTopology: true,
+  getSecureClientCapabilities: true,
+}));
 
 // Tasks A/B — the hosted page reports the bounded, non-secret policy
 // context it knows (deliveryMode, displayPolicy, requireDisplayCheck,

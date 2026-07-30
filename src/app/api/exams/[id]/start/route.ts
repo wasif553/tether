@@ -24,6 +24,8 @@ import { secureClientAvailabilityForInstitution, isTetherSecureClientBypassAllow
 import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
 import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
 import { isFinalExaminationPolicyEstablished } from "@/lib/assessmentType";
+import { systemCheckMode } from "@/lib/systemCheckConfig";
+import { evaluateFinalExamSystemCheckGate } from "@/lib/systemCheck/readiness";
 
 // Tether launch/install flow v1 — Requirement 9 ("Production start
 // protection"). Additive response field: `{required: false}` for every
@@ -365,6 +367,42 @@ export async function POST(
       },
       { status: 409 },
     );
+  }
+
+  // Tether System Check and Exam Readiness v1 — see
+  // docs/tether-system-check-v1.md. REQUIRE mode only ever applies to a
+  // BRAND NEW attempt for a final examination — never to resuming an
+  // existing IN_PROGRESS submission (handled in the idempotency branch
+  // above, well before this point), so a student already mid-exam can
+  // never be locked out by a since-expired system-check record. This
+  // gate only decides whether the student may proceed to the (unchanged)
+  // Tether launch flow — it never itself authorises exam content, and
+  // the real secure-client verification below still runs exactly as
+  // before regardless of this record.
+  if (settings.assessmentType === "FINAL_EXAMINATION") {
+    const mode = systemCheckMode();
+    if (mode === "REQUIRE") {
+      const latestRun = await prisma.tetherSystemCheckRun.findFirst({
+        where: { userId: session.user.id },
+        orderBy: { checkedAt: "desc" },
+        select: { overallStatus: true, expiresAt: true },
+      });
+      const gate = evaluateFinalExamSystemCheckGate({
+        mode,
+        isFinalExamination: true,
+        latestRun: latestRun ? { overallStatus: latestRun.overallStatus as "READY" | "READY_WITH_WARNINGS" | "NOT_READY", expiresAtMs: latestRun.expiresAt.getTime() } : null,
+        nowMs: Date.now(),
+      });
+      if (!gate.allowed) {
+        return NextResponse.json(
+          {
+            error: "Please run the system check before starting this final examination.",
+            code: gate.reason,
+          },
+          { status: 409 },
+        );
+      }
+    }
   }
 
   if (effectiveDeliveryMode === "SEB_REQUIRED") {

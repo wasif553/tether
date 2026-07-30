@@ -155,6 +155,27 @@ export class DisplayEnforcement {
     return screen.getAllDisplays().length;
   }
 
+  /**
+   * Tether System Check and Exam Readiness v1 — an on-demand, fresh
+   * native topology read for the "getDisplayTopology()" preload method,
+   * independent of the live enforcement loop's cached
+   * previousTopology/previousActiveTargetCount (those only update on the
+   * next debounced/periodic evaluate() tick, which could be stale by up
+   * to PERIODIC_RECHECK_MS at the moment a student runs the system
+   * check). Never toggles the overlay or enforcement state — read-only.
+   */
+  async getOnDemandDisplayTopology(): Promise<{ classification: WindowsDisplayTopologyClassification; activeTargetCount: number | null; electronDisplayCount: number }> {
+    const electronDisplayCount = this.getCurrentDisplayCount();
+    try {
+      const topology = await getWindowsDisplayTopology();
+      const primaryIsInternal = (screen.getPrimaryDisplay() as { internal?: boolean }).internal;
+      const classification = classifyWindowsDisplayTopology(topology, { primaryIsInternal });
+      return { classification: classification.classification, activeTargetCount: classification.activeTargetCount, electronDisplayCount };
+    } catch {
+      return { classification: "ERROR", activeTargetCount: null, electronDisplayCount };
+    }
+  }
+
   /** Task A/B — bounded, non-secret snapshot of everything this module currently knows, for the diagnostic panel and log file. Never includes anything beyond counts/enums/booleans/timestamps. */
   getDiagnosticsSnapshot(): {
     enforcementState: SecureClientEnforcementState;

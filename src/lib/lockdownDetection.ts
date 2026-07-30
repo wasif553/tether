@@ -45,6 +45,20 @@ type SesLockdownBridge = {
   }): void;
   isDiagnosticsPanelEnabled?(): Promise<boolean>;
   onDiagnosticsSnapshot?(callback: (snapshot: Record<string, unknown>) => void): void;
+  // Tether System Check and Exam Readiness v1 — see
+  // docs/tether-system-check-v1.md. Optional: only present in a
+  // v1.3.0+ packaged build; older installs simply don't expose these
+  // and every caller must feature-detect first, exactly like the other
+  // optional methods above.
+  getClientVersion?(): Promise<string>;
+  getOperatingSystemInfo?(): Promise<{ platform: string; release: string }>;
+  getDisplayTopology?(): Promise<{ classification: string; activeTargetCount: number | null; electronDisplayCount: number }>;
+  getSecureClientCapabilities?(): Promise<{
+    getClientVersion: boolean;
+    getOperatingSystemInfo: boolean;
+    getDisplayTopology: boolean;
+    getSecureClientCapabilities: boolean;
+  }>;
 };
 
 declare global {

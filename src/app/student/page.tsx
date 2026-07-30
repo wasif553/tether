@@ -72,7 +72,14 @@ export default function StudentDashboard() {
 
   return (
     <div className="mx-auto max-w-3xl">
-      <h1 className="text-2xl font-semibold">My Exams</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">My Exams</h1>
+        {/* Tether System Check and Exam Readiness v1 — see
+            docs/tether-system-check-v1.md. */}
+        <a href="/student/system-check" className="rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-800">
+          Check this computer
+        </a>
+      </div>
 
       <div className="mt-6 space-y-3">
         {loading && <p className="text-gray-500">Loading...</p>}

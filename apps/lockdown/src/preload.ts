@@ -134,6 +134,33 @@ contextBridge.exposeInMainWorld("sesLockdown", {
   onDiagnosticsSnapshot(callback: (snapshot: TetherDiagnosticsSnapshot) => void): void {
     if (typeof callback === "function") diagnosticsListeners.push(callback);
   },
+
+  // Tether System Check and Exam Readiness v1 — see
+  // docs/tether-system-check-v1.md. Four narrowly scoped, read-only
+  // methods, each backed by a single ipcRenderer.invoke to a specific
+  // main-process handler that returns only the named bounded value —
+  // never a generic ipcRenderer.invoke passthrough, never shell/fs/
+  // process/env access.
+  async getClientVersion(): Promise<string> {
+    return ipcRenderer.invoke("lockdown:get-client-version");
+  },
+
+  async getOperatingSystemInfo(): Promise<{ platform: string; release: string }> {
+    return ipcRenderer.invoke("lockdown:get-os-info");
+  },
+
+  async getDisplayTopology(): Promise<{ classification: string; activeTargetCount: number | null; electronDisplayCount: number }> {
+    return ipcRenderer.invoke("lockdown:get-display-topology");
+  },
+
+  async getSecureClientCapabilities(): Promise<{
+    getClientVersion: boolean;
+    getOperatingSystemInfo: boolean;
+    getDisplayTopology: boolean;
+    getSecureClientCapabilities: boolean;
+  }> {
+    return ipcRenderer.invoke("lockdown:get-secure-client-capabilities");
+  },
 });
 
 /** Drops any value that isn't a plain string/number/boolean — never forwards functions, secrets, or large blobs from the page. */

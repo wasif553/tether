@@ -29,6 +29,18 @@ export function buildLegacySesDeepLink(examId: string): string {
   return `ses://launch?examId=${encodeURIComponent(examId)}`;
 }
 
+/**
+ * Tether System Check and Exam Readiness v1 — an exam-less deep link for
+ * "Open Tether Secure Browser" from a context with no specific exam in
+ * mind (the system check page, or the dashboard's own prompt). Landing
+ * with no examId is already handled by apps/lockdown/src/main.ts's
+ * buildLoadUrl (falls back to the last known exam, or the plain
+ * dashboard) — no protocol contract change needed.
+ */
+export function buildTetherDashboardDeepLink(): string {
+  return "tether://launch";
+}
+
 export const DEFAULT_INSTALLER_FALLBACK_THRESHOLD_MS = 3000;
 
 /**
