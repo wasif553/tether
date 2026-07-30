@@ -501,16 +501,24 @@ export function describeDisplayRequirement(policy: Pick<SecureClientPolicy, "del
 
 export const DISPLAY_REQUIREMENT_UNAVAILABLE_TITLE = "Single-display enforcement unavailable";
 /**
- * Deliberately does NOT restate "this setting requires Safe Exam
- * Browser" — that general capability limitation belongs in the
+ * Deliberately does NOT restate "this setting requires a display-aware
+ * exam client" — that general capability limitation belongs in the
  * always-visible explanatory text next to the radios (see the lecturer
  * exam page), not here. Repeating it in both places was the duplicated-
  * explanation UX bug this fix removes; this message states only the
  * institution/environment-specific fact the general text can't know.
+ *
+ * Corrective pass, lecturer availability fix — generalised from "Safe
+ * Exam Browser is not enabled..." to cover BOTH exam clients that can
+ * actually observe display topology (Tether Secure Browser is the
+ * first-party, generally-available one; Safe Exam Browser remains an
+ * experimental, allowlisted option) — this message must never claim SEB
+ * specifically when Tether is the one that's actually unavailable, or
+ * vice versa.
  */
-export const DISPLAY_REQUIREMENT_UNAVAILABLE_MESSAGE = "Safe Exam Browser is not enabled for this institution or environment.";
+export const DISPLAY_REQUIREMENT_UNAVAILABLE_MESSAGE = "Tether Secure Browser or Safe Exam Browser is not enabled for this institution or environment.";
 export const DISPLAY_REQUIREMENT_STORED_BUT_UNAVAILABLE_MESSAGE =
-  "Single display required is already saved for this exam, but Safe Exam Browser is not currently enabled for this institution or environment. This setting cannot be changed or re-saved until Safe Exam Browser access is restored.";
+  "Single display required is already saved for this exam, but no display-aware exam client (Tether Secure Browser or Safe Exam Browser) is currently enabled for this institution or environment. This setting cannot be changed or re-saved until access is restored.";
 
 /**
  * INFO: an ordinary, non-blocking fact — UNRESTRICTED remains selected
@@ -553,9 +561,13 @@ export function resolveDisplayRequirementUiState(params: {
   storedDisplayPolicy: DisplayPolicy;
   sebOptionalAvailable: boolean;
   sebRequiredAvailable: boolean;
+  /** Lecturer availability fix — Tether Secure Browser is the first-party client and is generally available; must gate this control exactly like the SEB booleans always have, never leave it stuck showing "unavailable" while Tether is actually selectable. */
+  tetherClientRequiredAvailable: boolean;
+  tetherClientOptionalAvailable: boolean;
 }): DisplayRequirementUiState {
-  const sebAvailable = params.sebOptionalAvailable || params.sebRequiredAvailable;
-  if (sebAvailable) {
+  const secureClientAvailable =
+    params.sebOptionalAvailable || params.sebRequiredAvailable || params.tetherClientRequiredAvailable || params.tetherClientOptionalAvailable;
+  if (secureClientAvailable) {
     return { kind: "AVAILABLE", unrestrictedDisabled: false, singleDisplayRequiredDisabled: false, notice: null };
   }
   if (params.storedDisplayPolicy === "SINGLE_DISPLAY_REQUIRED") {
@@ -585,15 +597,27 @@ export function resolveDisplayRequirementUiState(params: {
  * disables the control in this case (see resolveDisplayRequirementUiState)
  * — when neither SEB mode is available.
  */
+/**
+ * Lecturer availability fix — preference order when auto-switching:
+ * TETHER_CLIENT_REQUIRED first (Tether Secure Browser is the first-party
+ * production client and the primary Tether workflow — SEB is not),
+ * then SEB_REQUIRED, then the two OPTIONAL modes, matching "prefer
+ * REQUIRED (stronger guarantee, matching Single display required's own
+ * strictness) and prefer Tether over SEB within the same tier."
+ */
 export function resolveDeliveryModeForSingleDisplayRequired(params: {
   currentDeliveryMode: DeliveryMode;
   sebOptionalAvailable: boolean;
   sebRequiredAvailable: boolean;
+  tetherClientRequiredAvailable: boolean;
+  tetherClientOptionalAvailable: boolean;
 }): { deliveryMode: DeliveryMode; changed: boolean } {
-  if (params.currentDeliveryMode === "SEB_REQUIRED" || params.currentDeliveryMode === "SEB_OPTIONAL") {
+  if (isDisplayPolicyCombinationValid(params.currentDeliveryMode, "SINGLE_DISPLAY_REQUIRED")) {
     return { deliveryMode: params.currentDeliveryMode, changed: false };
   }
+  if (params.tetherClientRequiredAvailable) return { deliveryMode: "TETHER_CLIENT_REQUIRED", changed: true };
   if (params.sebRequiredAvailable) return { deliveryMode: "SEB_REQUIRED", changed: true };
+  if (params.tetherClientOptionalAvailable) return { deliveryMode: "TETHER_CLIENT_OPTIONAL", changed: true };
   if (params.sebOptionalAvailable) return { deliveryMode: "SEB_OPTIONAL", changed: true };
   return { deliveryMode: params.currentDeliveryMode, changed: false };
 }
@@ -616,8 +640,10 @@ export function isDisplayPolicySaveBlocked(params: {
   displayPolicy: DisplayPolicy;
   sebOptionalAvailable: boolean;
   sebRequiredAvailable: boolean;
+  tetherClientRequiredAvailable: boolean;
+  tetherClientOptionalAvailable: boolean;
 }): boolean {
   if (params.displayPolicy !== "SINGLE_DISPLAY_REQUIRED") return false;
   if (!isDisplayPolicyCombinationValid(params.deliveryMode, params.displayPolicy)) return true;
-  return !params.sebOptionalAvailable && !params.sebRequiredAvailable;
+  return !params.sebOptionalAvailable && !params.sebRequiredAvailable && !params.tetherClientRequiredAvailable && !params.tetherClientOptionalAvailable;
 }

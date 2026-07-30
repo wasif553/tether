@@ -176,7 +176,7 @@ export async function PATCH(
       return NextResponse.json(
         {
           error:
-            "Single display required needs Safe Exam Browser delivery (SEB required or SEB optional). Change the exam delivery mode first, or choose No display restriction.",
+            "Single display required needs a display-aware exam client (Tether Secure Browser or Safe Exam Browser, required or optional). Change the exam delivery mode first, or choose No display restriction.",
         },
         { status: 400 },
       );

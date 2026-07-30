@@ -432,12 +432,16 @@ describe("describeDisplayRequirement", () => {
 // environment/institution availability gating.
 // ---------------------------------------------------------------------------
 
+/** Convenience default for tests that only care about the SEB axis — every Tether flag off, matching the pre-Tether-fix test fixtures below unless a test overrides them. */
+const NO_TETHER = { tetherClientRequiredAvailable: false, tetherClientOptionalAvailable: false };
+
 describe("resolveDisplayRequirementUiState", () => {
-  it("SEB unavailable + UNRESTRICTED stored: No display restriction stays enabled, only Single display required is disabled, notice is informational (not blocking)", () => {
+  it("nothing available (SEB nor Tether) + UNRESTRICTED stored: No display restriction stays enabled, only Single display required is disabled, notice is informational (not blocking)", () => {
     const result = resolveDisplayRequirementUiState({
       storedDisplayPolicy: "UNRESTRICTED",
       sebOptionalAvailable: false,
       sebRequiredAvailable: false,
+      ...NO_TETHER,
     });
     expect(result.kind).toBe("UNAVAILABLE");
     // Standard web + No display restriction remains a fully valid,
@@ -447,7 +451,7 @@ describe("resolveDisplayRequirementUiState", () => {
     expect(result.notice).not.toBeNull();
     expect(result.notice?.tone).toBe("INFO");
     expect(result.notice?.title).toBe("Single-display enforcement unavailable");
-    expect(result.notice?.message).toBe("Safe Exam Browser is not enabled for this institution or environment.");
+    expect(result.notice?.message).toBe("Tether Secure Browser or Safe Exam Browser is not enabled for this institution or environment.");
     // Must never instruct the lecturer to pick a delivery mode that is
     // itself disabled — this is the exact contradiction being fixed.
     expect(result.notice?.message).not.toMatch(/choose/i);
@@ -456,7 +460,7 @@ describe("resolveDisplayRequirementUiState", () => {
     // isDisplayPolicySaveBlocked (the actual save gate) agrees this must
     // not block saving.
     expect(
-      isDisplayPolicySaveBlocked({ deliveryMode: "STANDARD_WEB", displayPolicy: "UNRESTRICTED", sebOptionalAvailable: false, sebRequiredAvailable: false }),
+      isDisplayPolicySaveBlocked({ deliveryMode: "STANDARD_WEB", displayPolicy: "UNRESTRICTED", sebOptionalAvailable: false, sebRequiredAvailable: false, ...NO_TETHER }),
     ).toBe(false);
   });
 
@@ -465,6 +469,7 @@ describe("resolveDisplayRequirementUiState", () => {
       storedDisplayPolicy: "UNRESTRICTED",
       sebOptionalAvailable: false,
       sebRequiredAvailable: true,
+      ...NO_TETHER,
     });
     expect(result.kind).toBe("AVAILABLE");
     expect(result.unrestrictedDisabled).toBe(false);
@@ -477,6 +482,7 @@ describe("resolveDisplayRequirementUiState", () => {
       storedDisplayPolicy: "UNRESTRICTED",
       sebOptionalAvailable: true,
       sebRequiredAvailable: false,
+      ...NO_TETHER,
     });
     expect(result.kind).toBe("AVAILABLE");
     expect(result.unrestrictedDisabled).toBe(false);
@@ -489,6 +495,7 @@ describe("resolveDisplayRequirementUiState", () => {
       storedDisplayPolicy: "SINGLE_DISPLAY_REQUIRED",
       sebOptionalAvailable: true,
       sebRequiredAvailable: true,
+      ...NO_TETHER,
     });
     expect(result.kind).toBe("AVAILABLE");
     expect(result.unrestrictedDisabled).toBe(false);
@@ -496,16 +503,18 @@ describe("resolveDisplayRequirementUiState", () => {
     expect(result.notice).toBeNull();
   });
 
-  it("SEB unavailable + stored SINGLE_DISPLAY_REQUIRED: both options locked read-only, notice states it cannot be changed or re-saved, and never claims removal", () => {
+  it("nothing available + stored SINGLE_DISPLAY_REQUIRED: both options locked read-only, notice states it cannot be changed or re-saved, and never claims removal", () => {
     const result = resolveDisplayRequirementUiState({
       storedDisplayPolicy: "SINGLE_DISPLAY_REQUIRED",
       sebOptionalAvailable: false,
       sebRequiredAvailable: false,
+      ...NO_TETHER,
     });
     expect(result.kind).toBe("STORED_BUT_UNAVAILABLE");
     // Both options are locked in this exceptional state — the lecturer
     // cannot even switch back to UNRESTRICTED through this control while
-    // SEB is down, so the stored policy is never edited out from under it.
+    // no display-aware client is available, so the stored policy is
+    // never edited out from under it.
     expect(result.unrestrictedDisabled).toBe(true);
     expect(result.singleDisplayRequiredDisabled).toBe(true);
     expect(result.notice).not.toBeNull();
@@ -524,6 +533,7 @@ describe("resolveDisplayRequirementUiState", () => {
         displayPolicy: "SINGLE_DISPLAY_REQUIRED",
         sebOptionalAvailable: false,
         sebRequiredAvailable: false,
+        ...NO_TETHER,
       }),
     ).toBe(true);
   });
@@ -533,23 +543,73 @@ describe("resolveDisplayRequirementUiState", () => {
     // reason), but the messages must differ because they describe
     // different lecturer-facing consequences (nothing at stake vs. a
     // stored policy frozen in place).
-    const unavailable = resolveDisplayRequirementUiState({ storedDisplayPolicy: "UNRESTRICTED", sebOptionalAvailable: false, sebRequiredAvailable: false });
+    const unavailable = resolveDisplayRequirementUiState({ storedDisplayPolicy: "UNRESTRICTED", sebOptionalAvailable: false, sebRequiredAvailable: false, ...NO_TETHER });
     const storedButUnavailable = resolveDisplayRequirementUiState({
       storedDisplayPolicy: "SINGLE_DISPLAY_REQUIRED",
       sebOptionalAvailable: false,
       sebRequiredAvailable: false,
+      ...NO_TETHER,
     });
     expect(unavailable.notice?.title).toBe(storedButUnavailable.notice?.title);
     expect(unavailable.notice?.message).not.toBe(storedButUnavailable.notice?.message);
   });
+
+  // -------------------------------------------------------------------------
+  // Lecturer availability fix — Tether Secure Browser is the first-party,
+  // generally-available client and must gate this control exactly like
+  // the SEB booleans always have. Before this fix, resolveDisplayRequirementUiState
+  // only ever looked at the SEB booleans, so the lecturer UI showed
+  // "Single-display enforcement unavailable" / "Safe Exam Browser is not
+  // enabled..." even with TETHER_CLIENT_REQUIRED_DISABLED=false.
+  // -------------------------------------------------------------------------
+
+  it("only Tether required available (both SEB modes off): Single display required is selectable, no notice — this is the exact bug report scenario", () => {
+    const result = resolveDisplayRequirementUiState({
+      storedDisplayPolicy: "UNRESTRICTED",
+      sebOptionalAvailable: false,
+      sebRequiredAvailable: false,
+      tetherClientRequiredAvailable: true,
+      tetherClientOptionalAvailable: false,
+    });
+    expect(result.kind).toBe("AVAILABLE");
+    expect(result.unrestrictedDisabled).toBe(false);
+    expect(result.singleDisplayRequiredDisabled).toBe(false);
+    expect(result.notice).toBeNull();
+  });
+
+  it("only Tether optional available: also treated as available", () => {
+    const result = resolveDisplayRequirementUiState({
+      storedDisplayPolicy: "UNRESTRICTED",
+      sebOptionalAvailable: false,
+      sebRequiredAvailable: false,
+      tetherClientRequiredAvailable: false,
+      tetherClientOptionalAvailable: true,
+    });
+    expect(result.kind).toBe("AVAILABLE");
+    expect(result.singleDisplayRequiredDisabled).toBe(false);
+  });
+
+  it("Tether required available + stored SINGLE_DISPLAY_REQUIRED: never locked, since Tether is actually enabled", () => {
+    const result = resolveDisplayRequirementUiState({
+      storedDisplayPolicy: "SINGLE_DISPLAY_REQUIRED",
+      sebOptionalAvailable: false,
+      sebRequiredAvailable: false,
+      tetherClientRequiredAvailable: true,
+      tetherClientOptionalAvailable: false,
+    });
+    expect(result.kind).toBe("AVAILABLE");
+    expect(result.singleDisplayRequiredDisabled).toBe(false);
+    expect(result.notice).toBeNull();
+  });
 });
 
 describe("resolveDeliveryModeForSingleDisplayRequired", () => {
-  it("SEB_REQUIRED available (with or without SEB_OPTIONAL): switches STANDARD_WEB to SEB_REQUIRED", () => {
+  it("SEB_REQUIRED available (with or without SEB_OPTIONAL, no Tether): switches STANDARD_WEB to SEB_REQUIRED", () => {
     const result = resolveDeliveryModeForSingleDisplayRequired({
       currentDeliveryMode: "STANDARD_WEB",
       sebOptionalAvailable: true,
       sebRequiredAvailable: true,
+      ...NO_TETHER,
     });
     expect(result).toEqual({ deliveryMode: "SEB_REQUIRED", changed: true });
   });
@@ -559,6 +619,7 @@ describe("resolveDeliveryModeForSingleDisplayRequired", () => {
       currentDeliveryMode: "STANDARD_WEB",
       sebOptionalAvailable: true,
       sebRequiredAvailable: false,
+      ...NO_TETHER,
     });
     expect(result).toEqual({ deliveryMode: "SEB_OPTIONAL", changed: true });
   });
@@ -568,37 +629,89 @@ describe("resolveDeliveryModeForSingleDisplayRequired", () => {
       currentDeliveryMode: "MONITORED_WEB",
       sebOptionalAvailable: false,
       sebRequiredAvailable: true,
+      ...NO_TETHER,
     });
     expect(result).toEqual({ deliveryMode: "SEB_REQUIRED", changed: true });
   });
 
   it("already on SEB_REQUIRED or SEB_OPTIONAL: no change reported", () => {
     expect(
-      resolveDeliveryModeForSingleDisplayRequired({ currentDeliveryMode: "SEB_REQUIRED", sebOptionalAvailable: true, sebRequiredAvailable: true }),
+      resolveDeliveryModeForSingleDisplayRequired({ currentDeliveryMode: "SEB_REQUIRED", sebOptionalAvailable: true, sebRequiredAvailable: true, ...NO_TETHER }),
     ).toEqual({ deliveryMode: "SEB_REQUIRED", changed: false });
     expect(
-      resolveDeliveryModeForSingleDisplayRequired({ currentDeliveryMode: "SEB_OPTIONAL", sebOptionalAvailable: true, sebRequiredAvailable: true }),
+      resolveDeliveryModeForSingleDisplayRequired({ currentDeliveryMode: "SEB_OPTIONAL", sebOptionalAvailable: true, sebRequiredAvailable: true, ...NO_TETHER }),
     ).toEqual({ deliveryMode: "SEB_OPTIONAL", changed: false });
   });
 
-  it("neither SEB mode available (defensive — UI disables the control before this can be reached): echoes the current mode back unchanged", () => {
+  it("nothing available (defensive — UI disables the control before this can be reached): echoes the current mode back unchanged", () => {
     const result = resolveDeliveryModeForSingleDisplayRequired({
       currentDeliveryMode: "STANDARD_WEB",
       sebOptionalAvailable: false,
       sebRequiredAvailable: false,
+      ...NO_TETHER,
     });
     expect(result).toEqual({ deliveryMode: "STANDARD_WEB", changed: false });
+  });
+
+  // -------------------------------------------------------------------------
+  // Lecturer availability fix — Tether Secure Browser is the primary
+  // Tether workflow, so it is preferred over SEB when auto-switching.
+  // -------------------------------------------------------------------------
+
+  it("Tether required available (even alongside SEB): prefers TETHER_CLIENT_REQUIRED — Tether is the primary workflow, not SEB", () => {
+    const result = resolveDeliveryModeForSingleDisplayRequired({
+      currentDeliveryMode: "STANDARD_WEB",
+      sebOptionalAvailable: true,
+      sebRequiredAvailable: true,
+      tetherClientRequiredAvailable: true,
+      tetherClientOptionalAvailable: true,
+    });
+    expect(result).toEqual({ deliveryMode: "TETHER_CLIENT_REQUIRED", changed: true });
+  });
+
+  it("only Tether optional available (no SEB, no Tether required): switches to TETHER_CLIENT_OPTIONAL", () => {
+    const result = resolveDeliveryModeForSingleDisplayRequired({
+      currentDeliveryMode: "MONITORED_WEB",
+      sebOptionalAvailable: false,
+      sebRequiredAvailable: false,
+      tetherClientRequiredAvailable: false,
+      tetherClientOptionalAvailable: true,
+    });
+    expect(result).toEqual({ deliveryMode: "TETHER_CLIENT_OPTIONAL", changed: true });
+  });
+
+  it("already on TETHER_CLIENT_REQUIRED: no change reported", () => {
+    const result = resolveDeliveryModeForSingleDisplayRequired({
+      currentDeliveryMode: "TETHER_CLIENT_REQUIRED",
+      sebOptionalAvailable: true,
+      sebRequiredAvailable: true,
+      tetherClientRequiredAvailable: true,
+      tetherClientOptionalAvailable: true,
+    });
+    expect(result).toEqual({ deliveryMode: "TETHER_CLIENT_REQUIRED", changed: false });
+  });
+
+  it("SEB_REQUIRED preferred over Tether optional when Tether required is unavailable", () => {
+    const result = resolveDeliveryModeForSingleDisplayRequired({
+      currentDeliveryMode: "STANDARD_WEB",
+      sebOptionalAvailable: false,
+      sebRequiredAvailable: true,
+      tetherClientRequiredAvailable: false,
+      tetherClientOptionalAvailable: true,
+    });
+    expect(result).toEqual({ deliveryMode: "SEB_REQUIRED", changed: true });
   });
 });
 
 describe("isDisplayPolicySaveBlocked", () => {
-  it("SEB unavailable: blocks saving SINGLE_DISPLAY_REQUIRED even with a nominally-valid delivery mode", () => {
+  it("nothing available (SEB nor Tether): blocks saving SINGLE_DISPLAY_REQUIRED even with a nominally-valid delivery mode", () => {
     expect(
       isDisplayPolicySaveBlocked({
         deliveryMode: "SEB_REQUIRED",
         displayPolicy: "SINGLE_DISPLAY_REQUIRED",
         sebOptionalAvailable: false,
         sebRequiredAvailable: false,
+        ...NO_TETHER,
       }),
     ).toBe(true);
   });
@@ -610,6 +723,7 @@ describe("isDisplayPolicySaveBlocked", () => {
         displayPolicy: "SINGLE_DISPLAY_REQUIRED",
         sebOptionalAvailable: false,
         sebRequiredAvailable: true,
+        ...NO_TETHER,
       }),
     ).toBe(false);
   });
@@ -621,32 +735,36 @@ describe("isDisplayPolicySaveBlocked", () => {
         displayPolicy: "SINGLE_DISPLAY_REQUIRED",
         sebOptionalAvailable: true,
         sebRequiredAvailable: false,
+        ...NO_TETHER,
       }),
     ).toBe(false);
   });
 
-  it("Standard web cannot save Single display required even through manipulated client state (SEB fully available)", () => {
+  it("Standard web cannot save Single display required even through manipulated client state (SEB and Tether fully available)", () => {
     // Simulates a manipulated/bypassed disabled-radio state: deliveryMode
-    // is STANDARD_WEB even though SEB is available and normally the UI
-    // would have auto-switched it — the combination itself is what's
-    // invalid, independent of availability.
+    // is STANDARD_WEB even though SEB/Tether are available and normally
+    // the UI would have auto-switched it — the combination itself is
+    // what's invalid, independent of availability.
     expect(
       isDisplayPolicySaveBlocked({
         deliveryMode: "STANDARD_WEB",
         displayPolicy: "SINGLE_DISPLAY_REQUIRED",
         sebOptionalAvailable: true,
         sebRequiredAvailable: true,
+        tetherClientRequiredAvailable: true,
+        tetherClientOptionalAvailable: true,
       }),
     ).toBe(true);
   });
 
-  it("Standard web with SEB unavailable is also blocked (both the combination rule and the availability rule agree)", () => {
+  it("Standard web with nothing available is also blocked (both the combination rule and the availability rule agree)", () => {
     expect(
       isDisplayPolicySaveBlocked({
         deliveryMode: "STANDARD_WEB",
         displayPolicy: "SINGLE_DISPLAY_REQUIRED",
         sebOptionalAvailable: false,
         sebRequiredAvailable: false,
+        ...NO_TETHER,
       }),
     ).toBe(true);
   });
@@ -658,6 +776,7 @@ describe("isDisplayPolicySaveBlocked", () => {
         displayPolicy: "UNRESTRICTED",
         sebOptionalAvailable: false,
         sebRequiredAvailable: false,
+        ...NO_TETHER,
       }),
     ).toBe(false);
   });
@@ -665,12 +784,66 @@ describe("isDisplayPolicySaveBlocked", () => {
   it("stored Single display required is not silently removed when availability changes: the underlying displayPolicy value is untouched by this check", () => {
     // isDisplayPolicySaveBlocked only reports whether a save attempt
     // should be rejected — it never mutates or clears displayPolicy
-    // itself, so a caller that reads it back after SEB becomes
-    // unavailable still sees SINGLE_DISPLAY_REQUIRED, never a silently
-    // downgraded UNRESTRICTED.
+    // itself, so a caller that reads it back after availability changes
+    // still sees SINGLE_DISPLAY_REQUIRED, never a silently downgraded
+    // UNRESTRICTED.
     const draft = { deliveryMode: "SEB_REQUIRED" as const, displayPolicy: "SINGLE_DISPLAY_REQUIRED" as const };
-    const blocked = isDisplayPolicySaveBlocked({ ...draft, sebOptionalAvailable: false, sebRequiredAvailable: false });
+    const blocked = isDisplayPolicySaveBlocked({ ...draft, sebOptionalAvailable: false, sebRequiredAvailable: false, ...NO_TETHER });
     expect(blocked).toBe(true);
     expect(draft.displayPolicy).toBe("SINGLE_DISPLAY_REQUIRED");
+  });
+
+  // -------------------------------------------------------------------------
+  // Lecturer availability fix — Task 6: "Tether required is enabled ...
+  // single display becomes selectable for Tether required."
+  // -------------------------------------------------------------------------
+
+  it("Tether required available: does not block saving TETHER_CLIENT_REQUIRED + SINGLE_DISPLAY_REQUIRED", () => {
+    expect(
+      isDisplayPolicySaveBlocked({
+        deliveryMode: "TETHER_CLIENT_REQUIRED",
+        displayPolicy: "SINGLE_DISPLAY_REQUIRED",
+        sebOptionalAvailable: false,
+        sebRequiredAvailable: false,
+        tetherClientRequiredAvailable: true,
+        tetherClientOptionalAvailable: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("Tether required UNAVAILABLE (kill switch true): blocks saving TETHER_CLIENT_REQUIRED + SINGLE_DISPLAY_REQUIRED", () => {
+    expect(
+      isDisplayPolicySaveBlocked({
+        deliveryMode: "TETHER_CLIENT_REQUIRED",
+        displayPolicy: "SINGLE_DISPLAY_REQUIRED",
+        sebOptionalAvailable: false,
+        sebRequiredAvailable: false,
+        tetherClientRequiredAvailable: false,
+        tetherClientOptionalAvailable: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("Standard web still cannot claim reliable single-display enforcement even with Tether fully available (Task 3: Standard/Monitored web must stay unable)", () => {
+    expect(
+      isDisplayPolicySaveBlocked({
+        deliveryMode: "STANDARD_WEB",
+        displayPolicy: "SINGLE_DISPLAY_REQUIRED",
+        sebOptionalAvailable: false,
+        sebRequiredAvailable: false,
+        tetherClientRequiredAvailable: true,
+        tetherClientOptionalAvailable: true,
+      }),
+    ).toBe(true);
+    expect(
+      isDisplayPolicySaveBlocked({
+        deliveryMode: "MONITORED_WEB",
+        displayPolicy: "SINGLE_DISPLAY_REQUIRED",
+        sebOptionalAvailable: false,
+        sebRequiredAvailable: false,
+        tetherClientRequiredAvailable: true,
+        tetherClientOptionalAvailable: true,
+      }),
+    ).toBe(true);
   });
 });
