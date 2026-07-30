@@ -125,6 +125,11 @@ export async function GET(
       durationMins: exam.durationMins,
       accessCodeRequired: exam.accessCodeRequired,
       course: exam.course,
+      // Mandatory Tether Delivery for Final Examinations — lets the
+      // tether-launch page show the exact required student-facing copy
+      // ("This final examination must be opened in Tether Secure
+      // Browser.") instead of the generic Tether-required wording.
+      assessmentType: settings.assessmentType,
     },
     existingSubmission,
     examPolicySummary,

@@ -65,6 +65,9 @@ type AccessCheckResult =
         durationMins: number;
         accessCodeRequired: boolean;
         course: { id: string; name: string; code: string } | null;
+        // Mandatory Tether Delivery for Final Examinations — see
+        // src/lib/assessmentType.ts.
+        assessmentType?: "PRACTICE_OR_FORMATIVE" | "QUIZ_OR_TEST" | "MID_SEMESTER_EXAMINATION" | "FINAL_EXAMINATION";
       };
       existingSubmission: { id: string; status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" } | null;
       examPolicySummary: ExamPolicySummary;
@@ -106,6 +109,23 @@ export default function TetherLaunchPage({ params }: { params: Promise<{ id: str
 function OutsideTetherPrompt({ examId }: { examId: string }) {
   const [attemptedAt, setAttemptedAt] = useState<number | null>(null);
   const [now, setNow] = useState<number>(() => Date.now());
+  // Mandatory Tether Delivery for Final Examinations — Part 7: "Use
+  // simple student-facing copy: 'This final examination must be opened
+  // in Tether Secure Browser.'" A read-only, side-effect-free lookup
+  // purely for wording — never gates anything here (the actual
+  // enforcement is entirely server-side; see secureClientStartGate.ts).
+  const [isFinalExamination, setIsFinalExamination] = useState(false);
+
+  useEffect(() => {
+    fetch(`/api/exams/${examId}/access-check`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: AccessCheckResult | null) => {
+        if (data?.ok) {
+          setIsFinalExamination(data.exam.assessmentType === "FINAL_EXAMINATION");
+        }
+      })
+      .catch(() => {});
+  }, [examId]);
 
   useEffect(() => {
     if (attemptedAt == null) return;
@@ -126,8 +146,9 @@ function OutsideTetherPrompt({ examId }: { examId: string }) {
     <div className="mx-auto mt-16 max-w-md rounded border border-gray-200 p-6">
       <h1 className="text-lg font-medium">Tether Secure Browser required</h1>
       <p className="mt-3 text-sm text-gray-700">
-        This exam must be taken in Tether Secure Browser, our first-party secure exam client. It does not use Safe
-        Exam Browser, and no Browser Exam Key or Config Key is needed.
+        {isFinalExamination
+          ? "This final examination must be opened in Tether Secure Browser."
+          : "This exam must be taken in Tether Secure Browser, our first-party secure exam client. It does not use Safe Exam Browser, and no Browser Exam Key or Config Key is needed."}
       </p>
       <button onClick={attemptLaunch} className="mt-4 w-full rounded bg-black px-4 py-2 text-sm text-white">
         Open Tether Secure Browser

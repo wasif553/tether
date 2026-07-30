@@ -23,6 +23,7 @@ import { buildSecureClientPolicySnapshot, resolveEffectiveDeliveryMode, type Del
 import { secureClientAvailabilityForInstitution, isTetherSecureClientBypassAllowed } from "@/lib/secureClientAvailability";
 import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
 import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
+import { isFinalExaminationPolicyEstablished } from "@/lib/assessmentType";
 
 // Tether launch/install flow v1 — Requirement 9 ("Production start
 // protection"). Additive response field: `{required: false}` for every
@@ -342,6 +343,30 @@ export async function POST(
   // Same immutable-snapshot pattern as the snapshots above — reuses
   // secureClientAvailabilityForExam computed up front.
   const effectiveDeliveryMode = resolveEffectiveDeliveryMode(settings.deliveryMode, secureClientAvailabilityForExam);
+
+  // Mandatory Tether Delivery for Final Examinations — the last-resort
+  // server-side gate (Part 5: "reject... if the final invariant still
+  // cannot be established"). A final exam's settings are always
+  // normalised to TETHER_CLIENT_REQUIRED on save (see PATCH
+  // /api/exams/[id]), so this should never trigger in the ordinary case
+  // — it exists to catch a legacy exam that predates this feature, or
+  // the TETHER_CLIENT_REQUIRED_DISABLED emergency kill switch being
+  // thrown after publish. Never a query-parameter or user-agent bypass —
+  // this reuses the same server-computed effectiveDeliveryMode as every
+  // other gate in this route. Only ever applies to a BRAND NEW attempt;
+  // an existing IN_PROGRESS submission (handled above) always resumes
+  // through its own already-frozen, independently-safe policy snapshot,
+  // never re-evaluated against live settings.
+  if (!isFinalExaminationPolicyEstablished(settings.assessmentType, effectiveDeliveryMode)) {
+    return NextResponse.json(
+      {
+        error: "This final examination requires Tether Secure Browser, which is not currently available. Contact your lecturer or institution administrator.",
+        code: "FINAL_EXAMINATION_TETHER_UNAVAILABLE",
+      },
+      { status: 409 },
+    );
+  }
+
   if (effectiveDeliveryMode === "SEB_REQUIRED") {
     const activeSebConfig = await prisma.secureClientConfiguration.findFirst({
       where: { examId: id, provider: "SAFE_EXAM_BROWSER", status: "ACTIVE" },

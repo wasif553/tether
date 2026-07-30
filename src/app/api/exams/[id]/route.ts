@@ -5,7 +5,8 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { parseSecureSettings, secureSettingsInputSchema } from "@/lib/secureExam";
 import { secureClientAvailabilityForInstitution } from "@/lib/secureClientAvailability";
-import { isDisplayPolicyCombinationValid } from "@/lib/secureClientPolicy";
+import { isDisplayPolicyCombinationValid, resolveEffectiveDeliveryMode } from "@/lib/secureClientPolicy";
+import { applyMandatoryFinalExaminationPolicy, isFinalExaminationPolicyEstablished } from "@/lib/assessmentType";
 import type { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 import { assertCanAssignExamToCourse, assertStudentsInCourse, CourseAssignmentError } from "@/lib/courseAssignment";
@@ -52,6 +53,11 @@ function omitAccessCodeHash<T extends { accessCodeHash?: string | null }>(
 async function getOwnedExam(examId: string, lecturerId: string, session: Parameters<typeof institutionWhere>[0]) {
   return prisma.exam.findFirst({
     where: { id: examId, createdById: lecturerId, ...institutionWhere(session) },
+    // Mandatory Tether Delivery for Final Examinations — the publish gate
+    // below needs the exam's own institution slug to resolve real
+    // secure-client availability, exactly like the student start route
+    // already does.
+    include: { institution: { select: { slug: true } } },
   });
 }
 
@@ -161,17 +167,32 @@ export async function PATCH(
       ...rest
     } = parsed.data;
 
-    const mergedSecureSettings = secureSettings
+    const rawMergedSecureSettings = secureSettings
       ? parseSecureSettings({ ...parseSecureSettings(exam.secureSettings), ...secureSettings })
+      : undefined;
+
+    // Mandatory Tether Delivery for Final Examinations — "automatically
+    // normalise during draft save" (the recommended approach): whenever
+    // the effective assessmentType is FINAL_EXAMINATION, the delivery/
+    // display fields are force-set to the mandatory policy regardless of
+    // what the lecturer's draft said — a lecturer can never save a final
+    // examination as Standard Web (or any other non-Tether mode) no
+    // matter what the request body contains. A complete no-op for every
+    // other assessment type, so existing delivery-mode choices for
+    // quizzes/practice tests/mid-semester exams are always preserved.
+    const mergedSecureSettings = rawMergedSecureSettings
+      ? applyMandatoryFinalExaminationPolicy(rawMergedSecureSettings.assessmentType, rawMergedSecureSettings)
       : undefined;
 
     // Single Display Requirement v1 — server-side authoritative check
     // (never just the lecturer UI's own client-side guard). Validated
-    // against the MERGED settings (not the raw PATCH body alone) so a
-    // request that only updates displayPolicy, leaving a
+    // against the MERGED (and now normalised) settings, not the raw PATCH
+    // body alone, so a request that only updates displayPolicy, leaving a
     // previously-saved STANDARD_WEB deliveryMode untouched, is still
     // caught — see isDisplayPolicyCombinationValid in
-    // src/lib/secureClientPolicy.ts.
+    // src/lib/secureClientPolicy.ts. Normalisation above already makes
+    // this always pass for a final examination; this remains the
+    // authoritative check for every other assessment type.
     if (mergedSecureSettings && !isDisplayPolicyCombinationValid(mergedSecureSettings.deliveryMode, mergedSecureSettings.displayPolicy)) {
       return NextResponse.json(
         {
@@ -180,6 +201,37 @@ export async function PATCH(
         },
         { status: 400 },
       );
+    }
+
+    // Mandatory Tether Delivery for Final Examinations — "reject
+    // publication only if the final invariant still cannot be
+    // established" (the recommended approach's other half). Normalisation
+    // above already guarantees the STORED policy is nominally correct for
+    // a final examination; this checks the AVAILABILITY-RESOLVED
+    // effective delivery mode, so publishing is refused if Tether Secure
+    // Browser has genuinely become unavailable (e.g. the
+    // TETHER_CLIENT_REQUIRED_DISABLED emergency kill switch) even though
+    // the stored settings still nominally say TETHER_CLIENT_REQUIRED —
+    // never a silent downgrade to an ordinary-browser final exam. Reads
+    // the settings this update would actually leave in place, whether or
+    // not secureSettings was part of THIS request (a request that only
+    // flips published:true, leaving a previously-classified final exam's
+    // settings untouched, is still gated here).
+    const effectivePublished = rest.published !== undefined ? rest.published : exam.published;
+    if (effectivePublished) {
+      const effectiveSettingsForGate = mergedSecureSettings ?? parseSecureSettings(exam.secureSettings);
+      const availabilityForGate = secureClientAvailabilityForInstitution(exam.institution?.slug ?? null);
+      const effectiveDeliveryModeForGate = resolveEffectiveDeliveryMode(effectiveSettingsForGate.deliveryMode, availabilityForGate);
+      if (!isFinalExaminationPolicyEstablished(effectiveSettingsForGate.assessmentType, effectiveDeliveryModeForGate)) {
+        return NextResponse.json(
+          {
+            error:
+              "This exam is classified as a final examination and requires Tether Secure Browser, which is not currently available. Contact your institution administrator, or change the assessment type before publishing.",
+            code: "FINAL_EXAMINATION_TETHER_UNAVAILABLE",
+          },
+          { status: 400 },
+        );
+      }
     }
 
     // accessCode: undefined leaves it untouched, null clears it, a string

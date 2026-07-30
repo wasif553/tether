@@ -19,6 +19,14 @@ type SessionDetail = {
   recoveredAt: string | null;
   endedAt: string | null;
   endReason: string | null;
+  // Mandatory Tether Delivery for Final Examinations — Part 9 reporting.
+  // assessmentType is the exam's current classification; the rest is the
+  // FROZEN per-attempt policy actually enforced for this session.
+  assessmentType: string;
+  deliveryMode: string;
+  displayPolicy: string;
+  policyVersion: string;
+  policySchemaVersion: number;
 };
 
 type Attestation = { id: string; overallStatus: string; serverReceivedAt: string; [key: string]: unknown };
@@ -136,6 +144,28 @@ export default function SecureClientSessionDetailPage({ params }: { params: Prom
         <div>
           <p className="text-xs text-gray-500">Verification</p>
           <p className="font-medium">{detail.verificationStatus}</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500">Client version</p>
+          <p className="font-medium">{detail.clientVersion ?? "Unknown"}</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500">Assessment type</p>
+          <p className="font-medium">{detail.assessmentType.replaceAll("_", " ").toLowerCase()}</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500">Required delivery mode</p>
+          <p className="font-medium">{detail.deliveryMode.replaceAll("_", " ").toLowerCase()}</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500">Display policy</p>
+          <p className="font-medium">{detail.displayPolicy.replaceAll("_", " ").toLowerCase()}</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500">Policy snapshot version</p>
+          <p className="font-medium">
+            {detail.policyVersion} (schema {detail.policySchemaVersion})
+          </p>
         </div>
       </div>
 
