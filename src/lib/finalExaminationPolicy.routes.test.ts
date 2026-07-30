@@ -8,6 +8,16 @@
  * onDeviceAiIntegrity.routes.test.ts. Pure decision-logic tests for
  * assessmentType.ts itself live in assessmentType.test.ts, with no DB
  * dependency at all.
+ *
+ * SAFE EXECUTION ONLY: run this file exclusively via
+ * `npm run release:validate` (a disposable, local-only PostgreSQL
+ * container) — never a direct `npx vitest run` against this
+ * repository's committed DATABASE_URL, which points at the shared
+ * Preview/Production Supabase project. This is now enforced, not just
+ * documented: src/lib/prisma.ts's test-time safety guard throws before
+ * any query can run if DATABASE_URL doesn't resolve to a disposable
+ * loopback database. See docs/tether-system-check-v1.md, "Safe
+ * DB-backed test execution", and src/lib/prismaDbSafetyGuard.test.ts.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import bcrypt from "bcryptjs";

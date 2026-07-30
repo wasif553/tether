@@ -30,12 +30,16 @@ feature. Every result is one of `PASS` / `WARNING` / `BLOCKED` /
 
 ### Persistence
 
-One additive Prisma model, `TetherSystemCheckRun` (see
-`prisma/schema.prisma`) — one row per completed check run, keyed by
-`userId` (not per-exam: a student's readiness is about their computer,
-not any one exam). `resultsJson` stores only the bounded
-`{status, reasonCode}` pair per check id. See "Privacy" below for what is
-explicitly never stored.
+Two additive Prisma models (see `prisma/schema.prisma`):
+
+- **`TetherSystemCheckRun`** — one row per completed check run, keyed by
+  `userId` (not per-exam: a student's readiness is about their computer,
+  not any one exam). `resultsJson` stores only the bounded
+  `{status, reasonCode}` pair per check id. See "Privacy" below for what
+  is explicitly never stored.
+- **`SystemCheckSecureClientVerification`** (corrective pass) — one row
+  per successful SYSTEM_CHECK challenge/verify round trip. See "System-
+  check secure-client verification" below.
 
 ### API routes (`src/app/api/tether/system-check/`)
 
@@ -57,25 +61,81 @@ explicitly never stored.
 - `GET ping` — a dedicated, unauthenticated, trivial round-trip target
   for the network-connectivity check, alongside the existing
   `/api/auth/session`, `/api/version`, and `/api/readiness` endpoints.
+- `POST secure-client/challenge`, `POST secure-client/verify` —
+  corrective pass, see below.
 
-### Why the secure-client check is usually `NOT_CHECKED` on a first run
+### System-check secure-client verification (corrective pass)
 
-Check B ("secure client") can only ever be a genuine `PASS` when the
-POST body includes a `secureClientSessionId` that the server can verify
-is (a) owned by the requesting student and (b) currently
+**Root cause of the original limitation.** Check B ("secure client")
+could originally only ever be a genuine `PASS` when the POST body
+included a `secureClientSessionId` that the server could verify was (a)
+owned by the requesting student and (b) currently
 `verificationStatus: "VERIFIED"`. A verified `SecureClientSession` only
 ever exists in the context of a real exam attempt (the signed
 launch-manifest + attestation flow — see
 `docs/secure-client-foundation-seb-v1.md`), and the system check is
 explicitly forbidden from creating a submission or starting an exam
-itself. This means a student's **first-ever** standalone check (run from
-the dashboard, before ever having taken a Tether-delivered exam) will
-show "secure client: not checked" until they have gone through a real
-Tether launch at least once. This is a deliberate, documented tradeoff —
-see "Known limitations" below — not a bug: it is exactly what makes
-`ordinary Chrome/Edge must never produce a fully ready result` true even
-under a crafted raw HTTP request, since nothing server-side can be
-fabricated into a genuine verified session.
+itself. This meant a student's **first-ever** standalone check showed
+"secure client: not checked" until they had gone through a real Tether
+exam launch at least once — defeating the actual point of a pre-exam
+readiness check.
+
+**The fix** is a second, purpose-scoped verification path that reuses
+the exact same signing/nonce/replay-protection primitives as the real
+exam-launch manifest flow, but is structurally incapable of touching
+exam content:
+
+1. `POST /api/tether/system-check/secure-client/challenge` — the
+   authenticated student requests a short-lived (120s), signed
+   `SystemCheckChallenge` (`src/lib/secureClient/systemCheckChallenge.ts`).
+   `purpose` is always `"SYSTEM_CHECK"`, bound to `userSubjectHash`
+   (a hash of the student's id, never the raw id/email), an `audience`
+   string, `issuedAt`/`notBefore`/`expiresAt`, and a single-use `nonce`.
+   Signed with the SAME Ed25519 private key as the real exam-launch
+   manifest (`getSigningPrivateKey()` in `secureClientRunner.ts`) — no
+   second signing key is introduced. **No database write happens here**
+   — the challenge is a stateless, self-contained signed artifact, like
+   the payload of a signed JWT.
+2. Tether Secure Browser's renderer gathers real native facts via the
+   existing `window.sesLockdown` bridge (`getClientVersion()`,
+   `getOperatingSystemInfo()`) and echoes the challenge, its signature,
+   and those facts to `POST .../secure-client/verify`.
+3. The server **independently re-verifies everything** —
+   `validateChallengeContext` re-checks the Ed25519 signature, `purpose
+   === "SYSTEM_CHECK"`, `userSubjectHash` against the *currently
+   authenticated* session (not whatever the request claims), and
+   expiry/not-before/audience. It never reads or trusts a
+   renderer-supplied `verified` boolean — there is no such field in the
+   request body at all. Only once every check passes does it insert one
+   `SystemCheckSecureClientVerification` row; a second verify attempt
+   with the same nonce fails the `nonceHash` **unique constraint**
+   outright (replay protection, identical in spirit to
+   `consumeLaunchManifest`'s replay handling for the real exam flow).
+4. The returned `verificationId` is passed to `POST .../runs` as
+   `systemCheckVerificationId`. That route re-verifies ownership
+   (`userId` match), `purpose`, `verificationStatus === "VERIFIED"`, and
+   that the verification itself hasn't expired, before letting the
+   `secureClient` check report `PASS` — mirroring exactly how
+   `secureClientSessionId` was already handled for the exam-context
+   case, just against a different table.
+
+**Why this is a separate table, not a nullable `submissionId` on
+`SecureClientSession`.** Nothing in the exam start/launch/attestation
+code path (`secureClientRunner.ts`, `secureClientStartGate.ts`,
+`POST /api/exams/[id]/start`, `GET /api/submissions/[id]`) ever reads
+`SystemCheckSecureClientVerification` — there is no code path by which
+a SYSTEM_CHECK verification could be mistaken for, or accepted as, exam
+launch authorization. This is a **structural** guarantee (the two
+tables are simply unrelated), not a runtime check that could regress.
+See `src/lib/tetherSystemCheck.routes.test.ts`, describe block "SYSTEM_CHECK
+verification never authorises exam content", for the automated proof:
+a verified SYSTEM_CHECK record for a student does not change the
+behaviour of `POST /api/exams/[id]/start` or `GET /api/submissions/[id]`
+one bit — the real exam still requires its own genuine, submission-bound
+`SecureClientSession`.
+
+A first-time student can now reach overall `READY` on their very first
+standalone check, with zero prior exam activity.
 
 ### Ordinary browser vs Tether Secure Browser
 
@@ -129,6 +189,74 @@ never be locked out by a since-expired check).
 Non-final assessments (practice, quiz/test, mid-semester) are never
 affected by this gate, in any mode.
 
+## Chrome / ordinary-browser behaviour (corrective pass)
+
+The aggregation function (`computeOverallStatus`) was already correct —
+see the explicit invariant tests added in `readiness.test.ts`, describe
+block "corrective pass — aggregation invariants": a required `BLOCKED`
+or `NOT_CHECKED` check always forces `NOT_READY`, `READY_WITH_WARNINGS`
+requires every required check to be `PASS`/`WARNING` (never `BLOCKED`/
+`NOT_CHECKED`) with at least one genuinely warning, and an ordinary
+browser — where all four Tether-only checks are guaranteed `NOT_CHECKED`
+— can never reach `READY` or `READY_WITH_WARNINGS`.
+
+What the corrective pass changed is the **presentation**. Completing a
+run in an ordinary browser with every web-safe check `PASS`/`WARNING`
+(never an actual `BLOCKED` result among them) now shows:
+
+> **Web checks completed**
+> Open Tether Secure Browser to complete the required computer checks.
+
+instead of the generic "This computer is not ready yet" headline — the
+summary card stays neutral (gray border, no red), since Chrome being
+unable to run native checks is expected and not a device failure. If a
+web-safe check genuinely fails (e.g. camera permission denied), the
+generic `NOT_READY` headline is shown instead, since that IS a real
+finding worth flagging plainly. See
+`isIncompleteOnlyDueToMissingNativeChecks` in
+`src/app/student/system-check/page.tsx`. The underlying `overallStatus`
+is `NOT_READY` in both cases — only the headline text differs.
+
+## Safe DB-backed test execution (corrective pass)
+
+**Root cause found:** `.env`/`.env.local`'s `DATABASE_URL` is the real
+shared Preview/Production Supabase project (confirmed against
+`scripts/releaseValidation/dbSafetyGuard.ts`'s own reject-list). A
+direct `npx vitest run <file>` on any DB-backed test file — not just
+this feature's — therefore connected to, and wrote test rows into, the
+shared database. This was caught and all test rows were cleaned up (see
+the session history); it is now fixed at the root, not just papered
+over for one file.
+
+**The fix:** `src/lib/prisma.ts` — the one module every route AND every
+DB-backed test transitively gets its Prisma client from — now refuses
+to construct a client at all when `process.env.VITEST === "true"` (set
+automatically by Vitest in every test process, never outside one) and
+`DATABASE_URL` doesn't resolve to a disposable loopback database. It
+reuses `assertDisposableDatabaseUrl` from
+`scripts/releaseValidation/dbSafetyGuard.ts` directly — the exact same
+allow/deny list `npm run release:validate` already uses for its own
+disposable-container check — rather than maintaining a second,
+inconsistent copy of the Supabase project-ref/pooler-hostname markers.
+See `src/lib/prismaDbSafetyGuard.test.ts` for the automated proof (an
+unsafe `DATABASE_URL` throws before any query; a disposable localhost
+one does not; the guard never runs outside a Vitest process).
+
+**Why direct DB-backed `vitest run` commands are prohibited:** there is
+no way to distinguish "a developer intentionally pointed DATABASE_URL at
+a real disposable database they started themselves" from "a developer
+ran the test file with whatever `.env` already has configured" without
+inspecting the URL itself — and this repository's own `.env`/`.env.local`
+happen to hold the real shared credential. The guard therefore treats
+*any* non-loopback `DATABASE_URL` as unsafe under `VITEST=true`,
+including this repository's own committed values. **Always use `npm run
+release:validate`** (provisions and tears down a disposable Docker
+Postgres container automatically) for any test file that touches the
+database — `src/lib/finalExaminationPolicy.routes.test.ts`,
+`src/lib/tetherSystemCheck.routes.test.ts`, and every other
+`*.routes.test.ts`/DB-backed file in `src/lib/` are all protected by
+this same guard now, uniformly, with no per-file configuration needed.
+
 ## Environment variables
 
 | Variable | Default | Notes |
@@ -147,7 +275,12 @@ database (see `docs/migration-ledger.md`) — schema changes are never
 applied via `prisma db push`/`migrate`, only via a hand-written additive
 SQL file applied manually through the Supabase SQL Editor.
 
-**File:** `docs/sql/add-tether-system-check-readiness.sql`
+**Files:**
+- `docs/sql/add-tether-system-check-readiness.sql` (`TetherSystemCheckRun`)
+- `docs/sql/add-system-check-secure-client-verification.sql`
+  (`SystemCheckSecureClientVerification` — corrective pass)
+
+Apply both the same way, independently (neither depends on the other):
 
 1. Open the Supabase SQL Editor for the shared Preview/Production
    database.
@@ -155,16 +288,16 @@ SQL file applied manually through the Supabase SQL Editor.
    expect `NULL` (the table does not exist yet).
 3. Run the file's `BEGIN; ... COMMIT;` block.
 4. Run every post-application verification query at the bottom of the
-   file — expect the table, all three indexes, and the foreign key to
-   exist, with a row count of `0`.
+   file — expect the table, its indexes, and the foreign key to exist,
+   with a row count of `0`.
 5. Confirm existing tables are untouched by re-running the `Submission`
-   / `SecureClientSession` / `IntegrityEvent` row-count queries included
-   at the bottom of the file and comparing against a count taken before
-   step 3.
-6. Add one line to `docs/migration-ledger.md`'s "Confirmed applied" list
-   once done.
+   / `SecureClientSession` / `SecureClientLaunchManifest` /
+   `IntegrityEvent` row-count queries included at the bottom of each
+   file and comparing against a count taken before step 3.
+6. Add one line per file to `docs/migration-ledger.md`'s "Confirmed
+   applied" list once done.
 
-This file was **not** applied by the assistant that generated it — apply
+Neither file was applied by the assistant that generated it — apply
 manually after review, per this project's standing safety rule.
 
 ## Release and rollback
@@ -202,9 +335,18 @@ Tether-Secure-Browser code paths.
 
 ## Known limitations
 
-- **First-run secure-client check**: see "Why the secure-client check is
-  usually `NOT_CHECKED` on a first run" above — this is deliberate, not
-  a defect.
+- **The SYSTEM_CHECK challenge/verify flow proves the challenge is
+  genuine, current, single-use, and bound to the authenticated
+  student** — it does not, and cannot, cryptographically prove the
+  renderer process is genuinely Electron rather than a sufficiently
+  determined user manually faking `window.sesLockdown` in DevTools. This
+  is the same limitation already documented for `lockdownDetection.ts`'s
+  UA-based detection throughout this codebase, and is acceptable here
+  for the same reason: this whole feature is explicitly advisory (see
+  "Enforcement modes") and structurally cannot authorise exam content
+  (see "System-check secure-client verification" above) — the real
+  security boundary is, and remains, the unmodified signed launch-
+  manifest + attestation flow at actual exam start.
 - **Operating-system self-report in an ordinary browser** is inferred
   from `navigator.userAgentData`/`navigator.platform`/`navigator.userAgent`,
   which a sufficiently motivated user could spoof via browser DevTools.

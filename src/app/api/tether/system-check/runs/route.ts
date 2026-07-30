@@ -22,6 +22,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
 import { systemCheckValidityHours, minimumSupportedTetherVersion } from "@/lib/systemCheckConfig";
+import { loadOwnedSystemCheckVerification } from "@/lib/systemCheck/systemCheckSecureClientRunner";
 import {
   CHECK_RESULT_STATES,
   isValidSystemCheckId,
@@ -58,6 +59,11 @@ const bodySchema = z.object({
   operatingSystem: z.string().max(40).nullable().optional(),
   operatingSystemVersion: z.string().max(60).nullable().optional(),
   secureClientSessionId: z.string().max(100).nullable().optional(),
+  // Corrective pass — see systemCheckSecureClientRunner.ts. A first-time
+  // student (no exam-bound SecureClientSession yet) authenticates via
+  // this instead — the id of a SystemCheckSecureClientVerification row
+  // already created by POST .../secure-client/verify.
+  systemCheckVerificationId: z.string().max(100).nullable().optional(),
   clientTimeMs: z.number().finite(),
   displayTopologyClassification: z.string().max(40).nullable().optional(),
   bridgeCapabilities: bridgeCapabilitiesSchema.nullable().optional(),
@@ -102,26 +108,44 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Please wait a moment before running the check again." }, { status: 429 });
   }
 
-  // Secure-client session ownership (Part: "reject fabricated
+  // Secure-client verification ownership (Part: "reject fabricated
   // secure-client session IDs" / "reject another student's secure-client
   // session"). Never trusted from the body alone — always re-verified
   // against the database, scoped to the authenticated student.
+  //
+  // Corrective pass — two independent sources can establish this,
+  // checked in this order:
+  //  1. systemCheckVerificationId — a SYSTEM_CHECK-scoped, signed-
+  //     challenge verification (see systemCheckSecureClientRunner.ts),
+  //     the path a first-time student uses from the standalone check
+  //     page, never tied to any exam/submission.
+  //  2. secureClientSessionId — a real exam-bound SecureClientSession,
+  //     reused when the student already has one (e.g. re-running the
+  //     check from inside an active exam-launch context).
   let secureClientResult: CheckResult;
-  if (body.secureClientSessionId) {
+  if (body.systemCheckVerificationId) {
+    const owned = await loadOwnedSystemCheckVerification(body.systemCheckVerificationId, session.user.id);
+    if (!owned) {
+      return NextResponse.json({ error: "System-check verification not found." }, { status: 404 });
+    }
+    if (owned.purpose !== "SYSTEM_CHECK") {
+      secureClientResult = { status: "BLOCKED", reasonCode: "WRONG_PURPOSE" };
+    } else if (owned.expiresAt.getTime() <= Date.now()) {
+      secureClientResult = { status: "BLOCKED", reasonCode: "VERIFICATION_EXPIRED" };
+    } else {
+      secureClientResult = owned.verificationStatus === "VERIFIED" ? { status: "PASS", reasonCode: "SYSTEM_CHECK_VERIFIED" } : { status: "BLOCKED", reasonCode: "VERIFICATION_NOT_VERIFIED" };
+    }
+  } else if (body.secureClientSessionId) {
     const owned = await prisma.secureClientSession.findUnique({ where: { id: body.secureClientSessionId } });
     if (!owned || owned.studentId !== session.user.id) {
       return NextResponse.json({ error: "Secure-client session not found." }, { status: 404 });
     }
     secureClientResult = owned.verificationStatus === "VERIFIED" ? { status: "PASS", reasonCode: "SESSION_VERIFIED" } : { status: "BLOCKED", reasonCode: "SESSION_NOT_VERIFIED" };
   } else {
-    // No session to reuse — a standalone check (the common case, run
-    // before any exam attempt exists) cannot fabricate secure-client
-    // genuineness from a renderer-provided boolean. This is the reason a
-    // brand-new student's very first standalone check will show
-    // "secure client: not checked" until they have taken (or started
-    // launching) a Tether-delivered exam at least once — see
-    // docs/tether-system-check-v1.md, "Known limitations".
-    secureClientResult = { status: "NOT_CHECKED", reasonCode: "NO_SESSION_TO_VERIFY" };
+    // No verification to reuse and no session to reuse either — the
+    // client should call POST .../secure-client/challenge + .../verify
+    // first when running inside Tether Secure Browser.
+    secureClientResult = { status: "NOT_CHECKED", reasonCode: "NO_VERIFICATION_TO_REUSE" };
   }
 
   const isTether = body.sourceClientType === "TETHER_SECURE_CLIENT";
@@ -169,7 +193,13 @@ export async function POST(req: Request) {
       clientVersion: isTether ? (body.clientVersion ?? null) : null,
       operatingSystem: body.operatingSystem ?? null,
       operatingSystemVersion: body.operatingSystemVersion ?? null,
-      secureClientSessionId: body.secureClientSessionId ?? null,
+      // Advisory pointer only (see TetherSystemCheckRun's doc comment in
+      // prisma/schema.prisma) — stores whichever of the two sources
+      // above was actually used, never both. Avoids a second schema
+      // change purely to record which kind of pointer it is; the value
+      // itself is only ever used for audit/support, never re-resolved
+      // as authorization.
+      secureClientSessionId: body.systemCheckVerificationId ?? body.secureClientSessionId ?? null,
       checkedAt,
       expiresAt,
       resultsJson: finalResults as Prisma.InputJsonValue,

@@ -17,6 +17,16 @@ Per completed check, one row is stored (`TetherSystemCheckRun` — see
   student's session — see `docs/tether-system-check-v1.md`).
 - When the check was run and when it expires.
 
+Corrective pass: a first-time secure-client verification (see
+`docs/tether-system-check-v1.md`, "System-check secure-client
+verification") stores one additional row in
+`SystemCheckSecureClientVerification` — the same bounded client
+type/version/platform fields as above, plus a hashed nonce and
+challenge fingerprint used only for replay protection. No hardware
+serial number, MAC address, or machine fingerprint is ever derived or
+stored — the row's own id is the only "session" identity, scoped to
+your account.
+
 ## What is never collected
 
 - No photo, image, or video frame from the camera.

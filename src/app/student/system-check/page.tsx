@@ -80,6 +80,23 @@ const OVERALL_HEADLINES: Record<"READY" | "READY_WITH_WARNINGS" | "NOT_READY", s
   NOT_READY: "This computer is not ready yet",
 };
 
+/**
+ * Corrective pass — distinguishes "Chrome genuinely cannot run the four
+ * Tether-only checks" (expected, not a device failure) from "something
+ * this browser COULD check actually failed" (e.g. camera permission
+ * denied). Overall status stays NOT_READY either way — this only picks
+ * which non-alarming headline to show; it never overrides the real
+ * aggregated state (see computeOverallStatus in readiness.ts).
+ */
+function isIncompleteOnlyDueToMissingNativeChecks(inTether: boolean, results: RunState): boolean {
+  if (inTether) return false;
+  for (const id of CHECK_ORDER) {
+    if (TETHER_ONLY_CHECK_IDS.has(id)) continue;
+    if (results[id]?.status === "BLOCKED") return false;
+  }
+  return true;
+}
+
 /** Plain-language result + correction copy — no raw JSON, stack traces, Electron/GraphQL terminology, or policy hashes ever shown here. */
 function describeCheck(id: SystemCheckId, display: CheckDisplay | undefined): { message: string; correction: string | null } {
   const status = display?.status ?? "NOT_CHECKED";
@@ -96,8 +113,15 @@ function describeCheck(id: SystemCheckId, display: CheckDisplay | undefined): { 
     case "authentication":
       return status === "PASS" ? { message: "You're signed in.", correction: null } : { message: "Your sign-in could not be confirmed.", correction: "Sign in again and retry." };
     case "secureClient":
-      if (status === "PASS") return { message: "A verified Tether Secure Browser session was found.", correction: null };
-      return { message: "A verified secure-client session could not be confirmed here.", correction: "Full verification happens automatically when you start an exam." };
+      if (status === "PASS") return { message: "Your Tether Secure Browser was verified.", correction: null };
+      if (reason === "REPLAY") return { message: "This verification attempt was already used.", correction: "Retry the check to get a fresh one." };
+      if (reason === "EXPIRED" || reason === "VERIFICATION_EXPIRED" || reason === "NOT_YET_VALID") {
+        return { message: "The verification took too long and expired.", correction: "Retry the check." };
+      }
+      if (reason === "CHALLENGE_FAILED" || reason === "VERIFICATION_FAILED") {
+        return { message: "Your Tether Secure Browser could not be verified.", correction: "Check your connection and retry." };
+      }
+      return { message: "A verified Tether Secure Browser session could not be confirmed.", correction: "Retry the check." };
     case "clientVersion":
       if (status === "PASS") return { message: "Your Tether Secure Browser version is supported.", correction: null };
       if (status === "WARNING") return { message: "Your reported version could not be recognised.", correction: "Restart Tether Secure Browser and retry." };
@@ -166,6 +190,57 @@ function guessBrowserPlatform(): string | null {
 
 const NETWORK_ENDPOINTS = ["/api/auth/session", "/api/version", "/api/readiness", "/api/tether/system-check/ping"] as const;
 const CHECK_TIMEOUT_MS = 8_000;
+
+/**
+ * Corrective pass — first-time SYSTEM_CHECK secure-client verification
+ * (see docs/tether-system-check-v1.md, "System-check secure-client
+ * verification"). Requests a short-lived signed challenge, gathers real
+ * native facts via the existing window.sesLockdown bridge (feature-
+ * detected — an older packaged install simply won't expose
+ * getClientVersion/getOperatingSystemInfo, in which case those two
+ * fields stay null and the server-side signature/context checks still
+ * run without them), and asks the server to verify. The returned
+ * {status} IS the server's own PASS/BLOCKED decision — this function
+ * never reads or trusts any "verified" value it computed itself.
+ */
+async function verifySecureClient(): Promise<{ display: CheckDisplay; verificationId: string | null }> {
+  try {
+    const challengeRes = await withTimeout(fetch("/api/tether/system-check/secure-client/challenge", { method: "POST" }), CHECK_TIMEOUT_MS);
+    if (!challengeRes.ok) return { display: { status: "BLOCKED", reasonCode: "CHALLENGE_FAILED" }, verificationId: null };
+    const { challenge, signature } = await challengeRes.json();
+
+    const clientVersion =
+      typeof window.sesLockdown?.getClientVersion === "function"
+        ? await withTimeout(window.sesLockdown.getClientVersion(), CHECK_TIMEOUT_MS).catch(() => window.sesLockdown?.version ?? null)
+        : (window.sesLockdown?.version ?? null);
+    const platform =
+      typeof window.sesLockdown?.getOperatingSystemInfo === "function"
+        ? await withTimeout(window.sesLockdown.getOperatingSystemInfo(), CHECK_TIMEOUT_MS)
+            .then((info) => info?.platform ?? null)
+            .catch(() => null)
+        : null;
+
+    const verifyRes = await withTimeout(
+      fetch("/api/tether/system-check/secure-client/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ challenge, signature, clientType: "TETHER_SECURE_CLIENT", clientVersion, platform }),
+      }),
+      CHECK_TIMEOUT_MS,
+    );
+    const body = await verifyRes.json().catch(() => null);
+    if (verifyRes.ok && body?.verified) {
+      return {
+        display: { status: "PASS", reasonCode: "SYSTEM_CHECK_VERIFIED" },
+        verificationId: typeof body.verificationId === "string" ? body.verificationId : null,
+      };
+    }
+    const reason = typeof body?.reason === "string" ? body.reason : "VERIFICATION_FAILED";
+    return { display: { status: "BLOCKED", reasonCode: reason }, verificationId: null };
+  } catch {
+    return { display: { status: "BLOCKED", reasonCode: "VERIFICATION_FAILED" }, verificationId: null };
+  }
+}
 
 export default function SystemCheckPage() {
   const [inTether, setInTether] = useState<boolean | null>(null);
@@ -311,6 +386,11 @@ export default function SystemCheckPage() {
     let displayTopologyClassification: string | null = null;
     let bridgeCapabilities: { getClientVersion: boolean; getOperatingSystemInfo: boolean; getDisplayTopology: boolean; getSecureClientCapabilities: boolean } | null = null;
     let clientTimeMsForClock = Date.now();
+    // Corrective pass — first-time SYSTEM_CHECK secure-client
+    // verification. Set once the challenge/verify round trip succeeds;
+    // passed through to POST /runs so the server can re-verify ownership
+    // and status itself rather than trusting this variable directly.
+    let systemCheckVerificationId: string | null = null;
 
     for (let i = 0; i < CHECK_ORDER.length; i++) {
       const id = CHECK_ORDER[i];
@@ -319,9 +399,13 @@ export default function SystemCheckPage() {
         if (id === "authentication") {
           nextResults.authentication = { status: "PASS", reasonCode: "AUTHENTICATED" };
         } else if (id === "secureClient") {
-          // Standalone check: no submission/session to reuse — see
-          // src/app/api/tether/system-check/runs/route.ts doc comment.
-          nextResults.secureClient = { status: "NOT_CHECKED", reasonCode: "NO_SESSION_TO_VERIFY" };
+          const verification = tether ? await verifySecureClient() : null;
+          if (verification) {
+            nextResults.secureClient = verification.display;
+            systemCheckVerificationId = verification.verificationId;
+          } else {
+            nextResults.secureClient = { status: "NOT_CHECKED", reasonCode: "TETHER_NOT_DETECTED" };
+          }
         } else if (id === "clientVersion") {
           if (tether && typeof window.sesLockdown?.getClientVersion === "function") {
             clientVersionRaw = await withTimeout(window.sesLockdown.getClientVersion(), CHECK_TIMEOUT_MS).catch(() => window.sesLockdown?.version ?? null);
@@ -384,6 +468,7 @@ export default function SystemCheckPage() {
           operatingSystem: operatingSystemRaw,
           operatingSystemVersion: operatingSystemVersionRaw,
           secureClientSessionId: null,
+          systemCheckVerificationId,
           clientTimeMs: clientTimeMsForClock,
           displayTopologyClassification,
           bridgeCapabilities,
@@ -488,7 +573,20 @@ export default function SystemCheckPage() {
 
       {hasRunOnce && !running && (
         <div className="mt-4 rounded border border-gray-200 p-3 text-center">
-          <p className="text-base font-medium">{OVERALL_HEADLINES[overall]}</p>
+          {/* Corrective pass — Chrome cannot run the four Tether-only
+              checks; that is an expected, non-alarming incompleteness,
+              not a device failure, and must never be presented with the
+              same red/technical-error tone as a genuine BLOCKED result.
+              The underlying overall status stays NOT_READY either way —
+              only this headline differs. */}
+          {isIncompleteOnlyDueToMissingNativeChecks(Boolean(inTether), results) ? (
+            <>
+              <p className="text-base font-medium">Web checks completed</p>
+              <p className="mt-1 text-sm text-gray-600">Open Tether Secure Browser to complete the required computer checks.</p>
+            </>
+          ) : (
+            <p className="text-base font-medium">{OVERALL_HEADLINES[overall]}</p>
+          )}
         </div>
       )}
 

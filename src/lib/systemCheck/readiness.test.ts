@@ -180,6 +180,56 @@ describe("6. OFF, WARN, and REQUIRE modes", () => {
   });
 });
 
+describe("corrective pass — aggregation invariants (ordinary Chrome must never reach READY or READY_WITH_WARNINGS)", () => {
+  const chromeAllWebChecksPass: SystemCheckResults = {
+    authentication: { status: "PASS" },
+    operatingSystem: { status: "PASS" },
+    network: { status: "PASS" },
+    clock: { status: "PASS" },
+    camera: { status: "PASS" },
+    microphone: { status: "PASS" },
+    // The four Tether-only checks: guaranteed NOT_CHECKED in an ordinary
+    // browser, never supplied at all here — matches production reality.
+  };
+
+  it("ordinary Chrome with every web-safe check passing is still NOT_READY, never READY_WITH_WARNINGS", () => {
+    expect(computeOverallStatus(chromeAllWebChecksPass)).toBe("NOT_READY");
+  });
+
+  it("required NOT_CHECKED overrides optional PASS/WARNING results — the four Tether-only checks alone are enough to force NOT_READY even with everything else PASS", () => {
+    const partial: SystemCheckResults = { ...ALL_PASS };
+    delete partial.secureClient;
+    delete partial.clientVersion;
+    delete partial.displayTopology;
+    delete partial.bridge;
+    // Optional checks still explicitly PASS/WARNING — must not rescue overall status.
+    partial.camera = { status: "WARNING" };
+    partial.microphone = { status: "PASS" };
+    expect(computeOverallStatus(partial)).toBe("NOT_READY");
+  });
+
+  it("verified Tether with every required check PASS produces READY", () => {
+    expect(computeOverallStatus(ALL_PASS)).toBe("READY");
+  });
+
+  it("READY_WITH_WARNINGS is possible only when every required check is PASS or WARNING (never BLOCKED/NOT_CHECKED) and at least one check actually warns", () => {
+    // All required checks present and non-blocking; one required check (clock) warns.
+    const allRequiredOkOneWarns: SystemCheckResults = { ...ALL_PASS, clock: { status: "WARNING" } };
+    expect(computeOverallStatus(allRequiredOkOneWarns)).toBe("READY_WITH_WARNINGS");
+
+    // Same warning, but now a DIFFERENT required check is BLOCKED — must
+    // demote straight to NOT_READY, never READY_WITH_WARNINGS.
+    const oneRequiredBlockedToo: SystemCheckResults = { ...ALL_PASS, clock: { status: "WARNING" }, network: { status: "BLOCKED" } };
+    expect(computeOverallStatus(oneRequiredBlockedToo)).toBe("NOT_READY");
+
+    // Same warning, but now a different required check is missing
+    // entirely (NOT_CHECKED) — also must demote to NOT_READY.
+    const oneRequiredMissingToo: SystemCheckResults = { ...ALL_PASS, clock: { status: "WARNING" } };
+    delete oneRequiredMissingToo.bridge;
+    expect(computeOverallStatus(oneRequiredMissingToo)).toBe("NOT_READY");
+  });
+});
+
 describe("non-final assessments are never blocked by this gate, in any mode", () => {
   it("REQUIRE mode ignores a non-final assessment entirely", () => {
     expect(evaluateFinalExamSystemCheckGate({ mode: "REQUIRE", isFinalExamination: false, latestRun: null, nowMs: 0 })).toEqual({ allowed: true });

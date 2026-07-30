@@ -265,6 +265,8 @@ model User {
   // Tether System Check and Exam Readiness v1 (additive) — see
   // docs/tether-system-check-v1.md.
   tetherSystemCheckRuns TetherSystemCheckRun[]
+  // Corrective pass — first-time SYSTEM_CHECK secure-client verification.
+  systemCheckSecureClientVerifications SystemCheckSecureClientVerification[]
 
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
@@ -2304,4 +2306,55 @@ model TetherSystemCheckRun {
   @@index([userId, checkedAt])
   @@index([userId, expiresAt])
   @@index([secureClientSessionId])
+}
+
+// Tether System Check and Exam Readiness v1 — corrective pass (first-time
+// verification). See docs/tether-system-check-v1.md, "System-check
+// secure-client verification". A SYSTEM_CHECK-scoped, single-use, signed
+// verification — reuses the exact same Ed25519 signing key and nonce/
+// replay-protection pattern as SecureClientLaunchManifest above (see
+// src/lib/secureClient/systemCheckChallenge.ts), but is DELIBERATELY a
+// separate, standalone model rather than a nullable-submissionId variant
+// of SecureClientSession: nothing in the exam start/launch/attestation
+// code path (secureClientRunner.ts, secureClientStartGate.ts,
+// POST /api/exams/[id]/start, GET /api/submissions/[id]) ever reads this
+// table, so there is no code path by which a SYSTEM_CHECK verification
+// could ever be mistaken for, or accepted as, exam-launch authorization —
+// a structural guarantee, not merely a convention. `purpose` is always
+// "SYSTEM_CHECK" in v1 but kept as an explicit column (not inferred from
+// the table's mere existence) so a future second purpose could reuse
+// this table without a migration, and so every row states its own scope
+// for audit. No hardware/installation fingerprint is stored — the row's
+// own id, scoped to `userId`, is the "session" identity, exactly like
+// SecureClientSession.id already is for the real exam flow.
+model SystemCheckSecureClientVerification {
+  id            String @id @default(cuid())
+  userId        String
+  user          User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  institutionId String
+
+  purpose String @default("SYSTEM_CHECK")
+
+  // TETHER_SECURE_CLIENT | MOCK_TETHER_CLIENT
+  clientType String
+  // NOT_CHECKED | VERIFIED | INVALID_SIGNATURE | EXPIRED | REPLAY_REJECTED | WRONG_SUBJECT | WRONG_PURPOSE | UNSUPPORTED_VERSION | TECHNICAL_FAILURE
+  verificationStatus String @default("NOT_CHECKED")
+
+  clientVersion String?
+  platform      String?
+
+  // Replay protection — a second verify attempt with the same nonce
+  // fails the unique constraint outright (see systemCheckSecureClientRunner.ts).
+  nonceHash     String @unique
+  challengeHash String
+
+  issuedAt   DateTime
+  expiresAt  DateTime
+  verifiedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
 }
