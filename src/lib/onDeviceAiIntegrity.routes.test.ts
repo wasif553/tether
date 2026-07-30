@@ -191,6 +191,44 @@ describe("AI event types accepted, media metadata rejected", () => {
     expect(res.status).toBe(201);
   });
 
+  it("camera integrity reliability pass: CAMERA_STREAM_UNAVAILABLE is accepted and actually persists through the real Prisma IntegrityEventType enum (not just the route's own zod schema)", async () => {
+    const exam = await createExam();
+    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: studentA.id } });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await integrityEventsRoute.POST(
+      jsonRequest("POST", {
+        eventType: "CAMERA_STREAM_UNAVAILABLE",
+        severity: "LOW",
+        message: "Camera feed was temporarily interrupted.",
+        metadata: { source: "on_device_camera_ai" },
+        occurredAt: new Date().toISOString(),
+      }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(201);
+    const stored = await prisma.integrityEvent.findFirst({ where: { submissionId: submission.id, eventType: "CAMERA_STREAM_UNAVAILABLE" } });
+    expect(stored).not.toBeNull();
+  });
+
+  it("camera integrity reliability pass: CAMERA_VISIBILITY_RESTORED is accepted and actually persists through the real Prisma IntegrityEventType enum — the exact additive-enum path a prior attempt at this same event previously got wrong", async () => {
+    const exam = await createExam();
+    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: studentA.id } });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await integrityEventsRoute.POST(
+      jsonRequest("POST", {
+        eventType: "CAMERA_VISIBILITY_RESTORED",
+        severity: "INFO",
+        message: "Camera visibility restored.",
+        metadata: { source: "on_device_camera_ai" },
+        occurredAt: new Date().toISOString(),
+      }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(201);
+    const stored = await prisma.integrityEvent.findFirst({ where: { submissionId: submission.id, eventType: "CAMERA_VISIBILITY_RESTORED" } });
+    expect(stored).not.toBeNull();
+  });
+
   it("8. metadata containing an image-like key is rejected", async () => {
     const exam = await createExam();
     const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: studentA.id } });

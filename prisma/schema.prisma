@@ -67,6 +67,14 @@ enum IntegrityEventType {
   // never misclassified as confirmed face absence. See
   // classifyCameraStreamHealth in src/lib/cameraIntegrityDetection.ts.
   CAMERA_STREAM_UNAVAILABLE
+  // Camera integrity reliability pass (additive) — the "stable recovery"
+  // event, mirroring the existing SCREEN_SHARE_RESTORED /
+  // DISPLAY_POLICY_RESTORED pattern: fired once when a CONFIRMED sustained
+  // no-person episode resolves back to several consecutive, confidently
+  // visible frames. See resolveCameraIntegrityState in
+  // src/lib/cameraIntegrityDetection.ts. Neutral wording only — never
+  // implies the earlier absence was misconduct.
+  CAMERA_VISIBILITY_RESTORED
   // One-Question-At-A-Time Exam Delivery v1 (additive — see
   // docs/one-question-delivery-v1.md).
   QUESTION_NAVIGATED_NEXT

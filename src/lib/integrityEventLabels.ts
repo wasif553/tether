@@ -21,14 +21,19 @@ const EVENT_TYPE_LABELS: Partial<Record<string, string>> = {
   STUDENT_VERIFICATION_CONFIRMED: "Student verification confirmed",
   POSSIBLE_PHONE_VISIBLE: "Possible mobile phone visible — needs review",
   POSSIBLE_SECOND_PERSON_VISIBLE: "Possible additional person visible — needs review",
-  NO_PERSON_VISIBLE: "No student visible in camera — needs review",
+  // Camera integrity reliability pass — exact required neutral lecturer-
+  // evidence phrasing. Never "cheating detected", "misconduct confirmed",
+  // or "student intentionally left" — see resolveCameraIntegrityState in
+  // cameraIntegrityDetection.ts for the state model these labels surface.
+  NO_PERSON_VISIBLE: "No person was visible for a sustained period",
   CAMERA_VIEW_BLOCKED: "Camera view appears blocked — needs review",
-  CAMERA_TOO_DARK: "Camera view appears too dark — needs review",
+  CAMERA_TOO_DARK: "Lighting was too low to verify visibility",
   AI_CAMERA_CHECK_UNAVAILABLE: "AI camera checks unavailable",
-  // Corrective pass v1.2.2 — a resource/capture-level interruption (e.g.
-  // another application holding the camera), distinct from a confirmed
-  // no-person reading. Neutral wording, never implies face absence.
-  CAMERA_STREAM_UNAVAILABLE: "Camera feed temporarily interrupted",
+  CAMERA_STREAM_UNAVAILABLE: "Camera stream unavailable",
+  // Camera integrity reliability pass — the neutral "stable recovery"
+  // label, mirroring Screen sharing restored / Fullscreen restored below.
+  // Never implies the earlier absence was misconduct.
+  CAMERA_VISIBILITY_RESTORED: "Camera visibility restored",
   // Screen-share Evidence Mode v1 — neutral wording throughout; never
   // "cheating", "misconduct", or "caught" — see
   // docs/screen-share-evidence-v1.md.
@@ -87,6 +92,7 @@ const CAMERA_EVENT_TYPES = new Set([
   "CAMERA_TOO_DARK",
   "AI_CAMERA_CHECK_UNAVAILABLE",
   "CAMERA_STREAM_UNAVAILABLE",
+  "CAMERA_VISIBILITY_RESTORED",
 ]);
 
 const WINDOW_FOCUS_EVENT_TYPES = new Set([

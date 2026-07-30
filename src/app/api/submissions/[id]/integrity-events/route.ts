@@ -41,6 +41,9 @@ const INTEGRITY_EVENT_TYPES = [
   // Corrective pass v1.2.2, Task 8 — see cameraIntegrityDetection.ts's
   // classifyCameraStreamHealth doc comment.
   "CAMERA_STREAM_UNAVAILABLE",
+  // Camera integrity reliability pass — see resolveCameraIntegrityState
+  // in cameraIntegrityDetection.ts.
+  "CAMERA_VISIBILITY_RESTORED",
   // One-Question-At-A-Time Exam Delivery v1 — see
   // docs/one-question-delivery-v1.md.
   "QUESTION_NAVIGATED_NEXT",
@@ -107,6 +110,9 @@ const DEBOUNCE_WINDOWS_MS: Partial<Record<(typeof INTEGRITY_EVENT_TYPES)[number]
   CAMERA_TOO_DARK: 60_000,
   AI_CAMERA_CHECK_UNAVAILABLE: 60_000,
   CAMERA_STREAM_UNAVAILABLE: 60_000,
+  // A flickering borderline recovery must never flood the timeline —
+  // same cooldown window as the other camera-quality signals.
+  CAMERA_VISIBILITY_RESTORED: 60_000,
   // A student can only click a disabled/hidden Previous button through
   // direct API manipulation, but debounce anyway against accidental
   // rapid-fire duplicates.

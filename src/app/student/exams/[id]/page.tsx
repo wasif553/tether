@@ -22,6 +22,8 @@ import {
   decideFrameQualityEmission,
   classifyCameraStreamHealth,
   decideCameraStreamEmission,
+  resolveCameraIntegrityState,
+  decideVisibilityRestoredEmission,
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   PHONE_CONFIDENCE_THRESHOLD,
@@ -293,7 +295,8 @@ type IntegrityEventType =
   | "CAMERA_VIEW_BLOCKED"
   | "CAMERA_TOO_DARK"
   | "AI_CAMERA_CHECK_UNAVAILABLE"
-  | "CAMERA_STREAM_UNAVAILABLE";
+  | "CAMERA_STREAM_UNAVAILABLE"
+  | "CAMERA_VISIBILITY_RESTORED";
 
 type IntegritySeverity = "INFO" | "LOW" | "MEDIUM" | "HIGH";
 
@@ -312,6 +315,7 @@ const DEBOUNCE_MS: Partial<Record<IntegrityEventType, number>> = {
   CAMERA_TOO_DARK: 60_000,
   AI_CAMERA_CHECK_UNAVAILABLE: 60_000,
   CAMERA_STREAM_UNAVAILABLE: 60_000,
+  CAMERA_VISIBILITY_RESTORED: 60_000,
 };
 
 const MESSAGES: Record<IntegrityEventType, string> = {
@@ -355,6 +359,14 @@ const MESSAGES: Record<IntegrityEventType, string> = {
   // cameraIntegrityDetection.ts for why this is reported separately from
   // NO_PERSON_VISIBLE.
   CAMERA_STREAM_UNAVAILABLE: "Camera feed was temporarily interrupted.",
+  // Camera integrity reliability pass — the neutral "stable recovery"
+  // message. Only ever reported after a genuinely CONFIRMED
+  // (SUSTAINED_NO_PERSON_VISIBLE) absence resolves back to several
+  // consecutive, confidently visible frames — never merely because
+  // lighting/uncertainty caused the streak to freeze (see
+  // resolveCameraIntegrityState in cameraIntegrityDetection.ts). Never
+  // implies the earlier absence was misconduct.
+  CAMERA_VISIBILITY_RESTORED: "Camera visibility restored.",
 };
 
 function severityFor(eventType: IntegrityEventType, settings: SecureSettings): IntegritySeverity {
@@ -407,6 +419,8 @@ function severityFor(eventType: IntegrityEventType, settings: SecureSettings): I
       return "INFO";
     case "CAMERA_STREAM_UNAVAILABLE":
       return settings.requireCamera ? "MEDIUM" : "LOW";
+    case "CAMERA_VISIBILITY_RESTORED":
+      return "INFO";
   }
 }
 
@@ -671,6 +685,13 @@ export default function TakeExamPage({
   const detectorRef = useRef<CameraObjectDetector | null>(null);
   const detectionCooldown = useRef(new DetectionCooldownTracker());
   const detectionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Camera integrity reliability pass — caller-owned bookkeeping for
+  // resolveCameraIntegrityState's `wasSustainedNoPersonVisible` input:
+  // true from the tick a SUSTAINED_NO_PERSON_VISIBLE episode is first
+  // confirmed until CAMERA_VISIBILITY_RESTORED is actually reported for
+  // it (not merely reachable — see the tick handler). Survives across
+  // ticks the same way the cooldown tracker itself does.
+  const wasSustainedNoPersonVisibleRef = useRef(false);
   // Strengthened phone detection — see docs/phone-detection-calibration-v1.md.
   // Owned entirely by refs (not effect-local state) for the same reason
   // detectionSamplingReadyRef is: a restart of the detection effect must
@@ -2548,6 +2569,34 @@ export default function TakeExamPage({
               : cooldown.recordObservation("noPerson", person.noPersonDetected, now);
             const noPersonStreakDurationMs = cooldown.getStreakDurationMs("noPerson", now);
             const noPersonCooldownOk = cooldown.canEmit("NO_PERSON_VISIBLE", now, 45_000);
+            // Camera integrity reliability pass — Task 6 hysteresis: the
+            // mirror-image counter of noPersonCount, frozen the same way
+            // on the same ticks (bad quality / uncertain), so a single
+            // ambiguous frame during recovery neither advances nor resets
+            // recovery progress any more than it does for confirming
+            // absence in the first place.
+            const visibleCount = isNoPersonStreakFrozen
+              ? cooldown.getConsecutiveCount("personVisible")
+              : cooldown.recordObservation("personVisible", !person.noPersonDetected, now);
+            const cameraIntegrityState = suppressStartup
+              ? "CAMERA_VISIBLE"
+              : resolveCameraIntegrityState({
+                  streamHealth: "ok", // stream health is decided earlier this tick (see the early-return above) — reaching here already implies "ok".
+                  frameQuality: quality,
+                  person,
+                  noPersonConsecutiveCount: noPersonCount,
+                  noPersonStreakDurationMs,
+                  visibleConsecutiveCount: visibleCount,
+                  wasSustainedNoPersonVisible: wasSustainedNoPersonVisibleRef.current,
+                });
+            const visibilityRestoredCooldownOk = cooldown.canEmit("CAMERA_VISIBILITY_RESTORED", now, 60_000);
+            const restoredDecision = suppressStartup
+              ? { shouldEmit: false }
+              : decideVisibilityRestoredEmission(
+                  wasSustainedNoPersonVisibleRef.current,
+                  cameraIntegrityState === "CAMERA_VISIBILITY_RESTORED",
+                  visibilityRestoredCooldownOk,
+                );
 
             // Camera Startup Readiness v1 — counters above keep tracking
             // consecutive observations even during warm-up (so a signal
@@ -2561,6 +2610,21 @@ export default function TakeExamPage({
             noPersonDecision = suppressStartup
               ? { conditionMet: false, shouldEmit: false, qualifier: null }
               : decideNoPersonEmission(person, quality, noPersonCount, noPersonStreakDurationMs, noPersonCooldownOk);
+
+            // Task 6 hysteresis bookkeeping: latch on the tick a sustained
+            // absence is first CONFIRMED (independent of the backend
+            // cooldown, which must never suppress this internal state
+            // tracking), clear once CAMERA_VISIBILITY_RESTORED has
+            // actually been reported for it — reported below, alongside
+            // NO_PERSON_VISIBLE.
+            if (noPersonDecision.qualifier === "CONFIRMED") {
+              wasSustainedNoPersonVisibleRef.current = true;
+            }
+            if (restoredDecision.shouldEmit) {
+              cooldown.markEmitted("CAMERA_VISIBILITY_RESTORED", now);
+              reportIntegrityEvent("CAMERA_VISIBILITY_RESTORED", { source: "on_device_camera_ai" });
+              wasSustainedNoPersonVisibleRef.current = false;
+            }
 
             // Strengthened phone detection (multi-scale + temporal
             // tracking) — see docs/phone-detection-calibration-v1.md.

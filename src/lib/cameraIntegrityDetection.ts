@@ -356,6 +356,9 @@ export const UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND = 0.4;
  */
 export const MIN_NO_PERSON_SUSTAINED_DURATION_MS = 3_000;
 
+/** Minimum consecutive usable frames (not merely elapsed time) required before a sustained absence is confirmed — see decideNoPersonEmission and resolveCameraIntegrityState below. Named/exported so the "multiple consecutive usable frames" requirement is explicit and documented, not a bare literal. */
+export const NO_PERSON_MIN_CONSECUTIVE_TICKS = 3;
+
 /**
  * Distinguishes WHY the no-person condition is (or is not) currently
  * met — separates "adequate image + sustained face absent" from
@@ -417,7 +420,8 @@ export function decideNoPersonEmission(
   if (person.noPersonDetected && person.bestPersonScore >= UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND) {
     return { conditionMet: false, shouldEmit: false, qualifier: "UNCERTAIN" };
   }
-  const conditionMet = person.noPersonDetected && consecutiveCount >= 3 && streakDurationMs >= MIN_NO_PERSON_SUSTAINED_DURATION_MS;
+  const conditionMet =
+    person.noPersonDetected && consecutiveCount >= NO_PERSON_MIN_CONSECUTIVE_TICKS && streakDurationMs >= MIN_NO_PERSON_SUSTAINED_DURATION_MS;
   return { conditionMet, shouldEmit: conditionMet && cooldownOk, qualifier: conditionMet ? "CONFIRMED" : null };
 }
 
@@ -439,6 +443,96 @@ export function decideVisibilityRestoredEmission(
   cooldownOk: boolean,
 ): VisibilityRestoredDecision {
   return { shouldEmit: wasConfirmedAbsent && personConfidentlyVisibleNow && cooldownOk };
+}
+
+// ---------------------------------------------------------------------------
+// Camera integrity reliability pass — a single, explicit state model
+// unifying every signal above so the six lecturer-relevant camera states
+// stay clearly, testably separate rather than being scattered across
+// per-signal booleans/qualifiers. Never adds a new capability (no face
+// identity, no biometric matching, no additional image capture) — this
+// only names and composes the existing pure signals (stream health,
+// frame quality, person detection + hysteresis counters) that already
+// exist above.
+// ---------------------------------------------------------------------------
+
+export const CAMERA_INTEGRITY_STATES = [
+  "CAMERA_VISIBLE",
+  "LIGHTING_TOO_LOW",
+  "CAMERA_VISIBILITY_UNCERTAIN",
+  "CAMERA_STREAM_UNAVAILABLE",
+  "SUSTAINED_NO_PERSON_VISIBLE",
+  "CAMERA_VISIBILITY_RESTORED",
+] as const;
+export type CameraIntegrityState = (typeof CAMERA_INTEGRITY_STATES)[number];
+
+/**
+ * Symmetric with NO_PERSON_MIN_CONSECUTIVE_TICKS: a previously CONFIRMED
+ * (SUSTAINED_NO_PERSON_VISIBLE) episode requires this many consecutive,
+ * confidently-visible frames before it is reported as recovered — a
+ * single improved frame is never enough to clear an absence state
+ * (hysteresis).
+ */
+export const MIN_CONSECUTIVE_VISIBLE_FOR_RECOVERY = 3;
+
+/**
+ * The single source of truth for "which of the six camera-integrity
+ * states applies right now." Priority order matters and is deliberate:
+ *
+ * 1. CAMERA_STREAM_UNAVAILABLE — checked FIRST, before any pixel content
+ *    is even considered. A missing/muted/ended/frozen stream can never
+ *    fall through to any person-detection-based state (Task 3's core
+ *    requirement) because this function returns before `person`/
+ *    `frameQuality` are examined at all.
+ * 2. LIGHTING_TOO_LOW — a dark or blocked frame's content cannot be
+ *    trusted for person detection either way; reported as insufficient
+ *    lighting, never as absence.
+ * 3. CAMERA_VISIBILITY_UNCERTAIN — a near-threshold person-class score:
+ *    genuinely ambiguous, reported as neither visible nor absent.
+ * 4. SUSTAINED_NO_PERSON_VISIBLE — requires BOTH
+ *    NO_PERSON_MIN_CONSECUTIVE_TICKS consecutive usable frames AND
+ *    MIN_NO_PERSON_SUSTAINED_DURATION_MS elapsed (Task 5).
+ * 5. CAMERA_VISIBILITY_RESTORED — a one-time transitional state: only
+ *    reachable coming FROM a confirmed absence, and only once
+ *    MIN_CONSECUTIVE_VISIBLE_FOR_RECOVERY consecutive confidently-visible
+ *    frames have been observed (Task 6 hysteresis) — a single good frame
+ *    keeps reporting SUSTAINED_NO_PERSON_VISIBLE, not a premature
+ *    CAMERA_VISIBLE, so the lecturer timeline never shows an absence
+ *    "silently" clearing on a flicker.
+ * 6. CAMERA_VISIBLE — the default/steady state; not itself an event.
+ */
+export function resolveCameraIntegrityState(params: {
+  streamHealth: CameraStreamHealth;
+  frameQuality: FrameQuality;
+  person: PersonDetectionResult;
+  /** Consecutive ticks the no-person condition has held — frozen (unchanged), not reset, on an uncertain or bad-quality tick; see the caller's isNoPersonStreakFrozen pattern in page.tsx. */
+  noPersonConsecutiveCount: number;
+  noPersonStreakDurationMs: number;
+  /** Consecutive ticks a person has been confidently visible — frozen the same way as noPersonConsecutiveCount on an uncertain/bad-quality tick, so a single ambiguous frame during recovery neither advances nor resets recovery progress. */
+  visibleConsecutiveCount: number;
+  /** Caller-owned bookkeeping: true from the tick a SUSTAINED_NO_PERSON_VISIBLE episode is first confirmed until CAMERA_VISIBILITY_RESTORED is reported for it. */
+  wasSustainedNoPersonVisible: boolean;
+}): CameraIntegrityState {
+  if (params.streamHealth === "unavailable") return "CAMERA_STREAM_UNAVAILABLE";
+  if (params.frameQuality !== "ok") return "LIGHTING_TOO_LOW";
+  if (params.person.noPersonDetected && params.person.bestPersonScore >= UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND) {
+    return "CAMERA_VISIBILITY_UNCERTAIN";
+  }
+  const sustainedAbsent =
+    params.person.noPersonDetected &&
+    params.noPersonConsecutiveCount >= NO_PERSON_MIN_CONSECUTIVE_TICKS &&
+    params.noPersonStreakDurationMs >= MIN_NO_PERSON_SUSTAINED_DURATION_MS;
+  if (sustainedAbsent) return "SUSTAINED_NO_PERSON_VISIBLE";
+  if (params.wasSustainedNoPersonVisible) {
+    if (!params.person.noPersonDetected && params.visibleConsecutiveCount >= MIN_CONSECUTIVE_VISIBLE_FOR_RECOVERY) {
+      return "CAMERA_VISIBILITY_RESTORED";
+    }
+    // Still recovering: an absence state is never cleared by a single
+    // improved frame — keep reporting the prior confirmed state until
+    // stability is actually reached.
+    return "SUSTAINED_NO_PERSON_VISIBLE";
+  }
+  return "CAMERA_VISIBLE";
 }
 
 export type FrameQualityEmissionDecision = {
