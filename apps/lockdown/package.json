@@ -1,8 +1,8 @@
 {
   "name": "ses-lockdown",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
-  "description": "Tether Secure Browser v1.2.1 (corrective pass: fail-closed display-enforcement default posture, dev-only diagnostic panel/log, packaging verification, and direct-launch-path parity, on top of the v1.2 launch/install flow, live single-display enforcement with Windows Duplicate/Clone detection, and face-visibility false-positive fixes)",
+  "description": "Tether Secure Browser v1.2.2 (corrective pass: real verified-session establishment via attestation submission, unified direct-dashboard/protocol launch routing, exam-entry cover from click, camera capture-failure misclassification fix, on top of v1.2.1's fail-closed display-enforcement default posture and diagnostic panel/log, and the v1.2 launch/install flow with live single-display enforcement)",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",

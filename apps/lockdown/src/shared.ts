@@ -4,29 +4,42 @@
  * the two bundles.
  */
 
-// Corrective pass v1.2.1 — fixes the actual reported root cause of
-// "still does not detect or block a second display in physical testing":
-// the display-enforcement default posture was fail-OPEN (inactive until
-// the hosted page's async policy fetch resolved). Replaces the plain
-// requireSingleDisplay boolean with an explicit {active, ready,
-// requireSingleDisplay} contract that fails CLOSED for any
-// TETHER_CLIENT_REQUIRED exam (see displayEnforcementLogic.ts's
-// SecureClientEnforcementState). Also adds: a temporary, explicit
-// opt-in diagnostic panel + local log file (dev-only, never
-// Production — see tetherDiagnosticsSnapshot.ts), an automated
-// packaging-content assertion (verifyPackagedRelease.ts), and confirms
-// the direct-dashboard-launch path activates the identical gate as a
-// protocol launch. This IS a breaking change to the
-// window.sesLockdown bridge: setDisplayPolicyEnforced is replaced by
-// setSecureClientEnforcementState (no known deployed installs predate
-// this still-unreleased pass, so no dual-method shim is carried).
+// Corrective pass v1.2.2 — the physical diagnostic (v1.2.1's own panel
+// and log) traced the remaining defect: display detection was already
+// correct (Duplicate -> CLONE_OR_DUPLICATE, Extend -> EXTEND), but
+// entering an exam via the direct-launch workflow never actually
+// established a verified secure-client session, so enforcement never
+// activated at all (submissionIdPresent/deliveryMode/etc all stayed
+// null/false). Two real defects, both server/page-side, fixed this pass:
+// (1) consuming a launch manifest only ever CREATED a session
+// (verificationStatus NOT_CHECKED) — nothing in the real flow called
+// POST /api/secure-client/sessions/[sessionId]/attestation, the ONLY
+// thing that ever transitions a session to VERIFIED, except the dev mock
+// client simulator. src/app/student/exams/[id]/tether-launch/page.tsx
+// now submits one immediately after a successful consume. (2) the
+// dashboard's Start/Continue links, inside Tether, routed through the
+// join page / a raw submission link instead of the same /tether-launch
+// page a protocol launch uses — now unified via
+// examEntryHref/continueEntryHref in src/app/student/page.tsx. Also:
+// the fail-closed cover now activates from the CLICK on Start/Continue
+// (not just once the exam content page mounts — see
+// runLaunchSequence's uncoverOnFailure), and a camera capture/resource
+// interruption (Windows Media Foundation "Failed to reserve output
+// capture buffer", commonly another app holding the camera) is now
+// reported as CAMERA_STREAM_UNAVAILABLE instead of being silently fed
+// into person-detection as face absence (see classifyCameraStreamHealth
+// in src/lib/cameraIntegrityDetection.ts — web-app-side, unrelated to
+// this Electron bridge but shipped in the same corrective pass).
 //
-// v1.2.0 (previous) — fixed the Extend-mode enforcement activation bug
-// (debounce was silently dropping policy-driven evaluation), added
-// Windows-native Duplicate/Clone topology detection and periodic
-// re-checking, and separated lighting/uncertainty from confirmed
-// face-absence in the on-device AI camera integrity check (web-app-side).
-export const LOCKDOWN_VERSION = "1.2.1";
+// v1.2.1 (previous) — replaced the plain requireSingleDisplay boolean
+// with an explicit {active, ready, requireSingleDisplay} contract that
+// fails CLOSED for any TETHER_CLIENT_REQUIRED exam, added the dev-only
+// diagnostic panel/log (tetherDiagnosticsSnapshot.ts) and the packaging-
+// content assertion (verifyPackagedRelease.ts).
+// v1.2.0 — fixed the Extend-mode enforcement activation bug (debounce
+// was silently dropping policy-driven evaluation), added Windows-native
+// Duplicate/Clone topology detection and periodic re-checking.
+export const LOCKDOWN_VERSION = "1.2.2";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

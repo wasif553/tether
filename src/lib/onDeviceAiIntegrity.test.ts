@@ -38,6 +38,8 @@ import {
   cameraStartupPhase,
   CAMERA_STARTUP_GRACE_PERIOD_MS,
   CAMERA_READY_TIMEOUT_MS,
+  classifyCameraStreamHealth,
+  decideCameraStreamEmission,
   type PersonDetectionResult,
 } from "./cameraIntegrityDetection";
 
@@ -818,5 +820,61 @@ describe("camera startup suppression combined with phone/second-person decisions
     // confirm decidePhoneEmission emits immediately once actually called.
     const decision = decidePhoneEmission({ detected: true, confidence: 0.9 }, true);
     expect(decision.shouldEmit).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Corrective pass v1.2.2, Task 8. Physical testing showed repeated
+// Chromium/Windows Media Foundation "Failed to reserve output capture
+// buffer" errors while Microsoft Teams held the camera, which was
+// silently feeding a stale/frozen frame into person-detection and
+// eventually reporting NO_PERSON_VISIBLE. classifyCameraStreamHealth /
+// decideCameraStreamEmission are the fix: a capture-level interruption
+// must be classified and reported as CAMERA_STREAM_UNAVAILABLE, never as
+// face absence.
+// ---------------------------------------------------------------------------
+
+describe("classifyCameraStreamHealth", () => {
+  it("a live, unmuted track is healthy", () => {
+    expect(classifyCameraStreamHealth({ readyState: "live", muted: false })).toBe("ok");
+  });
+
+  it("no track at all (stream torn down) is unavailable", () => {
+    expect(classifyCameraStreamHealth(null)).toBe("unavailable");
+    expect(classifyCameraStreamHealth(undefined)).toBe("unavailable");
+  });
+
+  it("a muted track is unavailable — this is exactly the signal a capture-buffer reservation failure produces", () => {
+    expect(classifyCameraStreamHealth({ readyState: "live", muted: true })).toBe("unavailable");
+  });
+
+  it("an ended track is unavailable", () => {
+    expect(classifyCameraStreamHealth({ readyState: "ended", muted: false })).toBe("unavailable");
+  });
+});
+
+describe("decideCameraStreamEmission", () => {
+  it("a single unhealthy tick does not yet emit (requires 2 consecutive, same rule as CAMERA_VIEW_BLOCKED/CAMERA_TOO_DARK)", () => {
+    const decision = decideCameraStreamEmission("unavailable", 1, true);
+    expect(decision.conditionMet).toBe(false);
+    expect(decision.shouldEmit).toBe(false);
+  });
+
+  it("2 consecutive unhealthy ticks with cooldown available emits", () => {
+    const decision = decideCameraStreamEmission("unavailable", 2, true);
+    expect(decision.conditionMet).toBe(true);
+    expect(decision.shouldEmit).toBe(true);
+  });
+
+  it("condition met but cooldown not yet elapsed: conditionMet true, shouldEmit false", () => {
+    const decision = decideCameraStreamEmission("unavailable", 3, false);
+    expect(decision.conditionMet).toBe(true);
+    expect(decision.shouldEmit).toBe(false);
+  });
+
+  it("a healthy stream never triggers this emission regardless of consecutive count", () => {
+    const decision = decideCameraStreamEmission("ok", 5, true);
+    expect(decision.conditionMet).toBe(false);
+    expect(decision.shouldEmit).toBe(false);
   });
 });

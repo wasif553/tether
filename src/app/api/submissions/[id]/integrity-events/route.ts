@@ -38,6 +38,9 @@ const INTEGRITY_EVENT_TYPES = [
   "CAMERA_VIEW_BLOCKED",
   "CAMERA_TOO_DARK",
   "AI_CAMERA_CHECK_UNAVAILABLE",
+  // Corrective pass v1.2.2, Task 8 — see cameraIntegrityDetection.ts's
+  // classifyCameraStreamHealth doc comment.
+  "CAMERA_STREAM_UNAVAILABLE",
   // One-Question-At-A-Time Exam Delivery v1 — see
   // docs/one-question-delivery-v1.md.
   "QUESTION_NAVIGATED_NEXT",
@@ -103,6 +106,7 @@ const DEBOUNCE_WINDOWS_MS: Partial<Record<(typeof INTEGRITY_EVENT_TYPES)[number]
   CAMERA_VIEW_BLOCKED: 60_000,
   CAMERA_TOO_DARK: 60_000,
   AI_CAMERA_CHECK_UNAVAILABLE: 60_000,
+  CAMERA_STREAM_UNAVAILABLE: 60_000,
   // A student can only click a disabled/hidden Previous button through
   // direct API manipulation, but debounce anyway against accidental
   // rapid-fire duplicates.

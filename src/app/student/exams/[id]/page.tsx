@@ -9,6 +9,7 @@ import {
   shouldRunExamTimer,
 } from "@/lib/assessmentLifecycle";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
+import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 import {
   classifyFrameQuality,
   computeLuminanceVariance,
@@ -19,6 +20,8 @@ import {
   decideSecondPersonEmission,
   decideNoPersonEmission,
   decideFrameQualityEmission,
+  classifyCameraStreamHealth,
+  decideCameraStreamEmission,
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   PHONE_CONFIDENCE_THRESHOLD,
@@ -289,7 +292,8 @@ type IntegrityEventType =
   | "NO_PERSON_VISIBLE"
   | "CAMERA_VIEW_BLOCKED"
   | "CAMERA_TOO_DARK"
-  | "AI_CAMERA_CHECK_UNAVAILABLE";
+  | "AI_CAMERA_CHECK_UNAVAILABLE"
+  | "CAMERA_STREAM_UNAVAILABLE";
 
 type IntegritySeverity = "INFO" | "LOW" | "MEDIUM" | "HIGH";
 
@@ -307,6 +311,7 @@ const DEBOUNCE_MS: Partial<Record<IntegrityEventType, number>> = {
   CAMERA_VIEW_BLOCKED: 60_000,
   CAMERA_TOO_DARK: 60_000,
   AI_CAMERA_CHECK_UNAVAILABLE: 60_000,
+  CAMERA_STREAM_UNAVAILABLE: 60_000,
 };
 
 const MESSAGES: Record<IntegrityEventType, string> = {
@@ -343,6 +348,13 @@ const MESSAGES: Record<IntegrityEventType, string> = {
   CAMERA_VIEW_BLOCKED: "Camera view appears blocked or covered. Lecturer review required.",
   CAMERA_TOO_DARK: "Lighting is too low to verify camera visibility.",
   AI_CAMERA_CHECK_UNAVAILABLE: "On-device camera integrity checks are unavailable.",
+  // Corrective pass v1.2.2, Task 8 — a resource/capture-level camera
+  // interruption (e.g. another application holding the camera). Neutral
+  // wording, never implies the student did anything or that their face
+  // was confirmed absent — see classifyCameraStreamHealth in
+  // cameraIntegrityDetection.ts for why this is reported separately from
+  // NO_PERSON_VISIBLE.
+  CAMERA_STREAM_UNAVAILABLE: "Camera feed was temporarily interrupted.",
 };
 
 function severityFor(eventType: IntegrityEventType, settings: SecureSettings): IntegritySeverity {
@@ -393,6 +405,8 @@ function severityFor(eventType: IntegrityEventType, settings: SecureSettings): I
       return "LOW";
     case "AI_CAMERA_CHECK_UNAVAILABLE":
       return "INFO";
+    case "CAMERA_STREAM_UNAVAILABLE":
+      return settings.requireCamera ? "MEDIUM" : "LOW";
   }
 }
 
@@ -1131,11 +1145,15 @@ export default function TakeExamPage({
         // loadSubmission redirect handling.
         const verified = !gated || status.session?.verificationStatus === "VERIFIED";
         const enforced = status.displayRequirement?.status === "ENFORCED_BY_SECURE_CLIENT";
-        window.sesLockdown?.setSecureClientEnforcementState?.({
-          active: gated,
-          ready: !gated || verified,
-          requireSingleDisplay: enforced,
+        logClientTetherDiagnostic("attempt_policy_loaded", {
+          deliveryMode: status.deliveryMode,
+          displayPolicy: typeof status.displayRequirement?.displayPolicy === "string" ? status.displayRequirement.displayPolicy : null,
+          requireDisplayCheck: typeof status.requireDisplayCheck === "boolean" ? status.requireDisplayCheck : null,
+          verified,
         });
+        const nextEnforcementState = { active: gated, ready: !gated || verified, requireSingleDisplay: enforced };
+        logClientTetherDiagnostic("ipc_enforcement_state_sent", nextEnforcementState);
+        window.sesLockdown?.setSecureClientEnforcementState?.(nextEnforcementState);
         window.sesLockdown?.reportDiagnosticContext?.({
           submissionIdPresent: true,
           verifiedSecureClientSession: verified,
@@ -1151,7 +1169,10 @@ export default function TakeExamPage({
         // state in place on a failed/malformed status fetch — explicitly
         // re-assert the covering state so the exam stays covered until a
         // genuinely successful determination is made.
-        window.sesLockdown?.setSecureClientEnforcementState?.({ active: true, ready: false, requireSingleDisplay: false });
+        logClientTetherDiagnostic("attempt_policy_load_failed", {});
+        const coveringState = { active: true, ready: false, requireSingleDisplay: false };
+        logClientTetherDiagnostic("ipc_enforcement_state_sent", coveringState);
+        window.sesLockdown?.setSecureClientEnforcementState?.(coveringState);
         window.sesLockdown?.reportDiagnosticContext?.({
           submissionIdPresent: true,
           verifiedSecureClientSession: false,
@@ -2319,6 +2340,49 @@ export default function TakeExamPage({
 
       try {
         if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
+
+        // Corrective pass v1.2.2, Task 8 — a camera resource/capture
+        // failure (e.g. Windows Media Foundation "Failed to reserve
+        // output capture buffer", commonly caused by another app such as
+        // Microsoft Teams holding the camera) must never be classified
+        // as face absence. The <video> element's readyState/dimensions
+        // checked just above can stay stale at their last good values
+        // even once the underlying track has stopped delivering frames,
+        // so this checks the MediaStreamTrack itself — the same signal
+        // the existing camera heartbeat already relies on — BEFORE any
+        // pixel data from this (possibly frozen) frame is drawn or fed
+        // into person/phone/frame-quality detection.
+        const activeTrack = cameraStreamRef.current?.getVideoTracks()[0];
+        const streamHealth = classifyCameraStreamHealth(
+          activeTrack ? { readyState: activeTrack.readyState, muted: activeTrack.muted } : null,
+        );
+        const streamUnavailableCount = cooldown.recordObservation("streamUnavailable", streamHealth === "unavailable");
+        const streamDecision = decideCameraStreamEmission(
+          streamHealth,
+          streamUnavailableCount,
+          cooldown.canEmit("CAMERA_STREAM_UNAVAILABLE", now, 60_000),
+        );
+        if (streamDecision.shouldEmit) {
+          cooldown.markEmitted("CAMERA_STREAM_UNAVAILABLE", now);
+          reportIntegrityEvent("CAMERA_STREAM_UNAVAILABLE", {
+            source: "on_device_camera_ai",
+            confidenceBand: "high",
+            trackReadyState: activeTrack?.readyState ?? "absent",
+          });
+        }
+        if (streamHealth === "unavailable") {
+          // Never draw/classify this frame at all — every downstream
+          // signal (blocked, dark, no-person, phone, second-person) is
+          // skipped this tick, which also freezes their consecutive-tick
+          // counters exactly as if the tick had not run (see
+          // decideNoPersonEmission's frameQuality gate for the same
+          // hysteresis pattern).
+          logAiCameraDebug("tick: skipped — camera stream unavailable", {
+            trackReadyState: activeTrack?.readyState ?? "absent",
+            trackMuted: activeTrack?.muted ?? null,
+          });
+          return;
+        }
 
         // Camera Startup Lifecycle v2 — see
         // docs/on-device-ai-integrity-detection-v1.md ("Camera startup

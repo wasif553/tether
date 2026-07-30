@@ -202,6 +202,20 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   async function runLaunchSequence(code: string | null) {
     setBusy(true);
     setError(null);
+    // Corrective pass v1.2.2, Tasks 2/3 — activate the fail-closed
+    // enforcement gate the MOMENT the student enters a secured exam
+    // (clicking Start/Continue, or this page's own auto-resume of an
+    // existing IN_PROGRESS submission below), not merely once the exam
+    // CONTENT page later mounts. The acknowledgement screen itself is
+    // deliberately left uncovered (the student must be able to read it
+    // and type an access code) — this only covers the LOADING transition
+    // from here into verified exam content. Un-covered again below on
+    // any failure, so the error/retry UI stays visible and usable; a
+    // successful run leaves this active — the exam page's own mount
+    // effect then carries it through to ready:true once policy/session
+    // are confirmed, with no gap across the SPA navigation.
+    window.sesLockdown?.setSecureClientEnforcementState?.({ active: true, ready: false, requireSingleDisplay: false });
+    logClientTetherDiagnostic("exam_entry_cover_activated", { examId });
     try {
       const startRes = await fetch(`/api/exams/${examId}/start`, {
         method: "POST",
@@ -211,6 +225,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       if (!startRes.ok) {
         const body = await startRes.json().catch(() => null);
         setError(typeof body?.error === "string" ? body.error : "Failed to start exam.");
+        uncoverOnFailure();
         return;
       }
       const submission: StartResponse = await startRes.json();
@@ -238,6 +253,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       if (!launchRes.ok) {
         const body = await launchRes.json().catch(() => null);
         setError(resolveTetherLaunchFailureMessage(typeof body?.code === "string" ? body.code : ""));
+        uncoverOnFailure();
         return;
       }
       const { manifest, signature } = await launchRes.json();
@@ -255,6 +271,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       if (!consumeRes.ok) {
         const body = await consumeRes.json().catch(() => null);
         setError(resolveTetherLaunchFailureMessage(typeof body?.code === "string" ? body.code : ""));
+        uncoverOnFailure();
         return;
       }
       const consumed: { ok: boolean; sessionId?: string } = await consumeRes.json();
@@ -263,14 +280,98 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         hasSessionId: Boolean(consumed.sessionId),
       });
 
-      // Consumed successfully — a verified secure-client session now
-      // exists for this submission. Land directly in the exam; the
-      // Electron app's own live display-enforcement (registered from app
-      // start, independent of this page) takes over from here.
+      // Corrective pass v1.2.2, Task 1/2 (real root cause) — consuming
+      // the manifest only CREATES a secure-client session with
+      // verificationStatus NOT_CHECKED; it does NOT verify it.
+      // Verification only ever transitions to VERIFIED via
+      // POST /api/secure-client/sessions/[sessionId]/attestation (see
+      // recordAttestation in secureClientRunner.ts) — and nothing in the
+      // real launch flow ever called it. Only the dev mock-client
+      // simulator (src/app/dev/mock-secure-client/[id]/page.tsx) did,
+      // which is why this defect was invisible in every prior automated
+      // test and every dev-simulator smoke check: GET
+      // /api/submissions/[id]'s TETHER_SESSION_REQUIRED gate (and the
+      // identical check in POST /api/exams/[id]/start) both require
+      // verificationStatus === "VERIFIED" — with no attestation ever
+      // submitted, a real physical Tether launch could consume a
+      // manifest successfully and still never pass that gate, bouncing
+      // back to this page indefinitely without ever reaching a state
+      // that reports a real deliveryMode/displayPolicy to the exam page.
+      // Submits the one check this exam type actually implements
+      // (displayCheck, via the already-exposed
+      // window.sesLockdown.getDisplayCount() bridge) so a real launch
+      // establishes verification the same way the mock simulator always
+      // has.
+      if (consumed.sessionId) {
+        await submitInitialAttestation(consumed.sessionId, submission.id);
+      }
+
+      // Land directly in the exam; the Electron app's own live
+      // display-enforcement (registered from app start, independent of
+      // this page) takes over from here regardless of the one-time
+      // attestation result above.
       router.replace(`/student/exams/${submission.id}`);
+    } catch {
+      // A thrown exception (network failure, etc.) rather than a
+      // non-ok response — same fail-closed handling: never leave the
+      // student stuck behind a permanent cover with no visible error or
+      // retry option.
+      setError("Failed to start exam. Check your connection and try again.");
+      uncoverOnFailure();
     } finally {
       setBusy(false);
     }
+  }
+
+  /**
+   * Corrective pass v1.2.2, Task 1/2 — the missing verification step.
+   * Fetches the same /secure-client/status endpoint the exam page uses
+   * to learn whether this attempt's immutable policy actually requires
+   * a display check, reports the current Electron display count for
+   * that ONE check if so (feature-detected — never fails hard if an
+   * older packaged install doesn't expose getDisplayCount), and submits
+   * the attestation. Never blocks entry on failure here: if this call
+   * itself fails, the session simply stays unverified and the existing
+   * TETHER_SESSION_REQUIRED gate on GET /api/submissions/[id] will
+   * correctly send the student back to this page to retry, rather than
+   * silently granting access.
+   */
+  async function submitInitialAttestation(sessionId: string, submissionId: string): Promise<void> {
+    try {
+      const statusRes = await fetch(`/api/submissions/${submissionId}/secure-client/status`);
+      const status = statusRes.ok ? await statusRes.json().catch(() => null) : null;
+      const requireDisplayCheck = typeof status?.requireDisplayCheck === "boolean" ? status.requireDisplayCheck : false;
+
+      const checks: Record<string, string> = {};
+      if (requireDisplayCheck && typeof window.sesLockdown?.getDisplayCount === "function") {
+        const displayCount = await window.sesLockdown.getDisplayCount();
+        checks.displayCheck = displayCount <= 1 ? "PASS" : "FAIL";
+      }
+
+      const res = await fetch(`/api/secure-client/sessions/${sessionId}/attestation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          platform: window.sesLockdown?.platform?.() ?? undefined,
+          clientVersion: window.sesLockdown?.version ?? undefined,
+          checks,
+          required: requireDisplayCheck ? { displayCheck: true } : {},
+        }),
+      });
+      const body = await res.json().catch(() => null);
+      logClientTetherDiagnostic("secure_client_session_verified", {
+        ok: res.ok,
+        overallStatus: typeof body?.overallStatus === "string" ? body.overallStatus : null,
+      });
+    } catch {
+      logClientTetherDiagnostic("secure_client_session_verified", { ok: false, overallStatus: null });
+    }
+  }
+
+  /** Task 3 — un-cover only on a definitive launch failure, so the error/retry UI on this page is visible and usable. There is no exam content to protect yet at this point; re-clicking Start/Continue re-arms the cover from the top of runLaunchSequence. */
+  function uncoverOnFailure() {
+    window.sesLockdown?.setSecureClientEnforcementState?.({ active: false, ready: false, requireSingleDisplay: false });
+    logClientTetherDiagnostic("exam_entry_cover_released_on_failure", { examId });
   }
 
   if (loading || !result) {

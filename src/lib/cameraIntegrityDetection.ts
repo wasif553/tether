@@ -463,6 +463,64 @@ export function decideFrameQualityEmission(
   return { conditionMet, shouldEmit: conditionMet && cooldownOk };
 }
 
+// ---------------------------------------------------------------------------
+// Corrective pass v1.2.2, Task 8. Physical testing showed repeated
+// Chromium/Windows Media Foundation errors ("Failed to reserve output
+// capture buffer: 1") while another application (Microsoft Teams, in
+// three processes) held the camera. A capture-buffer reservation failure
+// does not necessarily change the <video> element's own
+// readyState/videoWidth/videoHeight/currentTime — those can stay frozen
+// at their last good values — so it was silently feeding a stale frame
+// into the object detector, which then found no person and eventually
+// reported NO_PERSON_VISIBLE ("Face not visible"). This must never
+// happen: a camera resource interruption is not evidence of face
+// absence.
+// ---------------------------------------------------------------------------
+
+export type CameraStreamHealth = "ok" | "unavailable";
+
+export type CameraTrackLike = { readyState: string; muted: boolean };
+
+/**
+ * Classifies MediaStreamTrack health independently of pixel content —
+ * the same two signals the existing camera heartbeat already relies on
+ * (see startCamera/heartbeat wiring in src/app/student/exams/[id]/page.tsx):
+ * the browser marks a track `muted` when its source cannot currently
+ * deliver data (exactly what a capture-buffer reservation failure is),
+ * and `readyState` becomes "ended" on a terminal failure. `null`/`undefined`
+ * (no track at all, e.g. the stream was torn down) is also "unavailable".
+ */
+export function classifyCameraStreamHealth(track: CameraTrackLike | null | undefined): CameraStreamHealth {
+  if (!track) return "unavailable";
+  if (track.readyState !== "live") return "unavailable";
+  if (track.muted) return "unavailable";
+  return "ok";
+}
+
+export type CameraStreamEmissionDecision = {
+  /** Whether the stream-unavailable condition has held for ≥2 consecutive checks — independent of cooldown. */
+  conditionMet: boolean;
+  /** Whether this tick should send a NEW backend integrity event: conditionMet AND the cooldown has elapsed. */
+  shouldEmit: boolean;
+};
+
+/**
+ * CAMERA_STREAM_UNAVAILABLE — same 2-consecutive-check confirmation rule
+ * as decideFrameQualityEmission, so a single-tick blip (e.g. one dropped
+ * frame during a benign resolution change) isn't itself reported.
+ * Distinct from the existing CAMERA_UNAVAILABLE event (total acquisition
+ * failure at startup/restore, see handleRestoreCamera) — this is a
+ * transient mid-exam interruption of an otherwise-running stream.
+ */
+export function decideCameraStreamEmission(
+  streamHealth: CameraStreamHealth,
+  consecutiveCount: number,
+  cooldownOk: boolean,
+): CameraStreamEmissionDecision {
+  const conditionMet = streamHealth === "unavailable" && consecutiveCount >= 2;
+  return { conditionMet, shouldEmit: conditionMet && cooldownOk };
+}
+
 /**
  * Camera Startup Readiness v1 — see docs/on-device-ai-integrity-detection-v1.md
  * ("Camera startup readiness"). Many webcams deliver a few transiently

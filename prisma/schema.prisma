@@ -61,6 +61,12 @@ enum IntegrityEventType {
   CAMERA_VIEW_BLOCKED
   CAMERA_TOO_DARK
   AI_CAMERA_CHECK_UNAVAILABLE
+  // Corrective pass v1.2.2, Task 8 (additive) — a resource/capture-level
+  // camera interruption (e.g. another application holding the camera),
+  // reported separately from NO_PERSON_VISIBLE so a capture failure is
+  // never misclassified as confirmed face absence. See
+  // classifyCameraStreamHealth in src/lib/cameraIntegrityDetection.ts.
+  CAMERA_STREAM_UNAVAILABLE
   // One-Question-At-A-Time Exam Delivery v1 (additive — see
   // docs/one-question-delivery-v1.md).
   QUESTION_NAVIGATED_NEXT

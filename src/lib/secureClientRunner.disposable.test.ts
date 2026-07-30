@@ -37,6 +37,7 @@
  */
 import { afterAll, describe, expect, it, vi } from "vitest";
 import crypto from "crypto";
+import type { Prisma } from "@/generated/prisma/client";
 
 const databaseUrl = process.env.DATABASE_URL ?? "";
 if (!databaseUrl || /supabase/i.test(databaseUrl)) {
@@ -65,6 +66,7 @@ const {
   consumeLaunchManifest,
   recordSecureClientEvent,
   recordAttestation,
+  getCurrentSessionForSubmission,
 } = await import("./secureClientRunner");
 const { computeExpectedRequestHash } = await import("./secureClient/sebBrowserExamKey");
 const { computeStudentSubjectHash } = await import("./secureClient/secureLaunchManifest");
@@ -414,6 +416,193 @@ describe("concurrent sequence numbers remain consistent", () => {
     expect(retry.replay).toBe(true);
     const persistedAfterRetry = await prisma.secureClientEvent.count({ where: { secureClientSessionId: session.id } });
     expect(persistedAfterRetry).toBe(N);
+  });
+});
+
+describe("Corrective pass v1.2.2 — real direct-launch workflow establishes a genuinely VERIFIED session", () => {
+  /**
+   * This is the exact defect physical testing traced Tasks 1/2 to:
+   * consuming a launch manifest only CREATES a session with
+   * verificationStatus NOT_CHECKED — it does NOT verify it. Verification
+   * only ever happens via recordAttestation (see
+   * POST /api/secure-client/sessions/[sessionId]/attestation). Nothing in
+   * the real launch flow called it before this corrective pass (only the
+   * dev mock-client simulator did) — these tests exercise the exact
+   * sequence src/app/student/exams/[id]/tether-launch/page.tsx now runs:
+   * issue -> consume -> attest -> verified, against a real database, so a
+   * regression that silently drops the attestation call again would be
+   * caught here even though no jsdom/Electron is available to catch it
+   * at the UI layer.
+   */
+  async function setupTetherRequiredSubmission(tag: string, requireDisplayCheck: boolean) {
+    const inst = await makeInstitution(`attest-flow-${tag}-${stamp}`);
+    const lecturer = await makeLecturer(inst.id, `attest-flow-${tag}-${stamp}`);
+    const student = await makeStudent(inst.id, `attest-flow-${tag}-${stamp}`);
+    const exam = await makeExam(inst.id, lecturer.id, `attest-flow-${tag}`);
+    const { DISABLED_SECURE_CLIENT_POLICY } = await import("./secureClientPolicy");
+    const submission = await prisma.submission.create({
+      data: {
+        examId: exam.id,
+        studentId: student.id,
+        secureClientPolicySnapshotJson: {
+          ...DISABLED_SECURE_CLIENT_POLICY,
+          deliveryMode: "TETHER_CLIENT_REQUIRED",
+          displayPolicy: requireDisplayCheck ? "SINGLE_DISPLAY_REQUIRED" : "UNRESTRICTED",
+          requireDisplayCheck,
+          maximumDisplays: requireDisplayCheck ? 1 : 4,
+        } as unknown as Prisma.InputJsonValue,
+      },
+    });
+    cleanup.exams.push(exam.id);
+    const { manifest, signature } = await issueLaunchManifest({
+      institutionId: inst.id,
+      examId: exam.id,
+      submissionId: submission.id,
+      studentId: student.id,
+      configurationId: null,
+      clientType: "TETHER_SECURE_CLIENT",
+      policy: { ...DISABLED_SECURE_CLIENT_POLICY, deliveryMode: "TETHER_CLIENT_REQUIRED", secureLaunchTokenTtlSeconds: 300 },
+      canonicalExamOrigin: "https://example.test",
+      launchPath: `/student/exams/${exam.id}/tether-launch`,
+      audience: "tether-secure-client",
+    });
+    return { inst, exam, student, submission, manifest, signature };
+  }
+
+  it("consuming the manifest alone leaves the session NOT_CHECKED — the actual pre-fix defect, asserted directly so a regression can't silently reintroduce it", async () => {
+    const { submission, manifest, signature } = await setupTetherRequiredSubmission("bug-repro", true);
+    const consumed = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    expect(consumed.outcome).toBe("CONSUMED");
+
+    const current = await getCurrentSessionForSubmission(submission.id);
+    expect(current?.verificationStatus).toBe("NOT_CHECKED");
+
+    const { resolveSecureClientStartGate } = await import("./secureClientStartGate");
+    const gate = resolveSecureClientStartGate({
+      effectiveDeliveryMode: "TETHER_CLIENT_REQUIRED",
+      hasVerifiedTetherSession: current?.verificationStatus === "VERIFIED",
+      devBypassAllowed: false,
+    });
+    expect(gate.kind).toBe("REDIRECT_TO_TETHER_LAUNCH");
+  });
+
+  it("issue -> consume -> attest (displayCheck PASS, one display) establishes a genuinely VERIFIED session and the start gate then ALLOWs", async () => {
+    const { submission, manifest, signature } = await setupTetherRequiredSubmission("verified-pass", true);
+    const consumed = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    if (consumed.outcome !== "CONSUMED") throw new Error(`expected CONSUMED, got ${consumed.outcome}`);
+    expect(consumed.sessionId).toBeTruthy();
+
+    const { overallStatus } = await recordAttestation({
+      sessionId: consumed.sessionId,
+      clientType: "TETHER_SECURE_CLIENT",
+      checks: { displayCheck: "PASS" },
+      required: { displayCheck: true },
+      clientVerificationFailed: false,
+      configurationInvalid: false,
+      versionUnsupported: false,
+      technicalFailure: false,
+      displayCount: 1,
+      displayTopology: "SINGLE",
+    });
+    expect(overallStatus).toBe("READY");
+
+    const current = await getCurrentSessionForSubmission(submission.id);
+    expect(current?.verificationStatus).toBe("VERIFIED");
+
+    const { resolveSecureClientStartGate } = await import("./secureClientStartGate");
+    const gate = resolveSecureClientStartGate({
+      effectiveDeliveryMode: "TETHER_CLIENT_REQUIRED",
+      hasVerifiedTetherSession: current?.verificationStatus === "VERIFIED",
+      devBypassAllowed: false,
+    });
+    expect(gate.kind).toBe("ALLOW");
+  });
+
+  it("issue -> consume -> attest with displayCheck FAIL (two displays at entry) never reaches VERIFIED — the start gate stays blocked, matching Electron's own BLOCKED decision for the same condition", async () => {
+    const { submission, manifest, signature } = await setupTetherRequiredSubmission("verified-fail", true);
+    const consumed = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    if (consumed.outcome !== "CONSUMED") throw new Error(`expected CONSUMED, got ${consumed.outcome}`);
+
+    const { overallStatus } = await recordAttestation({
+      sessionId: consumed.sessionId,
+      clientType: "TETHER_SECURE_CLIENT",
+      checks: { displayCheck: "FAIL" },
+      required: { displayCheck: true },
+      clientVerificationFailed: false,
+      configurationInvalid: false,
+      versionUnsupported: false,
+      technicalFailure: false,
+      displayCount: 2,
+      displayTopology: "EXTEND",
+    });
+    expect(overallStatus).not.toBe("READY");
+
+    const current = await getCurrentSessionForSubmission(submission.id);
+    expect(current?.verificationStatus).not.toBe("VERIFIED");
+
+    const { resolveSecureClientStartGate } = await import("./secureClientStartGate");
+    const gate = resolveSecureClientStartGate({
+      effectiveDeliveryMode: "TETHER_CLIENT_REQUIRED",
+      hasVerifiedTetherSession: current?.verificationStatus === "VERIFIED",
+      devBypassAllowed: false,
+    });
+    expect(gate.kind).toBe("REDIRECT_TO_TETHER_LAUNCH");
+  });
+
+  it("when the policy does not require a display check, an empty attestation (no checks at all) still reaches VERIFIED — nothing required, nothing to fail", async () => {
+    const { submission, manifest, signature } = await setupTetherRequiredSubmission("no-display-check", false);
+    const consumed = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    if (consumed.outcome !== "CONSUMED") throw new Error(`expected CONSUMED, got ${consumed.outcome}`);
+
+    const { overallStatus } = await recordAttestation({
+      sessionId: consumed.sessionId,
+      clientType: "TETHER_SECURE_CLIENT",
+      checks: {},
+      required: {},
+      clientVerificationFailed: false,
+      configurationInvalid: false,
+      versionUnsupported: false,
+      technicalFailure: false,
+      displayCount: null,
+      displayTopology: null,
+    });
+    expect(overallStatus).toBe("READY");
+
+    const current = await getCurrentSessionForSubmission(submission.id);
+    expect(current?.verificationStatus).toBe("VERIFIED");
+  });
+
+  it("Continue (existing IN_PROGRESS submission, already-verified session) resolves ALLOW without re-issuing a manifest — mirrors what the tether-launch page's early-return branch depends on", async () => {
+    const { submission, manifest, signature } = await setupTetherRequiredSubmission("continue-verified", true);
+    const consumed = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    if (consumed.outcome !== "CONSUMED") throw new Error(`expected CONSUMED, got ${consumed.outcome}`);
+    await recordAttestation({
+      sessionId: consumed.sessionId,
+      clientType: "TETHER_SECURE_CLIENT",
+      checks: { displayCheck: "PASS" },
+      required: { displayCheck: true },
+      clientVerificationFailed: false,
+      configurationInvalid: false,
+      versionUnsupported: false,
+      technicalFailure: false,
+      displayCount: 1,
+      displayTopology: "SINGLE",
+    });
+
+    // Simulates the student closing and reopening Tether, or a page
+    // refresh: the SAME submission is resolved again, and the SAME
+    // (already-verified) session is found — /start's idempotent
+    // existingInProgress branch depends on exactly this.
+    const current = await getCurrentSessionForSubmission(submission.id);
+    expect(current?.verificationStatus).toBe("VERIFIED");
+    const { resolveSecureClientStartGate } = await import("./secureClientStartGate");
+    const gate = resolveSecureClientStartGate({
+      effectiveDeliveryMode: "TETHER_CLIENT_REQUIRED",
+      hasVerifiedTetherSession: current?.verificationStatus === "VERIFIED",
+      devBypassAllowed: false,
+    });
+    expect(gate.kind).toBe("ALLOW");
+    expect(submission.status).toBe("IN_PROGRESS");
   });
 });
 

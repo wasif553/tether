@@ -25,6 +25,10 @@ const EVENT_TYPE_LABELS: Partial<Record<string, string>> = {
   CAMERA_VIEW_BLOCKED: "Camera view appears blocked — needs review",
   CAMERA_TOO_DARK: "Camera view appears too dark — needs review",
   AI_CAMERA_CHECK_UNAVAILABLE: "AI camera checks unavailable",
+  // Corrective pass v1.2.2 — a resource/capture-level interruption (e.g.
+  // another application holding the camera), distinct from a confirmed
+  // no-person reading. Neutral wording, never implies face absence.
+  CAMERA_STREAM_UNAVAILABLE: "Camera feed temporarily interrupted",
   // Screen-share Evidence Mode v1 — neutral wording throughout; never
   // "cheating", "misconduct", or "caught" — see
   // docs/screen-share-evidence-v1.md.
@@ -82,6 +86,7 @@ const CAMERA_EVENT_TYPES = new Set([
   "CAMERA_VIEW_BLOCKED",
   "CAMERA_TOO_DARK",
   "AI_CAMERA_CHECK_UNAVAILABLE",
+  "CAMERA_STREAM_UNAVAILABLE",
 ]);
 
 const WINDOW_FOCUS_EVENT_TYPES = new Set([
