@@ -22,7 +22,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
 import { systemCheckValidityHours, minimumSupportedTetherVersion } from "@/lib/systemCheckConfig";
-import { loadOwnedSystemCheckVerification } from "@/lib/systemCheck/systemCheckSecureClientRunner";
+import { loadOwnedSystemCheckVerification } from "@/lib/systemCheck/tetherAttestationRunner";
 import {
   CHECK_RESULT_STATES,
   isValidSystemCheckId,

@@ -48,16 +48,34 @@
 // signals. Purely additive — no change to contextIsolation,
 // nodeIntegration, sandbox, or any existing IPC channel.
 //
-// v1.4.0 — security hardening pass (see docs/tether-system-check-v1.md,
-// "Genuine client attestation"): adds attestSystemCheck, backed by an
-// embedded Ed25519 private key (clientAttestationKey.ts) that never
-// leaves the main process — closes the gap where an ordinary browser
-// could fabricate a "verified" SYSTEM_CHECK result by echoing a signed
-// server challenge back with self-reported native facts. Purely
-// additive — no change to contextIsolation, nodeIntegration, sandbox,
-// or any existing IPC channel; the new private key is never exposed to
-// the renderer.
-export const LOCKDOWN_VERSION = "1.4.0";
+// v1.4.0 — WITHDRAWN, must never be distributed. Shipped
+// attestSystemCheck backed by a SINGLE Ed25519 private key compiled
+// into EVERY packaged build (clientAttestationKey.ts, since deleted). A
+// security review correctly identified this as a critical flaw: that
+// key is extractable from the installer/packaged resources/process
+// memory, and one extraction would have compromised every installation
+// using it. See docs/tether-system-check-v1.md, "Secure Client
+// Attestation v2" for the replacement design and the full writeup of
+// why the v1.4.0 design was insecure.
+//
+// v1.5.0 — Secure Client Attestation v2 (see
+// docs/tether-system-check-v1.md, "Secure Client Attestation v2").
+// REPLACES v1.4.0's single globally-embedded key with a PER-INSTALLATION
+// keypair (installationKey.ts), generated once on first need and
+// encrypted at rest via Electron's OS-backed safeStorage — never
+// exported through any application API, never sent over IPC to the
+// renderer. Adds getInstallationInfo/ensureInstallationKey (public-key-
+// only, safe to expose) and signRegistrationProof/attestExamSession
+// (purpose-specific signing operations only — no generic "sign this
+// data" method exists). attestSystemCheck's shape is unchanged but now
+// signs with the per-installation key. Honestly classified as
+// SOFTWARE_PROTECTED — real Windows CNG/TPM-backed non-exportable key
+// storage was investigated but deliberately not implemented this pass
+// (no TPM hardware was available to verify against in this
+// environment) — see "Known limitations" in the doc above. Purely
+// additive to the bridge surface — no change to contextIsolation,
+// nodeIntegration, or sandbox.
+export const LOCKDOWN_VERSION = "1.5.0";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

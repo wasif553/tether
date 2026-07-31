@@ -124,8 +124,14 @@ function describeCheck(id: SystemCheckId, display: CheckDisplay | undefined): { 
       if (reason === "ATTESTATION_UNAVAILABLE") {
         return { message: "This Tether Secure Browser installation is too old to verify.", correction: "Download and install the latest version, then retry." };
       }
-      if (reason === "ATTESTATION_FAILED" || reason === "CLIENT_ATTESTATION_INVALID") {
+      if (reason === "ATTESTATION_FAILED" || reason === "CLIENT_ATTESTATION_INVALID" || reason === "INSTALLATION_SIGNATURE_INVALID") {
         return { message: "Your Tether Secure Browser could not be verified.", correction: "Restart Tether Secure Browser and retry." };
+      }
+      if (reason === "INSTALLATION_UNAVAILABLE") {
+        return { message: "This computer could not be registered with Tether Secure Browser.", correction: "Restart Tether Secure Browser and retry." };
+      }
+      if (reason === "INSTALLATION_NOT_ACTIVE") {
+        return { message: "This computer's Tether Secure Browser registration is no longer active.", correction: "Restart Tether Secure Browser to register this computer again." };
       }
       return { message: "A verified Tether Secure Browser session could not be confirmed.", correction: "Retry the check." };
     case "clientVersion":
@@ -220,14 +226,76 @@ const CHECK_TIMEOUT_MS = 8_000;
  * main.ts itself gathered. This function never constructs or trusts a
  * "verified" boolean itself — the server's response is authoritative.
  */
+/**
+ * Secure Client Attestation v2 — see docs/tether-system-check-v1.md,
+ * "Per-installation key" / "Installation registration". Ensures a
+ * genuine, server-registered per-installation key exists for this
+ * device, registering one (first-time-ever, or after a prior
+ * revocation) if needed. Returns the installationId to attest with, or
+ * null if registration could not be completed. The private key itself
+ * never leaves the Electron main process at any point in this flow.
+ */
+async function ensureRegisteredInstallation(): Promise<string | null> {
+  const current = await withTimeout(fetch("/api/tether/installation/current"), CHECK_TIMEOUT_MS)
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
+  if (current?.installation?.id) return current.installation.id;
+
+  if (typeof window.sesLockdown?.ensureInstallationKey !== "function" || typeof window.sesLockdown?.signRegistrationProof !== "function") {
+    return null;
+  }
+  const keyInfo = await withTimeout(window.sesLockdown.ensureInstallationKey(), CHECK_TIMEOUT_MS).catch(() => null);
+  if (!keyInfo?.hasKey || !keyInfo.publicKey) return null;
+
+  const challengeRes = await withTimeout(fetch("/api/tether/installation/registration-challenge", { method: "POST" }), CHECK_TIMEOUT_MS).catch(() => null);
+  if (!challengeRes?.ok) return null;
+  const { challenge, signature: challengeSignature } = await challengeRes.json();
+
+  const proof = await withTimeout(window.sesLockdown.signRegistrationProof(challenge.nonce), CHECK_TIMEOUT_MS).catch(() => null);
+  if (!proof) return null;
+
+  const registerRes = await withTimeout(
+    fetch("/api/tether/installation/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challenge,
+        challengeSignature,
+        publicKey: proof.publicKey ?? keyInfo.publicKey,
+        keyAlgorithm: proof.keyAlgorithm ?? keyInfo.keyAlgorithm,
+        keyProtectionLevel: proof.keyProtectionLevel ?? keyInfo.keyProtectionLevel,
+        proofOfPossessionSignature: proof.signature,
+        clientVersion: window.sesLockdown?.version ?? null,
+        platform: null,
+      }),
+    }),
+    CHECK_TIMEOUT_MS,
+  ).catch(() => null);
+  if (!registerRes?.ok) return null;
+  const registerBody = await registerRes.json().catch(() => null);
+  return typeof registerBody?.installationId === "string" ? registerBody.installationId : null;
+}
+
 async function verifySecureClient(): Promise<{ display: CheckDisplay; verificationId: string | null }> {
   try {
-    const challengeRes = await withTimeout(fetch("/api/tether/system-check/secure-client/challenge", { method: "POST" }), CHECK_TIMEOUT_MS);
+    const installationId = await ensureRegisteredInstallation();
+    if (!installationId) {
+      return { display: { status: "BLOCKED", reasonCode: "INSTALLATION_UNAVAILABLE" }, verificationId: null };
+    }
+
+    const challengeRes = await withTimeout(
+      fetch("/api/tether/system-check/secure-client/challenge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ installationId }),
+      }),
+      CHECK_TIMEOUT_MS,
+    );
     if (!challengeRes.ok) return { display: { status: "BLOCKED", reasonCode: "CHALLENGE_FAILED" }, verificationId: null };
-    const { challenge, signature } = await challengeRes.json();
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
 
     if (typeof window.sesLockdown?.attestSystemCheck !== "function") {
-      // An older packaged install (pre-1.4.0) doesn't expose this yet —
+      // An older packaged install (pre-1.5.0) doesn't expose this yet —
       // never falls back to unsigned self-reported facts.
       return { display: { status: "BLOCKED", reasonCode: "ATTESTATION_UNAVAILABLE" }, verificationId: null };
     }
@@ -242,15 +310,12 @@ async function verifySecureClient(): Promise<{ display: CheckDisplay; verificati
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           challenge,
-          signature,
+          challengeSignature,
           clientType: "TETHER_SECURE_CLIENT",
-          clientAttestation: {
-            nonce: challenge.nonce,
-            clientVersion: attestation.clientVersion,
-            platform: attestation.platform,
-            displayTopologyClassification: attestation.displayTopologyClassification,
-            signature: attestation.signature,
-          },
+          installationSignature: attestation.signature,
+          clientVersion: attestation.clientVersion,
+          platform: attestation.platform,
+          displayTopologyClassification: attestation.displayTopologyClassification,
         }),
       }),
       CHECK_TIMEOUT_MS,

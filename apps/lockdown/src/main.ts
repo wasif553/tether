@@ -12,10 +12,12 @@ import {
   BrowserWindow,
   ipcMain,
   session as electronSession,
+  safeStorage,
 } from "electron";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import crypto from "node:crypto";
 import Store from "electron-store";
 import {
   DEFAULT_SES_BASE_URL,
@@ -28,7 +30,7 @@ import {
   type QueuedLockdownEvent,
 } from "./shared";
 import { DisplayEnforcement } from "./displayEnforcement";
-import { signWithClientAttestationKey } from "./clientAttestationKey";
+import { ensureInstallationKey, getInstallationInfo, signWithInstallationKey, type InstallationKeyStoreSchema } from "./installationKey";
 import type { DisplayEnforcementEventType, SecureClientEnforcementState } from "./displayEnforcementLogic";
 import {
   isDiagnosticsPanelEnabled,
@@ -46,7 +48,7 @@ if (!gotLock) {
   app.quit();
 }
 
-type StoreSchema = {
+type StoreSchema = InstallationKeyStoreSchema & {
   queuedEvents: QueuedLockdownEvent[];
   // Cold-start convenience only (Tether launch/install flow v1): if the
   // OS launches the app via protocol before any window exists yet, and
@@ -57,7 +59,7 @@ type StoreSchema = {
 };
 
 const store = new Store<StoreSchema>({
-  defaults: { queuedEvents: [], lastExamId: null },
+  defaults: { queuedEvents: [], lastExamId: null, installationKey: null },
 });
 
 const displayEnforcement = new DisplayEnforcement({
@@ -480,30 +482,117 @@ ipcMain.handle("lockdown:get-secure-client-capabilities", () => ({
   getSecureClientCapabilities: true,
 }));
 
-// Security hardening pass — genuine client attestation for the SYSTEM_CHECK
-// flow. See docs/tether-system-check-v1.md, "Genuine client attestation",
-// and clientAttestationKey.ts's own doc comment. Every fact signed here is
+// Secure Client Attestation v2 — see docs/tether-system-check-v1.md,
+// "Per-installation key" / "Genuine client attestation", and
+// installationKey.ts's own doc comment. REPLACES the removed v1 design
+// (a single globally-embedded private key). Every fact signed below is
 // gathered by THIS main process itself (never trusted from an IPC
 // argument the renderer supplies) — the renderer only ever hands in the
-// server-issued nonce it received from POST .../secure-client/challenge.
-// The exact canonical string format below MUST match
-// buildSystemCheckAttestationCanonicalString in the main web app's
-// src/lib/secureClient/systemCheckClientAttestation.ts — kept as two
-// small, independently-reviewable copies rather than a cross-package
-// import, since apps/lockdown is a separate compiled package.
-function buildSystemCheckAttestationCanonicalString(params: { nonce: string; clientVersion: string; platform: string; displayTopologyClassification: string }): string {
-  return ["SYSTEM_CHECK_ATTESTATION_V1", params.nonce, params.clientVersion, params.platform, params.displayTopologyClassification].join("|");
+// server-issued nonce (and, for exam sessions, the exam/submission/
+// policy-hash values ALREADY bound into the server-signed challenge it
+// received). The exact canonical string formats below MUST match
+// buildSystemCheckAttestationCanonicalString /
+// buildExamSessionAttestationCanonicalString in the main web app's
+// src/lib/secureClient/tetherAttestation.ts — kept as independently
+// reviewable copies rather than a cross-package import, since
+// apps/lockdown is a separate compiled package.
+function buildSystemCheckAttestationCanonicalString(params: { nonce: string; installationPublicKeyFingerprint: string; clientVersion: string; platform: string; displayTopologyClassification: string }): string {
+  return ["TETHER_ATTESTATION_V2", "SYSTEM_CHECK", params.nonce, params.installationPublicKeyFingerprint, params.clientVersion, params.platform, params.displayTopologyClassification].join("|");
 }
+
+function buildExamSessionAttestationCanonicalString(params: {
+  nonce: string;
+  installationPublicKeyFingerprint: string;
+  clientVersion: string;
+  platform: string;
+  displayTopologyClassification: string;
+  displayCount: number;
+  examId: string;
+  submissionId: string;
+  policyHash: string;
+}): string {
+  return [
+    "TETHER_ATTESTATION_V2",
+    "EXAM_SESSION",
+    params.nonce,
+    params.installationPublicKeyFingerprint,
+    params.clientVersion,
+    params.platform,
+    params.displayTopologyClassification,
+    String(params.displayCount),
+    params.examId,
+    params.submissionId,
+    params.policyHash,
+  ].join("|");
+}
+
+function computePublicKeyFingerprint(publicKeyPem: string): string {
+  return crypto.createHash("sha256").update(publicKeyPem.trim(), "utf8").digest("hex");
+}
+
+ipcMain.handle("lockdown:get-installation-info", () => getInstallationInfo(store));
+
+ipcMain.handle("lockdown:ensure-installation-key", () => ensureInstallationKey(store, safeStorage));
+
+// Registration proof-of-possession — signs ONLY the server-issued
+// registration-challenge nonce, nothing else. A narrowly scoped,
+// purpose-specific operation, not a generic signing primitive.
+ipcMain.handle("lockdown:sign-registration-proof", (_event, nonce: unknown) => {
+  if (typeof nonce !== "string" || nonce.length === 0 || nonce.length > 512) return null;
+  const signature = signWithInstallationKey(store, safeStorage, nonce);
+  if (!signature) return null;
+  const info = getInstallationInfo(store);
+  return { signature, publicKey: info.publicKey, keyAlgorithm: info.keyAlgorithm, keyProtectionLevel: info.keyProtectionLevel };
+});
 
 ipcMain.handle("lockdown:attest-system-check", async (_event, nonce: unknown) => {
   if (typeof nonce !== "string" || nonce.length === 0 || nonce.length > 512) return null;
+  const info = getInstallationInfo(store);
+  if (!info.hasKey || !info.publicKey) return null;
   const clientVersion = LOCKDOWN_VERSION;
   const platform = process.platform;
   const topology = await displayEnforcement.getOnDemandDisplayTopology();
   const displayTopologyClassification = topology.classification;
-  const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce, clientVersion, platform, displayTopologyClassification });
-  const signature = signWithClientAttestationKey(canonicalString);
+  const installationPublicKeyFingerprint = computePublicKeyFingerprint(info.publicKey);
+  const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce, installationPublicKeyFingerprint, clientVersion, platform, displayTopologyClassification });
+  const signature = signWithInstallationKey(store, safeStorage, canonicalString);
+  if (!signature) return null;
   return { signature, clientVersion, platform, displayTopologyClassification };
+});
+
+ipcMain.handle("lockdown:attest-exam-session", async (_event, payload: unknown) => {
+  if (typeof payload !== "object" || payload === null) return null;
+  const { nonce, examId, submissionId, policyHash } = payload as Record<string, unknown>;
+  if (
+    typeof nonce !== "string" || nonce.length === 0 || nonce.length > 512 ||
+    typeof examId !== "string" || examId.length === 0 ||
+    typeof submissionId !== "string" || submissionId.length === 0 ||
+    typeof policyHash !== "string" || policyHash.length === 0
+  ) {
+    return null;
+  }
+  const info = getInstallationInfo(store);
+  if (!info.hasKey || !info.publicKey) return null;
+  const clientVersion = LOCKDOWN_VERSION;
+  const platform = process.platform;
+  const topology = await displayEnforcement.getOnDemandDisplayTopology();
+  const displayTopologyClassification = topology.classification;
+  const displayCount = displayEnforcement.getCurrentDisplayCount();
+  const installationPublicKeyFingerprint = computePublicKeyFingerprint(info.publicKey);
+  const canonicalString = buildExamSessionAttestationCanonicalString({
+    nonce,
+    installationPublicKeyFingerprint,
+    clientVersion,
+    platform,
+    displayTopologyClassification,
+    displayCount,
+    examId,
+    submissionId,
+    policyHash,
+  });
+  const signature = signWithInstallationKey(store, safeStorage, canonicalString);
+  if (!signature) return null;
+  return { signature, clientVersion, platform, displayTopologyClassification, displayCount };
 });
 
 // Tasks A/B — the hosted page reports the bounded, non-secret policy

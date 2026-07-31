@@ -1,11 +1,34 @@
 /**
- * Tether System Check and Exam Readiness v1 — DB-backed route tests. See
- * docs/tether-system-check-v1.md.
+ * Tether System Check and Exam Readiness — DB-backed route tests. See
+ * docs/tether-system-check-v1.md, "Secure Client Attestation v2".
  *
  * Same established pattern as finalExaminationPolicy.routes.test.ts: real
  * route handlers imported directly, run against a real local test
  * Postgres. Pure aggregation/mode logic lives in
- * src/lib/systemCheck/readiness.test.ts with no DB dependency at all.
+ * src/lib/systemCheck/readiness.test.ts; pure attestation crypto lives in
+ * src/lib/secureClient/tetherAttestation.test.ts and
+ * apps/lockdown/src/installationKey.test.ts — none of those need a DB.
+ *
+ * IMPORTANT — v2 architecture note, read before extending this file:
+ * there is no longer a single globally-shared attestation key. Every
+ * test that needs a "genuine Tether installation" must actually drive
+ * the real registration flow (registerFreshInstallation below) to
+ * obtain a per-installation keypair the server has genuinely recorded —
+ * exactly what a real packaged client does. A "Chrome" scenario is
+ * simulated by signing with a key that was NEVER registered (or was
+ * registered by a DIFFERENT installation) — the server looks up the
+ * REGISTERED public key for the claimed installationId and verifies
+ * against THAT, so an unregistered/mismatched key never verifies. See
+ * "Known limitations" in docs/tether-system-check-v1.md for the honest
+ * boundary this does NOT defend: a sufficiently sophisticated attacker
+ * who can script the registration+attestation HTTP flow directly (not
+ * merely open DevTools in a real browser tab) CAN self-register a
+ * SOFTWARE_PROTECTED installation and attest with it — v2's guarantee is
+ * that this is never mistaken for TPM-backed/hardware-attested (see the
+ * protection-level tests below), and that any single installation's
+ * compromise is contained and revocable, not that pure software crypto
+ * makes this impossible — no purely software scheme can, without real
+ * TPM/CNG remote attestation infrastructure this pass does not add.
  *
  * SAFE EXECUTION ONLY: run this file exclusively via
  * `npm run release:validate` — never a direct `npx vitest run` against
@@ -17,49 +40,20 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
+import { buildSystemCheckAttestationCanonicalString, buildExamSessionAttestationCanonicalString } from "@/lib/secureClient/tetherAttestation";
 
 const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
 
-// Corrective pass — the SYSTEM_CHECK challenge/verify flow reuses the
-// real Ed25519 signing key infrastructure (getSigningPrivateKey/
-// getSigningPublicKey in secureClientRunner.ts) — same convention as
-// secureClientRunner.disposable.test.ts for the real exam-launch
-// manifest flow: generate a fresh keypair for this test file. Set
-// directly on process.env (NOT via vi.stubEnv) — several other tests in
-// this file call vi.unstubAllEnvs() in their own cleanup, which would
-// otherwise wipe this out the moment any of them runs, since
-// unstubAllEnvs reverts every vitest-tracked stub globally, not just
-// the ones a given test itself set.
-const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-process.env.TETHER_SECURE_CLIENT_SIGNING_PUBLIC_KEY = publicKey.export({ type: "spki", format: "pem" }).toString();
-process.env.TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-
-// Security hardening pass — see docs/tether-system-check-v1.md, "Genuine
-// client attestation". A SEPARATE keypair, simulating the embedded
-// client-attestation key that only a genuine packaged Tether build
-// possesses (apps/lockdown/src/clientAttestationKey.ts). This test file
-// plays the role of "genuine Tether" by signing with
-// genuineClientPrivateKeyPem below; a "Chrome" scenario is simulated by
-// NOT having this key at all (generating an unrelated one, or omitting
-// clientAttestation entirely).
-const { publicKey: genuineClientPublicKey, privateKey: genuineClientPrivateKey } = crypto.generateKeyPairSync("ed25519");
-const genuineClientPrivateKeyPem = genuineClientPrivateKey.export({ type: "pkcs8", format: "pem" }).toString();
-process.env.TETHER_CLIENT_ATTESTATION_PUBLIC_KEY = genuineClientPublicKey.export({ type: "spki", format: "pem" }).toString();
-
-function buildAttestationCanonicalString(params: { nonce: string; clientVersion: string; platform: string; displayTopologyClassification: string }): string {
-  return ["SYSTEM_CHECK_ATTESTATION_V1", params.nonce, params.clientVersion, params.platform, params.displayTopologyClassification].join("|");
-}
-
-/** Simulates the Electron main process signing with a given private key — genuinePrivateKeyPem for "real Tether", any other/garbage key for "Chrome pretending". */
-function signAttestation(
-  facts: { nonce: string; clientVersion: string; platform: string; displayTopologyClassification: string },
-  privateKeyPem: string,
-) {
-  const canonicalString = buildAttestationCanonicalString(facts);
-  const signature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), privateKeyPem).toString("base64");
-  return { ...facts, signature };
-}
+// The SERVER's own challenge-signing key (unchanged role from before —
+// see getSigningPrivateKey/getSigningPublicKey in secureClientRunner.ts,
+// reused as-is by the v2 attestation challenge flow too). Set directly
+// on process.env (NOT via vi.stubEnv) — several tests below call
+// vi.unstubAllEnvs() in their own cleanup, which would otherwise wipe
+// this out the moment any of them runs.
+const { publicKey: serverPublicKey, privateKey: serverPrivateKey } = crypto.generateKeyPairSync("ed25519");
+process.env.TETHER_SECURE_CLIENT_SIGNING_PUBLIC_KEY = serverPublicKey.export({ type: "spki", format: "pem" }).toString();
+process.env.TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY = serverPrivateKey.export({ type: "pkcs8", format: "pem" }).toString();
 
 const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
@@ -71,6 +65,12 @@ const latestRoute = await import("../app/api/tether/system-check/latest/route");
 const runsRoute = await import("../app/api/tether/system-check/runs/route");
 const challengeRoute = await import("../app/api/tether/system-check/secure-client/challenge/route");
 const verifyRoute = await import("../app/api/tether/system-check/secure-client/verify/route");
+const installationRegistrationChallengeRoute = await import("../app/api/tether/installation/registration-challenge/route");
+const installationRegisterRoute = await import("../app/api/tether/installation/register/route");
+const installationRevokeRoute = await import("../app/api/tether/installation/[id]/revoke/route");
+const installationCurrentRoute = await import("../app/api/tether/installation/current/route");
+const examSessionChallengeRoute = await import("../app/api/tether/exam-session/attestation/challenge/route");
+const examSessionVerifyRoute = await import("../app/api/tether/exam-session/attestation/verify/route");
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT", institutionId: string) {
   return {
@@ -114,6 +114,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await prisma.tetherSystemCheckRun.deleteMany({ where: { userId: { in: cleanup.users } } });
   await prisma.systemCheckSecureClientVerification.deleteMany({ where: { userId: { in: cleanup.users } } });
+  await prisma.tetherClientInstallation.deleteMany({ where: { userId: { in: cleanup.users } } });
   await prisma.secureClientSession.deleteMany({ where: { examId: { in: cleanup.exams } } });
   await prisma.submission.deleteMany({ where: { examId: { in: cleanup.exams } } });
   await prisma.exam.deleteMany({ where: { id: { in: cleanup.exams } } });
@@ -137,9 +138,17 @@ async function publishFinalExam(title: string) {
   return exam;
 }
 
+async function freshStudent(label: string) {
+  const user = await prisma.user.create({
+    data: { name: label, email: `syscheck-${label.toLowerCase().replace(/\s+/g, "-")}-${stamp}-${Math.random().toString(36).slice(2)}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
+  });
+  cleanup.users.push(user.id);
+  return user;
+}
+
 const fullTetherResults = {
   sourceClientType: "TETHER_SECURE_CLIENT",
-  clientVersion: "1.4.0",
+  clientVersion: "1.5.0",
   operatingSystem: "win32",
   operatingSystemVersion: "10.0.19045",
   secureClientSessionId: null as string | null,
@@ -152,6 +161,81 @@ const fullTetherResults = {
     microphone: { status: "PASS" },
   },
 };
+
+// ---------------------------------------------------------------------------
+// Secure Client Attestation v2 helpers — installation registration and
+// purpose-bound attestation, driving the REAL routes exactly like a
+// genuine packaged client (minus the actual Electron IPC — signing
+// happens in-process here with a real keypair, playing main.ts's role).
+// ---------------------------------------------------------------------------
+
+type RegisterOptions = { keyPair?: crypto.KeyPairSyncResult<string, string>; keyProtectionLevel?: string; keyAlgorithm?: string };
+
+async function registerFreshInstallation(userId: string, institutionId: string, options: RegisterOptions = {}) {
+  const keyPair = options.keyPair ?? crypto.generateKeyPairSync("ed25519", { publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
+  const publicKeyPem = keyPair.publicKey;
+  const privateKeyPem = keyPair.privateKey;
+
+  mockAuth.mockResolvedValue(sessionFor(userId, "STUDENT", institutionId));
+  const challengeRes = await installationRegistrationChallengeRoute.POST();
+  const { challenge, signature: challengeSignature } = await challengeRes.json();
+  const proofOfPossessionSignature = crypto.sign(null, Buffer.from(challenge.nonce, "utf8"), privateKeyPem).toString("base64");
+
+  const registerRes = await installationRegisterRoute.POST(
+    jsonRequest("POST", {
+      challenge,
+      challengeSignature,
+      publicKey: publicKeyPem,
+      keyAlgorithm: options.keyAlgorithm ?? "Ed25519",
+      keyProtectionLevel: options.keyProtectionLevel ?? "SOFTWARE_PROTECTED",
+      proofOfPossessionSignature,
+      clientVersion: "1.5.0",
+      platform: "win32",
+    }),
+  );
+  return { registerRes, privateKeyPem, publicKeyPem };
+}
+
+type IssueAndVerifyOptions = {
+  installationId?: string;
+  signWith?: string;
+  facts?: Partial<{ clientVersion: string; platform: string; displayTopologyClassification: string }>;
+  omitAttestation?: boolean;
+  nonceOverride?: string;
+  clientType?: string;
+};
+
+/** Registers a fresh, genuine installation (unless one is supplied) and drives the real SYSTEM_CHECK challenge/verify round trip. Pass `signWith` a key that was NEVER registered to simulate "Chrome" (or any actor without the genuine installation's key). */
+async function issueAndVerify(userId: string, institutionId: string, options: IssueAndVerifyOptions = {}) {
+  let installationId = options.installationId;
+  let signingKey = options.signWith;
+  if (!installationId) {
+    const reg = await registerFreshInstallation(userId, institutionId);
+    const body = await reg.registerRes.clone().json();
+    installationId = body.installationId;
+    signingKey = signingKey ?? reg.privateKeyPem;
+  }
+
+  mockAuth.mockResolvedValue(sessionFor(userId, "STUDENT", institutionId));
+  const challengeRes = await challengeRoute.POST(jsonRequest("POST", { installationId }));
+  if (!challengeRes.ok) return { challengeRes, verifyRes: null as unknown as Response, challenge: null, challengeSignature: null, installationId };
+  const { challenge, signature: challengeSignature } = await challengeRes.json();
+
+  const facts = {
+    clientVersion: options.facts?.clientVersion ?? "1.5.0",
+    platform: options.facts?.platform ?? "win32",
+    displayTopologyClassification: options.facts?.displayTopologyClassification ?? "INTERNAL_ONLY",
+  };
+  const nonce = options.nonceOverride ?? challenge.nonce;
+  const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce, installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint, ...facts });
+  const installationSignature = options.omitAttestation || !signingKey ? undefined : crypto.sign(null, Buffer.from(canonicalString, "utf8"), signingKey).toString("base64");
+
+  const body: Record<string, unknown> = { challenge, challengeSignature, clientType: options.clientType ?? "TETHER_SECURE_CLIENT", ...facts };
+  if (installationSignature) body.installationSignature = installationSignature;
+
+  const verifyRes = await verifyRoute.POST(jsonRequest("POST", body));
+  return { challengeRes, verifyRes, challenge, challengeSignature, installationId, requestBody: body };
+}
 
 describe("GET /api/tether/system-check/config", () => {
   it("defaults to WARN mode when TETHER_SYSTEM_CHECK_MODE is unset — missing config must never accidentally block all students", async () => {
@@ -187,7 +271,7 @@ describe("GET /api/tether/system-check/latest", () => {
 });
 
 describe("POST /api/tether/system-check/runs", () => {
-  it("11. a malformed payload is rejected", async () => {
+  it("21a. a malformed payload is rejected", async () => {
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
     const res = await runsRoute.POST(jsonRequest("POST", { sourceClientType: "NOT_A_REAL_TYPE" }));
     expect(res.status).toBe(400);
@@ -201,13 +285,13 @@ describe("POST /api/tether/system-check/runs", () => {
     expect(res.status).toBe(400);
   });
 
-  it("9. a fabricated secure-client session id is rejected", async () => {
+  it("a fabricated secure-client session id is rejected", async () => {
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
     const res = await runsRoute.POST(jsonRequest("POST", { ...fullTetherResults, secureClientSessionId: "does-not-exist" }));
     expect(res.status).toBe(404);
   });
 
-  it("10. another student's secure-client session is rejected, even though it genuinely exists", async () => {
+  it("another student's secure-client session is rejected, even though it genuinely exists", async () => {
     const exam = await publishFinalExam("foreign-session-rejected");
     const foreignSession = await prisma.secureClientSession.create({
       data: {
@@ -228,9 +312,7 @@ describe("POST /api/tether/system-check/runs", () => {
     expect(res.status).toBe(404);
   });
 
-  it("7/8. an ordinary browser can never achieve READY, and a verified Tether session (all checks reported) achieves READY", async () => {
-    // Ordinary browser — every Tether-only check is forced NOT_CHECKED
-    // server-side regardless of what the payload claims.
+  it("13. an ordinary browser can never create a READY persisted system-check run", async () => {
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
     const browserRes = await runsRoute.POST(
       jsonRequest("POST", { ...fullTetherResults, sourceClientType: "BROWSER", secureClientSessionId: null }),
@@ -241,16 +323,10 @@ describe("POST /api/tether/system-check/runs", () => {
     expect(browserBody.run.results.secureClient.status).toBe("NOT_CHECKED");
     expect(browserBody.run.results.displayTopology.status).toBe("NOT_CHECKED");
     expect(browserBody.run.results.bridge.status).toBe("NOT_CHECKED");
+  });
 
-    // Verified Tether session — genuine PASS on secureClient, all other
-    // required checks PASS from real reported/derived data -> READY. A
-    // dedicated student avoids both the rate limiter (student already
-    // has a fresh run from browserRes above) and needing to re-mock
-    // auth after publishFinalExam switches the session to the lecturer.
-    const readyStudentForTest8 = await prisma.user.create({
-      data: { name: "Ready For READY", email: `syscheck-ready8-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
-    });
-    cleanup.users.push(readyStudentForTest8.id);
+  it("a verified real-exam secure-client session (legacy path, unaffected by v2) still achieves READY", async () => {
+    const readyStudentForTest8 = await freshStudent("Ready For READY");
     const exam = await publishFinalExam("verified-session-ready");
     const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: readyStudentForTest8.id, attemptNumber: 1 } });
     const session = await prisma.secureClientSession.create({
@@ -272,7 +348,7 @@ describe("POST /api/tether/system-check/runs", () => {
     expect(readyBody.run.overallStatus).toBe("READY");
   });
 
-  it("16. running a system check never creates a Submission", async () => {
+  it("22a. running a system check never creates a Submission", async () => {
     mockAuth.mockResolvedValue(sessionFor(otherStudent.id, "STUDENT", instId));
     const before = await prisma.submission.count({ where: { studentId: otherStudent.id } });
     await runsRoute.POST(jsonRequest("POST", { ...fullTetherResults, sourceClientType: "BROWSER", secureClientSessionId: null, clientTimeMs: Date.now() }));
@@ -280,7 +356,7 @@ describe("POST /api/tether/system-check/runs", () => {
     expect(after).toBe(before);
   });
 
-  it("17. running a system check never creates an IntegrityEvent", async () => {
+  it("22b. running a system check never creates an IntegrityEvent", async () => {
     mockAuth.mockResolvedValue(sessionFor(otherStudent.id, "STUDENT", instId));
     const before = await prisma.integrityEvent.count({ where: { studentId: otherStudent.id } });
     await runsRoute.POST(jsonRequest("POST", { ...fullTetherResults, sourceClientType: "BROWSER", secureClientSessionId: null, clientTimeMs: Date.now() + 100 }));
@@ -289,12 +365,7 @@ describe("POST /api/tether/system-check/runs", () => {
   });
 
   it("an out-of-support client version is BLOCKED, not READY", async () => {
-    // A dedicated student — avoids the rate limiter tripping from an
-    // earlier test's run for a shared user.
-    const versionTestStudent = await prisma.user.create({
-      data: { name: "Version Test Student", email: `syscheck-version-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
-    });
-    cleanup.users.push(versionTestStudent.id);
+    const versionTestStudent = await freshStudent("Version Test Student");
     mockAuth.mockResolvedValue(sessionFor(versionTestStudent.id, "STUDENT", instId));
     vi.stubEnv("TETHER_MINIMUM_SUPPORTED_VERSION", "9.9.9");
     try {
@@ -309,8 +380,8 @@ describe("POST /api/tether/system-check/runs", () => {
   });
 });
 
-describe("18/19. final examination WARN and REQUIRE flows", () => {
-  it("18. WARN mode never blocks starting a final examination, even with no stored system check", async () => {
+describe("18/19/21. final examination WARN and REQUIRE flows", () => {
+  it("WARN mode never blocks starting a final examination, even with no stored system check", async () => {
     const exam = await publishFinalExam("warn-mode-never-blocks");
     mockAuth.mockResolvedValue(sessionFor(otherStudent.id, "STUDENT", instId));
     vi.stubEnv("TETHER_SYSTEM_CHECK_MODE", "WARN");
@@ -322,39 +393,29 @@ describe("18/19. final examination WARN and REQUIRE flows", () => {
     }
   });
 
-  it("19. REQUIRE mode blocks starting a final examination with no current system check, and allows it once a READY one exists", async () => {
+  it("REQUIRE mode blocks starting a final examination with no current system check, and allows it once a READY one exists", async () => {
     const exam = await publishFinalExam("require-mode-blocks-then-allows");
-    // A fresh student with no prior TetherSystemCheckRun row at all.
-    const freshStudent = await prisma.user.create({
-      data: { name: "Fresh Student", email: `syscheck-fresh-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
-    });
-    cleanup.users.push(freshStudent.id);
+    const freshStudentUser = await freshStudent("Fresh Student");
 
-    mockAuth.mockResolvedValue(sessionFor(freshStudent.id, "STUDENT", instId));
+    mockAuth.mockResolvedValue(sessionFor(freshStudentUser.id, "STUDENT", instId));
     vi.stubEnv("TETHER_SYSTEM_CHECK_MODE", "REQUIRE");
     try {
       const blockedRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
       expect(blockedRes.status).toBe(409);
       const blockedBody = await blockedRes.json();
       expect(blockedBody.code).toBe("SYSTEM_CHECK_REQUIRED");
-      const submissionCount = await prisma.submission.count({ where: { examId: exam.id, studentId: freshStudent.id } });
+      const submissionCount = await prisma.submission.count({ where: { examId: exam.id, studentId: freshStudentUser.id } });
       expect(submissionCount).toBe(0);
 
-      // A READY run for this student, established via a verified session
-      // on an unrelated exam (system-check records are per-user, not
-      // per-exam) — then REQUIRE mode allows starting THIS final exam.
-      // publishFinalExam mocks the LECTURER session internally to author
-      // the PATCH — re-mock freshStudent afterwards before any further
-      // student-authenticated call.
       const otherExam = await publishFinalExam("require-mode-unrelated-exam");
-      mockAuth.mockResolvedValue(sessionFor(freshStudent.id, "STUDENT", instId));
-      const otherSubmission = await prisma.submission.create({ data: { examId: otherExam.id, studentId: freshStudent.id, attemptNumber: 1 } });
+      mockAuth.mockResolvedValue(sessionFor(freshStudentUser.id, "STUDENT", instId));
+      const otherSubmission = await prisma.submission.create({ data: { examId: otherExam.id, studentId: freshStudentUser.id, attemptNumber: 1 } });
       const otherSession = await prisma.secureClientSession.create({
         data: {
           institutionId: instId,
           examId: otherExam.id,
           submissionId: otherSubmission.id,
-          studentId: freshStudent.id,
+          studentId: freshStudentUser.id,
           clientType: "TETHER_SECURE_CLIENT",
           status: "ACTIVE",
           verificationStatus: "VERIFIED",
@@ -363,7 +424,7 @@ describe("18/19. final examination WARN and REQUIRE flows", () => {
       const readyRunRes = await runsRoute.POST(jsonRequest("POST", { ...fullTetherResults, secureClientSessionId: otherSession.id, clientTimeMs: Date.now() }));
       expect(readyRunRes.status).toBe(200);
 
-      mockAuth.mockResolvedValue(sessionFor(freshStudent.id, "STUDENT", instId));
+      mockAuth.mockResolvedValue(sessionFor(freshStudentUser.id, "STUDENT", instId));
       const allowedRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
       expect(allowedRes.status).toBe(201);
     } finally {
@@ -371,16 +432,10 @@ describe("18/19. final examination WARN and REQUIRE flows", () => {
     }
   });
 
-  it("20. a stored READY system check never weakens or bypasses the existing fail-closed Tether-availability kill switch", async () => {
+  it("a stored READY system check never weakens or bypasses the existing fail-closed Tether-availability kill switch", async () => {
     const exam = await publishFinalExam("kill-switch-still-fail-closed");
-    const readyStudent = await prisma.user.create({
-      data: { name: "Ready Student", email: `syscheck-readystud-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
-    });
-    cleanup.users.push(readyStudent.id);
+    const readyStudent = await freshStudent("Ready Student");
 
-    // publishFinalExam mocks the LECTURER session internally to author
-    // the PATCH — re-mock readyStudent afterwards before any further
-    // student-authenticated call.
     const otherExam = await publishFinalExam("kill-switch-unrelated-exam-for-ready-record");
     mockAuth.mockResolvedValue(sessionFor(readyStudent.id, "STUDENT", instId));
     const otherSubmission = await prisma.submission.create({ data: { examId: otherExam.id, studentId: readyStudent.id, attemptNumber: 1 } });
@@ -403,9 +458,6 @@ describe("18/19. final examination WARN and REQUIRE flows", () => {
     try {
       mockAuth.mockResolvedValue(sessionFor(readyStudent.id, "STUDENT", instId));
       const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
-      // The existing final-exam Tether-availability gate (checked BEFORE
-      // the system-check gate in the route) still wins — a READY system
-      // check record does not make the kill switch's block go away.
       expect(res.status).toBe(409);
       const body = await res.json();
       expect(body.code).toBe("FINAL_EXAMINATION_TETHER_UNAVAILABLE");
@@ -414,17 +466,14 @@ describe("18/19. final examination WARN and REQUIRE flows", () => {
     }
   });
 
-  it("non-final assessments are never unexpectedly blocked by REQUIRE mode", async () => {
+  it("23. non-final assessments are never unexpectedly blocked by REQUIRE mode", async () => {
     const exam = await createExam("non-final-never-blocked");
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
     await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { assessmentType: "QUIZ_OR_TEST" }, published: true }), {
       params: Promise.resolve({ id: exam.id }),
     });
-    const freshStudent = await prisma.user.create({
-      data: { name: "Quiz Student", email: `syscheck-quiz-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
-    });
-    cleanup.users.push(freshStudent.id);
-    mockAuth.mockResolvedValue(sessionFor(freshStudent.id, "STUDENT", instId));
+    const freshStudentUser = await freshStudent("Quiz Student");
+    mockAuth.mockResolvedValue(sessionFor(freshStudentUser.id, "STUDENT", instId));
     vi.stubEnv("TETHER_SYSTEM_CHECK_MODE", "REQUIRE");
     try {
       const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
@@ -436,78 +485,197 @@ describe("18/19. final examination WARN and REQUIRE flows", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Corrective pass — first-time SYSTEM_CHECK secure-client verification.
-// See docs/tether-system-check-v1.md, "System-check secure-client
-// verification".
+// Installation registration and lifecycle (Secure Client Attestation v2)
 // ---------------------------------------------------------------------------
 
-type IssueAndVerifyOptions = {
-  clientType?: string;
-  signWith?: string;
-  facts?: Partial<{ clientVersion: string; platform: string; displayTopologyClassification: string }>;
-  omitClientAttestation?: boolean;
-  nonceOverride?: string;
-};
+describe("POST /api/tether/installation/register", () => {
+  it("6. a valid installation signature (genuine registration + attestation) is accepted", async () => {
+    const s = await freshStudent("Genuine Installation");
+    const { registerRes } = await registerFreshInstallation(s.id, instId);
+    expect(registerRes.status).toBe(200);
+    const body = await registerRes.json();
+    expect(body.registered).toBe(true);
+    expect(typeof body.installationId).toBe("string");
 
-/**
- * Simulates the full genuine-Tether round trip by default (challenge ->
- * main-process-equivalent signing with genuineClientPrivateKeyPem ->
- * verify). Pass `signWith` a DIFFERENT/random key, or
- * `omitClientAttestation: true`, to simulate an ordinary browser that
- * has a perfectly valid SERVER challenge but no genuine client key.
- */
-async function issueAndVerify(userId: string, institutionId: string, options: IssueAndVerifyOptions = {}) {
-  mockAuth.mockResolvedValue(sessionFor(userId, "STUDENT", institutionId));
-  const challengeRes = await challengeRoute.POST();
-  expect(challengeRes.status).toBe(200);
-  const { challenge, signature } = await challengeRes.json();
-
-  const facts = {
-    clientVersion: options.facts?.clientVersion ?? "1.4.0",
-    platform: options.facts?.platform ?? "win32",
-    displayTopologyClassification: options.facts?.displayTopologyClassification ?? "INTERNAL_ONLY",
-  };
-  const nonce = options.nonceOverride ?? challenge.nonce;
-  const clientAttestation = options.omitClientAttestation ? undefined : signAttestation({ nonce, ...facts }, options.signWith ?? genuineClientPrivateKeyPem);
-
-  const body: Record<string, unknown> = { challenge, signature, clientType: options.clientType ?? "TETHER_SECURE_CLIENT" };
-  if (clientAttestation) body.clientAttestation = clientAttestation;
-
-  const verifyRes = await verifyRoute.POST(jsonRequest("POST", body));
-  return { challenge, signature, verifyRes };
-}
-
-async function freshStudent(label: string) {
-  const user = await prisma.user.create({
-    data: { name: label, email: `syscheck-${label.toLowerCase().replace(/\s+/g, "-")}-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
+    const stored = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: body.installationId } });
+    expect(stored.userId).toBe(s.id);
+    expect(stored.status).toBe("ACTIVE");
   });
-  cleanup.users.push(user.id);
-  return user;
-}
 
-describe("POST /api/tether/system-check/secure-client/challenge + verify — genuine client attestation", () => {
+  it("2. two separate installations (real registrations) end up with different, independently-stored public keys", async () => {
+    const s1 = await freshStudent("Install A");
+    const s2 = await freshStudent("Install B");
+    const { registerRes: r1 } = await registerFreshInstallation(s1.id, instId);
+    const { registerRes: r2 } = await registerFreshInstallation(s2.id, instId);
+    const b1 = await r1.json();
+    const b2 = await r2.json();
+    expect(b1.publicKeyFingerprint).not.toBe(b2.publicKeyFingerprint);
+  });
+
+  it("4. ordinary Chrome cannot register as TPM-attested — the server rejects the claim outright, it is not silently downgraded", async () => {
+    const s = await freshStudent("TPM Claim Student");
+    const { registerRes } = await registerFreshInstallation(s.id, instId, { keyProtectionLevel: "TPM_ATTESTED" });
+    expect(registerRes.status).toBe(400);
+    expect(await prisma.tetherClientInstallation.count({ where: { userId: s.id } })).toBe(0);
+  });
+
+  it("5. a self-generated (Chrome/WebCrypto-equivalent) key can only ever be classified as SOFTWARE_PROTECTED — never silently treated as genuine hardware-backed Tether", async () => {
+    const s = await freshStudent("Software Protected Student");
+    const { registerRes } = await registerFreshInstallation(s.id, instId, { keyProtectionLevel: "SOFTWARE_PROTECTED" });
+    expect(registerRes.status).toBe(200);
+    const body = await registerRes.json();
+    const stored = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: body.installationId } });
+    expect(stored.keyProtectionLevel).toBe("SOFTWARE_PROTECTED");
+    expect(stored.keyProtectionLevel).not.toBe("TPM_ATTESTED");
+  });
+
+  it("rejects registration with a proof-of-possession signature that does not match the submitted public key", async () => {
+    const s = await freshStudent("Bad Proof Student");
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const challengeRes = await installationRegistrationChallengeRoute.POST();
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
+    const realKeys = crypto.generateKeyPairSync("ed25519");
+    const attackerKeys = crypto.generateKeyPairSync("ed25519");
+    const wrongProof = crypto.sign(null, Buffer.from(challenge.nonce, "utf8"), attackerKeys.privateKey).toString("base64");
+    const registerRes = await installationRegisterRoute.POST(
+      jsonRequest("POST", {
+        challenge,
+        challengeSignature,
+        publicKey: realKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+        keyAlgorithm: "Ed25519",
+        keyProtectionLevel: "SOFTWARE_PROTECTED",
+        proofOfPossessionSignature: wrongProof,
+        clientVersion: "1.5.0",
+        platform: "win32",
+      }),
+    );
+    expect(registerRes.status).toBe(400);
+    const body = await registerRes.json();
+    expect(body.reason).toBe("PROOF_OF_POSSESSION_INVALID");
+  });
+
+  it("registering a new installation automatically REPLACES any prior ACTIVE installation for the same user", async () => {
+    const s = await freshStudent("Replacement Student");
+    const first = await registerFreshInstallation(s.id, instId);
+    const firstBody = await first.registerRes.json();
+
+    const second = await registerFreshInstallation(s.id, instId);
+    const secondBody = await second.registerRes.json();
+    expect(second.registerRes.status).toBe(200);
+
+    const firstRecord = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: firstBody.installationId } });
+    const secondRecord = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: secondBody.installationId } });
+    expect(firstRecord.status).toBe("REPLACED");
+    expect(secondRecord.status).toBe("ACTIVE");
+  });
+});
+
+describe("POST /api/tether/installation/[id]/revoke", () => {
+  it("the owning student can revoke their own installation", async () => {
+    const s = await freshStudent("Self Revoke Student");
+    const { registerRes } = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await registerRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "Lost device" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(200);
+
+    const record = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
+    expect(record.status).toBe("REVOKED");
+    expect(record.revocationReason).toBe("Lost device");
+  });
+
+  it("another student cannot revoke someone else's installation", async () => {
+    const owner = await freshStudent("Installation Owner");
+    const attacker = await freshStudent("Revoke Attacker");
+    const { registerRes } = await registerFreshInstallation(owner.id, instId);
+    const { installationId } = await registerRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(attacker.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(404);
+
+    const record = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
+    expect(record.status).toBe("ACTIVE");
+  });
+
+  it("8. a revoked installation cannot attest", async () => {
+    const s = await freshStudent("Revoked Attest Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test revoke" }), { params: Promise.resolve({ id: installationId }) });
+
+    const { verifyRes, challengeRes } = await issueAndVerify(s.id, instId, { installationId, signWith: reg.privateKeyPem });
+    // The challenge issuance itself already refuses a non-ACTIVE installation.
+    expect(challengeRes.status).toBe(409);
+    expect(verifyRes).toBeNull();
+  });
+
+  it("9. a replaced installation cannot attest, even though it was genuinely registered", async () => {
+    const s = await freshStudent("Replaced Attest Student");
+    const first = await registerFreshInstallation(s.id, instId);
+    const firstBody = await first.registerRes.json();
+    await registerFreshInstallation(s.id, instId); // replaces the first
+
+    const { verifyRes, challengeRes } = await issueAndVerify(s.id, instId, { installationId: firstBody.installationId, signWith: first.privateKeyPem });
+    expect(challengeRes.status).toBe(409);
+    expect(verifyRes).toBeNull();
+  });
+});
+
+describe("GET /api/tether/installation/current", () => {
+  it("returns null for a student with no registered installation", async () => {
+    const s = await freshStudent("No Installation Student");
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const res = await installationCurrentRoute.GET();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.installation).toBeNull();
+  });
+
+  it("returns the current ACTIVE installation, never a REVOKED/REPLACED one", async () => {
+    const s = await freshStudent("Current Installation Student");
+    await registerFreshInstallation(s.id, instId);
+    const second = await registerFreshInstallation(s.id, instId);
+    const secondBody = await second.registerRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const res = await installationCurrentRoute.GET();
+    const body = await res.json();
+    expect(body.installation.id).toBe(secondBody.installationId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SYSTEM_CHECK purpose-bound attestation — genuine-client proof.
+// ---------------------------------------------------------------------------
+
+describe("POST /api/tether/system-check/secure-client/challenge + verify", () => {
   it("5/14. valid genuine Tether attestation for SYSTEM_CHECK is accepted, and a first-time student (never taken any exam) reaches READY without creating Submission, Answer, or IntegrityEvent rows", async () => {
-    const student = await freshStudent("First Timer");
+    const s = await freshStudent("First Timer");
     const [submissionsBefore, answersBefore, eventsBefore] = await Promise.all([
-      prisma.submission.count({ where: { studentId: student.id } }),
+      prisma.submission.count({ where: { studentId: s.id } }),
       prisma.answer.count(),
-      prisma.integrityEvent.count({ where: { studentId: student.id } }),
+      prisma.integrityEvent.count({ where: { studentId: s.id } }),
     ]);
 
-    const { verifyRes } = await issueAndVerify(student.id, instId);
+    const { verifyRes } = await issueAndVerify(s.id, instId);
     expect(verifyRes.status).toBe(200);
     const body = await verifyRes.json();
     expect(body.verified).toBe(true);
     expect(typeof body.verificationId).toBe("string");
 
     const stored = await prisma.systemCheckSecureClientVerification.findUniqueOrThrow({ where: { id: body.verificationId } });
-    expect(stored.userId).toBe(student.id);
+    expect(stored.userId).toBe(s.id);
     expect(stored.purpose).toBe("SYSTEM_CHECK");
     expect(stored.verificationStatus).toBe("VERIFIED");
-    expect(stored.clientVersion).toBe("1.4.0");
+    expect(stored.clientVersion).toBe("1.5.0");
     expect(stored.displayTopologyClassification).toBe("INTERNAL_ONLY");
+    expect(typeof stored.installationId).toBe("string");
 
-    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
     const runRes = await runsRoute.POST(
       jsonRequest("POST", { ...fullTetherResults, secureClientSessionId: null, systemCheckVerificationId: body.verificationId, clientTimeMs: Date.now() }),
     );
@@ -517,144 +685,146 @@ describe("POST /api/tether/system-check/secure-client/challenge + verify — gen
     expect(runBody.run.overallStatus).toBe("READY");
 
     const [submissionsAfter, answersAfter, eventsAfter] = await Promise.all([
-      prisma.submission.count({ where: { studentId: student.id } }),
+      prisma.submission.count({ where: { studentId: s.id } }),
       prisma.answer.count(),
-      prisma.integrityEvent.count({ where: { studentId: student.id } }),
+      prisma.integrityEvent.count({ where: { studentId: s.id } }),
     ]);
     expect(submissionsAfter).toBe(submissionsBefore);
     expect(answersAfter).toBe(answersBefore);
     expect(eventsAfter).toBe(eventsBefore);
   });
 
-  it("1. Chrome requests a valid challenge and sends it back with fabricated Tether facts (no client attestation at all) — rejected", async () => {
-    const student = await freshStudent("Chrome No Attestation");
-    const { verifyRes } = await issueAndVerify(student.id, instId, { omitClientAttestation: true });
-    // The zod schema itself requires clientAttestation — a fabricated
-    // response with none is malformed, never silently accepted.
+  it("1. Chrome with no genuinely registered installation key sends a request with no installation signature at all — rejected", async () => {
+    const s = await freshStudent("Chrome No Attestation");
+    const { verifyRes } = await issueAndVerify(s.id, instId, { omitAttestation: true });
     expect(verifyRes.status).toBe(400);
   });
 
-  it("2. Chrome claims to be TETHER_SECURE_CLIENT (the equivalent of asserting window.sesLockdown exists) but signs with a self-generated (Chrome-side) key — rejected", async () => {
-    const student = await freshStudent("Chrome Fake Bridge");
-    const chromeKeys = crypto.generateKeyPairSync("ed25519");
-    const chromePrivatePem = chromeKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const { verifyRes } = await issueAndVerify(student.id, instId, { clientType: "TETHER_SECURE_CLIENT", signWith: chromePrivatePem });
+  it("1/2/3. Chrome signs with a key that was NEVER registered with the server (the WebCrypto/self-generated-but-unregistered case) — rejected regardless of how plausible the claimed facts are", async () => {
+    const s = await freshStudent("Chrome Unregistered Key");
+    const unregisteredKeys = crypto.generateKeyPairSync("ed25519");
+    const unregisteredPrivatePem = unregisteredKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const { verifyRes } = await issueAndVerify(s.id, instId, { signWith: unregisteredPrivatePem, facts: { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" } });
     expect(verifyRes.status).toBe(400);
     const body = await verifyRes.json();
-    expect(body.reason).toBe("CLIENT_ATTESTATION_INVALID");
-    // No verification row was ever created for this attempt.
-    expect(await prisma.systemCheckSecureClientVerification.count({ where: { userId: student.id } })).toBe(0);
+    expect(body.reason).toBe("INSTALLATION_SIGNATURE_INVALID");
+    expect(await prisma.systemCheckSecureClientVerification.count({ where: { userId: s.id } })).toBe(0);
   });
 
-  it("3. Chrome supplies fabricated client version and display topology, self-signed — rejected regardless of how plausible the fabricated facts look", async () => {
-    const student = await freshStudent("Chrome Fabricated Facts");
-    const chromeKeys = crypto.generateKeyPairSync("ed25519");
-    const chromePrivatePem = chromeKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const { verifyRes } = await issueAndVerify(student.id, instId, {
-      signWith: chromePrivatePem,
-      facts: { clientVersion: "1.4.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" },
-    });
+  it("7. wrong installation key is rejected — a signature from a DIFFERENT student's genuinely-registered installation never verifies against this installation's pinned fingerprint", async () => {
+    const s = await freshStudent("Right Installation Student");
+    const otherReg = await registerFreshInstallation((await freshStudent("Someone Elses Installation")).id, instId);
+    const { verifyRes } = await issueAndVerify(s.id, instId, { signWith: otherReg.privateKeyPem });
     expect(verifyRes.status).toBe(400);
     const body = await verifyRes.json();
-    expect(body.reason).toBe("CLIENT_ATTESTATION_INVALID");
+    expect(body.reason).toBe("INSTALLATION_SIGNATURE_INVALID");
   });
 
-  it("4. a correctly signed server challenge, echoed back correctly, but with client attestation signed by the WRONG key — rejected (the server's own challenge signature alone is never sufficient)", async () => {
-    const student = await freshStudent("Wrong Key Student");
-    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
-    const challengeRes = await challengeRoute.POST();
-    const { challenge, signature } = await challengeRes.json();
-    // The server's own challenge signature is untouched/genuine here —
-    // only the client-side attestation is forged.
-    const wrongKeys = crypto.generateKeyPairSync("ed25519");
-    const wrongPrivatePem = wrongKeys.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const clientAttestation = signAttestation({ nonce: challenge.nonce, clientVersion: "1.4.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" }, wrongPrivatePem);
-    const verifyRes = await verifyRoute.POST(jsonRequest("POST", { challenge, signature, clientType: "TETHER_SECURE_CLIENT", clientAttestation }));
-    expect(verifyRes.status).toBe(400);
-    const body = await verifyRes.json();
-    expect(body.reason).toBe("CLIENT_ATTESTATION_INVALID");
-  });
-
-  it("rejects a signature-tampered challenge even with a genuine client attestation attached", async () => {
-    const student = await freshStudent("Tamper Student");
-    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
-    const challengeRes = await challengeRoute.POST();
-    const { challenge, signature } = await challengeRes.json();
+  it("rejects a signature-tampered challenge even with a genuine installation signature attached", async () => {
+    const s = await freshStudent("Tamper Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const challengeRes = await challengeRoute.POST(jsonRequest("POST", { installationId }));
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
     const tampered = { ...challenge, userSubjectHash: "0".repeat(64) };
-    const clientAttestation = signAttestation({ nonce: challenge.nonce, clientVersion: "1.4.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" }, genuineClientPrivateKeyPem);
-    const verifyRes = await verifyRoute.POST(jsonRequest("POST", { challenge: tampered, signature, clientType: "TETHER_SECURE_CLIENT", clientAttestation }));
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" };
+    const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce: challenge.nonce, installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint, ...facts });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
+    const verifyRes = await verifyRoute.POST(jsonRequest("POST", { challenge: tampered, challengeSignature, clientType: "TETHER_SECURE_CLIENT", installationSignature, ...facts }));
     expect(verifyRes.status).toBe(400);
     const body = await verifyRes.json();
     expect(body.verified).toBe(false);
   });
 
-  it("9. a challenge issued to one student cannot be verified as another student (WRONG_SUBJECT), even with genuine client attestation", async () => {
+  it("12. a challenge issued to one student cannot be verified as another student", async () => {
     const owner = await freshStudent("Challenge Owner");
     const impersonator = await freshStudent("Impersonator");
+    const reg = await registerFreshInstallation(owner.id, instId);
+    const { installationId } = await reg.registerRes.json();
 
     mockAuth.mockResolvedValue(sessionFor(owner.id, "STUDENT", instId));
-    const challengeRes = await challengeRoute.POST();
-    const { challenge, signature } = await challengeRes.json();
-    const clientAttestation = signAttestation({ nonce: challenge.nonce, clientVersion: "1.4.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" }, genuineClientPrivateKeyPem);
+    const challengeRes = await challengeRoute.POST(jsonRequest("POST", { installationId }));
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" };
+    const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce: challenge.nonce, installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint, ...facts });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
 
-    // The impersonator authenticates as themself but tries to redeem a
-    // challenge that was bound (via userSubjectHash) to a different user.
     mockAuth.mockResolvedValue(sessionFor(impersonator.id, "STUDENT", instId));
-    const verifyRes = await verifyRoute.POST(jsonRequest("POST", { challenge, signature, clientType: "TETHER_SECURE_CLIENT", clientAttestation }));
+    const verifyRes = await verifyRoute.POST(jsonRequest("POST", { challenge, challengeSignature, clientType: "TETHER_SECURE_CLIENT", installationSignature, ...facts }));
     expect(verifyRes.status).toBe(400);
     const body = await verifyRes.json();
-    expect(body.reason).toBe("WRONG_SUBJECT");
+    // The installation lookup itself is owner-scoped (loadOwnedInstallation),
+    // exactly like every other ownership check in this codebase (see
+    // loadOwnedSystemCheckVerification's own "404-equivalent semantics
+    // for both not-found and belongs-to-someone-else" doc comment) — the
+    // impersonator's own query for `challenge.installationId` simply
+    // never finds a match scoped to their own userId, so this is
+    // reported the same way as "installation not found", never
+    // literally distinguishing "exists but isn't yours" (which would
+    // leak installationId existence to a non-owner). Either way, the
+    // request is unconditionally rejected.
+    expect(body.reason).toBe("INVALID_SIGNATURE");
   });
 
-  it("8. purpose tampering is rejected (invalidates the server's own signature, since purpose is part of the signed challenge)", async () => {
-    const student = await freshStudent("Purpose Tamper Student");
-    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
-    const challengeRes = await challengeRoute.POST();
-    const { challenge, signature } = await challengeRes.json();
-    const tampered = { ...challenge, purpose: "EXAM_LAUNCH" };
-    const clientAttestation = signAttestation({ nonce: challenge.nonce, clientVersion: "1.4.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" }, genuineClientPrivateKeyPem);
-    // The zod schema itself only accepts the literal "SYSTEM_CHECK" purpose.
-    const verifyRes = await verifyRoute.POST(jsonRequest("POST", { challenge: tampered, signature, clientType: "TETHER_SECURE_CLIENT", clientAttestation }));
+  it("16. purpose tampering is rejected (invalidates the server's own signature, since purpose is part of the signed challenge)", async () => {
+    const s = await freshStudent("Purpose Tamper Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const challengeRes = await challengeRoute.POST(jsonRequest("POST", { installationId }));
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
+    const tampered = { ...challenge, purpose: "EXAM_SESSION" };
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" };
+    const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce: challenge.nonce, installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint, ...facts });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
+    const verifyRes = await verifyRoute.POST(jsonRequest("POST", { challenge: tampered, challengeSignature, clientType: "TETHER_SECURE_CLIENT", installationSignature, ...facts }));
     expect(verifyRes.status).toBe(400);
   });
 
-  it("10. expiry tampering is rejected — extending expiresAt after issuance invalidates the server's own signature", async () => {
-    const student = await freshStudent("Expiry Tamper Student");
-    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
-    const challengeRes = await challengeRoute.POST();
-    const { challenge, signature } = await challengeRes.json();
+  it("17. expiry tampering is rejected — extending expiresAt after issuance invalidates the server's own signature", async () => {
+    const s = await freshStudent("Expiry Tamper Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const challengeRes = await challengeRoute.POST(jsonRequest("POST", { installationId }));
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
     const tampered = { ...challenge, expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString() };
-    const clientAttestation = signAttestation({ nonce: challenge.nonce, clientVersion: "1.4.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" }, genuineClientPrivateKeyPem);
-    const verifyRes = await verifyRoute.POST(jsonRequest("POST", { challenge: tampered, signature, clientType: "TETHER_SECURE_CLIENT", clientAttestation }));
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" };
+    const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce: challenge.nonce, installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint, ...facts });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
+    const verifyRes = await verifyRoute.POST(jsonRequest("POST", { challenge: tampered, challengeSignature, clientType: "TETHER_SECURE_CLIENT", installationSignature, ...facts }));
     expect(verifyRes.status).toBe(400);
     const body = await verifyRes.json();
     expect(body.reason).toBe("INVALID_SIGNATURE");
   });
 
-  it("11. preserves replay protection — a second verify of the same challenge is rejected", async () => {
-    const student = await freshStudent("Replay Student");
-    const first = await issueAndVerify(student.id, instId);
+  it("18. replay is rejected — resubmitting the EXACT same verify request a second time fails", async () => {
+    const s = await freshStudent("Replay Student");
+    const first = await issueAndVerify(s.id, instId);
     expect(first.verifyRes.status).toBe(200);
 
-    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
-    const clientAttestation = signAttestation({ nonce: first.challenge.nonce, clientVersion: "1.4.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" }, genuineClientPrivateKeyPem);
-    const second = await verifyRoute.POST(jsonRequest("POST", { challenge: first.challenge, signature: first.signature, clientType: "TETHER_SECURE_CLIENT", clientAttestation }));
-    expect(second.status).toBe(409);
-    const secondBody = await second.json();
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const secondRes = await verifyRoute.POST(jsonRequest("POST", first.requestBody));
+    expect(secondRes.status).toBe(409);
+    const secondBody = await secondRes.json();
     expect(secondBody.reason).toBe("REPLAY");
 
-    // Only one row was ever persisted, not two.
-    const count = await prisma.systemCheckSecureClientVerification.count({ where: { userId: student.id } });
+    const count = await prisma.systemCheckSecureClientVerification.count({ where: { userId: s.id } });
     expect(count).toBe(1);
   });
 
-  it("concurrent replay attempts produce at most one accepted verification", async () => {
-    const student = await freshStudent("Concurrent Replay Student");
-    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
-    const challengeRes = await challengeRoute.POST();
-    const { challenge, signature } = await challengeRes.json();
-    const clientAttestation = signAttestation({ nonce: challenge.nonce, clientVersion: "1.4.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" }, genuineClientPrivateKeyPem);
-    const body = { challenge, signature, clientType: "TETHER_SECURE_CLIENT", clientAttestation };
+  it("19. concurrent replay attempts produce at most one accepted verification", async () => {
+    const s = await freshStudent("Concurrent Replay Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const challengeRes = await challengeRoute.POST(jsonRequest("POST", { installationId }));
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" };
+    const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce: challenge.nonce, installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint, ...facts });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
+    const body = { challenge, challengeSignature, clientType: "TETHER_SECURE_CLIENT", installationSignature, ...facts };
 
     const results = await Promise.all([
       verifyRoute.POST(jsonRequest("POST", body)),
@@ -664,85 +834,83 @@ describe("POST /api/tether/system-check/secure-client/challenge + verify — gen
     const successCount = results.filter((r) => r.status === 200).length;
     expect(successCount).toBe(1);
 
-    const count = await prisma.systemCheckSecureClientVerification.count({ where: { userId: student.id } });
+    const count = await prisma.systemCheckSecureClientVerification.count({ where: { userId: s.id } });
     expect(count).toBe(1);
   });
 
+  it("20. fabricated native facts (genuinely signed by the RIGHT key, but altered afterward) invalidate the signature", async () => {
+    const s = await freshStudent("Fabricated Facts Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const challengeRes = await challengeRoute.POST(jsonRequest("POST", { installationId }));
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" };
+    const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce: challenge.nonce, installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint, ...facts });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
+    // Genuinely signed for INTERNAL_ONLY — resubmitted claiming a duplicated display instead.
+    const verifyRes = await verifyRoute.POST(
+      jsonRequest("POST", { challenge, challengeSignature, clientType: "TETHER_SECURE_CLIENT", installationSignature, ...facts, displayTopologyClassification: "CLONE_OR_DUPLICATE" }),
+    );
+    expect(verifyRes.status).toBe(400);
+    const body = await verifyRes.json();
+    expect(body.reason).toBe("INSTALLATION_SIGNATURE_INVALID");
+  });
+
   it("an expired challenge is rejected, never silently accepted", async () => {
-    const student = await freshStudent("Expired Student");
-    const { computeUserSubjectHash, signChallenge, generateSystemCheckNonce, SYSTEM_CHECK_CHALLENGE_PURPOSE, SYSTEM_CHECK_CHALLENGE_ISSUER, SYSTEM_CHECK_CHALLENGE_SCHEMA_VERSION } =
-      await import("../lib/secureClient/systemCheckChallenge");
+    const s = await freshStudent("Expired Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const {
+      computeUserSubjectHash,
+      signAttestationChallenge,
+      generateAttestationNonce,
+      ATTESTATION_ISSUER,
+      ATTESTATION_PROTOCOL_VERSION,
+    } = await import("../lib/secureClient/tetherAttestation");
     const now = Date.now();
+    const installation = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
     const expiredChallenge = {
-      schemaVersion: SYSTEM_CHECK_CHALLENGE_SCHEMA_VERSION,
+      schemaVersion: ATTESTATION_PROTOCOL_VERSION,
       challengeId: "expired-challenge-1",
       keyId: "dev-key-1",
-      issuer: SYSTEM_CHECK_CHALLENGE_ISSUER,
-      purpose: SYSTEM_CHECK_CHALLENGE_PURPOSE,
-      audience: "tether-system-check",
-      userSubjectHash: computeUserSubjectHash(student.id),
+      issuer: ATTESTATION_ISSUER,
+      purpose: "SYSTEM_CHECK" as const,
+      audience: "tether-attestation",
+      userSubjectHash: computeUserSubjectHash(s.id),
+      installationId,
+      installationPublicKeyFingerprint: installation.publicKeyFingerprint,
       issuedAt: new Date(now - 10 * 60_000).toISOString(),
       notBefore: new Date(now - 10 * 60_000).toISOString(),
       expiresAt: new Date(now - 5 * 60_000).toISOString(),
-      nonce: generateSystemCheckNonce(),
+      nonce: generateAttestationNonce(),
+      examId: null,
+      submissionId: null,
+      policyHash: null,
     };
-    const signature = signChallenge(expiredChallenge, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
-    const clientAttestation = signAttestation(
-      { nonce: expiredChallenge.nonce, clientVersion: "1.4.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" },
-      genuineClientPrivateKeyPem,
-    );
-    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
-    const verifyRes = await verifyRoute.POST(jsonRequest("POST", { challenge: expiredChallenge, signature, clientType: "TETHER_SECURE_CLIENT", clientAttestation }));
+    const challengeSignature = signAttestationChallenge(expiredChallenge, serverPrivateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY" };
+    const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce: expiredChallenge.nonce, installationPublicKeyFingerprint: installation.publicKeyFingerprint, ...facts });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const verifyRes = await verifyRoute.POST(jsonRequest("POST", { challenge: expiredChallenge, challengeSignature, clientType: "TETHER_SECURE_CLIENT", installationSignature, ...facts }));
     expect(verifyRes.status).toBe(400);
     const body = await verifyRes.json();
     expect(body.reason).toBe("EXPIRED");
   });
-
-  it("7. a valid real-exam SecureClientSession id cannot be relabelled/reused as a systemCheckVerificationId", async () => {
-    const student = await freshStudent("Relabel Student");
-    const exam = await publishFinalExam("relabel-exam-attestation");
-    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: student.id, attemptNumber: 1 } });
-    const examSession = await prisma.secureClientSession.create({
-      data: {
-        institutionId: instId,
-        examId: exam.id,
-        submissionId: submission.id,
-        studentId: student.id,
-        clientType: "TETHER_SECURE_CLIENT",
-        status: "ACTIVE",
-        verificationStatus: "VERIFIED",
-      },
-    });
-    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
-    const res = await runsRoute.POST(
-      jsonRequest("POST", { ...fullTetherResults, secureClientSessionId: null, systemCheckVerificationId: examSession.id, clientTimeMs: Date.now() }),
-    );
-    // examSession.id is a SecureClientSession id, not a
-    // SystemCheckSecureClientVerification id — the two tables are
-    // structurally unrelated, so this is simply "not found".
-    expect(res.status).toBe(404);
-  });
 });
 
 describe("POST /api/tether/system-check/runs — systemCheckVerificationId ownership", () => {
-  it("9. a fabricated systemCheckVerificationId is rejected", async () => {
-    const student5 = await prisma.user.create({
-      data: { name: "Fab Verification Student", email: `syscheck-fabverif-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
-    });
-    cleanup.users.push(student5.id);
-    mockAuth.mockResolvedValue(sessionFor(student5.id, "STUDENT", instId));
+  it("a fabricated systemCheckVerificationId is rejected", async () => {
+    const s = await freshStudent("Fab Verification Student");
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
     const res = await runsRoute.POST(jsonRequest("POST", { ...fullTetherResults, secureClientSessionId: null, systemCheckVerificationId: "does-not-exist", clientTimeMs: Date.now() }));
     expect(res.status).toBe(404);
   });
 
-  it("10. another student's systemCheckVerificationId is rejected, even though it genuinely exists and is VERIFIED", async () => {
-    const owner2 = await prisma.user.create({
-      data: { name: "Verification Owner", email: `syscheck-verifowner-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
-    });
-    const thief = await prisma.user.create({
-      data: { name: "Verification Thief", email: `syscheck-verifthief-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
-    });
-    cleanup.users.push(owner2.id, thief.id);
+  it("15. a stolen verification ID cannot be used by another user, even though it genuinely exists and is VERIFIED", async () => {
+    const owner2 = await freshStudent("Verification Owner");
+    const thief = await freshStudent("Verification Thief");
 
     const { verifyRes } = await issueAndVerify(owner2.id, instId);
     const { verificationId } = await verifyRes.json();
@@ -751,33 +919,45 @@ describe("POST /api/tether/system-check/runs — systemCheckVerificationId owner
     const res = await runsRoute.POST(jsonRequest("POST", { ...fullTetherResults, secureClientSessionId: null, systemCheckVerificationId: verificationId, clientTimeMs: Date.now() }));
     expect(res.status).toBe(404);
   });
+
+  it("a valid real-exam SecureClientSession id cannot be relabelled/reused as a systemCheckVerificationId", async () => {
+    const s = await freshStudent("Relabel Student");
+    const exam = await publishFinalExam("relabel-exam-attestation");
+    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: s.id, attemptNumber: 1 } });
+    const examSession = await prisma.secureClientSession.create({
+      data: {
+        institutionId: instId,
+        examId: exam.id,
+        submissionId: submission.id,
+        studentId: s.id,
+        clientType: "TETHER_SECURE_CLIENT",
+        status: "ACTIVE",
+        verificationStatus: "VERIFIED",
+      },
+    });
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const res = await runsRoute.POST(
+      jsonRequest("POST", { ...fullTetherResults, secureClientSessionId: null, systemCheckVerificationId: examSession.id, clientTimeMs: Date.now() }),
+    );
+    expect(res.status).toBe(404);
+  });
 });
 
-describe("SYSTEM_CHECK verification never authorises exam content", () => {
+describe("10. SYSTEM_CHECK verification never authorises exam content", () => {
   it("a verified SYSTEM_CHECK record does not satisfy the real exam content gate (GET /api/submissions/[id] still requires a genuine, submission-bound verified SecureClientSession)", async () => {
-    const student6 = await prisma.user.create({
-      data: { name: "Never Authorises Student", email: `syscheck-neverauth-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
-    });
-    cleanup.users.push(student6.id);
+    const s = await freshStudent("Never Authorises Student");
 
-    // Establish a genuinely VERIFIED SYSTEM_CHECK record for this student.
-    const { verifyRes } = await issueAndVerify(student6.id, instId);
+    const { verifyRes } = await issueAndVerify(s.id, instId);
     expect((await verifyRes.clone().json()).verified).toBe(true);
 
-    // Start a real final exam attempt for the SAME student — this still
-    // requires the REAL exam-bound Tether launch/attestation flow;
-    // having a SYSTEM_CHECK verification changes nothing about it.
     const exam = await publishFinalExam("never-authorises-exam-content");
-    mockAuth.mockResolvedValue(sessionFor(student6.id, "STUDENT", instId));
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
     const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
     expect(startRes.status).toBe(201);
     const submission = await startRes.json();
     expect(submission.secureClientLaunch).toMatchObject({ required: true, kind: "REDIRECT_TO_TETHER_LAUNCH" });
 
-    // The real content-serving route still blocks — a SYSTEM_CHECK
-    // verification is never read by, or substitutable for, the real
-    // per-submission SecureClientSession gate.
-    mockAuth.mockResolvedValue(sessionFor(student6.id, "STUDENT", instId));
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
     const contentRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect(contentRes.status).toBe(403);
     const contentBody = await contentRes.json();
@@ -785,27 +965,216 @@ describe("SYSTEM_CHECK verification never authorises exam content", () => {
   });
 
   it("structural proof: the challenge/verify routes never create a Submission, Answer, or IntegrityEvent", async () => {
-    const student7 = await prisma.user.create({
-      data: { name: "Structural Proof Student", email: `syscheck-structural-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: instId },
-    });
-    cleanup.users.push(student7.id);
+    const s = await freshStudent("Structural Proof Student");
 
     const [submissionsBefore, answersBefore, eventsBefore] = await Promise.all([
-      prisma.submission.count({ where: { studentId: student7.id } }),
+      prisma.submission.count({ where: { studentId: s.id } }),
       prisma.answer.count(),
-      prisma.integrityEvent.count({ where: { studentId: student7.id } }),
+      prisma.integrityEvent.count({ where: { studentId: s.id } }),
     ]);
 
-    await issueAndVerify(student7.id, instId);
+    await issueAndVerify(s.id, instId);
 
     const [submissionsAfter, answersAfter, eventsAfter] = await Promise.all([
-      prisma.submission.count({ where: { studentId: student7.id } }),
+      prisma.submission.count({ where: { studentId: s.id } }),
       prisma.answer.count(),
-      prisma.integrityEvent.count({ where: { studentId: student7.id } }),
+      prisma.integrityEvent.count({ where: { studentId: s.id } }),
     ]);
 
     expect(submissionsAfter).toBe(submissionsBefore);
     expect(answersAfter).toBe(answersBefore);
     expect(eventsAfter).toBe(eventsBefore);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EXAM_SESSION purpose-bound attestation — additive groundwork.
+// ---------------------------------------------------------------------------
+
+describe("EXAM_SESSION attestation — purpose isolation and additive-only behaviour", () => {
+  async function setUpInProgressSession(s: { id: string }) {
+    const exam = await publishFinalExam("exam-session-attestation");
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: s.id, attemptNumber: 1, status: "IN_PROGRESS" } });
+    const session = await prisma.secureClientSession.create({
+      data: {
+        institutionId: instId,
+        examId: exam.id,
+        submissionId: submission.id,
+        studentId: s.id,
+        clientType: "TETHER_SECURE_CLIENT",
+        status: "ACTIVE",
+        verificationStatus: "NOT_CHECKED",
+      },
+    });
+    return { exam, submission, session };
+  }
+
+  it("11. a valid EXAM_SESSION attestation is accepted and populates clientInstallationIdHash, but is never usable as a SYSTEM_CHECK proof", async () => {
+    const s = await freshStudent("Exam Session Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission, session } = await setUpInProgressSession(s);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const challengeRes = await examSessionChallengeRoute.POST(jsonRequest("POST", { installationId, submissionId: submission.id }));
+    expect(challengeRes.status).toBe(200);
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
+    expect(challenge.purpose).toBe("EXAM_SESSION");
+    expect(challenge.examId).toBe(submission.examId);
+    expect(challenge.submissionId).toBe(submission.id);
+
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY", displayCount: 1 };
+    const canonicalString = buildExamSessionAttestationCanonicalString({
+      nonce: challenge.nonce,
+      installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint,
+      examId: challenge.examId,
+      submissionId: challenge.submissionId,
+      policyHash: challenge.policyHash,
+      ...facts,
+    });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
+
+    const verifyRes = await examSessionVerifyRoute.POST(jsonRequest("POST", { challenge, challengeSignature, installationSignature, ...facts }));
+    expect(verifyRes.status).toBe(200);
+    const body = await verifyRes.json();
+    expect(body.verified).toBe(true);
+    expect(body.sessionId).toBe(session.id);
+
+    const updatedSession = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: session.id } });
+    expect(updatedSession.clientInstallationIdHash).toBeTruthy();
+    // ADDITIVE ONLY — verificationStatus/status untouched by this pass.
+    expect(updatedSession.verificationStatus).toBe("NOT_CHECKED");
+
+    // Using this SAME challenge shape/response against the SYSTEM_CHECK
+    // verify route is rejected outright — different purpose, different
+    // canonical signed payload entirely.
+    const relabelRes = await verifyRoute.POST(
+      jsonRequest("POST", { challenge, challengeSignature, clientType: "TETHER_SECURE_CLIENT", installationSignature, clientVersion: facts.clientVersion, platform: facts.platform, displayTopologyClassification: facts.displayTopologyClassification }),
+    );
+    expect(relabelRes.status).toBe(400);
+  });
+
+  it("a valid SYSTEM_CHECK attestation cannot be used as EXAM_SESSION proof", async () => {
+    const s = await freshStudent("Cross Purpose Student");
+    const { verifyRes: systemCheckVerifyRes, challenge: systemCheckChallenge, challengeSignature } = await issueAndVerify(s.id, instId);
+    expect(systemCheckVerifyRes.status).toBe(200);
+
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY", displayCount: 1 };
+    const relabelRes = await examSessionVerifyRoute.POST(
+      jsonRequest("POST", { challenge: systemCheckChallenge, challengeSignature, installationSignature: "irrelevant", ...facts }),
+    );
+    expect(relabelRes.status).toBe(400);
+  });
+
+  it("13. exam tampering (a challenge for exam A resubmitted claiming exam B) is rejected", async () => {
+    const s = await freshStudent("Exam Tamper Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission } = await setUpInProgressSession(s);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const challengeRes = await examSessionChallengeRoute.POST(jsonRequest("POST", { installationId, submissionId: submission.id }));
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
+    const tampered = { ...challenge, examId: "a-different-exam-id" };
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY", displayCount: 1 };
+    const canonicalString = buildExamSessionAttestationCanonicalString({ nonce: challenge.nonce, installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint, examId: challenge.examId, submissionId: challenge.submissionId, policyHash: challenge.policyHash, ...facts });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
+    const verifyRes = await examSessionVerifyRoute.POST(jsonRequest("POST", { challenge: tampered, challengeSignature, installationSignature, ...facts }));
+    expect(verifyRes.status).toBe(400);
+  });
+
+  it("14. submission tampering (a signature for one submission cannot be reused for another) is rejected", async () => {
+    const s = await freshStudent("Submission Tamper Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission: submissionA } = await setUpInProgressSession(s);
+    const { submission: submissionB } = await setUpInProgressSession(s);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const challengeRes = await examSessionChallengeRoute.POST(jsonRequest("POST", { installationId, submissionId: submissionA.id }));
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY", displayCount: 1 };
+    const canonicalString = buildExamSessionAttestationCanonicalString({ nonce: challenge.nonce, installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint, examId: challenge.examId, submissionId: challenge.submissionId, policyHash: challenge.policyHash, ...facts });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
+    // Genuinely signed for submissionA's challenge — resubmit CLAIMING submissionB.
+    const tampered = { ...challenge, submissionId: submissionB.id };
+    const verifyRes = await examSessionVerifyRoute.POST(jsonRequest("POST", { challenge: tampered, challengeSignature, installationSignature, ...facts }));
+    expect(verifyRes.status).toBe(400);
+  });
+
+  it("15. policy-hash tampering is rejected", async () => {
+    const s = await freshStudent("Policy Hash Tamper Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission } = await setUpInProgressSession(s);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const challengeRes = await examSessionChallengeRoute.POST(jsonRequest("POST", { installationId, submissionId: submission.id }));
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
+    const tampered = { ...challenge, policyHash: "a-different-policy-hash" };
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY", displayCount: 1 };
+    const canonicalString = buildExamSessionAttestationCanonicalString({ nonce: challenge.nonce, installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint, examId: challenge.examId, submissionId: challenge.submissionId, policyHash: challenge.policyHash, ...facts });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
+    const verifyRes = await examSessionVerifyRoute.POST(jsonRequest("POST", { challenge: tampered, challengeSignature, installationSignature, ...facts }));
+    expect(verifyRes.status).toBe(400);
+  });
+});
+
+describe("21. final-exam content remains fail-closed regardless of any v2 attestation activity", () => {
+  it("a student with a genuine SYSTEM_CHECK verification AND a genuine EXAM_SESSION attestation still cannot access exam content without the real, unmodified secure-client session verification", async () => {
+    const s = await freshStudent("Fail Closed Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+
+    await issueAndVerify(s.id, instId, { installationId, signWith: reg.privateKeyPem });
+
+    // Started via the REAL start route (not a direct Prisma insert) so
+    // the submission carries a genuine, frozen
+    // secureClientPolicySnapshotJson (deliveryMode: TETHER_CLIENT_REQUIRED)
+    // — without this, GET /api/submissions/[id]'s Tether gate has
+    // nothing to key off and the test would prove nothing.
+    const exam = await publishFinalExam("fail-closed-exam-session");
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(startRes.status).toBe(201);
+    const submission = await startRes.json();
+    // The real start flow only creates the Submission — a
+    // SecureClientSession only exists once a launch manifest is
+    // consumed, which examSessionVerifyRoute requires to already exist
+    // (it looks one up, never creates one — see its own doc comment).
+    await prisma.secureClientSession.create({
+      data: {
+        institutionId: instId,
+        examId: exam.id,
+        submissionId: submission.id,
+        studentId: s.id,
+        clientType: "TETHER_SECURE_CLIENT",
+        status: "ACTIVE",
+        verificationStatus: "NOT_CHECKED",
+      },
+    });
+
+    const challengeRes = await examSessionChallengeRoute.POST(jsonRequest("POST", { installationId, submissionId: submission.id }));
+    const { challenge, signature: challengeSignature } = await challengeRes.json();
+    const facts = { clientVersion: "1.5.0", platform: "win32", displayTopologyClassification: "INTERNAL_ONLY", displayCount: 1 };
+    const canonicalString = buildExamSessionAttestationCanonicalString({ nonce: challenge.nonce, installationPublicKeyFingerprint: challenge.installationPublicKeyFingerprint, examId: challenge.examId, submissionId: challenge.submissionId, policyHash: challenge.policyHash, ...facts });
+    const installationSignature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), reg.privateKeyPem).toString("base64");
+    const examSessionVerifyRes = await examSessionVerifyRoute.POST(jsonRequest("POST", { challenge, challengeSignature, installationSignature, ...facts }));
+    expect(examSessionVerifyRes.status).toBe(200);
+
+    // Content is STILL blocked — verificationStatus is still NOT_CHECKED
+    // (the legacy recordAttestation flow, which this pass never calls,
+    // is the only thing that can change it).
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const contentRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect(contentRes.status).toBe(403);
+  });
+});
+
+describe("25. DB-backed tests run only through disposable release validation", () => {
+  it("this file's own module-level guard is the src/lib/prisma.ts safety guard, proven directly in prismaDbSafetyGuard.test.ts — this test only re-confirms this process is running under a disposable/local DATABASE_URL right now", () => {
+    expect(process.env.VITEST).toBe("true");
+    expect(process.env.DATABASE_URL ?? "").toMatch(/localhost|127\.0\.0\.1|::1/);
   });
 });

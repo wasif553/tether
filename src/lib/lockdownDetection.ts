@@ -59,10 +59,20 @@ type SesLockdownBridge = {
     getDisplayTopology: boolean;
     getSecureClientCapabilities: boolean;
   }>;
-  // Security hardening pass — genuine client attestation. See
-  // docs/tether-system-check-v1.md, "Genuine client attestation".
-  // Optional: only present in a v1.4.0+ packaged build.
+  // Secure Client Attestation v2 — see docs/tether-system-check-v1.md,
+  // "Per-installation key" / "Genuine client attestation". Optional:
+  // only present in a v1.5.0+ packaged build. None of these ever
+  // return, or accept, a private key or key handle.
   attestSystemCheck?(nonce: string): Promise<{ signature: string; clientVersion: string; platform: string; displayTopologyClassification: string } | null>;
+  getInstallationInfo?(): Promise<{ hasKey: boolean; publicKey: string | null; keyAlgorithm: string; keyProtectionLevel: string }>;
+  ensureInstallationKey?(): Promise<{ hasKey: boolean; publicKey: string | null; keyAlgorithm: string; keyProtectionLevel: string }>;
+  signRegistrationProof?(nonce: string): Promise<{ signature: string; publicKey: string | null; keyAlgorithm: string; keyProtectionLevel: string } | null>;
+  attestExamSession?(params: {
+    nonce: string;
+    examId: string;
+    submissionId: string;
+    policyHash: string;
+  }): Promise<{ signature: string; clientVersion: string; platform: string; displayTopologyClassification: string; displayCount: number } | null>;
 };
 
 declare global {

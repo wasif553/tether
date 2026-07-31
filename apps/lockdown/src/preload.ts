@@ -177,6 +177,47 @@ contextBridge.exposeInMainWorld("sesLockdown", {
     if (typeof nonce !== "string" || nonce.length === 0) return null;
     return ipcRenderer.invoke("lockdown:attest-system-check", nonce);
   },
+
+  /**
+   * Secure Client Attestation v2 — see docs/tether-system-check-v1.md,
+   * "Per-installation key". None of these four methods ever return, or
+   * accept, a private key or key handle — only public information
+   * (getInstallationInfo/ensureInstallationKey) or the RESULT of a
+   * purpose-specific signing operation performed entirely inside main.ts
+   * (signRegistrationProof/attestExamSession). There is no generic
+   * "sign this data" method exposed to the renderer.
+   */
+  async getInstallationInfo(): Promise<{ hasKey: boolean; publicKey: string | null; keyAlgorithm: string; keyProtectionLevel: string }> {
+    return ipcRenderer.invoke("lockdown:get-installation-info");
+  },
+
+  async ensureInstallationKey(): Promise<{ hasKey: boolean; publicKey: string | null; keyAlgorithm: string; keyProtectionLevel: string }> {
+    return ipcRenderer.invoke("lockdown:ensure-installation-key");
+  },
+
+  async signRegistrationProof(nonce: string): Promise<{ signature: string; publicKey: string | null; keyAlgorithm: string; keyProtectionLevel: string } | null> {
+    if (typeof nonce !== "string" || nonce.length === 0) return null;
+    return ipcRenderer.invoke("lockdown:sign-registration-proof", nonce);
+  },
+
+  async attestExamSession(params: {
+    nonce: string;
+    examId: string;
+    submissionId: string;
+    policyHash: string;
+  }): Promise<{ signature: string; clientVersion: string; platform: string; displayTopologyClassification: string; displayCount: number } | null> {
+    if (typeof params !== "object" || params === null) return null;
+    const { nonce, examId, submissionId, policyHash } = params;
+    if (
+      typeof nonce !== "string" || nonce.length === 0 ||
+      typeof examId !== "string" || examId.length === 0 ||
+      typeof submissionId !== "string" || submissionId.length === 0 ||
+      typeof policyHash !== "string" || policyHash.length === 0
+    ) {
+      return null;
+    }
+    return ipcRenderer.invoke("lockdown:attest-exam-session", { nonce, examId, submissionId, policyHash });
+  },
 });
 
 /** Drops any value that isn't a plain string/number/boolean — never forwards functions, secrets, or large blobs from the page. */

@@ -1,8 +1,8 @@
 {
   "name": "ses-lockdown",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
-  "description": "Tether Secure Browser v1.4.0 (security hardening pass: adds attestSystemCheck, a genuine main-process-signed client attestation for the SYSTEM_CHECK flow using an embedded private key never exposed to the renderer, on top of v1.3.0's getClientVersion/getOperatingSystemInfo/getDisplayTopology/getSecureClientCapabilities read-only preload methods and v1.2.2's real verified-session establishment via attestation submission)",
+  "description": "Tether Secure Browser v1.5.0 (Secure Client Attestation v2: replaces v1.4.0's single globally-embedded attestation private key, WITHDRAWN as a critical vulnerability, with a per-installation keypair generated on first need and encrypted at rest via Electron safeStorage, never exported through any application API; adds attestExamSession alongside attestSystemCheck, both purpose-bound and installation-signed)",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",

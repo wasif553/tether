@@ -1,9 +1,12 @@
 -- Tether System Check and Exam Readiness v1 — corrective pass (first-time
 -- verification) + security hardening pass (adds
 -- "displayTopologyClassification", the signature-bound authoritative
--- native display-topology fact). See docs/tether-system-check-v1.md.
--- This table has not been applied to Preview/Production yet, so this
--- file is updated in place rather than adding a second ALTER TABLE file.
+-- native display-topology fact) + Secure Client Attestation v2 (adds
+-- "installationId", required — see
+-- docs/sql/add-tether-client-installation.sql for the companion table
+-- this column references, and docs/tether-system-check-v1.md). This
+-- table has not been applied to Preview/Production yet, so this file is
+-- updated in place rather than adding a second ALTER TABLE file.
 --
 -- Adds ONE new, fully additive table: "SystemCheckSecureClientVerification".
 -- Does not alter, rename, or drop any existing table, column, index,
@@ -32,6 +35,7 @@ CREATE TABLE IF NOT EXISTS "public"."SystemCheckSecureClientVerification" (
     "userId"             TEXT NOT NULL,
     "institutionId"      TEXT NOT NULL,
     "purpose"            TEXT NOT NULL DEFAULT 'SYSTEM_CHECK',
+    "installationId"     TEXT NOT NULL,
     "clientType"         TEXT NOT NULL,
     "verificationStatus" TEXT NOT NULL DEFAULT 'NOT_CHECKED',
     "clientVersion"      TEXT,
@@ -68,6 +72,9 @@ CREATE INDEX IF NOT EXISTS "SystemCheckSecureClientVerification_userId_createdAt
 
 CREATE INDEX IF NOT EXISTS "SystemCheckSecureClientVerification_expiresAt_idx"
     ON "public"."SystemCheckSecureClientVerification" ("expiresAt");
+
+CREATE INDEX IF NOT EXISTS "SystemCheckSecureClientVerification_installationId_idx"
+    ON "public"."SystemCheckSecureClientVerification" ("installationId");
 
 COMMIT;
 

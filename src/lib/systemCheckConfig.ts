@@ -25,12 +25,14 @@ export function systemCheckValidityHours(): number {
   return parsed;
 }
 
-// 1.4.0 is the first version exposing attestSystemCheck — see
-// docs/tether-system-check-v1.md, "Genuine client attestation". An
-// older installed client can never produce a genuine SYSTEM_CHECK
-// verification at all (ATTESTATION_UNAVAILABLE), regardless of this
-// setting, so this default is kept in step with that requirement.
-const DEFAULT_MINIMUM_SUPPORTED_VERSION = "1.4.0";
+// 1.5.0 is the first version using per-installation attestation keys —
+// see docs/tether-system-check-v1.md, "Secure Client Attestation v2".
+// 1.4.0 shipped a single globally-embedded attestation private key and
+// has been WITHDRAWN — must never be distributed. An older installed
+// client can never produce a genuine SYSTEM_CHECK verification at all
+// (ATTESTATION_UNAVAILABLE / INSTALLATION_UNAVAILABLE) regardless of
+// this setting, so this default is kept in step with that requirement.
+const DEFAULT_MINIMUM_SUPPORTED_VERSION = "1.5.0";
 
 /** The minimum Tether Secure Browser version this deployment accepts as ready. Never hard-coded elsewhere — see docs/tether-system-check-v1.md. */
 export function minimumSupportedTetherVersion(): string {

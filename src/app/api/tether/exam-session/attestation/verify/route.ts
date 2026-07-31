@@ -1,32 +1,32 @@
 /**
- * Secure Client Attestation v2 — see docs/tether-system-check-v1.md.
+ * Secure Client Attestation v2 — EXAM_SESSION purpose. See
+ * docs/tether-system-check-v1.md, "Real exam attestation — additive
+ * groundwork".
  *
- * POST /api/tether/system-check/secure-client/verify — the student's
- * Tether Secure Browser echoes back the signed SYSTEM_CHECK challenge,
- * together with `installationSignature`: a signature produced by that
- * installation's OWN registered private key (never a globally shared
- * one — see "Genuine client attestation" history / "Secure Client
- * Attestation v2"), computed entirely inside the Electron main process.
- * The server independently re-verifies BOTH the server's own challenge
- * signature AND the installation's signature against ITS registered
- * public key, and confirms the installation is currently ACTIVE (not
- * revoked/replaced). It never trusts a renderer-supplied "verified"
- * boolean — there is no such field in this request body at all. A
- * second verify attempt with the same nonce is rejected as a replay.
- * Never logs the full challenge or any signature.
+ * POST /api/tether/exam-session/attestation/verify — verifies BOTH the
+ * server's own challenge signature and the installation's own signature
+ * over the canonical EXAM_SESSION payload (binding
+ * examId/submissionId/policyHash — a signature genuinely produced for a
+ * different exam, submission, or policy fails to verify here). Only
+ * ADDITIVELY records the result — populates the existing
+ * SecureClientSession.clientInstallationIdHash field — and never
+ * changes that session's status/verificationStatus, which remain
+ * governed entirely by the existing, unmodified recordAttestation()
+ * flow. See tetherAttestationRunner.ts's verifyExamSessionAttestation
+ * doc comment for exactly why this is deliberately scoped this way in
+ * this pass.
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
-import { requireInstitutionId } from "@/lib/institutionScope";
-import { verifySystemCheckAttestation, isValidSystemCheckClientType, SYSTEM_CHECK_CLIENT_TYPES } from "@/lib/systemCheck/tetherAttestationRunner";
+import { verifyExamSessionAttestation } from "@/lib/systemCheck/tetherAttestationRunner";
 
 const challengeSchema = z.object({
   schemaVersion: z.number().int(),
   challengeId: z.string().min(1).max(200),
   keyId: z.string().min(1).max(200),
   issuer: z.string().min(1).max(200),
-  purpose: z.literal("SYSTEM_CHECK"),
+  purpose: z.literal("EXAM_SESSION"),
   audience: z.string().min(1).max(200),
   userSubjectHash: z.string().min(1).max(200),
   installationId: z.string().min(1).max(100),
@@ -35,19 +35,19 @@ const challengeSchema = z.object({
   notBefore: z.string().min(1).max(64),
   expiresAt: z.string().min(1).max(64),
   nonce: z.string().min(1).max(512),
-  examId: z.null(),
-  submissionId: z.null(),
-  policyHash: z.null(),
+  examId: z.string().min(1).max(100),
+  submissionId: z.string().min(1).max(100),
+  policyHash: z.string().min(1).max(200),
 });
 
 const bodySchema = z.object({
   challenge: challengeSchema,
   challengeSignature: z.string().min(1).max(2048),
-  clientType: z.enum(SYSTEM_CHECK_CLIENT_TYPES),
   installationSignature: z.string().min(1).max(2048),
   clientVersion: z.string().min(1).max(40),
   platform: z.string().min(1).max(40),
   displayTopologyClassification: z.string().min(1).max(40),
+  displayCount: z.number().int().min(0).max(64),
 });
 
 export async function POST(req: Request) {
@@ -62,27 +62,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Malformed request" }, { status: 400 });
   }
   const body = parsed.data;
-  if (!isValidSystemCheckClientType(body.clientType)) {
-    return NextResponse.json({ error: "Unsupported client type" }, { status: 400 });
-  }
 
-  let institutionId: string;
-  try {
-    institutionId = requireInstitutionId(session);
-  } catch {
-    return NextResponse.json({ error: "Institution not resolved for this account" }, { status: 403 });
-  }
-
-  const result = await verifySystemCheckAttestation({
+  const result = await verifyExamSessionAttestation({
     userId: session.user.id,
-    institutionId,
     challenge: body.challenge,
     challengeSignature: body.challengeSignature,
-    clientType: body.clientType,
     installationSignature: body.installationSignature,
     clientVersion: body.clientVersion,
     platform: body.platform,
     displayTopologyClassification: body.displayTopologyClassification,
+    displayCount: body.displayCount,
   });
 
   if (result.outcome === "INVALID") {
@@ -94,11 +83,17 @@ export async function POST(req: Request) {
   if (result.outcome === "INSTALLATION_SIGNATURE_INVALID") {
     return NextResponse.json({ verified: false, reason: "INSTALLATION_SIGNATURE_INVALID" }, { status: 400 });
   }
+  if (result.outcome === "SESSION_NOT_FOUND") {
+    return NextResponse.json({ verified: false, reason: "SESSION_NOT_FOUND" }, { status: 404 });
+  }
+  if (result.outcome === "BINDING_MISMATCH") {
+    return NextResponse.json({ verified: false, reason: "BINDING_MISMATCH" }, { status: 400 });
+  }
   if (result.outcome === "REPLAY") {
     return NextResponse.json({ verified: false, reason: "REPLAY" }, { status: 409 });
   }
 
-  return NextResponse.json({ verified: true, verificationId: result.verificationId, expiresAt: result.expiresAt });
+  return NextResponse.json({ verified: true, sessionId: result.sessionId });
 }
 
 export const dynamic = "force-dynamic";
