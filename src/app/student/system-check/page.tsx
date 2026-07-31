@@ -121,6 +121,12 @@ function describeCheck(id: SystemCheckId, display: CheckDisplay | undefined): { 
       if (reason === "CHALLENGE_FAILED" || reason === "VERIFICATION_FAILED") {
         return { message: "Your Tether Secure Browser could not be verified.", correction: "Check your connection and retry." };
       }
+      if (reason === "ATTESTATION_UNAVAILABLE") {
+        return { message: "This Tether Secure Browser installation is too old to verify.", correction: "Download and install the latest version, then retry." };
+      }
+      if (reason === "ATTESTATION_FAILED" || reason === "CLIENT_ATTESTATION_INVALID") {
+        return { message: "Your Tether Secure Browser could not be verified.", correction: "Restart Tether Secure Browser and retry." };
+      }
       return { message: "A verified Tether Secure Browser session could not be confirmed.", correction: "Retry the check." };
     case "clientVersion":
       if (status === "PASS") return { message: "Your Tether Secure Browser version is supported.", correction: null };
@@ -203,28 +209,49 @@ const CHECK_TIMEOUT_MS = 8_000;
  * {status} IS the server's own PASS/BLOCKED decision — this function
  * never reads or trusts any "verified" value it computed itself.
  */
+/**
+ * Security hardening pass — see docs/tether-system-check-v1.md,
+ * "Genuine client attestation". `window.sesLockdown.attestSystemCheck`
+ * (not the individually-callable getClientVersion/getOperatingSystemInfo/
+ * getDisplayTopology used elsewhere on this page for display purposes)
+ * is the ONLY source of the facts submitted here — it returns a
+ * signature computed entirely inside the Electron main process using an
+ * embedded key this page never sees, bound to exactly the facts
+ * main.ts itself gathered. This function never constructs or trusts a
+ * "verified" boolean itself — the server's response is authoritative.
+ */
 async function verifySecureClient(): Promise<{ display: CheckDisplay; verificationId: string | null }> {
   try {
     const challengeRes = await withTimeout(fetch("/api/tether/system-check/secure-client/challenge", { method: "POST" }), CHECK_TIMEOUT_MS);
     if (!challengeRes.ok) return { display: { status: "BLOCKED", reasonCode: "CHALLENGE_FAILED" }, verificationId: null };
     const { challenge, signature } = await challengeRes.json();
 
-    const clientVersion =
-      typeof window.sesLockdown?.getClientVersion === "function"
-        ? await withTimeout(window.sesLockdown.getClientVersion(), CHECK_TIMEOUT_MS).catch(() => window.sesLockdown?.version ?? null)
-        : (window.sesLockdown?.version ?? null);
-    const platform =
-      typeof window.sesLockdown?.getOperatingSystemInfo === "function"
-        ? await withTimeout(window.sesLockdown.getOperatingSystemInfo(), CHECK_TIMEOUT_MS)
-            .then((info) => info?.platform ?? null)
-            .catch(() => null)
-        : null;
+    if (typeof window.sesLockdown?.attestSystemCheck !== "function") {
+      // An older packaged install (pre-1.4.0) doesn't expose this yet —
+      // never falls back to unsigned self-reported facts.
+      return { display: { status: "BLOCKED", reasonCode: "ATTESTATION_UNAVAILABLE" }, verificationId: null };
+    }
+    const attestation = await withTimeout(window.sesLockdown.attestSystemCheck(challenge.nonce), CHECK_TIMEOUT_MS).catch(() => null);
+    if (!attestation) {
+      return { display: { status: "BLOCKED", reasonCode: "ATTESTATION_FAILED" }, verificationId: null };
+    }
 
     const verifyRes = await withTimeout(
       fetch("/api/tether/system-check/secure-client/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ challenge, signature, clientType: "TETHER_SECURE_CLIENT", clientVersion, platform }),
+        body: JSON.stringify({
+          challenge,
+          signature,
+          clientType: "TETHER_SECURE_CLIENT",
+          clientAttestation: {
+            nonce: challenge.nonce,
+            clientVersion: attestation.clientVersion,
+            platform: attestation.platform,
+            displayTopologyClassification: attestation.displayTopologyClassification,
+            signature: attestation.signature,
+          },
+        }),
       }),
       CHECK_TIMEOUT_MS,
     );

@@ -59,6 +59,10 @@ type SesLockdownBridge = {
     getDisplayTopology: boolean;
     getSecureClientCapabilities: boolean;
   }>;
+  // Security hardening pass — genuine client attestation. See
+  // docs/tether-system-check-v1.md, "Genuine client attestation".
+  // Optional: only present in a v1.4.0+ packaged build.
+  attestSystemCheck?(nonce: string): Promise<{ signature: string; clientVersion: string; platform: string; displayTopologyClassification: string } | null>;
 };
 
 declare global {

@@ -2342,6 +2342,14 @@ model SystemCheckSecureClientVerification {
 
   clientVersion String?
   platform      String?
+  // Security hardening pass — see docs/tether-system-check-v1.md,
+  // "Genuine client attestation". The AUTHORITATIVE, signature-bound
+  // native display-topology classification gathered by the Electron
+  // main process itself (never a value the renderer could tamper with
+  // independently — see verifyClientAttestation in
+  // systemCheckClientAttestation.ts). One of
+  // DISPLAY_TOPOLOGY_CLASSIFICATIONS in readiness.ts.
+  displayTopologyClassification String?
 
   // Replay protection — a second verify attempt with the same nonce
   // fails the unique constraint outright (see systemCheckSecureClientRunner.ts).

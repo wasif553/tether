@@ -40,6 +40,8 @@ import {
   type SystemCheckChallenge,
   type ChallengeValidationReasonCode,
 } from "@/lib/secureClient/systemCheckChallenge";
+import { verifyClientAttestation, clientAttestationPublicKey, type ClientAttestationFacts } from "@/lib/secureClient/systemCheckClientAttestation";
+import { isValidDisplayTopologyClassification } from "@/lib/systemCheck/readiness";
 
 /** Short-lived on purpose — a quick round trip while the student has the system-check page open, not a multi-minute installer wait like the exam-launch manifest's TTL. */
 export const SYSTEM_CHECK_CHALLENGE_TTL_SECONDS = 120;
@@ -80,24 +82,48 @@ export type VerifySystemCheckChallengeParams = {
   challenge: SystemCheckChallenge;
   signature: string;
   clientType: SystemCheckClientType;
-  clientVersion: string | null;
-  platform: string | null;
+  /**
+   * Security hardening pass — see docs/tether-system-check-v1.md,
+   * "Genuine client attestation". REQUIRED: the second, independent
+   * signature produced by the embedded client-attestation private key
+   * that exists only inside a genuine packaged Electron main process
+   * (apps/lockdown/src/clientAttestationKey.ts) — never a renderer-
+   * computed or client-self-reported value. Proves possession of that
+   * key, which an ordinary browser cannot obtain or reproduce.
+   */
+  clientAttestation: ClientAttestationFacts;
 };
 
 export type VerifySystemCheckChallengeResult =
   | { outcome: "VERIFIED"; verificationId: string; expiresAt: Date }
   | { outcome: "REPLAY" }
-  | { outcome: "INVALID"; reason: ChallengeValidationReasonCode };
+  | { outcome: "INVALID"; reason: ChallengeValidationReasonCode }
+  | { outcome: "CLIENT_ATTESTATION_INVALID" };
 
 /**
- * Verifies a signed SYSTEM_CHECK challenge response and, only if genuine,
- * persists exactly one narrowly-scoped verification row. Never trusts a
- * renderer-supplied "verified" boolean — the server independently
- * re-verifies the Ed25519 signature and every bound context field
- * (purpose, subject, audience, expiry) via validateChallengeContext.
- * Replay is rejected by the nonceHash UNIQUE constraint — a second
- * verify attempt with the same nonce always fails to insert, exactly
- * like consumeLaunchManifest's real-exam-flow replay protection.
+ * Verifies a signed SYSTEM_CHECK challenge response and, only if
+ * genuine, persists exactly one narrowly-scoped verification row. Never
+ * trusts a renderer-supplied "verified" boolean. Two INDEPENDENT
+ * signatures are checked:
+ *
+ *  1. The server's own challenge signature (validateChallengeContext) —
+ *     proves the challenge itself was issued by this server, bound to
+ *     this user/purpose/audience, and hasn't expired. This alone is
+ *     NOT proof of client genuineness — any browser can echo a valid
+ *     challenge back (see the security hardening pass report).
+ *  2. The client-attestation signature (verifyClientAttestation) —
+ *     proves the responder possesses the embedded private key that
+ *     ONLY exists inside a genuine packaged Tether Secure Browser main
+ *     process, bound to the exact nonce/clientVersion/platform/
+ *     displayTopologyClassification facts reported. An ordinary Chrome
+ *     or Edge browser — even one that fabricates every native fact and
+ *     resubmits a perfectly valid server challenge — cannot produce a
+ *     valid signature here, because it never possesses that key.
+ *
+ * BOTH must pass before a verification row is ever written. Replay is
+ * rejected by the nonceHash UNIQUE constraint — a second verify attempt
+ * with the same nonce always fails to insert, exactly like
+ * consumeLaunchManifest's real-exam-flow replay protection.
  */
 export async function verifySystemCheckChallenge(params: VerifySystemCheckChallengeParams): Promise<VerifySystemCheckChallengeResult> {
   const expectedUserSubjectHash = computeUserSubjectHash(params.userId);
@@ -108,6 +134,26 @@ export async function verifySystemCheckChallenge(params: VerifySystemCheckChalle
   });
   if (validation !== "VALID") {
     return { outcome: "INVALID", reason: validation };
+  }
+
+  // The client-attestation must be bound to THIS exact challenge's
+  // nonce — a signature genuinely produced for a DIFFERENT nonce (e.g.
+  // replayed from an earlier round trip) is rejected here, before ever
+  // reaching the crypto verification itself.
+  if (params.clientAttestation.nonce !== params.challenge.nonce) {
+    return { outcome: "CLIENT_ATTESTATION_INVALID" };
+  }
+  if (!isValidDisplayTopologyClassification(params.clientAttestation.displayTopologyClassification)) {
+    return { outcome: "CLIENT_ATTESTATION_INVALID" };
+  }
+  let publicKey: string;
+  try {
+    publicKey = clientAttestationPublicKey();
+  } catch {
+    return { outcome: "CLIENT_ATTESTATION_INVALID" };
+  }
+  if (!verifyClientAttestation(params.clientAttestation, publicKey)) {
+    return { outcome: "CLIENT_ATTESTATION_INVALID" };
   }
 
   const nonceHash = hashNonce(params.challenge.nonce);
@@ -121,8 +167,9 @@ export async function verifySystemCheckChallenge(params: VerifySystemCheckChalle
         purpose: "SYSTEM_CHECK",
         clientType: params.clientType,
         verificationStatus: "VERIFIED",
-        clientVersion: params.clientVersion,
-        platform: params.platform,
+        clientVersion: params.clientAttestation.clientVersion,
+        platform: params.clientAttestation.platform,
+        displayTopologyClassification: params.clientAttestation.displayTopologyClassification,
         nonceHash,
         challengeHash,
         issuedAt: new Date(params.challenge.issuedAt),

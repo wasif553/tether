@@ -122,7 +122,17 @@ export async function POST(req: Request) {
   //  2. secureClientSessionId — a real exam-bound SecureClientSession,
   //     reused when the student already has one (e.g. re-running the
   //     check from inside an active exam-launch context).
+  // Security hardening pass — see docs/tether-system-check-v1.md,
+  // "Genuine client attestation". When a systemCheckVerificationId is
+  // used, clientVersion/platform/displayTopologyClassification are
+  // ALWAYS pulled from that row (the AUTHORITATIVE, signature-bound
+  // facts main.ts attested — see systemCheckClientAttestation.ts) —
+  // never from the separate, unsigned body fields below, which a
+  // browser could set to anything.
   let secureClientResult: CheckResult;
+  let attestedClientVersion: string | null = null;
+  let attestedPlatform: string | null = null;
+  let attestedDisplayTopology: string | null = null;
   if (body.systemCheckVerificationId) {
     const owned = await loadOwnedSystemCheckVerification(body.systemCheckVerificationId, session.user.id);
     if (!owned) {
@@ -132,8 +142,13 @@ export async function POST(req: Request) {
       secureClientResult = { status: "BLOCKED", reasonCode: "WRONG_PURPOSE" };
     } else if (owned.expiresAt.getTime() <= Date.now()) {
       secureClientResult = { status: "BLOCKED", reasonCode: "VERIFICATION_EXPIRED" };
+    } else if (owned.verificationStatus === "VERIFIED") {
+      secureClientResult = { status: "PASS", reasonCode: "SYSTEM_CHECK_VERIFIED" };
+      attestedClientVersion = owned.clientVersion;
+      attestedPlatform = owned.platform;
+      attestedDisplayTopology = owned.displayTopologyClassification;
     } else {
-      secureClientResult = owned.verificationStatus === "VERIFIED" ? { status: "PASS", reasonCode: "SYSTEM_CHECK_VERIFIED" } : { status: "BLOCKED", reasonCode: "VERIFICATION_NOT_VERIFIED" };
+      secureClientResult = { status: "BLOCKED", reasonCode: "VERIFICATION_NOT_VERIFIED" };
     }
   } else if (body.secureClientSessionId) {
     const owned = await prisma.secureClientSession.findUnique({ where: { id: body.secureClientSessionId } });
@@ -150,21 +165,28 @@ export async function POST(req: Request) {
 
   const isTether = body.sourceClientType === "TETHER_SECURE_CLIENT";
 
+  // Prefer the attested (signature-verified) facts when available;
+  // otherwise fall back to the pre-hardening, self-reported values —
+  // still safe overall, since secureClient itself only reaches PASS via
+  // a genuinely attested verification (see above), so this fallback
+  // path can never contribute to an unearned READY on its own.
+  const effectiveClientVersion = attestedClientVersion ?? body.clientVersion ?? null;
+  const effectiveDisplayTopologyRaw = attestedDisplayTopology ?? body.displayTopologyClassification ?? null;
+
   const clientVersionResult: CheckResult = isTether
-    ? evaluateClientVersion(body.clientVersion ?? null, minimumSupportedTetherVersion())
+    ? evaluateClientVersion(effectiveClientVersion, minimumSupportedTetherVersion())
     : { status: "NOT_CHECKED", reasonCode: "TETHER_NOT_DETECTED" };
 
   const displayTopologyResult: CheckResult = isTether
-    ? evaluateDisplayTopology(
-        body.displayTopologyClassification && isValidDisplayTopologyClassification(body.displayTopologyClassification) ? body.displayTopologyClassification : "ERROR",
-      )
+    ? evaluateDisplayTopology(effectiveDisplayTopologyRaw && isValidDisplayTopologyClassification(effectiveDisplayTopologyRaw) ? effectiveDisplayTopologyRaw : "ERROR")
     : { status: "NOT_CHECKED", reasonCode: "TETHER_NOT_DETECTED" };
 
   const bridgeResult: CheckResult = isTether
     ? evaluateBridgeCapabilities(body.bridgeCapabilities ?? null)
     : { status: "NOT_CHECKED", reasonCode: "TETHER_NOT_DETECTED" };
 
-  const operatingSystemResult: CheckResult = evaluateOperatingSystem(body.operatingSystem ?? null);
+  const effectiveOperatingSystem = attestedPlatform ?? body.operatingSystem ?? null;
+  const operatingSystemResult: CheckResult = evaluateOperatingSystem(effectiveOperatingSystem);
   const clockResult = evaluateClockDifference(body.clientTimeMs, Date.now());
 
   const finalResults: SystemCheckResults = {
@@ -190,8 +212,8 @@ export async function POST(req: Request) {
       userId: session.user.id,
       overallStatus,
       sourceClientType: body.sourceClientType,
-      clientVersion: isTether ? (body.clientVersion ?? null) : null,
-      operatingSystem: body.operatingSystem ?? null,
+      clientVersion: isTether ? effectiveClientVersion : null,
+      operatingSystem: effectiveOperatingSystem,
       operatingSystemVersion: body.operatingSystemVersion ?? null,
       // Advisory pointer only (see TetherSystemCheckRun's doc comment in
       // prisma/schema.prisma) — stores whichever of the two sources

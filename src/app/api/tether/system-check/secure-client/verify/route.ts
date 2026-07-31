@@ -1,17 +1,20 @@
 /**
- * Tether System Check and Exam Readiness v1 — corrective pass (first-time
- * verification). See docs/tether-system-check-v1.md.
+ * Tether System Check and Exam Readiness v1 — see
+ * docs/tether-system-check-v1.md, "Genuine client attestation" (security
+ * hardening pass).
  *
  * POST /api/tether/system-check/secure-client/verify — the student's
  * Tether Secure Browser echoes back the signed challenge it received
- * from .../challenge, along with the native client facts it gathered
- * (clientType/clientVersion/platform via the existing
- * window.sesLockdown bridge). The server independently re-verifies the
- * Ed25519 signature and every bound context field — it NEVER trusts a
- * renderer-supplied "verified" boolean; there is no such field in this
- * request body at all. A second verify attempt with the same nonce is
- * rejected as a replay (nonceHash UNIQUE constraint). Never logs the
- * full challenge or signature — only the outcome and reason code.
+ * from .../challenge, together with a `clientAttestation`: a SECOND,
+ * independent signature computed entirely inside the Electron main
+ * process (never the renderer) using an embedded private key an
+ * ordinary browser cannot possess — see
+ * apps/lockdown/src/clientAttestationKey.ts. The server never trusts a
+ * renderer-supplied "verified" boolean, and never accepts the server's
+ * own challenge signature alone as proof of client genuineness — both
+ * signatures must independently verify. A second verify attempt with
+ * the same nonce is rejected as a replay (nonceHash UNIQUE constraint).
+ * Never logs the full challenge, signature, or attestation.
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -34,12 +37,19 @@ const challengeSchema = z.object({
   nonce: z.string().min(1).max(512),
 });
 
+const clientAttestationSchema = z.object({
+  nonce: z.string().min(1).max(512),
+  clientVersion: z.string().min(1).max(40),
+  platform: z.string().min(1).max(40),
+  displayTopologyClassification: z.string().min(1).max(40),
+  signature: z.string().min(1).max(2048),
+});
+
 const bodySchema = z.object({
   challenge: challengeSchema,
   signature: z.string().min(1).max(2048),
   clientType: z.enum(SYSTEM_CHECK_CLIENT_TYPES),
-  clientVersion: z.string().max(40).nullable().optional(),
-  platform: z.string().max(40).nullable().optional(),
+  clientAttestation: clientAttestationSchema,
 });
 
 export async function POST(req: Request) {
@@ -71,12 +81,14 @@ export async function POST(req: Request) {
     challenge: body.challenge,
     signature: body.signature,
     clientType: body.clientType,
-    clientVersion: body.clientVersion ?? null,
-    platform: body.platform ?? null,
+    clientAttestation: body.clientAttestation,
   });
 
   if (result.outcome === "INVALID") {
     return NextResponse.json({ verified: false, reason: result.reason }, { status: 400 });
+  }
+  if (result.outcome === "CLIENT_ATTESTATION_INVALID") {
+    return NextResponse.json({ verified: false, reason: "CLIENT_ATTESTATION_INVALID" }, { status: 400 });
   }
   if (result.outcome === "REPLAY") {
     return NextResponse.json({ verified: false, reason: "REPLAY" }, { status: 409 });

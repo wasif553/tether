@@ -28,6 +28,7 @@ import {
   type QueuedLockdownEvent,
 } from "./shared";
 import { DisplayEnforcement } from "./displayEnforcement";
+import { signWithClientAttestationKey } from "./clientAttestationKey";
 import type { DisplayEnforcementEventType, SecureClientEnforcementState } from "./displayEnforcementLogic";
 import {
   isDiagnosticsPanelEnabled,
@@ -478,6 +479,32 @@ ipcMain.handle("lockdown:get-secure-client-capabilities", () => ({
   getDisplayTopology: true,
   getSecureClientCapabilities: true,
 }));
+
+// Security hardening pass — genuine client attestation for the SYSTEM_CHECK
+// flow. See docs/tether-system-check-v1.md, "Genuine client attestation",
+// and clientAttestationKey.ts's own doc comment. Every fact signed here is
+// gathered by THIS main process itself (never trusted from an IPC
+// argument the renderer supplies) — the renderer only ever hands in the
+// server-issued nonce it received from POST .../secure-client/challenge.
+// The exact canonical string format below MUST match
+// buildSystemCheckAttestationCanonicalString in the main web app's
+// src/lib/secureClient/systemCheckClientAttestation.ts — kept as two
+// small, independently-reviewable copies rather than a cross-package
+// import, since apps/lockdown is a separate compiled package.
+function buildSystemCheckAttestationCanonicalString(params: { nonce: string; clientVersion: string; platform: string; displayTopologyClassification: string }): string {
+  return ["SYSTEM_CHECK_ATTESTATION_V1", params.nonce, params.clientVersion, params.platform, params.displayTopologyClassification].join("|");
+}
+
+ipcMain.handle("lockdown:attest-system-check", async (_event, nonce: unknown) => {
+  if (typeof nonce !== "string" || nonce.length === 0 || nonce.length > 512) return null;
+  const clientVersion = LOCKDOWN_VERSION;
+  const platform = process.platform;
+  const topology = await displayEnforcement.getOnDemandDisplayTopology();
+  const displayTopologyClassification = topology.classification;
+  const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce, clientVersion, platform, displayTopologyClassification });
+  const signature = signWithClientAttestationKey(canonicalString);
+  return { signature, clientVersion, platform, displayTopologyClassification };
+});
 
 // Tasks A/B — the hosted page reports the bounded, non-secret policy
 // context it knows (deliveryMode, displayPolicy, requireDisplayCheck,

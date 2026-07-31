@@ -161,6 +161,22 @@ contextBridge.exposeInMainWorld("sesLockdown", {
   }> {
     return ipcRenderer.invoke("lockdown:get-secure-client-capabilities");
   },
+
+  /**
+   * Security hardening pass — genuine client attestation. See
+   * docs/tether-system-check-v1.md, "Genuine client attestation". Takes
+   * only the server-issued nonce string; every fact in the response
+   * (clientVersion/platform/displayTopologyClassification) is gathered
+   * by the MAIN process itself and signed there with the embedded
+   * client-attestation private key — this preload function never sees
+   * that key, never computes the signature itself, and cannot be made
+   * to sign arbitrary attacker-chosen data (only this one fixed
+   * canonical format, built entirely in main.ts).
+   */
+  async attestSystemCheck(nonce: string): Promise<{ signature: string; clientVersion: string; platform: string; displayTopologyClassification: string } | null> {
+    if (typeof nonce !== "string" || nonce.length === 0) return null;
+    return ipcRenderer.invoke("lockdown:attest-system-check", nonce);
+  },
 });
 
 /** Drops any value that isn't a plain string/number/boolean — never forwards functions, secrets, or large blobs from the page. */

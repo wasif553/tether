@@ -1,5 +1,9 @@
 -- Tether System Check and Exam Readiness v1 — corrective pass (first-time
--- verification). See docs/tether-system-check-v1.md.
+-- verification) + security hardening pass (adds
+-- "displayTopologyClassification", the signature-bound authoritative
+-- native display-topology fact). See docs/tether-system-check-v1.md.
+-- This table has not been applied to Preview/Production yet, so this
+-- file is updated in place rather than adding a second ALTER TABLE file.
 --
 -- Adds ONE new, fully additive table: "SystemCheckSecureClientVerification".
 -- Does not alter, rename, or drop any existing table, column, index,
@@ -32,6 +36,7 @@ CREATE TABLE IF NOT EXISTS "public"."SystemCheckSecureClientVerification" (
     "verificationStatus" TEXT NOT NULL DEFAULT 'NOT_CHECKED',
     "clientVersion"      TEXT,
     "platform"           TEXT,
+    "displayTopologyClassification" TEXT,
     "nonceHash"          TEXT NOT NULL,
     "challengeHash"      TEXT NOT NULL,
     "issuedAt"           TIMESTAMP(3) NOT NULL,

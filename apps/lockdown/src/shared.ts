@@ -47,7 +47,17 @@
 // /student/system-check page can report genuine native readiness
 // signals. Purely additive — no change to contextIsolation,
 // nodeIntegration, sandbox, or any existing IPC channel.
-export const LOCKDOWN_VERSION = "1.3.0";
+//
+// v1.4.0 — security hardening pass (see docs/tether-system-check-v1.md,
+// "Genuine client attestation"): adds attestSystemCheck, backed by an
+// embedded Ed25519 private key (clientAttestationKey.ts) that never
+// leaves the main process — closes the gap where an ordinary browser
+// could fabricate a "verified" SYSTEM_CHECK result by echoing a signed
+// server challenge back with self-reported native facts. Purely
+// additive — no change to contextIsolation, nodeIntegration, sandbox,
+// or any existing IPC channel; the new private key is never exposed to
+// the renderer.
+export const LOCKDOWN_VERSION = "1.4.0";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see
