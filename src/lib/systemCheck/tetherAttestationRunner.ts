@@ -18,13 +18,22 @@
  * shared secret.
  *
  * Structural non-authorization guarantee (unchanged from v1): nothing in
- * this file creates, reads, or updates Submission, Answer,
+ * this file creates, writes, or updates Submission, Answer,
  * IntegrityEvent, or ExamAttemptSession. `verifyExamSessionAttestation`
  * DOES read/update an EXISTING SecureClientSession row (additive only —
  * see its own doc comment) but never creates one, and
  * `verifySystemCheckAttestation` never touches SecureClientSession at
  * all — see the "purpose isolation" tests in
  * tetherAttestation.routes.test.ts for the automated proof.
+ *
+ * One READ-only exception (device-management revocation guard, see
+ * resolveActiveExamRevocationBlock below): it reads
+ * Submission.startedAt/Exam.durationMins/Exam.secureSettings — the exact
+ * same fields POST /api/submissions/[id]/submit already reads — to decide
+ * whether a candidate session is still within its authoritative
+ * submission window (submissionDeadline/canAcceptSubmit in
+ * assessmentLifecycle.ts). Still never writes to Submission/Answer/
+ * IntegrityEvent/ExamAttemptSession.
  */
 import { randomBytes, createHash } from "crypto";
 import { prisma } from "@/lib/prisma";
@@ -56,6 +65,8 @@ import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 import { computePolicyHash } from "@/lib/secureClient/secureLaunchManifest";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { resolveMaxActiveInstallationsPerUser, parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
+import { parseSecureSettings } from "@/lib/secureExam";
+import { submissionDeadline, canAcceptSubmit } from "@/lib/assessmentLifecycle";
 
 export const REGISTRATION_CHALLENGE_TTL_SECONDS = 120;
 export const ATTESTATION_CHALLENGE_TTL_SECONDS = 120;
@@ -300,26 +311,77 @@ export async function loadOwnedInstallation(installationId: string, userId: stri
 const NON_TERMINAL_SESSION_STATUSES = ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] as const;
 
 /**
+ * Device management UI v1 — "Active exam safety", authoritative-expiry
+ * gate. `Submission.status` only ever leaves IN_PROGRESS through POST
+ * /api/submissions/[id]/submit (explicit student action, or a client-side
+ * auto-submit timer post — see shouldAutoSubmit in assessmentLifecycle.ts,
+ * driven from the STUDENT's own browser). There is no server-side sweep
+ * job that expires a stale row: a closed laptop, dead battery, crashed
+ * browser, or an abandoned attempt leaves Submission.status IN_PROGRESS
+ * and the SecureClientSession non-terminal FOREVER, even long after the
+ * exam's own deadline has genuinely passed. A revocation guard keyed only
+ * on those two stored statuses would therefore block a student's devices
+ * indefinitely for an exam that, in every real sense, is already over.
+ *
+ * This reuses — never reimplements — the EXACT same calculation the real
+ * enforcement point (POST /api/submissions/[id]/submit) already uses to
+ * decide whether a submit attempt would even be accepted right now:
+ * submissionDeadline(startedAt, durationMins) + canAcceptSubmit(...), both
+ * from assessmentLifecycle.ts, read from the SAME live source that route
+ * reads (submission.startedAt, exam.durationMins,
+ * parseSecureSettings(exam.secureSettings) — there is no separate frozen
+ * per-attempt duration/late-submit snapshot anywhere in this codebase to
+ * prefer instead). `systemAutoSubmit` is always passed as `false`: that
+ * flag exists only to let the submit route's OWN forced-auto-submit call
+ * through past the deadline for `autoSubmitOnTimerEnd`, and is irrelevant
+ * to "is this exam still genuinely ongoing" — an `allowLateSubmit` exam is
+ * correctly still "ongoing" past its nominal timer (canAcceptSubmit
+ * already returns true for that case); one that neither allows late
+ * submission nor has had its forced auto-submit actually run yet is not.
+ *
+ * `now` is always this server's own `new Date()` — nothing here ever
+ * reads a client-supplied clock, timestamp, or remaining-time value (the
+ * revoke API's own request body only ever accepts `reason`; nothing else
+ * it might contain can reach this calculation).
+ */
+function isWithinAuthoritativeSubmissionWindow(startedAt: Date, durationMins: number, secureSettings: unknown): boolean {
+  const settings = parseSecureSettings(secureSettings);
+  const deadline = submissionDeadline(startedAt, durationMins);
+  return canAcceptSubmit({ now: new Date(), deadline, settings, systemAutoSubmit: false });
+}
+
+/**
  * Device management UI v1 — "Active exam safety", installation-specific
  * branch. Returns the id of a non-terminal secure-client session (whose
- * submission is still IN_PROGRESS) that is CURRENTLY bound to this exact
- * installation via SecureClientSession.clientInstallationId — populated
- * only by a genuine v2 EXAM_SESSION attestation, see
- * verifyExamSessionAttestation above — or null if none exists. Precise:
- * never blocks a DIFFERENT installation than the one actually carrying
- * the active session (see resolveActiveExamRevocationBlock below for how
- * this composes with the LEGACY-mode conservative check).
+ * submission is still IN_PROGRESS AND still within its authoritative
+ * submission window — see isWithinAuthoritativeSubmissionWindow above)
+ * that is CURRENTLY bound to this exact installation via
+ * SecureClientSession.clientInstallationId — populated only by a genuine
+ * v2 EXAM_SESSION attestation, see verifyExamSessionAttestation above —
+ * or null if none exists. Precise: never blocks a DIFFERENT installation
+ * than the one actually carrying the active session (see
+ * resolveActiveExamRevocationBlock below for how this composes with the
+ * LEGACY-mode conservative check).
  */
 async function findActiveBoundExamSessionId(installationId: string): Promise<string | null> {
-  const activeSession = await prisma.secureClientSession.findFirst({
+  const candidates = await prisma.secureClientSession.findMany({
     where: {
       clientInstallationId: installationId,
       status: { in: [...NON_TERMINAL_SESSION_STATUSES] },
       submission: { status: "IN_PROGRESS" },
     },
-    select: { id: true },
+    select: {
+      id: true,
+      submission: { select: { startedAt: true, exam: { select: { durationMins: true, secureSettings: true } } } },
+    },
   });
-  return activeSession?.id ?? null;
+  for (const candidate of candidates) {
+    const { startedAt, exam } = candidate.submission;
+    if (isWithinAuthoritativeSubmissionWindow(startedAt, exam.durationMins, exam.secureSettings)) {
+      return candidate.id;
+    }
+  }
+  return null;
 }
 
 /**
@@ -361,6 +423,11 @@ async function findActiveBoundExamSessionId(installationId: string): Promise<str
  *    TETHER_CLIENT_REQUIRED — an ordinary STANDARD_WEB/MONITORED_WEB
  *    assessment, or one merely offering Tether as optional, never blocks
  *    revocation of anything.
+ *  - The submission must still be within its authoritative submission
+ *    window — see isWithinAuthoritativeSubmissionWindow above. A
+ *    genuinely expired attempt (deadline passed, late submission not
+ *    permitted) never blocks, no matter how stale the stored
+ *    IN_PROGRESS/non-terminal statuses are.
  */
 async function findLegacyTetherRequiredActiveSessionId(userId: string): Promise<string | null> {
   const candidates = await prisma.secureClientSession.findMany({
@@ -372,12 +439,19 @@ async function findLegacyTetherRequiredActiveSessionId(userId: string): Promise<
       verificationStatus: "VERIFIED",
       submission: { status: "IN_PROGRESS" },
     },
-    select: { id: true, attestationRequirement: true, submission: { select: { secureClientPolicySnapshotJson: true } } },
+    select: {
+      id: true,
+      attestationRequirement: true,
+      submission: { select: { startedAt: true, secureClientPolicySnapshotJson: true, exam: { select: { durationMins: true, secureSettings: true } } } },
+    },
   });
   for (const candidate of candidates) {
     if (parseAttestationRequirement(candidate.attestationRequirement) !== "LEGACY") continue;
     const policy = parseSecureClientPolicy(candidate.submission.secureClientPolicySnapshotJson);
-    if (policy.deliveryMode === "TETHER_CLIENT_REQUIRED") return candidate.id;
+    if (policy.deliveryMode !== "TETHER_CLIENT_REQUIRED") continue;
+    const { startedAt, exam } = candidate.submission;
+    if (!isWithinAuthoritativeSubmissionWindow(startedAt, exam.durationMins, exam.secureSettings)) continue;
+    return candidate.id;
   }
   return null;
 }

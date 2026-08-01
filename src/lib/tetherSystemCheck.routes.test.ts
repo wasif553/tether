@@ -1195,6 +1195,156 @@ describe("Legacy-mode active-exam revocation gap — closing pass", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Authoritative exam expiry in the revocation guard — see
+// isWithinAuthoritativeSubmissionWindow in tetherAttestationRunner.ts.
+// Submission.status only ever leaves IN_PROGRESS through a real submit
+// request (student action or client-side auto-submit timer) — there is no
+// server-side sweep job, so an abandoned attempt (closed laptop, dead
+// battery, crashed browser, lost network) can leave IN_PROGRESS/non-
+// terminal statuses in the database indefinitely, long after the exam's
+// own deadline has genuinely passed. These tests drive that scenario
+// directly by moving Submission.startedAt into the past WITHOUT touching
+// any stored status field, and confirm the revocation guard reuses the
+// exact same submissionDeadline/canAcceptSubmit calculation
+// POST /api/submissions/[id]/submit itself already uses.
+// ---------------------------------------------------------------------------
+describe("Legacy-mode active-exam revocation gap — authoritative exam expiry", () => {
+  it("1. an IN_PROGRESS row whose authoritative exam time has expired no longer blocks revocation, even though the stored submission/session statuses are unchanged", async () => {
+    const s = await freshStudent("Authoritative Expiry Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-legacy");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const blockedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(blockedRes.status).toBe(409);
+
+    // Push the submission's own recorded start time far enough into the
+    // past that the exam's real 30-minute duration (see createExam) has
+    // authoritatively elapsed — WITHOUT touching Submission.status or
+    // SecureClientSession.status at all, simulating an abandoned attempt
+    // that no client-side auto-submit ever ran for.
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
+    expect((await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } })).status).toBe("IN_PROGRESS");
+    expect((await prisma.secureClientSession.findUniqueOrThrow({ where: { id: session.id } })).status).toBe("ACTIVE");
+
+    const allowedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(allowedRes.status).toBe(200);
+  });
+
+  it("2. an IN_PROGRESS row past its nominal deadline but inside an explicitly authorised late-submit window still blocks revocation, matching the exam's own submit policy", async () => {
+    const s = await freshStudent("Late Submit Window Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { exam, submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-late-submit");
+    await establishLegacyVerifiedSession(session.id);
+
+    // Explicitly allow late submission for this exam — canAcceptSubmit
+    // (the SAME calculation POST /api/submissions/[id]/submit itself
+    // uses) treats this exam as still legitimately acceptable past its
+    // nominal deadline, so the revocation guard must agree.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { allowLateSubmit: true } }), { params: Promise.resolve({ id: exam.id }) });
+
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(409);
+    const body = await revokeRes.json();
+    expect(body.reason).toBe("ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE");
+  });
+
+  it("3. an IN_PROGRESS row with remaining authoritative exam time still blocks revocation", async () => {
+    const s = await freshStudent("Remaining Time Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { session } = await startFinalExamWithSession(s, "authoritative-expiry-remaining-time");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(409);
+  });
+
+  it("4. the exam's own duration input — the only 'extra time' concept that exists anywhere in this codebase (there is no separate per-student accommodation field) — genuinely participates in the expiry calculation", async () => {
+    const s = await freshStudent("Duration Included Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { exam, submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-duration");
+    await establishLegacyVerifiedSession(session.id);
+
+    // 20 minutes elapsed against the exam's stored 30-minute duration —
+    // still within the window, still blocked.
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 20 * 60_000) } });
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const stillWithinDuration = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(stillWithinDuration.status).toBe(409);
+
+    // Extending the exam's own duration (the only "extra time" input the
+    // authoritative calculation reads) pushes the deadline out further —
+    // proving durationMins genuinely participates, not just startedAt.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { durationMins: 90 }), { params: Promise.resolve({ id: exam.id }) });
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const extendedStillBlocked = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(extendedStillBlocked.status).toBe(409);
+
+    // Shrinking duration back down below the already-elapsed time removes
+    // the block — same startedAt, only the duration input changed.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { durationMins: 10 }), { params: Promise.resolve({ id: exam.id }) });
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const nowExpired = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(nowExpired.status).toBe(200);
+  });
+
+  it("5. client-supplied clock/remaining-time values in the revoke request body have no effect on the expiry decision", async () => {
+    const s = await freshStudent("Client Clock Ignored Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-client-clock");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+
+    // A forged body claiming the exam is already expired / has no
+    // remaining time — none of these fields exist in the revoke route's
+    // own zod schema (only `reason` does) and must be silently ignored.
+    // The exam is genuinely still within its window, so it must still be
+    // blocked.
+    const forgedButStillActive = await installationRevokeRoute.POST(
+      jsonRequest("POST", {
+        reason: "test",
+        now: new Date(0).toISOString(),
+        clientTime: 0,
+        remainingSeconds: -1,
+        deadline: new Date(0).toISOString(),
+        systemAutoSubmit: true,
+      }),
+      { params: Promise.resolve({ id: installationId }) },
+    );
+    expect(forgedButStillActive.status).toBe(409);
+
+    // Now genuinely expire it server-side (the only thing that actually
+    // matters) and confirm a forged "still plenty of remaining time" body
+    // has no power to keep the block alive either.
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
+    const forgedButExpired = await installationRevokeRoute.POST(
+      jsonRequest("POST", {
+        reason: "test",
+        now: new Date(Date.now() + 999_999_999).toISOString(),
+        remainingSeconds: 999_999,
+        deadline: new Date(Date.now() + 999_999_999).toISOString(),
+      }),
+      { params: Promise.resolve({ id: installationId }) },
+    );
+    expect(forgedButExpired.status).toBe(200);
+  });
+});
+
 describe("POST /api/tether/installation/current", () => {
   it("returns null for a student with no registered installation", async () => {
     const s = await freshStudent("No Installation Student");
