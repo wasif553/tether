@@ -820,6 +820,139 @@ describe("POST /api/tether/installation/[id]/revoke", () => {
     expect(challengeRes.status).toBe(409);
     expect(verifyRes).toBeNull();
   });
+
+  it("13. revocation preserves the historical installation row rather than deleting it, and it still appears in the list as REVOKED", async () => {
+    const s = await freshStudent("Revoke Preserves History Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "Lost device" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(200);
+
+    const record = await prisma.tetherClientInstallation.findUnique({ where: { id: installationId } });
+    expect(record).not.toBeNull();
+    expect(record?.status).toBe("REVOKED");
+    expect(record?.revokedAt).not.toBeNull();
+
+    const listRes = await installationListRoute.GET();
+    const listBody = await listRes.json();
+    const row = listBody.installations.find((i: { id: string }) => i.id === installationId);
+    expect(row).toBeTruthy();
+    expect(row.status).toBe("REVOKED");
+  });
+
+  it("20. revocation deletes no Submission, Answer, or evidence records", async () => {
+    const s = await freshStudent("Revoke No Data Loss Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { exam, submission } = await startFinalExamWithSession(s, "revoke-no-data-loss");
+    const question = await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Evidence question" } });
+    await prisma.answer.create({ data: { submissionId: submission.id, questionId: question.id, response: "kept" } });
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(200);
+
+    expect(await prisma.submission.findUnique({ where: { id: submission.id } })).not.toBeNull();
+    const answers = await prisma.answer.findMany({ where: { submissionId: submission.id } });
+    expect(answers.length).toBe(1);
+    expect(answers[0].response).toBe("kept");
+  });
+
+  it("21. concurrent revoke requests for the same installation never leave inconsistent or partial state", async () => {
+    const s = await freshStudent("Concurrent Revoke Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const [r1, r2] = await Promise.all([
+      installationRevokeRoute.POST(jsonRequest("POST", { reason: "click 1" }), { params: Promise.resolve({ id: installationId }) }),
+      installationRevokeRoute.POST(jsonRequest("POST", { reason: "click 2" }), { params: Promise.resolve({ id: installationId }) }),
+    ]);
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+
+    const record = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
+    expect(record.status).toBe("REVOKED");
+  });
+});
+
+describe("Device management UI v1 — active-exam revocation safety", () => {
+  it("16. revocation is rejected server-side while the installation is bound to an active (IN_PROGRESS) exam session", async () => {
+    const s = await freshStudent("Active Exam Revoke Block Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission } = await startFinalExamWithSession(s, "active-exam-revoke-block");
+    const v2Res = await attestExamSessionV2(s, { installationId, privateKeyPem: reg.privateKeyPem }, submission.id);
+    expect(v2Res.status).toBe(200);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(409);
+    const body = await revokeRes.json();
+    expect(body.reason).toBe("ACTIVE_EXAM_IN_PROGRESS");
+
+    const record = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
+    expect(record.status).toBe("ACTIVE");
+  });
+
+  it("17. a blocked revocation attempt is itself operationally audited, distinctly from a successful revocation", async () => {
+    const s = await freshStudent("Active Exam Revoke Audit Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission } = await startFinalExamWithSession(s, "active-exam-revoke-audit");
+    await attestExamSessionV2(s, { installationId, privateKeyPem: reg.privateKeyPem }, submission.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+
+    const blockedAuditRows = await prisma.platformAuditLog.findMany({
+      where: { actorId: s.id, action: "TETHER_INSTALLATION_REVOCATION_BLOCKED_ACTIVE_EXAM" },
+    });
+    expect(blockedAuditRows.length).toBe(1);
+    expect(blockedAuditRows[0].targetId).toBe(installationId);
+
+    const successAuditRows = await prisma.platformAuditLog.findMany({ where: { actorId: s.id, action: "TETHER_INSTALLATION_REVOKED" } });
+    expect(successAuditRows.length).toBe(0);
+
+    const integrityEvents = await prisma.integrityEvent.count({ where: { studentId: s.id } });
+    expect(integrityEvents).toBe(0);
+  });
+
+  it("revocation becomes available once the bound submission is no longer IN_PROGRESS", async () => {
+    const s = await freshStudent("Active Exam Revoke After Submit Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission } = await startFinalExamWithSession(s, "active-exam-revoke-after-submit");
+    await attestExamSessionV2(s, { installationId, privateKeyPem: reg.privateKeyPem }, submission.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const blockedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(blockedRes.status).toBe(409);
+
+    await prisma.submission.update({ where: { id: submission.id }, data: { status: "SUBMITTED" } });
+
+    const allowedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(allowedRes.status).toBe(200);
+    const record = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
+    expect(record.status).toBe("REVOKED");
+  });
+
+  it("a LEGACY-only (non-v2-attested) active session does not block revocation — documented data-model limitation, not a silent failure", async () => {
+    const s = await freshStudent("Legacy Active Exam No Block Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    // A session that reaches an active exam purely via the legacy path
+    // never populates clientInstallationId — see
+    // isInstallationBoundToActiveExam's own doc comment.
+    const { session } = await startFinalExamWithSession(s, "legacy-active-exam-no-block");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(200);
+  });
 });
 
 describe("POST /api/tether/installation/current", () => {

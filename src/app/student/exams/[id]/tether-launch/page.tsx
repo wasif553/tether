@@ -159,6 +159,12 @@ function OutsideTetherPrompt({ examId }: { examId: string }) {
       <a href="/student/system-check" className="mt-2 block w-full rounded border border-gray-300 px-4 py-2 text-center text-sm text-gray-800">
         Check this computer
       </a>
+      {/* Registered Tether Devices and Revocation UI v1 — a low-emphasis
+          text link, not another button, so this screen doesn't get
+          crowded when the student's actual goal here is opening Tether. */}
+      <a href="/student/tether-devices" className="mt-2 block text-center text-xs text-gray-500 underline">
+        Manage registered computers
+      </a>
       {attemptedAt != null && !showFallback && <p className="mt-3 text-center text-xs text-gray-500">Opening Tether Secure Browser…</p>}
       {showFallback && (
         <div className="mt-5 border-t border-gray-200 pt-4">

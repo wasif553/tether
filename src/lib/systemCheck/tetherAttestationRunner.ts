@@ -296,15 +296,76 @@ export async function loadOwnedInstallation(installationId: string, userId: stri
   return record;
 }
 
+/** Non-terminal SecureClientSession states — mirrors the set used throughout secureClientRunner.ts (getOrCreateSessionCore's own "still open" check). */
+const NON_TERMINAL_SESSION_STATUSES = ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] as const;
+
+/**
+ * Device management UI v1 — "Active exam safety". True if this
+ * installation is CURRENTLY bound (via SecureClientSession.clientInstallationId,
+ * populated only by a genuine v2 EXAM_SESSION attestation — see
+ * verifyExamSessionAttestation above) to a non-terminal secure-client
+ * session whose submission is still IN_PROGRESS.
+ *
+ * KNOWN LIMITATION, documented rather than silently assumed away: this
+ * binding only exists for sessions that have completed at least one v2
+ * EXAM_SESSION attestation. Under the safe-default LEGACY compatibility
+ * mode (see tetherAttestationConfig.ts), a session verified purely via
+ * the legacy recordAttestation() flow never populates
+ * clientInstallationId at all, so this check cannot detect that case —
+ * revoking the installation behind a LEGACY-only active exam is not
+ * blocked by this function. This is the narrowest safe server-side block
+ * the current data model supports without inventing a new, independently
+ * maintained "which installation is this session using" signal; closing
+ * the LEGACY-mode gap would require wiring installation identity into
+ * the legacy attestation path itself, which is out of scope for this
+ * pass (see docs/tether-system-check-v1.md, "Known limitations").
+ */
+async function isInstallationBoundToActiveExam(installationId: string): Promise<boolean> {
+  const activeSession = await prisma.secureClientSession.findFirst({
+    where: {
+      clientInstallationId: installationId,
+      status: { in: [...NON_TERMINAL_SESSION_STATUSES] },
+      submission: { status: "IN_PROGRESS" },
+    },
+    select: { id: true },
+  });
+  return activeSession !== null;
+}
+
+export type RevokeInstallationResult =
+  | { outcome: "REVOKED"; installation: NonNullable<Awaited<ReturnType<typeof loadOwnedInstallation>>> }
+  | { outcome: "NOT_FOUND" }
+  | { outcome: "ACTIVE_EXAM_IN_PROGRESS" };
+
 /**
  * The student's own self-service "log out this device" action — used
  * both to free up a slot under the multi-device limit and to revoke a
  * lost/shared/lab device. An administrative (lecturer/platform-admin)
  * revocation UI is out of scope for this pass (see "Known limitations").
+ *
+ * Device management UI v1 — refuses to revoke an installation currently
+ * carrying an active examination session (see
+ * isInstallationBoundToActiveExam above and its own documented
+ * limitation). A blocked attempt is itself audited, distinctly from a
+ * successful revocation, so an unusual pattern of blocked attempts is
+ * reviewable later.
  */
-export async function revokeInstallation(installationId: string, userId: string, reason: string) {
+export async function revokeInstallation(installationId: string, userId: string, reason: string): Promise<RevokeInstallationResult> {
   const owned = await loadOwnedInstallation(installationId, userId);
-  if (!owned) return null;
+  if (!owned) return { outcome: "NOT_FOUND" };
+
+  if (await isInstallationBoundToActiveExam(installationId)) {
+    await createPlatformAuditLog({
+      actorId: userId,
+      action: "TETHER_INSTALLATION_REVOCATION_BLOCKED_ACTIVE_EXAM",
+      targetType: "TetherClientInstallation",
+      targetId: installationId,
+      institutionId: owned.institutionId,
+      metadata: { reason },
+    }).catch(() => {});
+    return { outcome: "ACTIVE_EXAM_IN_PROGRESS" };
+  }
+
   const revoked = await prisma.tetherClientInstallation.update({
     where: { id: installationId },
     data: { status: "REVOKED", revokedAt: new Date(), revocationReason: reason },
@@ -317,7 +378,7 @@ export async function revokeInstallation(installationId: string, userId: string,
     institutionId: owned.institutionId,
     metadata: { reason },
   }).catch(() => {});
-  return revoked;
+  return { outcome: "REVOKED", installation: revoked };
 }
 
 /**

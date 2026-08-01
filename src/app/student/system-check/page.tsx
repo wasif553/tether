@@ -637,6 +637,10 @@ export default function SystemCheckPage() {
         <Link href="/student" className="text-sm underline">
           Return to dashboard
         </Link>
+        {/* Registered Tether Devices and Revocation UI v1. */}
+        <Link href="/student/tether-devices" className="text-sm underline">
+          Registered computers
+        </Link>
       </div>
     </div>
   );
