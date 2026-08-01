@@ -1,6 +1,16 @@
 import { z } from "zod";
+import { ASSESSMENT_TYPES } from "@/lib/assessmentType";
 
 export const secureExamSettingsSchema = z.object({
+  // --- Mandatory Tether Delivery for Final Examinations (additive) —
+  // see src/lib/assessmentType.ts. Reuses this existing JSON settings
+  // column rather than a new Prisma field. Defaults to QUIZ_OR_TEST —
+  // never retroactively classifies a pre-existing exam as a final
+  // examination, so no existing exam's delivery mode is silently
+  // rewritten by this addition alone (the PATCH route only normalises
+  // delivery/display settings when a lecturer explicitly sets
+  // assessmentType to FINAL_EXAMINATION on a save).
+  assessmentType: z.enum(ASSESSMENT_TYPES).default("QUIZ_OR_TEST"),
   secureModeEnabled: z.boolean().default(false),
   requireFullscreen: z.boolean().default(false),
   blockCopyPaste: z.boolean().default(true),

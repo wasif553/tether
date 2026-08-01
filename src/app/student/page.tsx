@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
+import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
+import { buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
 
 type AvailableExam = {
   id: string;
@@ -26,6 +29,27 @@ type AvailableExam = {
 export default function StudentDashboard() {
   const [exams, setExams] = useState<AvailableExam[]>([]);
   const [loading, setLoading] = useState(true);
+  // Corrective pass v1.2.2, Tasks 1/2/5 — physical testing traced the
+  // real defect to routing, not enforcement: outside Tether the dashboard
+  // correctly routes through the join page (fresh attempt) or the plain
+  // submission link (continue), and each of those already funnels
+  // TETHER_CLIENT_REQUIRED exams to /tether-launch via the server-computed
+  // secureClientLaunch gate. But INSIDE Tether, sending a student straight
+  // to the join page or the raw submission link left an unnecessary extra
+  // hop with its own (subtly different) launch-sequencing logic. Routing
+  // every exam entry inside Tether through the exact same
+  // /tether-launch page used by protocol launches — which already
+  // handles both "fresh start" and "resume existing IN_PROGRESS"
+  // uniformly (see tether-launch/page.tsx's InsideTetherLaunchFlow) —
+  // is what makes "protocol launch and direct dashboard launch converge
+  // on the same verified server-side workflow" (Task 2) literally true:
+  // one page, one code path, regardless of entry point.
+  const [inTether, setInTether] = useState(false);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setInTether(isRunningInLockdownBrowser());
+  }, []);
 
   useEffect(() => {
     fetch("/api/exams/available")
@@ -34,9 +58,28 @@ export default function StudentDashboard() {
       .finally(() => setLoading(false));
   }, []);
 
+  function examEntryHref(examId: string): string {
+    return inTether ? buildTetherLaunchPagePath(examId) : `/student/exams/join/${examId}`;
+  }
+
+  function continueEntryHref(examId: string, submissionId: string): string {
+    return inTether ? buildTetherLaunchPagePath(examId) : `/student/exams/${submissionId}`;
+  }
+
+  function logExamSelected(examId: string, mode: "start" | "continue") {
+    logClientTetherDiagnostic("dashboard_examination_selected", { examId, mode, tetherDetected: inTether });
+  }
+
   return (
     <div className="mx-auto max-w-3xl">
-      <h1 className="text-2xl font-semibold">My Exams</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">My Exams</h1>
+        {/* Tether System Check and Exam Readiness v1 — see
+            docs/tether-system-check-v1.md. */}
+        <a href="/student/system-check" className="rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-800">
+          Check this computer
+        </a>
+      </div>
 
       <div className="mt-6 space-y-3">
         {loading && <p className="text-gray-500">Loading...</p>}
@@ -86,7 +129,8 @@ export default function StudentDashboard() {
                 // same "Exam conditions" acknowledgement step before
                 // POST /api/exams/[id]/start is ever called.
                 <a
-                  href={`/student/exams/join/${exam.id}`}
+                  href={examEntryHref(exam.id)}
+                  onClick={() => logExamSelected(exam.id, "start")}
                   className="inline-block rounded bg-black px-3 py-1.5 text-sm text-white"
                 >
                   {exam.submission ? "Start next attempt" : "Start exam"}
@@ -94,7 +138,8 @@ export default function StudentDashboard() {
               )}
               {exam.submission?.status === "IN_PROGRESS" && (
                 <a
-                  href={`/student/exams/${exam.submission.id}`}
+                  href={continueEntryHref(exam.id, exam.submission.id)}
+                  onClick={() => logExamSelected(exam.id, "continue")}
                   className="rounded bg-black px-3 py-1.5 text-sm text-white"
                 >
                   Continue

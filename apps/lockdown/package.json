@@ -1,17 +1,19 @@
 {
   "name": "ses-lockdown",
-  "version": "1.0.0",
+  "version": "1.6.0",
   "private": true,
-  "description": "Tether Secure Browser v1 (detection-and-logging native client for Safe Exam System)",
+  "description": "Tether Secure Browser v1.6.0 (binds Secure Client Attestation v2 installation-bound signing into real exam sessions: attestExamSession now signs the secure-client session ID, secure-client capabilities snapshot, and a timestamp alongside the existing exam/submission/policy-hash facts, verified server-side against a full 20-point checklist before a SecureClientSession can receive v2-verified status. Compatibility governed by TETHER_EXAM_ATTESTATION_MODE=LEGACY|DUAL|V2_REQUIRED, safe default LEGACY. v1.4.0 and v1.5.0 were development-only, never distributed.)",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
     "start": "npm run build && electron .",
-    "pack": "npm run build && electron-builder --dir",
+    "pack": "npm run build && electron-builder --dir && npm run verify:package",
     "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac"
+    "dist:win": "npm run build && electron-builder --win && npm run verify:package -- release/win-unpacked",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "verify:package": "node dist/verifyPackagedRelease.js"
   },
   "dependencies": {
     "electron-store": "^8.2.0"
@@ -20,6 +22,7 @@
     "@types/node": "^20",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.9"
   }
 }

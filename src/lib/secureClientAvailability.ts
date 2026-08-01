@@ -61,15 +61,24 @@ function parseSlugAllowlist(raw: string | undefined): string[] {
 
 /**
  * TETHER_CLIENT_OPTIONAL is visible only behind this internal feature
- * flag (Part 1). TETHER_CLIENT_REQUIRED remains unavailable
- * unconditionally in v1 — "cannot be selected for real exams until a
- * signed production client is available" (Part 1), which does not exist
- * in this phase.
+ * flag (Part 1).
+ *
+ * TETHER_CLIENT_REQUIRED — Tether launch/install flow v1 (see
+ * docs/secure-client-foundation-seb-v1.md and the Tether Secure Browser
+ * launch architecture): Tether Secure Browser is now the first-party,
+ * signed production client, so TETHER_CLIENT_REQUIRED is the NORMAL
+ * final-exam delivery mode and is available by default in every
+ * environment, INCLUDING Production — this is a deliberate reversal of
+ * the previous "cannot be selected until a signed production client is
+ * available" gate, which no longer applies now that client exists. Only
+ * an explicit kill-switch (`TETHER_CLIENT_REQUIRED_DISABLED=true`) turns
+ * it off, e.g. for an emergency rollback — never a per-institution
+ * allowlist or a client-supplied value.
  */
 export function secureClientAvailability(): SecureClientAvailability {
   return {
     tetherClientOptionalAvailable: !isProduction() && process.env.TETHER_CLIENT_OPTIONAL_ENABLED === "true",
-    tetherClientRequiredAvailable: false,
+    tetherClientRequiredAvailable: process.env.TETHER_CLIENT_REQUIRED_DISABLED !== "true",
     sebOptionalAvailable: isSebOptionalAvailable(),
     sebRequiredAvailable: false,
   };
@@ -135,6 +144,31 @@ export function isSebRequiredAllowed(institutionSlug: string | null): boolean {
   if (env === "production" || env === "unknown") return false;
   if (process.env.TETHER_SEB_EXPERIMENTAL_ENABLED !== "true") return false;
   const allowedSlugs = parseSlugAllowlist(process.env.TETHER_SEB_REQUIRED_ALLOWED_INSTITUTION_SLUGS);
+  if (allowedSlugs.length === 0) return false;
+  return institutionSlug != null && allowedSlugs.includes(institutionSlug);
+}
+
+/**
+ * Tether launch/install flow v1 — the development/Preview bypass
+ * (product contract: "Normal-browser student exam access remains
+ * available only as a controlled local/Preview development bypass").
+ * This is a SEPARATE gate from `secureClientAvailability` above: it does
+ * not decide whether TETHER_CLIENT_REQUIRED can be selected (that's now
+ * generally available, see above) — it decides whether a STUDENT may be
+ * permitted to proceed into a TETHER_CLIENT_REQUIRED exam's content via
+ * an ordinary browser (no verified Tether secure-client session)
+ * instead of being redirected to the Tether launch page. Exactly like
+ * `isSebRequiredAllowed`: never available in Production or an unknown
+ * environment, and never available anywhere without BOTH an explicit
+ * flag AND the institution being on an explicit allowlist. Never reads a
+ * header, query parameter, or any other client-supplied value — only
+ * process.env and the server-resolved institution slug.
+ */
+export function isTetherSecureClientBypassAllowed(institutionSlug: string | null): boolean {
+  const env = deploymentEnvironment();
+  if (env === "production" || env === "unknown") return false;
+  if (process.env.TETHER_SECURE_CLIENT_BYPASS_ENABLED !== "true") return false;
+  const allowedSlugs = parseSlugAllowlist(process.env.TETHER_SECURE_CLIENT_BYPASS_ALLOWED_INSTITUTION_SLUGS);
   if (allowedSlugs.length === 0) return false;
   return institutionSlug != null && allowedSlugs.includes(institutionSlug);
 }

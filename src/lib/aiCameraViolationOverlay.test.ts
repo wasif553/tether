@@ -39,7 +39,9 @@ describe("createAiCameraViolationOverlay", () => {
   it("2. a no-person event creates an active overlay", () => {
     const overlay = createAiCameraViolationOverlay("NO_PERSON_VISIBLE");
     expect(overlay?.active).toBe(true);
-    expect(overlay?.reason).toBe("No person visible");
+    // Face-visibility false-positive fix (corrective pass v1.2.0, Part 4)
+    // — exact required neutral copy.
+    expect(overlay?.reason).toBe("Face not visible for a sustained period.");
   });
 
   it("3. a phone event creates an active overlay", () => {
@@ -57,7 +59,9 @@ describe("createAiCameraViolationOverlay", () => {
   it("5. a dark-camera event creates an active overlay", () => {
     const overlay = createAiCameraViolationOverlay("CAMERA_TOO_DARK");
     expect(overlay?.active).toBe(true);
-    expect(overlay?.reason).toBe("Camera view is too dark");
+    // Face-visibility false-positive fix (corrective pass v1.2.0, Part 4)
+    // — exact required neutral copy.
+    expect(overlay?.reason).toBe("Lighting is too low to verify camera visibility.");
   });
 
   it("6. a non-AI event does not create an overlay", () => {
@@ -132,7 +136,7 @@ describe("pickActiveAiCameraOverlayEventType / computeLocalAiCameraOverlay", () 
     const noPersonOnly = noConditionsMet.map((c) =>
       c.eventType === "NO_PERSON_VISIBLE" ? { ...c, conditionMet: true } : c,
     );
-    expect(computeLocalAiCameraOverlay(noPersonOnly)?.reason).toBe("No person visible");
+    expect(computeLocalAiCameraOverlay(noPersonOnly)?.reason).toBe("Face not visible for a sustained period.");
   });
 
   it("7. a different violation type replaces/reopens the overlay immediately when it becomes true", () => {
@@ -223,7 +227,7 @@ describe("handleAiCameraIntegrityReport", () => {
 
     expect(setOverlay).toHaveBeenCalledTimes(1);
     expect(setOverlay).toHaveBeenCalledWith(
-      expect.objectContaining({ active: true, reason: "No person visible" }),
+      expect.objectContaining({ active: true, reason: "Face not visible for a sustained period." }),
     );
   });
 

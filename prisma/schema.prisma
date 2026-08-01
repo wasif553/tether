@@ -61,6 +61,20 @@ enum IntegrityEventType {
   CAMERA_VIEW_BLOCKED
   CAMERA_TOO_DARK
   AI_CAMERA_CHECK_UNAVAILABLE
+  // Corrective pass v1.2.2, Task 8 (additive) — a resource/capture-level
+  // camera interruption (e.g. another application holding the camera),
+  // reported separately from NO_PERSON_VISIBLE so a capture failure is
+  // never misclassified as confirmed face absence. See
+  // classifyCameraStreamHealth in src/lib/cameraIntegrityDetection.ts.
+  CAMERA_STREAM_UNAVAILABLE
+  // Camera integrity reliability pass (additive) — the "stable recovery"
+  // event, mirroring the existing SCREEN_SHARE_RESTORED /
+  // DISPLAY_POLICY_RESTORED pattern: fired once when a CONFIRMED sustained
+  // no-person episode resolves back to several consecutive, confidently
+  // visible frames. See resolveCameraIntegrityState in
+  // src/lib/cameraIntegrityDetection.ts. Neutral wording only — never
+  // implies the earlier absence was misconduct.
+  CAMERA_VISIBILITY_RESTORED
   // One-Question-At-A-Time Exam Delivery v1 (additive — see
   // docs/one-question-delivery-v1.md).
   QUESTION_NAVIGATED_NEXT
@@ -247,6 +261,16 @@ model User {
   revokedSecureClientConfigurations   SecureClientConfiguration[] @relation("SecureClientConfigRevokedBy")
   createdSebAllowedExamKeys           SebAllowedExamKey[]         @relation("SebAllowedExamKeyCreatedBy")
   issuedSecureClientRecoveryGrants    SecureClientRecoveryGrant[] @relation("SecureClientRecoveryGrantIssuedBy")
+
+  // Tether System Check and Exam Readiness v1 (additive) — see
+  // docs/tether-system-check-v1.md.
+  tetherSystemCheckRuns TetherSystemCheckRun[]
+  // Corrective pass — first-time SYSTEM_CHECK secure-client verification.
+  systemCheckSecureClientVerifications SystemCheckSecureClientVerification[]
+  // Secure Client Attestation v2 — see docs/tether-system-check-v1.md.
+  tetherClientInstallations TetherClientInstallation[]
+  // Pre-Preview safety pass — see "Single-use registration challenges".
+  tetherInstallationRegistrationChallenges TetherInstallationRegistrationChallenge[]
 
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
@@ -2070,11 +2094,20 @@ model SecureClientLaunchManifest {
 // docs/secure-client-foundation-seb-v1.md ("Session state machine").
 // `clientInstallationIdHash` is a random, hashed, per-installation
 // identifier — never a hardware serial number, MAC address, or
-// unrestricted machine fingerprint (Part 3). Only one CURRENT
-// non-terminal session per submission is allowed — enforced by a partial
-// unique index in the migration (WHERE status NOT IN ('ENDED',
-// 'REJECTED')), so a browser refresh never silently creates a second
-// session; recovery/end must be explicit.
+// unrestricted machine fingerprint (Part 3). As of Secure Client
+// Attestation v2 (docs/tether-system-check-v1.md), this field is
+// populated with a registered TetherClientInstallation's
+// `publicKeyFingerprint` whenever a genuine EXAM_SESSION installation
+// attestation succeeds for this session (see
+// recordInstallationBoundExamAttestation in
+// systemCheckSecureClientRunner.ts) — additive, alongside the existing
+// verificationStatus/status fields, which still govern this session's
+// actual READY/CANNOT_START outcome unchanged in this pass (see "Known
+// limitations" — full enforcement gating on this field is a follow-up).
+// Only one CURRENT non-terminal session per submission is allowed —
+// enforced by a partial unique index in the migration (WHERE status NOT
+// IN ('ENDED', 'REJECTED')), so a browser refresh never silently creates
+// a second session; recovery/end must be explicit.
 model SecureClientSession {
   id            String @id @default(cuid())
   institutionId String
@@ -2101,6 +2134,52 @@ model SecureClientSession {
   clientInstallationIdHash String?
   policyHash               String?
 
+  // Secure Client Attestation v2 — EXAM_SESSION wiring. `clientInstallationId`
+  // is the real reference (advisory relation, onDelete: SetNull — a later
+  // installation revocation/replacement must never retroactively alter
+  // historical session evidence). `installationAttestationVerified` is the
+  // v2 verification OUTCOME for this session, populated ONLY by
+  // verifyExamSessionAttestation after all 20 required checks pass — see
+  // tetherAttestationRunner.ts. This is deliberately a SEPARATE field from
+  // `verificationStatus`/`status` (the legacy fields), never overwritten by
+  // them and never overwriting them: whether v2 verification actually
+  // gates exam content access is decided at request time by
+  // resolveEffectiveTetherVerification (src/lib/secureClient/examAttestationMode.ts),
+  // according to TETHER_EXAM_ATTESTATION_MODE — not by any column here.
+  clientInstallationId               String?
+  clientInstallation                 TetherClientInstallation? @relation(fields: [clientInstallationId], references: [id], onDelete: SetNull)
+  installationAttestationVerified    Boolean                   @default(false)
+  installationAttestationVerifiedAt  DateTime?
+  // Last v2 verification failure's reason code, if any — cleared to null on
+  // the next success. Never a stack trace or raw request body; always one
+  // of the ValidationReasonCode / VerifyExamSessionAttestationResult
+  // outcome strings.
+  installationAttestationFailureReason String?
+  // Advisory pointer (no FK, mirrors clientInstallationIdHash's own
+  // pattern) to the SystemCheckSecureClientVerification row holding the
+  // full evidence record (clientVersion, platform,
+  // displayTopologyClassification, nonceHash, challengeHash, verifiedAt)
+  // for the latest successful v2 EXAM_SESSION attestation.
+  installationVerificationId String?
+
+  // Pre-Preview safety pass — see docs/tether-system-check-v1.md,
+  // "Immutable per-session attestation requirement". The resolved
+  // TETHER_EXAM_ATTESTATION_MODE (LEGACY | DUAL | V2_REQUIRED), snapshotted
+  // ONCE by getOrCreateSessionCore at the moment this session is first
+  // created — server-computed from the environment resolver only, NEVER
+  // from any client-supplied value (in particular, never from the
+  // unsigned, renderer-controlled `clientVersion` field above). Read by
+  // resolveEffectiveTetherVerification() at every subsequent request
+  // instead of recomputing from the live environment variable, so (a) a
+  // later environment-variable change can never retroactively alter an
+  // already-in-progress session's access contract, and (b) DUAL's
+  // "legacy AND v2 both required" requirement can never be
+  // self-downgraded by a client claiming an older version. NULL for any
+  // session created before this column existed — treated as "LEGACY" by
+  // every reader (the safe, pre-v2 default), never re-derived from the
+  // current environment.
+  attestationRequirement String?
+
   manifestId String? @unique
 
   startedAt        DateTime  @default(now())
@@ -2123,6 +2202,7 @@ model SecureClientSession {
   @@index([institutionId])
   @@index([status])
   @@index([studentId])
+  @@index([clientInstallationId])
 }
 
 // One structured preflight/client-verification result — see
@@ -2242,4 +2322,216 @@ model SecureClientRecoveryGrant {
   @@index([secureClientSessionId])
   @@index([submissionId])
   @@index([expiresAt])
+}
+
+// Tether System Check and Exam Readiness v1 (additive) — see
+// docs/tether-system-check-v1.md. One row per completed "Check this
+// computer" run. This is a TECHNICAL READINESS record, not an integrity
+// signal — never joined against or interpreted as misconduct evidence,
+// and never itself a source of exam-content authorization (the real
+// exam-start preflight and verified secure-client session checks always
+// run again — see src/lib/systemCheck/readiness.ts). `secureClientSessionId`
+// is an advisory pointer only (no FK), mirroring
+// SecureClientLaunchManifest.clientSessionId above — a system check runs
+// standalone, outside any submission, so there is usually no session to
+// point at. `resultsJson` holds one bounded {status, reasonCode} object
+// per check id (see SYSTEM_CHECK_IDS in readiness.ts) — never an image,
+// audio sample, raw permission object, biometric template, or full
+// launch manifest.
+model TetherSystemCheckRun {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  // READY | READY_WITH_WARNINGS | NOT_READY
+  overallStatus String
+  // BROWSER | TETHER_SECURE_CLIENT
+  sourceClientType String
+
+  clientVersion          String?
+  operatingSystem        String?
+  operatingSystemVersion String?
+
+  // Advisory only — see doc comment above.
+  secureClientSessionId String?
+
+  checkedAt DateTime @default(now())
+  expiresAt DateTime
+
+  resultsJson Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, checkedAt])
+  @@index([userId, expiresAt])
+  @@index([secureClientSessionId])
+}
+
+// Tether System Check and Exam Readiness — Secure Client Attestation v2
+// (see docs/tether-system-check-v1.md, "Secure Client Attestation v2").
+// A SYSTEM_CHECK-scoped, single-use, signed verification. As of v2, this
+// REQUIRES a genuine per-installation attestation (`installationId`,
+// below) — the earlier v1 design (a single Ed25519 key compiled into
+// every packaged build) has been REMOVED entirely: it allowed one
+// extracted key to forge attestations for every installation. See git
+// history for the removed `clientAttestationKey.ts` /
+// `systemCheckClientAttestation.ts`. DELIBERATELY a separate, standalone
+// model rather than a nullable-submissionId variant of
+// SecureClientSession: nothing in the exam start/launch/attestation code
+// path (secureClientRunner.ts, secureClientStartGate.ts,
+// POST /api/exams/[id]/start, GET /api/submissions/[id]) ever reads this
+// table, so there is no code path by which a SYSTEM_CHECK verification
+// could ever be mistaken for, or accepted as, exam-launch authorization —
+// a structural guarantee, not merely a convention. `purpose` is always
+// "SYSTEM_CHECK" but kept as an explicit column (not inferred from the
+// table's mere existence) so it states its own scope for audit, exactly
+// mirroring the "EXAM_SESSION" purpose used elsewhere in the same
+// attestation framework (src/lib/secureClient/tetherAttestation.ts).
+model SystemCheckSecureClientVerification {
+  id            String @id @default(cuid())
+  userId        String
+  user          User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  institutionId String
+
+  purpose String @default("SYSTEM_CHECK")
+
+  // The attestation protocol version (AttestationChallenge.schemaVersion)
+  // this row was verified under — evidence only; there is no server code
+  // path that issues or accepts anything other than the current
+  // ATTESTATION_PROTOCOL_VERSION today, but retaining it lets a future
+  // protocol bump be told apart from older rows without guessing.
+  attestationProtocolVersion Int @default(2)
+
+  // The specific TetherClientInstallation that produced this
+  // attestation — required (never null) as of v2: every SYSTEM_CHECK
+  // verification must be traceable to one genuine, registered,
+  // currently-ACTIVE installation. No FK (mirrors the advisory-pointer
+  // convention already used elsewhere in this schema) so a later
+  // installation revocation/replacement never needs to touch historical
+  // verification rows.
+  installationId String
+
+  // TETHER_SECURE_CLIENT | MOCK_TETHER_CLIENT
+  clientType String
+  // NOT_CHECKED | VERIFIED | INVALID_SIGNATURE | EXPIRED | REPLAY_REJECTED | WRONG_SUBJECT | WRONG_PURPOSE | INSTALLATION_NOT_ACTIVE | UNSUPPORTED_VERSION | TECHNICAL_FAILURE
+  verificationStatus String @default("NOT_CHECKED")
+
+  clientVersion String?
+  platform      String?
+  // The AUTHORITATIVE, installation-signature-bound native display-
+  // topology classification gathered by the Electron main process
+  // itself (never a value the renderer could tamper with independently
+  // — see verifyInstallationSignature in tetherAttestation.ts). One of
+  // DISPLAY_TOPOLOGY_CLASSIFICATIONS in readiness.ts.
+  displayTopologyClassification String?
+
+  // Replay protection — a second verify attempt with the same nonce
+  // fails the unique constraint outright (see systemCheckSecureClientRunner.ts).
+  nonceHash     String @unique
+  challengeHash String
+
+  issuedAt   DateTime
+  expiresAt  DateTime
+  verifiedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+  @@index([installationId])
+}
+
+// Pre-Preview safety pass — see docs/tether-system-check-v1.md,
+// "Single-use registration challenges". Records ONLY the atomic
+// CONSUMPTION of a registration challenge — never written at challenge
+// issuance time (that step is deliberately stateless, matching every
+// other short-lived signed challenge in this codebase). A row here
+// exists if and only if a registration challenge for this exact nonce
+// was successfully consumed; a second attempt with the same nonce fails
+// the unique constraint on nonceHash outright (registerInstallation
+// inserts this row inside the SAME transaction as creating the
+// TetherClientInstallation — both succeed together or neither does).
+// Deliberately minimal: no public key, no signature, no reusable token —
+// only enough to prove/audit that this specific challenge was consumed,
+// by whom, and for which key fingerprint.
+model TetherInstallationRegistrationChallenge {
+  id                   String   @id @default(cuid())
+  userId               String
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  publicKeyFingerprint String
+  nonceHash            String   @unique
+  consumedAt           DateTime @default(now())
+  createdAt            DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// Secure Client Attestation v2 — see docs/tether-system-check-v1.md,
+// "Per-installation key" and "Installation registration". One row per
+// registered Tether Secure Browser installation, each with its OWN
+// Ed25519 (or, for a future TPM/CNG-backed installation, ECDSA P-256)
+// keypair — the PRIVATE half never leaves that one installation's own
+// device (see apps/lockdown/src/installationKey.ts). Replaces the v1
+// design's single, globally-shared, compiled-in private key: compromise
+// of any ONE installation's key here only ever affects that one
+// installation, which can be revoked independently without touching any
+// other student's ability to attest.
+//
+// `keyProtectionLevel` is SELF-REPORTED by the client at registration
+// time and is NEVER escalated by the server beyond what it can actually
+// verify: this release's Electron code only ever produces
+// "SOFTWARE_PROTECTED" (an Ed25519 key generated by Node's `crypto` and
+// encrypted at rest via Electron's OS-backed `safeStorage`, e.g. Windows
+// DPAPI) — "TPM_UNATTESTED" and "TPM_ATTESTED" are structurally
+// supported here for a FUTURE pass that adds real Windows CNG/TPM key
+// storage and (for TPM_ATTESTED specifically) genuine remote attestation
+// evidence verification, neither of which exists yet — see "Known
+// limitations" in the doc above. The registration route explicitly
+// REJECTS any client-claimed "TPM_ATTESTED" value today, since no
+// evidence-verification code exists to substantiate that claim.
+model TetherClientInstallation {
+  id            String @id @default(cuid())
+  userId        String
+  user          User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  institutionId String
+
+  publicKey            String
+  publicKeyFingerprint String @unique
+  // "Ed25519" today; "ECDSA_P256" reserved for a future TPM/CNG-backed installation.
+  keyAlgorithm String
+  // SOFTWARE_PROTECTED | TPM_UNATTESTED | TPM_ATTESTED — see doc comment above.
+  keyProtectionLevel String @default("SOFTWARE_PROTECTED")
+
+  clientVersion String?
+  platform      String?
+
+  // ACTIVE | REVOKED | REPLACED — up to
+  // resolveMaxActiveInstallationsPerUser() (see tetherAttestationConfig.ts,
+  // default 2) installations may be ACTIVE per user at once (multi-device
+  // support). Registering beyond that limit is REJECTED (LIMIT_REACHED),
+  // never silently marks anything REPLACED — REPLACED is retained in the
+  // enum for backward-compatible reads only; no live code path writes it
+  // as of this pass. The student's own self-service revoke action (or an
+  // administrator/security-review action) sets REVOKED with a reason
+  // instead — see tetherAttestationRunner.ts.
+  status String @default("ACTIVE")
+
+  // Advisory inverse side of SecureClientSession.clientInstallationId —
+  // every real exam session this installation ever produced a verified
+  // v2 EXAM_SESSION attestation for. Read-only evidence trail; revoking
+  // or replacing this installation never touches these historical rows.
+  secureClientSessions SecureClientSession[]
+
+  installedAt      DateTime  @default(now())
+  lastAttestedAt   DateTime?
+  revokedAt        DateTime?
+  revocationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, publicKeyFingerprint])
+  @@index([userId, status])
 }

@@ -35,12 +35,36 @@ export async function GET(
     orderBy: { startedAt: "desc" },
   });
 
+  // Tether System Check and Exam Readiness v1 — see
+  // docs/tether-system-check-v1.md, "Reporting/audit". Neutral,
+  // non-invasive lecturer visibility: only overallStatus, checkedAt, and
+  // clientVersion per student — never camera/microphone permission
+  // details or any other device information. The record is per-STUDENT
+  // (not per-exam), so this is each student's most recent check
+  // regardless of which exam it was run for.
+  const studentIds = [...new Set(submissions.map((s) => s.student.id))];
+  const latestChecks =
+    studentIds.length > 0
+      ? await prisma.tetherSystemCheckRun.findMany({
+          where: { userId: { in: studentIds } },
+          orderBy: { checkedAt: "desc" },
+          select: { userId: true, overallStatus: true, checkedAt: true, clientVersion: true },
+        })
+      : [];
+  const latestCheckByStudent = new Map<string, { overallStatus: string; checkedAt: Date; clientVersion: string | null }>();
+  for (const check of latestChecks) {
+    if (!latestCheckByStudent.has(check.userId)) {
+      latestCheckByStudent.set(check.userId, { overallStatus: check.overallStatus, checkedAt: check.checkedAt, clientVersion: check.clientVersion });
+    }
+  }
+
   return NextResponse.json(
     submissions.map((s) => ({
       ...s,
       attemptNumber: s.attemptNumber,
       canvasStatus: s.gradePassback?.status ?? null,
       gradePassback: undefined,
+      systemCheck: latestCheckByStudent.get(s.student.id) ?? null,
     })),
   );
 }

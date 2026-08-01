@@ -10,20 +10,36 @@
 import {
   app,
   BrowserWindow,
-  screen,
   ipcMain,
   session as electronSession,
+  safeStorage,
 } from "electron";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import crypto from "node:crypto";
 import Store from "electron-store";
 import {
   DEFAULT_SES_BASE_URL,
-  DEEP_LINK_PROTOCOL,
+  DEEP_LINK_PROTOCOLS,
   LOCKDOWN_VERSION,
   USER_AGENT_SUFFIX,
+  isDeepLinkArg,
+  buildTetherLaunchPath,
   type ExamContext,
   type QueuedLockdownEvent,
 } from "./shared";
+import { DisplayEnforcement } from "./displayEnforcement";
+import { ensureInstallationKey, getInstallationInfo, signWithInstallationKey, type InstallationKeyStoreSchema } from "./installationKey";
+import type { DisplayEnforcementEventType, SecureClientEnforcementState } from "./displayEnforcementLogic";
+import {
+  isDiagnosticsPanelEnabled,
+  snapshotsEqualIgnoringTimestamp,
+  formatDiagnosticLogLine,
+  type TetherDiagnosticsSnapshot,
+} from "./tetherDiagnosticsSnapshot";
+
+export const DIAGNOSTIC_LOG_FILE_NAME = "tether-secure-browser-diagnostics.log";
 
 const SES_BASE_URL = process.env.SES_BASE_URL ?? DEFAULT_SES_BASE_URL;
 
@@ -32,17 +48,126 @@ if (!gotLock) {
   app.quit();
 }
 
-type StoreSchema = {
+type StoreSchema = InstallationKeyStoreSchema & {
   queuedEvents: QueuedLockdownEvent[];
+  // Cold-start convenience only (Tether launch/install flow v1): if the
+  // OS launches the app via protocol before any window exists yet, and
+  // the process is later killed/relaunched mid-login, this lets a fresh
+  // launch still resolve back to the exam the student was headed to —
+  // never used for authorization, only for choosing which page to load.
+  lastExamId: string | null;
 };
 
 const store = new Store<StoreSchema>({
-  defaults: { queuedEvents: [] },
+  defaults: { queuedEvents: [], lastExamId: null, installationKey: null },
+});
+
+const displayEnforcement = new DisplayEnforcement({
+  onEventType: (eventType: DisplayEnforcementEventType, displayCount: number) => {
+    mainWindow?.webContents.send("lockdown:display-enforcement-event", { eventType, displayCount });
+  },
+  onDiagnosticsChanged: () => maybeEmitDiagnostics(),
 });
 
 let mainWindow: BrowserWindow | null = null;
 let examContext: ExamContext = { examId: null, submissionId: null };
 let isOnline = true;
+
+// Corrective pass v1.2.1, Tasks A/B — a temporary, explicit, local-only
+// diagnostic surface. Never activates from anything Vercel controls: this
+// flag lives entirely in the LOCAL Electron process's own environment,
+// checked once at startup, never fetched from or influenced by the
+// hosted web app in any way.
+const diagnosticsPanelEnabled = isDiagnosticsPanelEnabled(process.env.TETHER_SECURE_CLIENT_DIAGNOSTICS_ENABLED);
+
+type PageReportedDiagnosticContext = {
+  submissionIdPresent: boolean;
+  verifiedSecureClientSession: boolean;
+  deliveryMode: string | null;
+  displayPolicy: string | null;
+  requireDisplayCheck: boolean | null;
+  maximumDisplays: number | null;
+};
+
+let pageReportedContext: PageReportedDiagnosticContext = {
+  submissionIdPresent: false,
+  verifiedSecureClientSession: false,
+  deliveryMode: null,
+  displayPolicy: null,
+  requireDisplayCheck: null,
+  maximumDisplays: null,
+};
+
+let lastEmittedDiagnosticsSnapshot: TetherDiagnosticsSnapshot | null = null;
+
+function diagnosticLogFilePath(): string {
+  return path.join(app.getPath("userData"), DIAGNOSTIC_LOG_FILE_NAME);
+}
+
+function buildCurrentDiagnosticsSnapshot(): TetherDiagnosticsSnapshot {
+  const de = displayEnforcement.getDiagnosticsSnapshot();
+  return {
+    browserVersion: LOCKDOWN_VERSION,
+    submissionIdPresent: pageReportedContext.submissionIdPresent,
+    tetherBrowserDetected: true,
+    verifiedSecureClientSession: pageReportedContext.verifiedSecureClientSession,
+    deliveryMode: pageReportedContext.deliveryMode,
+    displayPolicy: pageReportedContext.displayPolicy,
+    requireDisplayCheck: pageReportedContext.requireDisplayCheck,
+    maximumDisplays: pageReportedContext.maximumDisplays,
+    electronDisplayCount: de.electronDisplayCount,
+    windowsTopologyClassification: de.windowsTopologyClassification,
+    activeWindowsTargetCount: de.activeWindowsTargetCount,
+    enforcementEnabled: de.enforcementState.active,
+    currentDecision: de.currentDecision === "BLOCKED" ? "BLOCK" : "ALLOW",
+    overlayVisible: de.overlayVisible,
+    lastDisplayCheckAt: de.lastDisplayCheckAt,
+    lastErrorCode: de.lastErrorCode,
+  };
+}
+
+/**
+ * Task A/B shared emit path — pushes the current snapshot to the
+ * diagnostic panel (if one is listening) and appends one line to the
+ * on-disk log, but ONLY when something other than the timestamp actually
+ * changed (Task B: "one line only when state changes, not every polling
+ * cycle" — the periodic 2s recheck in displayEnforcement.ts would
+ * otherwise call this every tick). No-ops entirely when diagnostics are
+ * not enabled — this must add zero overhead and zero disk writes for a
+ * real exam attempt.
+ */
+function maybeEmitDiagnostics(): void {
+  if (!diagnosticsPanelEnabled) return;
+  const snapshot = buildCurrentDiagnosticsSnapshot();
+  if (lastEmittedDiagnosticsSnapshot && snapshotsEqualIgnoringTimestamp(lastEmittedDiagnosticsSnapshot, snapshot)) return;
+  lastEmittedDiagnosticsSnapshot = snapshot;
+  mainWindow?.webContents.send("lockdown:diagnostics-snapshot", snapshot);
+  try {
+    fs.mkdirSync(app.getPath("userData"), { recursive: true });
+    fs.appendFileSync(diagnosticLogFilePath(), `${formatDiagnosticLogLine(snapshot)}\n`, "utf8");
+  } catch {
+    // Best-effort only — a disk/log failure must never block or crash the exam window.
+  }
+}
+
+function isValidEnforcementState(value: unknown): value is SecureClientEnforcementState {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.active === "boolean" && typeof v.ready === "boolean" && typeof v.requireSingleDisplay === "boolean";
+}
+
+function isValidDiagnosticContext(value: unknown): value is PageReportedDiagnosticContext {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.submissionIdPresent === "boolean" &&
+    typeof v.verifiedSecureClientSession === "boolean" &&
+    (v.deliveryMode === null || typeof v.deliveryMode === "string") &&
+    (v.displayPolicy === null || typeof v.displayPolicy === "string") &&
+    (v.requireDisplayCheck === null || typeof v.requireDisplayCheck === "boolean") &&
+    (v.maximumDisplays === null || typeof v.maximumDisplays === "number")
+  );
+}
 
 function getQueue(): QueuedLockdownEvent[] {
   return store.get("queuedEvents", []);
@@ -135,15 +260,24 @@ function recordEvent(
 }
 
 function buildLoadUrl(examId: string | null): string {
-  // The deployed SES web app keys the student exam page by submissionId,
-  // not examId (a student starts an exam via POST /api/exams/[id]/start,
-  // which returns the submission). There is no /student/exams/[examId]
-  // route. v1 adapts the deep link by landing on the dashboard — the
-  // student still completes the start-exam click there themselves; this
-  // is a deliberate adaptation to the real app routes, documented in
-  // apps/lockdown/README.md.
+  // Tether launch/install flow v1 — fixes the confirmed bug where this
+  // always returned the dashboard regardless of examId. The web app
+  // still keys the exam-taking page by submissionId, not examId (there
+  // is no /student/exams/[examId] route) — but the Tether launch page
+  // (buildTetherLaunchPath) resolves examId -> the correct submission
+  // and exam content automatically, once inside Tether and
+  // authenticated (see src/app/student/exams/[id]/tether-launch/page.tsx
+  // in the main repo), so the student never has to find it themselves.
   if (examId) {
-    return `${SES_BASE_URL}/student`;
+    store.set("lastExamId", examId);
+    return `${SES_BASE_URL}${buildTetherLaunchPath(examId)}`;
+  }
+  // No examId on this launch — fall back to the last one we know about
+  // (cold-start convenience only, e.g. the app was killed and relaunched
+  // mid-login), then finally the plain dashboard.
+  const lastExamId = store.get("lastExamId", null);
+  if (lastExamId) {
+    return `${SES_BASE_URL}${buildTetherLaunchPath(lastExamId)}`;
   }
   return `${SES_BASE_URL}/student`;
 }
@@ -180,8 +314,18 @@ function createWindow(examId: string | null) {
 
   mainWindow.webContents.once("did-finish-load", () => {
     mainWindow?.webContents.send("lockdown:content-protection-status", contentProtectionEnabled);
-    checkDisplays();
   });
+
+  // Tether launch/install flow v1 — live for the whole session (not
+  // gated on did-finish-load), replacing the old one-shot
+  // checkDisplays()/MANUAL_WARNING check. Starts inactive
+  // ({active:false} — harmless on the dashboard/login/tether-launch
+  // pages, which never call setSecureClientEnforcementState) until the
+  // exam page itself opts in on mount via
+  // window.sesLockdown.setSecureClientEnforcementState({active:true,...})
+  // — see displayEnforcementLogic.ts's SecureClientEnforcementState doc
+  // comment (corrective pass v1.2.1, Task C).
+  displayEnforcement.start(mainWindow);
 
   mainWindow.on("blur", () => {
     recordEvent("WINDOW_BLUR", "The lockdown browser window lost focus.", "window-blur");
@@ -218,20 +362,8 @@ function createWindow(examId: string | null) {
 
   mainWindow.on("closed", () => {
     mainWindow = null;
+    displayEnforcement.stop();
   });
-}
-
-function checkDisplays() {
-  const displays = screen.getAllDisplays();
-  if (displays.length > 1) {
-    recordEvent(
-      "MANUAL_WARNING",
-      "Multiple displays were detected at exam launch.",
-      "multiple-displays-detected",
-      { displayCount: displays.length },
-    );
-    emitWarning("Secure exam mode: multiple displays detected. This has been recorded.");
-  }
 }
 
 /**
@@ -260,8 +392,10 @@ function monitorNetworkRequests() {
 }
 
 function registerDeepLinkProtocol() {
-  if (!app.isDefaultProtocolClient(DEEP_LINK_PROTOCOL)) {
-    app.setAsDefaultProtocolClient(DEEP_LINK_PROTOCOL);
+  for (const protocol of DEEP_LINK_PROTOCOLS) {
+    if (!app.isDefaultProtocolClient(protocol)) {
+      app.setAsDefaultProtocolClient(protocol);
+    }
   }
 }
 
@@ -313,6 +447,202 @@ ipcMain.handle("lockdown:get-session-info", async () => {
   return { authenticated };
 });
 
+// Corrective pass v1.2.1, Task C — the hosted page tells main the full
+// {active, ready, requireSingleDisplay} state (main has no policy
+// awareness of its own — see displayEnforcement.ts doc comment).
+// Reporting the resulting events back to the server stays page-driven
+// (the page already has an authenticated fetch); only the blocking
+// overlay itself is main-owned.
+ipcMain.on("lockdown:set-secure-client-enforcement-state", (_event, state: unknown) => {
+  if (!isValidEnforcementState(state)) return;
+  displayEnforcement.setEnforcementState(state);
+  maybeEmitDiagnostics();
+});
+
+ipcMain.handle("lockdown:get-display-count", () => displayEnforcement.getCurrentDisplayCount());
+
+// Tether System Check and Exam Readiness v1 — see
+// docs/tether-system-check-v1.md. Four narrowly scoped, read-only
+// readiness methods. None expose shell execution, filesystem access,
+// arbitrary IPC, environment-variable dumps, process lists, or secrets —
+// each handler below returns only the specific bounded value named.
+ipcMain.handle("lockdown:get-client-version", () => LOCKDOWN_VERSION);
+
+ipcMain.handle("lockdown:get-os-info", () => ({
+  platform: process.platform,
+  release: os.release(),
+}));
+
+ipcMain.handle("lockdown:get-display-topology", () => displayEnforcement.getOnDemandDisplayTopology());
+
+ipcMain.handle("lockdown:get-secure-client-capabilities", () => ({
+  getClientVersion: true,
+  getOperatingSystemInfo: true,
+  getDisplayTopology: true,
+  getSecureClientCapabilities: true,
+}));
+
+// Secure Client Attestation v2 — see docs/tether-system-check-v1.md,
+// "Per-installation key" / "Genuine client attestation", and
+// installationKey.ts's own doc comment. REPLACES the removed v1 design
+// (a single globally-embedded private key). Every fact signed below is
+// gathered by THIS main process itself (never trusted from an IPC
+// argument the renderer supplies) — the renderer only ever hands in the
+// server-issued nonce (and, for exam sessions, the exam/submission/
+// policy-hash values ALREADY bound into the server-signed challenge it
+// received). The exact canonical string formats below MUST match
+// buildSystemCheckAttestationCanonicalString /
+// buildExamSessionAttestationCanonicalString in the main web app's
+// src/lib/secureClient/tetherAttestation.ts — kept as independently
+// reviewable copies rather than a cross-package import, since
+// apps/lockdown is a separate compiled package.
+function buildSystemCheckAttestationCanonicalString(params: { nonce: string; installationPublicKeyFingerprint: string; clientVersion: string; platform: string; displayTopologyClassification: string }): string {
+  return ["TETHER_ATTESTATION_V2", "SYSTEM_CHECK", params.nonce, params.installationPublicKeyFingerprint, params.clientVersion, params.platform, params.displayTopologyClassification].join("|");
+}
+
+function buildExamSessionAttestationCanonicalString(params: {
+  nonce: string;
+  installationPublicKeyFingerprint: string;
+  clientVersion: string;
+  platform: string;
+  displayTopologyClassification: string;
+  displayCount: number;
+  examId: string;
+  submissionId: string;
+  policyHash: string;
+  secureClientSessionId: string;
+  capabilities: string;
+  timestamp: string;
+}): string {
+  return [
+    "TETHER_ATTESTATION_V2",
+    "EXAM_SESSION",
+    params.nonce,
+    params.installationPublicKeyFingerprint,
+    params.clientVersion,
+    params.platform,
+    params.displayTopologyClassification,
+    String(params.displayCount),
+    params.examId,
+    params.submissionId,
+    params.policyHash,
+    params.secureClientSessionId,
+    params.capabilities,
+    params.timestamp,
+  ].join("|");
+}
+
+// A fixed, comma-joined snapshot of the same four secure-client-capability
+// booleans lockdown:get-secure-client-capabilities reports — never
+// free-form JSON, always this exact bounded shape. Kept as a standalone
+// function (rather than reusing the IPC handler's own literal) so both
+// call sites are provably in lockstep.
+function secureClientCapabilitiesSnapshot(): string {
+  return "1,1,1,1";
+}
+
+function computePublicKeyFingerprint(publicKeyPem: string): string {
+  return crypto.createHash("sha256").update(publicKeyPem.trim(), "utf8").digest("hex");
+}
+
+ipcMain.handle("lockdown:get-installation-info", () => getInstallationInfo(store));
+
+ipcMain.handle("lockdown:ensure-installation-key", () => ensureInstallationKey(store, safeStorage));
+
+// Registration proof-of-possession — signs ONLY the server-issued
+// registration-challenge nonce, nothing else. A narrowly scoped,
+// purpose-specific operation, not a generic signing primitive.
+ipcMain.handle("lockdown:sign-registration-proof", (_event, nonce: unknown) => {
+  if (typeof nonce !== "string" || nonce.length === 0 || nonce.length > 512) return null;
+  const signature = signWithInstallationKey(store, safeStorage, nonce);
+  if (!signature) return null;
+  const info = getInstallationInfo(store);
+  return { signature, publicKey: info.publicKey, keyAlgorithm: info.keyAlgorithm, keyProtectionLevel: info.keyProtectionLevel };
+});
+
+ipcMain.handle("lockdown:attest-system-check", async (_event, nonce: unknown) => {
+  if (typeof nonce !== "string" || nonce.length === 0 || nonce.length > 512) return null;
+  const info = getInstallationInfo(store);
+  if (!info.hasKey || !info.publicKey) return null;
+  const clientVersion = LOCKDOWN_VERSION;
+  const platform = process.platform;
+  const topology = await displayEnforcement.getOnDemandDisplayTopology();
+  const displayTopologyClassification = topology.classification;
+  const installationPublicKeyFingerprint = computePublicKeyFingerprint(info.publicKey);
+  const canonicalString = buildSystemCheckAttestationCanonicalString({ nonce, installationPublicKeyFingerprint, clientVersion, platform, displayTopologyClassification });
+  const signature = signWithInstallationKey(store, safeStorage, canonicalString);
+  if (!signature) return null;
+  return { signature, clientVersion, platform, displayTopologyClassification };
+});
+
+// EXAM_SESSION attestation — see docs/tether-system-check-v1.md, "Wiring
+// installation attestation into real exam sessions". The renderer relays
+// examId/submissionId/policyHash/secureClientSessionId straight out of
+// the server-signed challenge it received (never chosen by the renderer
+// itself) — main does not re-verify those against a local copy of the
+// challenge (it has none; only the server holds the private signing key
+// needed to have issued a genuine one), but every one of them is bound
+// into THIS signature, and the SERVER independently re-checks each field
+// against its own challenge and the real SecureClientSession/Submission
+// rows before accepting anything (tetherAttestationRunner.ts). Native
+// facts (clientVersion, platform, displayTopologyClassification,
+// displayCount, capabilities, timestamp) are always gathered by main
+// itself — never accepted from the payload.
+ipcMain.handle("lockdown:attest-exam-session", async (_event, payload: unknown) => {
+  if (typeof payload !== "object" || payload === null) return null;
+  const { nonce, examId, submissionId, policyHash, secureClientSessionId } = payload as Record<string, unknown>;
+  if (
+    typeof nonce !== "string" || nonce.length === 0 || nonce.length > 512 ||
+    typeof examId !== "string" || examId.length === 0 ||
+    typeof submissionId !== "string" || submissionId.length === 0 ||
+    typeof policyHash !== "string" || policyHash.length === 0 ||
+    typeof secureClientSessionId !== "string" || secureClientSessionId.length === 0
+  ) {
+    return null;
+  }
+  const info = getInstallationInfo(store);
+  if (!info.hasKey || !info.publicKey) return null;
+  const clientVersion = LOCKDOWN_VERSION;
+  const platform = process.platform;
+  const topology = await displayEnforcement.getOnDemandDisplayTopology();
+  const displayTopologyClassification = topology.classification;
+  const displayCount = displayEnforcement.getCurrentDisplayCount();
+  const capabilities = secureClientCapabilitiesSnapshot();
+  const timestamp = new Date().toISOString();
+  const installationPublicKeyFingerprint = computePublicKeyFingerprint(info.publicKey);
+  const canonicalString = buildExamSessionAttestationCanonicalString({
+    nonce,
+    installationPublicKeyFingerprint,
+    clientVersion,
+    platform,
+    displayTopologyClassification,
+    displayCount,
+    examId,
+    submissionId,
+    policyHash,
+    secureClientSessionId,
+    capabilities,
+    timestamp,
+  });
+  const signature = signWithInstallationKey(store, safeStorage, canonicalString);
+  if (!signature) return null;
+  return { signature, clientVersion, platform, displayTopologyClassification, displayCount, capabilities, timestamp };
+});
+
+// Tasks A/B — the hosted page reports the bounded, non-secret policy
+// context it knows (deliveryMode, displayPolicy, requireDisplayCheck,
+// maximumDisplays, submissionId presence, verified-session boolean) so
+// the diagnostic panel/log can show the full picture without main ever
+// fetching or trusting policy on its own.
+ipcMain.on("lockdown:report-diagnostic-context", (_event, context: unknown) => {
+  if (!isValidDiagnosticContext(context)) return;
+  pageReportedContext = context;
+  maybeEmitDiagnostics();
+});
+
+ipcMain.handle("lockdown:get-diagnostics-enabled", () => diagnosticsPanelEnabled);
+ipcMain.handle("lockdown:get-diagnostics-snapshot", () => buildCurrentDiagnosticsSnapshot());
+
 app.whenReady().then(() => {
   registerDeepLinkProtocol();
   monitorNetworkRequests();
@@ -325,11 +655,11 @@ app.whenReady().then(() => {
     if (isOnline) void flushQueue();
   });
 
-  const initialExamId = parseExamIdFromDeepLink(process.argv.find((a) => a.startsWith(`${DEEP_LINK_PROTOCOL}://`)) ?? "");
+  const initialExamId = parseExamIdFromDeepLink(process.argv.find((a) => isDeepLinkArg(a)) ?? "");
   createWindow(initialExamId);
 
   app.on("second-instance", (_event, argv) => {
-    const deepLinkArg = argv.find((a) => a.startsWith(`${DEEP_LINK_PROTOCOL}://`));
+    const deepLinkArg = argv.find((a) => isDeepLinkArg(a));
     if (deepLinkArg) handleDeepLink(deepLinkArg);
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();

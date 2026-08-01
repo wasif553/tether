@@ -8,6 +8,8 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { assertSameInstitution, institutionErrorResponse, isPlatformAdmin } from "@/lib/institutionScope";
+import { parseSecureSettings } from "@/lib/secureExam";
+import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ sessionId: string }> }) {
   const session = await auth();
@@ -26,7 +28,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ session
   });
   if (!clientSession) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const exam = await prisma.exam.findUnique({ where: { id: clientSession.examId }, select: { createdById: true, institutionId: true, title: true } });
+  const exam = await prisma.exam.findUnique({
+    where: { id: clientSession.examId },
+    select: { createdById: true, institutionId: true, title: true, secureSettings: true },
+  });
   if (!exam || (!isPlatformAdmin(session) && exam.createdById !== session.user.id)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
@@ -39,6 +44,22 @@ export async function GET(_req: Request, { params }: { params: Promise<{ session
   }
 
   const student = await prisma.user.findUnique({ where: { id: clientSession.studentId }, select: { name: true } });
+
+  // Mandatory Tether Delivery for Final Examinations — Part 9: "Expose in
+  // lecturer/admin views: assessment type; required delivery mode;
+  // display policy; ... policy snapshot version/hash where already
+  // supported." The FROZEN per-attempt snapshot (never the exam's
+  // current/live settings) is the authoritative record of what was
+  // actually enforced for THIS attempt — see docs/exam-design-policy-v1.md
+  // and buildSecureClientPolicySnapshot in secureClientPolicy.ts. Neutral
+  // reporting only: a failed/incomplete client check is never labelled
+  // misconduct here, only its factual status (verificationStatus above).
+  const submission = await prisma.submission.findUnique({
+    where: { id: clientSession.submissionId },
+    select: { secureClientPolicySnapshotJson: true },
+  });
+  const policySnapshot = parseSecureClientPolicy(submission?.secureClientPolicySnapshotJson);
+  const currentSettings = parseSecureSettings(exam.secureSettings);
 
   return NextResponse.json({
     session: {
@@ -58,6 +79,14 @@ export async function GET(_req: Request, { params }: { params: Promise<{ session
       recoveredAt: clientSession.recoveredAt,
       endedAt: clientSession.endedAt,
       endReason: clientSession.endReason,
+      // Assessment type reflects the exam's CURRENT classification (a
+      // lecturer-facing setting, not something frozen per attempt);
+      // everything else below is the FROZEN attempt policy.
+      assessmentType: currentSettings.assessmentType,
+      deliveryMode: policySnapshot.deliveryMode,
+      displayPolicy: policySnapshot.displayPolicy,
+      policyVersion: policySnapshot.policyVersion,
+      policySchemaVersion: policySnapshot.schemaVersion,
     },
     attestations: clientSession.attestations.map((a) => ({
       id: a.id,

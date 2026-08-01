@@ -30,7 +30,14 @@ import {
   resolveDisplayRequirementUiState,
   resolveDeliveryModeForSingleDisplayRequired,
   isDisplayPolicySaveBlocked,
+  isDisplayPolicyCombinationValid,
 } from "@/lib/secureClientPolicy";
+import {
+  ASSESSMENT_TYPES,
+  ASSESSMENT_TYPE_LABELS,
+  applyMandatoryFinalExaminationPolicy,
+  type AssessmentType,
+} from "@/lib/assessmentType";
 
 type Question = {
   id: string;
@@ -55,6 +62,9 @@ type QuestionPool = {
 };
 
 type SecureSettings = {
+  // Mandatory Tether Delivery for Final Examinations — see
+  // src/lib/assessmentType.ts.
+  assessmentType: AssessmentType;
   secureModeEnabled: boolean;
   requireFullscreen: boolean;
   blockCopyPaste: boolean;
@@ -146,6 +156,24 @@ type SecureClientAvailability = {
   sebOptionalAvailable: boolean;
   sebRequiredAvailable: boolean;
 };
+
+/** Lecturer-facing label for a delivery mode — the single source of truth for this page's radio-card titles, so the auto-switch notice below always names the mode using the exact same label the lecturer sees on the radio itself. */
+function deliveryModeLabel(mode: SecureSettings["deliveryMode"]): string {
+  switch (mode) {
+    case "STANDARD_WEB":
+      return "Standard web";
+    case "MONITORED_WEB":
+      return "Monitored web";
+    case "TETHER_CLIENT_REQUIRED":
+      return "Tether Secure Browser — required";
+    case "TETHER_CLIENT_OPTIONAL":
+      return "Tether Secure Browser — optional";
+    case "SEB_REQUIRED":
+      return "Safe Exam Browser — required";
+    case "SEB_OPTIONAL":
+      return "Safe Exam Browser — optional";
+  }
+}
 
 type Exam = {
   id: string;
@@ -694,6 +722,8 @@ export default function LecturerExamPage({
         displayPolicy: secureForm.displayPolicy,
         sebOptionalAvailable: exam.secureClientAvailability.sebOptionalAvailable,
         sebRequiredAvailable: exam.secureClientAvailability.sebRequiredAvailable,
+        tetherClientRequiredAvailable: exam.secureClientAvailability.tetherClientRequiredAvailable,
+        tetherClientOptionalAvailable: exam.secureClientAvailability.tetherClientOptionalAvailable,
       })
     ) {
       setSecureSaveMessage(
@@ -933,7 +963,17 @@ export default function LecturerExamPage({
     storedDisplayPolicy: exam.secureSettings.displayPolicy,
     sebOptionalAvailable: exam.secureClientAvailability.sebOptionalAvailable,
     sebRequiredAvailable: exam.secureClientAvailability.sebRequiredAvailable,
+    tetherClientRequiredAvailable: exam.secureClientAvailability.tetherClientRequiredAvailable,
+    tetherClientOptionalAvailable: exam.secureClientAvailability.tetherClientOptionalAvailable,
   });
+
+  // Mandatory Tether Delivery for Final Examinations — see
+  // src/lib/assessmentType.ts. Drives the locked/auto-selected Exam
+  // delivery and Display requirement controls below: once Final
+  // examination is chosen, Tether Secure Browser required + Single
+  // display required are not really independent choices any more, they
+  // follow automatically and cannot be downgraded through this form.
+  const isFinalExamLocked = secureForm?.assessmentType === "FINAL_EXAMINATION";
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -2170,6 +2210,75 @@ export default function LecturerExamPage({
             )}
           </div>
 
+          {/* Mandatory Tether Delivery for Final Examinations — see
+              src/lib/assessmentType.ts. Placed before Exam delivery/
+              security configuration: for a final examination, delivery
+              mode and display policy are not independent choices — they
+              follow automatically from this classification and are
+              locked below. */}
+          <div className="border-t border-gray-200 pt-3">
+            <h3 className="text-sm font-medium">Assessment type</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Classify this assessment. Final examinations must be delivered through Tether Secure Browser.
+            </p>
+            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {ASSESSMENT_TYPES.map((type) => (
+                <label
+                  key={type}
+                  className={`cursor-pointer rounded border p-3 text-sm ${secureForm.assessmentType === type ? "border-gray-500 bg-gray-50" : "border-gray-200"}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="assessmentType"
+                      checked={secureForm.assessmentType === type}
+                      onChange={() => {
+                        // Automatically select + lock Tether Secure Browser
+                        // required and Single display required the moment
+                        // Final examination is chosen — see
+                        // applyMandatoryFinalExaminationPolicy. A no-op for
+                        // every other assessment type, so switching between
+                        // Practice/Quiz/Mid-semester never touches delivery
+                        // settings.
+                        setSecureForm(applyMandatoryFinalExaminationPolicy(type, { ...secureForm, assessmentType: type }));
+                        setDisplayPolicyAutoSwitchNotice(null);
+                      }}
+                    />
+                    <span className="font-medium">{ASSESSMENT_TYPE_LABELS[type]}</span>
+                    {type === "FINAL_EXAMINATION" && (
+                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-white">Required for final examinations</span>
+                    )}
+                  </div>
+                </label>
+              ))}
+            </div>
+            {isFinalExamLocked && (
+              <div className="mt-2 rounded border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800">
+                <p className="font-medium">Final examinations must be delivered through Tether Secure Browser.</p>
+                <p className="mt-0.5">Students must use a verified Tether Secure Browser session and a compliant single-display setup.</p>
+              </div>
+            )}
+            {/* Mandatory Tether Delivery for Final Examinations — Part 6:
+                per-attempt policy snapshots are frozen at submission-start
+                time and are never retroactively rewritten (see
+                buildSecureClientPolicySnapshot in secureClientPolicy.ts).
+                A lecturer changing classification/policy on an exam that
+                already has submissions must be told that plainly, since
+                the save itself will silently only affect NEW attempts. */}
+            {!!submissionCounts && submissionCounts.total > 0 && (
+              <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                <p className="font-medium">
+                  This exam already has {submissionCounts.total} submission{submissionCounts.total === 1 ? "" : "s"}.
+                </p>
+                <p className="mt-0.5">
+                  Existing attempts keep the delivery and display policy that was in effect when they started. Changes made
+                  here apply only to new attempts — start a new exam version or attempt cycle to bring existing attempts
+                  under the mandatory policy.
+                </p>
+              </div>
+            )}
+          </div>
+
           {/* Tether Secure Client Foundation + Safe Exam Browser
               Compatibility v1 — see
               docs/secure-client-foundation-seb-v1.md. Cheat-resistant,
@@ -2179,62 +2288,122 @@ export default function LecturerExamPage({
             <p className="mt-1 text-xs text-gray-500">
               Choose how students access this exam. The web examination platform remains fully functional in every mode.
             </p>
+            {isFinalExamLocked && (
+              <p className="mt-1 text-xs text-gray-500">Other delivery modes are unavailable for final examinations.</p>
+            )}
             <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
               {(
                 [
-                  { value: "STANDARD_WEB", title: "Standard web", desc: "For ordinary assessments using normal browser delivery.", disabled: false, needsValidationNotice: false },
-                  { value: "MONITORED_WEB", title: "Monitored web", desc: "Uses Tether's existing camera, screen-sharing and integrity evidence.", disabled: false, needsValidationNotice: false },
+                  {
+                    value: "STANDARD_WEB",
+                    title: "Standard web",
+                    desc: "For ordinary assessments using normal browser delivery.",
+                    disabled: isFinalExamLocked || false,
+                    needsValidationNotice: false,
+                    disabledReason: isFinalExamLocked ? "Not available for final examinations." : null,
+                  },
+                  {
+                    value: "MONITORED_WEB",
+                    title: "Monitored web",
+                    desc: "Uses Tether's existing camera, screen-sharing and integrity evidence.",
+                    disabled: isFinalExamLocked || false,
+                    needsValidationNotice: false,
+                    disabledReason: isFinalExamLocked ? "Not available for final examinations." : null,
+                  },
+                  // Lecturer availability fix — Tether Secure Browser is
+                  // the first-party, generally-available production
+                  // client (see src/lib/secureClientAvailability.ts,
+                  // tetherClientRequiredAvailable) and the primary Tether
+                  // workflow — Safe Exam Browser is not. This option was
+                  // previously missing from this list entirely; only the
+                  // still-experimental TETHER_CLIENT_OPTIONAL mode below
+                  // was ever offered.
+                  //
+                  // Mandatory Tether Delivery for Final Examinations — once
+                  // locked, this option is never itself "disabled" from the
+                  // lecturer's perspective (it IS the mandatory choice,
+                  // always checked); the radio input is disabled only so it
+                  // cannot be toggled OFF, matching "lock this setting so
+                  // the lecturer cannot downgrade it."
+                  {
+                    value: "TETHER_CLIENT_REQUIRED",
+                    title: "Tether Secure Browser — required",
+                    desc: "Students must open this examination in Tether Secure Browser.",
+                    disabled: !exam.secureClientAvailability.tetherClientRequiredAvailable || isFinalExamLocked,
+                    needsValidationNotice: false,
+                    disabledReason: isFinalExamLocked ? null : "Temporarily disabled for this environment.",
+                    lockedBadge: isFinalExamLocked,
+                  },
+                  {
+                    value: "TETHER_CLIENT_OPTIONAL",
+                    title: "Tether Secure Browser — optional",
+                    desc: "Students may open this examination in Tether Secure Browser, or continue in an ordinary browser.",
+                    disabled: !exam.secureClientAvailability.tetherClientOptionalAvailable || isFinalExamLocked,
+                    needsValidationNotice: false,
+                    disabledReason: isFinalExamLocked ? "Not available for final examinations." : "Not enabled for this environment.",
+                  },
                   {
                     value: "SEB_OPTIONAL",
                     title: "Safe Exam Browser — optional",
                     desc: "Students may use an approved Safe Exam Browser configuration.",
-                    disabled: !exam.secureClientAvailability.sebOptionalAvailable,
+                    disabled: isFinalExamLocked || !exam.secureClientAvailability.sebOptionalAvailable,
                     needsValidationNotice: true,
+                    disabledReason: isFinalExamLocked ? "Not available for final examinations." : "Not enabled for this institution in this environment.",
                   },
                   {
                     value: "SEB_REQUIRED",
                     title: "Safe Exam Browser — required",
                     desc: "Students must use an approved Safe Exam Browser configuration.",
-                    disabled: !exam.secureClientAvailability.sebRequiredAvailable,
+                    disabled: isFinalExamLocked || !exam.secureClientAvailability.sebRequiredAvailable,
                     needsValidationNotice: true,
+                    disabledReason: isFinalExamLocked ? "Not available for final examinations." : "Not enabled for this institution in this environment.",
                   },
-                  { value: "TETHER_CLIENT_OPTIONAL", title: "Tether Secure Client", desc: "Planned for examinations requiring stronger device controls.", disabled: !exam.secureClientAvailability.tetherClientOptionalAvailable, needsValidationNotice: false },
-                ] as const
-              ).map((option) => (
-                <label
-                  key={option.value}
-                  className={`rounded border p-3 text-sm ${secureForm.deliveryMode === option.value ? "border-gray-500 bg-gray-50" : "border-gray-200"} ${option.disabled ? "opacity-50" : "cursor-pointer"}`}
-                >
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="radio"
-                      name="deliveryMode"
-                      disabled={option.disabled}
-                      checked={secureForm.deliveryMode === option.value}
-                      onChange={() => {
-                        setSecureForm({ ...secureForm, deliveryMode: option.value });
-                        setDisplayPolicyAutoSwitchNotice(null);
-                      }}
-                    />
-                    <span className="font-medium">{option.title}</span>
-                  </div>
-                  <p className="mt-1 text-xs text-gray-500">{option.desc}</p>
-                  {/* Real Safe Exam Browser client compatibility has not yet
-                      been validated against this backend — never claim
-                      "production verified" here regardless of whether the
-                      mode is currently selectable. */}
-                  {option.needsValidationNotice && (
-                    <p className="mt-1 text-xs text-amber-700">Compatibility validation required.</p>
-                  )}
-                  {option.disabled && (
-                    <p className="mt-1 text-xs text-amber-700">
-                      {option.value === "SEB_REQUIRED" || option.value === "SEB_OPTIONAL"
-                        ? "Not enabled for this institution in this environment."
-                        : "Disabled in production v1."}
-                    </p>
-                  )}
-                </label>
-              ))}
+                ] as Array<{
+                  value: SecureSettings["deliveryMode"];
+                  title: string;
+                  desc: string;
+                  disabled: boolean;
+                  needsValidationNotice: boolean;
+                  disabledReason: string | null;
+                  lockedBadge?: boolean;
+                }>
+              ).map((option) => {
+                const checked = isFinalExamLocked ? option.value === "TETHER_CLIENT_REQUIRED" : secureForm.deliveryMode === option.value;
+                return (
+                  <label
+                    key={option.value}
+                    className={`rounded border p-3 text-sm ${checked ? "border-gray-500 bg-gray-50" : "border-gray-200"} ${option.disabled ? "opacity-50" : "cursor-pointer"}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="deliveryMode"
+                        disabled={option.disabled}
+                        checked={checked}
+                        onChange={() => {
+                          setSecureForm({ ...secureForm, deliveryMode: option.value });
+                          setDisplayPolicyAutoSwitchNotice(null);
+                        }}
+                      />
+                      <span className="font-medium">{option.title}</span>
+                      {option.lockedBadge && (
+                        <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-white">Required for final examinations</span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-xs text-gray-500">{option.desc}</p>
+                    {/* Real Safe Exam Browser client compatibility has not yet
+                        been validated against this backend — never claim
+                        "production verified" here regardless of whether the
+                        mode is currently selectable. Tether Secure Browser is
+                        the validated first-party client, so neither Tether
+                        option shows this notice. */}
+                    {option.needsValidationNotice && (
+                      <p className="mt-1 text-xs text-amber-700">Compatibility validation required.</p>
+                    )}
+                    {option.disabled && option.disabledReason && <p className="mt-1 text-xs text-amber-700">{option.disabledReason}</p>}
+                  </label>
+                );
+              })}
             </div>
 
             {/* Single Display Requirement v1 — see
@@ -2247,14 +2416,14 @@ export default function LecturerExamPage({
               <p className="text-sm font-medium">Display requirement</p>
               <div className="mt-1 flex flex-col gap-1.5">
                 <label
-                  className={`flex items-start gap-2 text-sm text-gray-700 ${displayRequirementUiState.unrestrictedDisabled ? "opacity-50" : ""}`}
+                  className={`flex items-start gap-2 text-sm text-gray-700 ${isFinalExamLocked || displayRequirementUiState.unrestrictedDisabled ? "opacity-50" : ""}`}
                 >
                   <input
                     type="radio"
                     name="displayPolicy"
                     className="mt-0.5"
-                    disabled={displayRequirementUiState.unrestrictedDisabled}
-                    checked={secureForm.displayPolicy === "UNRESTRICTED"}
+                    disabled={isFinalExamLocked || displayRequirementUiState.unrestrictedDisabled}
+                    checked={!isFinalExamLocked && secureForm.displayPolicy === "UNRESTRICTED"}
                     onChange={() => {
                       setSecureForm({ ...secureForm, displayPolicy: "UNRESTRICTED" });
                       setDisplayPolicyAutoSwitchNotice(null);
@@ -2268,14 +2437,14 @@ export default function LecturerExamPage({
                   </span>
                 </label>
                 <label
-                  className={`flex items-start gap-2 text-sm text-gray-700 ${displayRequirementUiState.singleDisplayRequiredDisabled ? "opacity-50" : ""}`}
+                  className={`flex items-start gap-2 text-sm text-gray-700 ${isFinalExamLocked || displayRequirementUiState.singleDisplayRequiredDisabled ? "opacity-50" : ""}`}
                 >
                   <input
                     type="radio"
                     name="displayPolicy"
                     className="mt-0.5"
-                    disabled={displayRequirementUiState.singleDisplayRequiredDisabled}
-                    checked={secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED"}
+                    disabled={isFinalExamLocked || displayRequirementUiState.singleDisplayRequiredDisabled}
+                    checked={isFinalExamLocked || secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED"}
                     onChange={() => {
                       // Availability-gating fix: this handler can only ever
                       // fire while the radio is enabled (singleDisplayRequiredDisabled
@@ -2288,20 +2457,22 @@ export default function LecturerExamPage({
                         currentDeliveryMode: secureForm.deliveryMode,
                         sebOptionalAvailable: exam.secureClientAvailability.sebOptionalAvailable,
                         sebRequiredAvailable: exam.secureClientAvailability.sebRequiredAvailable,
+                        tetherClientRequiredAvailable: exam.secureClientAvailability.tetherClientRequiredAvailable,
+                        tetherClientOptionalAvailable: exam.secureClientAvailability.tetherClientOptionalAvailable,
                       });
                       setSecureForm({ ...secureForm, displayPolicy: "SINGLE_DISPLAY_REQUIRED", deliveryMode });
                       setDisplayPolicyAutoSwitchNotice(
-                        changed
-                          ? `Exam delivery switched to "${deliveryMode === "SEB_REQUIRED" ? "Safe Exam Browser — required" : "Safe Exam Browser — optional"}" because single display required needs Safe Exam Browser delivery.`
-                          : null,
+                        changed ? `Exam delivery switched to "${deliveryModeLabel(deliveryMode)}" because single display required needs a display-aware exam client.` : null,
                       );
                     }}
                   />
                   <span>
                     Single display required
+                    {isFinalExamLocked && (
+                      <span className="ml-1.5 rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-white">Required for final examinations</span>
+                    )}
                     <span className="mt-0.5 block text-xs font-normal text-gray-500">
-                      Students must use one active display. Safe Exam Browser will enforce the supported display
-                      restrictions before and during the exam.
+                      Tether Secure Browser checks Windows display topology before and during the examination.
                     </span>
                   </span>
                 </label>
@@ -2319,24 +2490,27 @@ export default function LecturerExamPage({
                   {displayPolicyAutoSwitchNotice}
                 </p>
               )}
-              {/* Only shown when SEB is actually available — if it weren't,
-                  displayRequirementUiState.notice below already explains
-                  why, and telling the lecturer to "choose Safe Exam
-                  Browser above" would repeat the exact contradiction this
-                  fix removes. This covers the ordinary (non-manipulated)
-                  path where a lecturer enables Single display required —
-                  which auto-switches deliveryMode to a SEB mode — and then
-                  separately switches deliveryMode back to Standard/
-                  Monitored web via the radios above. This IS a genuine,
-                  actionable validation error (unlike the notice below), so
-                  it stays red. */}
+              {/* Only shown when a display-aware exam client is actually
+                  available — if none were, displayRequirementUiState.notice
+                  below already explains why, and telling the lecturer to
+                  "choose Tether/SEB above" would repeat the exact
+                  contradiction this fix removes. This covers the ordinary
+                  (non-manipulated) path where a lecturer enables Single
+                  display required — which auto-switches deliveryMode to a
+                  compatible mode — and then separately switches
+                  deliveryMode back to Standard/Monitored web via the
+                  radios above. This IS a genuine, actionable validation
+                  error (unlike the notice below), so it stays red. Never
+                  shown when Tether Secure Browser required is already
+                  selected — that combination is valid, so this must not
+                  contradict it with a stale SEB-only warning. */}
               {displayRequirementUiState.kind === "AVAILABLE" &&
                 secureForm.displayPolicy === "SINGLE_DISPLAY_REQUIRED" &&
-                secureForm.deliveryMode !== "SEB_REQUIRED" &&
-                secureForm.deliveryMode !== "SEB_OPTIONAL" && (
+                !isDisplayPolicyCombinationValid(secureForm.deliveryMode, "SINGLE_DISPLAY_REQUIRED") && (
                   <p className="mt-1.5 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-800">
-                    Single display required needs Safe Exam Browser delivery. Choose &quot;Safe Exam Browser —
-                    required&quot; or &quot;Safe Exam Browser — optional&quot; above before saving, or this setting
+                    Single display required needs a display-aware exam client. Choose &quot;Tether Secure Browser —
+                    required&quot;, &quot;Tether Secure Browser — optional&quot;, &quot;Safe Exam Browser —
+                    required&quot;, or &quot;Safe Exam Browser — optional&quot; above before saving, or this setting
                     will be rejected.
                   </p>
                 )}

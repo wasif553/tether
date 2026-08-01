@@ -9,6 +9,7 @@ import {
   shouldRunExamTimer,
 } from "@/lib/assessmentLifecycle";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
+import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 import {
   classifyFrameQuality,
   computeLuminanceVariance,
@@ -19,9 +20,14 @@ import {
   decideSecondPersonEmission,
   decideNoPersonEmission,
   decideFrameQualityEmission,
+  classifyCameraStreamHealth,
+  decideCameraStreamEmission,
+  resolveCameraIntegrityState,
+  decideVisibilityRestoredEmission,
   shouldLogAiCameraDebug,
   DetectionCooldownTracker,
   PHONE_CONFIDENCE_THRESHOLD,
+  UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND,
   type DetectedObject,
 } from "@/lib/cameraIntegrityDetection";
 // Camera Startup Lifecycle v2 — see
@@ -288,7 +294,9 @@ type IntegrityEventType =
   | "NO_PERSON_VISIBLE"
   | "CAMERA_VIEW_BLOCKED"
   | "CAMERA_TOO_DARK"
-  | "AI_CAMERA_CHECK_UNAVAILABLE";
+  | "AI_CAMERA_CHECK_UNAVAILABLE"
+  | "CAMERA_STREAM_UNAVAILABLE"
+  | "CAMERA_VISIBILITY_RESTORED";
 
 type IntegritySeverity = "INFO" | "LOW" | "MEDIUM" | "HIGH";
 
@@ -306,6 +314,8 @@ const DEBOUNCE_MS: Partial<Record<IntegrityEventType, number>> = {
   CAMERA_VIEW_BLOCKED: 60_000,
   CAMERA_TOO_DARK: 60_000,
   AI_CAMERA_CHECK_UNAVAILABLE: 60_000,
+  CAMERA_STREAM_UNAVAILABLE: 60_000,
+  CAMERA_VISIBILITY_RESTORED: 60_000,
 };
 
 const MESSAGES: Record<IntegrityEventType, string> = {
@@ -332,10 +342,31 @@ const MESSAGES: Record<IntegrityEventType, string> = {
   POSSIBLE_PHONE_VISIBLE: "Possible mobile phone visible in camera view. Lecturer review required.",
   POSSIBLE_SECOND_PERSON_VISIBLE:
     "Possible additional person visible in camera view. Lecturer review required.",
-  NO_PERSON_VISIBLE: "No student appears visible in the camera view. Lecturer review required.",
+  // Face-visibility false-positive fix (Part 4) — exact required neutral
+  // copy, shared with NEUTRAL_CAMERA_VISIBILITY_MESSAGES in
+  // cameraIntegrityDetection.ts. NO_PERSON_VISIBLE is only ever reported
+  // now when the frame quality was adequate AND the condition was
+  // sustained (see decideNoPersonEmission) — never merely because the
+  // room was dark or the detector was uncertain.
+  NO_PERSON_VISIBLE: "Face not visible for a sustained period.",
   CAMERA_VIEW_BLOCKED: "Camera view appears blocked or covered. Lecturer review required.",
-  CAMERA_TOO_DARK: "Camera view appears too dark or unusable. Lecturer review required.",
+  CAMERA_TOO_DARK: "Lighting is too low to verify camera visibility.",
   AI_CAMERA_CHECK_UNAVAILABLE: "On-device camera integrity checks are unavailable.",
+  // Corrective pass v1.2.2, Task 8 — a resource/capture-level camera
+  // interruption (e.g. another application holding the camera). Neutral
+  // wording, never implies the student did anything or that their face
+  // was confirmed absent — see classifyCameraStreamHealth in
+  // cameraIntegrityDetection.ts for why this is reported separately from
+  // NO_PERSON_VISIBLE.
+  CAMERA_STREAM_UNAVAILABLE: "Camera feed was temporarily interrupted.",
+  // Camera integrity reliability pass — the neutral "stable recovery"
+  // message. Only ever reported after a genuinely CONFIRMED
+  // (SUSTAINED_NO_PERSON_VISIBLE) absence resolves back to several
+  // consecutive, confidently visible frames — never merely because
+  // lighting/uncertainty caused the streak to freeze (see
+  // resolveCameraIntegrityState in cameraIntegrityDetection.ts). Never
+  // implies the earlier absence was misconduct.
+  CAMERA_VISIBILITY_RESTORED: "Camera visibility restored.",
 };
 
 function severityFor(eventType: IntegrityEventType, settings: SecureSettings): IntegritySeverity {
@@ -385,6 +416,10 @@ function severityFor(eventType: IntegrityEventType, settings: SecureSettings): I
     case "CAMERA_TOO_DARK":
       return "LOW";
     case "AI_CAMERA_CHECK_UNAVAILABLE":
+      return "INFO";
+    case "CAMERA_STREAM_UNAVAILABLE":
+      return settings.requireCamera ? "MEDIUM" : "LOW";
+    case "CAMERA_VISIBILITY_RESTORED":
       return "INFO";
   }
 }
@@ -650,6 +685,13 @@ export default function TakeExamPage({
   const detectorRef = useRef<CameraObjectDetector | null>(null);
   const detectionCooldown = useRef(new DetectionCooldownTracker());
   const detectionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Camera integrity reliability pass — caller-owned bookkeeping for
+  // resolveCameraIntegrityState's `wasSustainedNoPersonVisible` input:
+  // true from the tick a SUSTAINED_NO_PERSON_VISIBLE episode is first
+  // confirmed until CAMERA_VISIBILITY_RESTORED is actually reported for
+  // it (not merely reachable — see the tick handler). Survives across
+  // ticks the same way the cooldown tracker itself does.
+  const wasSustainedNoPersonVisibleRef = useRef(false);
   // Strengthened phone detection — see docs/phone-detection-calibration-v1.md.
   // Owned entirely by refs (not effect-local state) for the same reason
   // detectionSamplingReadyRef is: a restart of the detection effect must
@@ -731,9 +773,26 @@ export default function TakeExamPage({
 
   const [inLockdownBrowser, setInLockdownBrowser] = useState(false);
 
+  // Corrective pass v1.2.1, Task C — the actual reported root cause: the
+  // old code only told Electron about the display policy AFTER `data`
+  // and /secure-client/status both resolved (see the effect below),
+  // leaving a fail-open window from window-creation through that entire
+  // fetch chain during which a second display would not be covered even
+  // for a TETHER_CLIENT_REQUIRED exam. Fixed by calling
+  // setSecureClientEnforcementState({active:true, ready:false, ...}) in
+  // THIS SAME mount-time effect, synchronously with detection — before
+  // `data` has even started loading — so Electron covers the window from
+  // the earliest possible moment and only uncovers once the effect below
+  // confirms the real policy. Harmless for a non-gated (STANDARD_WEB)
+  // exam opened inside Tether: it clears again as soon as that effect's
+  // fetch resolves, below.
   useEffect(() => {
+    const detected = isRunningInLockdownBrowser();
+    if (detected) {
+      window.sesLockdown?.setSecureClientEnforcementState?.({ active: true, ready: false, requireSingleDisplay: false });
+    }
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setInLockdownBrowser(isRunningInLockdownBrowser());
+    setInLockdownBrowser(detected);
   }, []);
 
   const applySubmissionData = useCallback((d: SubmissionData) => {
@@ -761,6 +820,15 @@ export default function TakeExamPage({
       const res = await fetch(`/api/submissions/${id}`);
       if (!res.ok) {
         const body = await res.json().catch(() => null);
+        // Tether launch/install flow v1 — see secureClientStartGate.ts.
+        // This exam requires a verified Tether Secure Browser session
+        // and none exists yet (e.g. the student reached this page
+        // directly, outside Tether) — send them to the Tether launch
+        // page instead of showing a dead-end access error.
+        if (res.status === 403 && body?.code === "TETHER_SESSION_REQUIRED" && typeof body?.action?.redirectTo === "string") {
+          router.replace(body.action.redirectTo);
+          return null;
+        }
         setLoadError(
           res.status === 404
             ? "This exam submission could not be found."
@@ -780,7 +848,7 @@ export default function TakeExamPage({
       setLoadError("Could not load this exam — check your connection and try refreshing the page.");
       return null;
     }
-  }, [id, applySubmissionData]);
+  }, [id, applySubmissionData, router]);
 
   // One-Question-At-A-Time Exam Delivery v1 — see
   // docs/one-question-delivery-v1.md. Declared early (ahead of
@@ -1049,6 +1117,110 @@ export default function TakeExamPage({
     if (!data) return;
     window.sesLockdown?.setExamContext({ examId: data.exam.id, submissionId: data.id });
   }, [data]);
+
+  // Tether launch/install flow v1 — see apps/lockdown/src/displayEnforcement.ts.
+  // Only relevant inside Tether Secure Browser. Resolves the readiness
+  // gate the mount-time effect above opened with {active:true,
+  // ready:false} — the Electron main process has no policy awareness of
+  // its own and never trusts anything from this page except this one
+  // state object (corrective pass v1.2.1, Task C). Depends on data?.id
+  // (stable for the lifetime of one attempt) rather than the whole
+  // `data` object, so this registers exactly once per submission even if
+  // `data` is re-fetched/replaced by polling elsewhere on this page —
+  // window.sesLockdown.onDisplayEnforcementEvent has no remove-listener
+  // API, so re-registering on every re-fetch would leak duplicate
+  // listeners and duplicate event reports.
+  useEffect(() => {
+    if (!data?.id || !inLockdownBrowser) return;
+    const submissionId = data.id;
+    let cancelled = false;
+    let sessionId: string | null = null;
+
+    type StatusResponse = {
+      deliveryMode?: unknown;
+      requireDisplayCheck?: unknown;
+      maximumDisplays?: unknown;
+      displayRequirement?: { status?: unknown; displayPolicy?: unknown } | null;
+      session?: { id: string; verificationStatus?: unknown } | null;
+    };
+
+    fetch(`/api/submissions/${submissionId}/secure-client/status`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((status: StatusResponse | null) => {
+        if (cancelled) return;
+        // Task C: "if displayPolicy is missing or invalid, cover the
+        // exam" — a non-ok response or an unexpectedly shaped body both
+        // land here as a rejection, matching the .catch below.
+        if (!status || typeof status.deliveryMode !== "string" || typeof status.displayRequirement?.status !== "string") {
+          throw new Error("malformed_status_response");
+        }
+        sessionId = status.session?.id ?? null;
+        const gated = status.deliveryMode === "TETHER_CLIENT_REQUIRED";
+        // For a gated exam, reaching this point already implies a
+        // verified secure-client session: GET /api/submissions/[id] (the
+        // route that produced `data` above) 403s with
+        // TETHER_SESSION_REQUIRED for a TETHER_CLIENT_REQUIRED exam with
+        // no verified session, redirecting to the Tether launch page
+        // instead of ever setting `data` — see
+        // src/app/api/submissions/[id]/route.ts and this page's
+        // loadSubmission redirect handling.
+        const verified = !gated || status.session?.verificationStatus === "VERIFIED";
+        const enforced = status.displayRequirement?.status === "ENFORCED_BY_SECURE_CLIENT";
+        logClientTetherDiagnostic("attempt_policy_loaded", {
+          deliveryMode: status.deliveryMode,
+          displayPolicy: typeof status.displayRequirement?.displayPolicy === "string" ? status.displayRequirement.displayPolicy : null,
+          requireDisplayCheck: typeof status.requireDisplayCheck === "boolean" ? status.requireDisplayCheck : null,
+          verified,
+        });
+        const nextEnforcementState = { active: gated, ready: !gated || verified, requireSingleDisplay: enforced };
+        logClientTetherDiagnostic("ipc_enforcement_state_sent", nextEnforcementState);
+        window.sesLockdown?.setSecureClientEnforcementState?.(nextEnforcementState);
+        window.sesLockdown?.reportDiagnosticContext?.({
+          submissionIdPresent: true,
+          verifiedSecureClientSession: verified,
+          deliveryMode: status.deliveryMode,
+          displayPolicy: typeof status.displayRequirement?.displayPolicy === "string" ? status.displayRequirement.displayPolicy : null,
+          requireDisplayCheck: typeof status.requireDisplayCheck === "boolean" ? status.requireDisplayCheck : null,
+          maximumDisplays: typeof status.maximumDisplays === "number" ? status.maximumDisplays : null,
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Fail closed: never silently leave the previous (or default)
+        // state in place on a failed/malformed status fetch — explicitly
+        // re-assert the covering state so the exam stays covered until a
+        // genuinely successful determination is made.
+        logClientTetherDiagnostic("attempt_policy_load_failed", {});
+        const coveringState = { active: true, ready: false, requireSingleDisplay: false };
+        logClientTetherDiagnostic("ipc_enforcement_state_sent", coveringState);
+        window.sesLockdown?.setSecureClientEnforcementState?.(coveringState);
+        window.sesLockdown?.reportDiagnosticContext?.({
+          submissionIdPresent: true,
+          verifiedSecureClientSession: false,
+          deliveryMode: null,
+          displayPolicy: null,
+          requireDisplayCheck: null,
+          maximumDisplays: null,
+        });
+      });
+
+    window.sesLockdown?.onDisplayEnforcementEvent?.((payload) => {
+      if (cancelled || !sessionId) return;
+      // Bounded evidence only — displayCount, event type, timestamp
+      // (server-assigned) — never display names, serials, EDID or
+      // device paths, matching the existing displayMetadataSchema in
+      // src/lib/secureClient/secureClientEvents.ts.
+      fetch(`/api/secure-client/sessions/${sessionId}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventType: payload.eventType, metadata: { displayCount: payload.displayCount } }),
+      }).catch(() => {});
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [data?.id, inLockdownBrowser]);
 
   const secureSettings = data?.exam.secureSettings;
   const secureModeEnabled = secureSettings?.secureModeEnabled ?? false;
@@ -2190,6 +2362,49 @@ export default function TakeExamPage({
       try {
         if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
 
+        // Corrective pass v1.2.2, Task 8 — a camera resource/capture
+        // failure (e.g. Windows Media Foundation "Failed to reserve
+        // output capture buffer", commonly caused by another app such as
+        // Microsoft Teams holding the camera) must never be classified
+        // as face absence. The <video> element's readyState/dimensions
+        // checked just above can stay stale at their last good values
+        // even once the underlying track has stopped delivering frames,
+        // so this checks the MediaStreamTrack itself — the same signal
+        // the existing camera heartbeat already relies on — BEFORE any
+        // pixel data from this (possibly frozen) frame is drawn or fed
+        // into person/phone/frame-quality detection.
+        const activeTrack = cameraStreamRef.current?.getVideoTracks()[0];
+        const streamHealth = classifyCameraStreamHealth(
+          activeTrack ? { readyState: activeTrack.readyState, muted: activeTrack.muted } : null,
+        );
+        const streamUnavailableCount = cooldown.recordObservation("streamUnavailable", streamHealth === "unavailable");
+        const streamDecision = decideCameraStreamEmission(
+          streamHealth,
+          streamUnavailableCount,
+          cooldown.canEmit("CAMERA_STREAM_UNAVAILABLE", now, 60_000),
+        );
+        if (streamDecision.shouldEmit) {
+          cooldown.markEmitted("CAMERA_STREAM_UNAVAILABLE", now);
+          reportIntegrityEvent("CAMERA_STREAM_UNAVAILABLE", {
+            source: "on_device_camera_ai",
+            confidenceBand: "high",
+            trackReadyState: activeTrack?.readyState ?? "absent",
+          });
+        }
+        if (streamHealth === "unavailable") {
+          // Never draw/classify this frame at all — every downstream
+          // signal (blocked, dark, no-person, phone, second-person) is
+          // skipped this tick, which also freezes their consecutive-tick
+          // counters exactly as if the tick had not run (see
+          // decideNoPersonEmission's frameQuality gate for the same
+          // hysteresis pattern).
+          logAiCameraDebug("tick: skipped — camera stream unavailable", {
+            trackReadyState: activeTrack?.readyState ?? "absent",
+            trackMuted: activeTrack?.muted ?? null,
+          });
+          return;
+        }
+
         // Camera Startup Lifecycle v2 — see
         // docs/on-device-ai-integrity-detection-v1.md ("Camera startup
         // lifecycle" / "Detection-sampling sink readiness"). Detection/
@@ -2297,10 +2512,11 @@ export default function TakeExamPage({
           noPersonDetected: false,
           multiplePersons: false,
           multiplePersonsHighConfidence: false,
+          bestPersonScore: 0,
         };
         let phoneDecision = decidePhoneEmission({ detected: false, confidence: 0 }, true);
         let secondPersonDecision = decideSecondPersonEmission(noFreshPersonData, 0, true);
-        let noPersonDecision = decideNoPersonEmission(noFreshPersonData, 0, true);
+        let noPersonDecision = decideNoPersonEmission(noFreshPersonData, quality, 0, 0, true);
 
         if (!detector) {
           logAiCameraDebug("tick: model not loaded", { modelLoaded: false });
@@ -2338,8 +2554,49 @@ export default function TakeExamPage({
             const phoneCooldownOk = cooldown.canEmit("POSSIBLE_PHONE_VISIBLE", now, 45_000);
             const secondPersonCount = cooldown.recordObservation("secondPerson", person.multiplePersons);
             const secondPersonCooldownOk = cooldown.canEmit("POSSIBLE_SECOND_PERSON_VISIBLE", now, 45_000);
-            const noPersonCount = cooldown.recordObservation("noPerson", person.noPersonDetected);
+            // Face-visibility false-positive fix (Part 4): the no-person
+            // streak FREEZES (neither increments nor resets — hysteresis)
+            // on a tick where the frame quality isn't "ok" (dark/blocked —
+            // CAMERA_TOO_DARK/CAMERA_VIEW_BLOCKED already report that
+            // separately) or where the detector is merely "uncertain"
+            // (a near-threshold person-class score) — recordObservation is
+            // simply not called for those ticks, so the existing streak is
+            // read back unchanged via getConsecutiveCount instead.
+            const isNoPersonStreakFrozen =
+              quality !== "ok" || (person.noPersonDetected && person.bestPersonScore >= UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND);
+            const noPersonCount = isNoPersonStreakFrozen
+              ? cooldown.getConsecutiveCount("noPerson")
+              : cooldown.recordObservation("noPerson", person.noPersonDetected, now);
+            const noPersonStreakDurationMs = cooldown.getStreakDurationMs("noPerson", now);
             const noPersonCooldownOk = cooldown.canEmit("NO_PERSON_VISIBLE", now, 45_000);
+            // Camera integrity reliability pass — Task 6 hysteresis: the
+            // mirror-image counter of noPersonCount, frozen the same way
+            // on the same ticks (bad quality / uncertain), so a single
+            // ambiguous frame during recovery neither advances nor resets
+            // recovery progress any more than it does for confirming
+            // absence in the first place.
+            const visibleCount = isNoPersonStreakFrozen
+              ? cooldown.getConsecutiveCount("personVisible")
+              : cooldown.recordObservation("personVisible", !person.noPersonDetected, now);
+            const cameraIntegrityState = suppressStartup
+              ? "CAMERA_VISIBLE"
+              : resolveCameraIntegrityState({
+                  streamHealth: "ok", // stream health is decided earlier this tick (see the early-return above) — reaching here already implies "ok".
+                  frameQuality: quality,
+                  person,
+                  noPersonConsecutiveCount: noPersonCount,
+                  noPersonStreakDurationMs,
+                  visibleConsecutiveCount: visibleCount,
+                  wasSustainedNoPersonVisible: wasSustainedNoPersonVisibleRef.current,
+                });
+            const visibilityRestoredCooldownOk = cooldown.canEmit("CAMERA_VISIBILITY_RESTORED", now, 60_000);
+            const restoredDecision = suppressStartup
+              ? { shouldEmit: false }
+              : decideVisibilityRestoredEmission(
+                  wasSustainedNoPersonVisibleRef.current,
+                  cameraIntegrityState === "CAMERA_VISIBILITY_RESTORED",
+                  visibilityRestoredCooldownOk,
+                );
 
             // Camera Startup Readiness v1 — counters above keep tracking
             // consecutive observations even during warm-up (so a signal
@@ -2351,8 +2608,23 @@ export default function TakeExamPage({
               ? { conditionMet: false, shouldEmit: false, confidenceBand: null }
               : decideSecondPersonEmission(person, secondPersonCount, secondPersonCooldownOk);
             noPersonDecision = suppressStartup
-              ? { conditionMet: false, shouldEmit: false }
-              : decideNoPersonEmission(person, noPersonCount, noPersonCooldownOk);
+              ? { conditionMet: false, shouldEmit: false, qualifier: null }
+              : decideNoPersonEmission(person, quality, noPersonCount, noPersonStreakDurationMs, noPersonCooldownOk);
+
+            // Task 6 hysteresis bookkeeping: latch on the tick a sustained
+            // absence is first CONFIRMED (independent of the backend
+            // cooldown, which must never suppress this internal state
+            // tracking), clear once CAMERA_VISIBILITY_RESTORED has
+            // actually been reported for it — reported below, alongside
+            // NO_PERSON_VISIBLE.
+            if (noPersonDecision.qualifier === "CONFIRMED") {
+              wasSustainedNoPersonVisibleRef.current = true;
+            }
+            if (restoredDecision.shouldEmit) {
+              cooldown.markEmitted("CAMERA_VISIBILITY_RESTORED", now);
+              reportIntegrityEvent("CAMERA_VISIBILITY_RESTORED", { source: "on_device_camera_ai" });
+              wasSustainedNoPersonVisibleRef.current = false;
+            }
 
             // Strengthened phone detection (multi-scale + temporal
             // tracking) — see docs/phone-detection-calibration-v1.md.
