@@ -8,7 +8,7 @@ import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
 import { isTetherSecureClientBypassAllowed } from "@/lib/secureClientAvailability";
 import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
-import { resolveExamAttestationMode, resolveEffectiveTetherVerification } from "@/lib/tetherAttestationConfig";
+import { parseAttestationRequirement, resolveEffectiveTetherVerification } from "@/lib/tetherAttestationConfig";
 
 export async function GET(
   _req: Request,
@@ -58,15 +58,15 @@ export async function GET(
       const currentSession = await getCurrentSessionForSubmission(submission.id);
       // Secure Client Attestation v2 — the real content-exposure gate.
       // See src/lib/tetherAttestationConfig.ts for the full
-      // LEGACY/DUAL/V2_REQUIRED truth table. Safe default (LEGACY)
-      // reproduces the exact prior behaviour byte-for-byte — no student
-      // can be locked out of an exam they could previously access merely
-      // because this pass exists.
+      // LEGACY/DUAL/V2_REQUIRED truth table. Reads the SESSION's own
+      // immutable requirement snapshot — never the live environment
+      // variable, and never any client-supplied version (closes the
+      // client-controlled-downgrade path the pre-Preview safety pass
+      // found in the previous design).
       const hasVerifiedTetherSession = resolveEffectiveTetherVerification({
-        mode: resolveExamAttestationMode(),
+        sessionRequirement: parseAttestationRequirement(currentSession?.attestationRequirement ?? null),
         legacyVerified: currentSession?.verificationStatus === "VERIFIED",
         v2Verified: currentSession?.installationAttestationVerified === true,
-        legacyClientVersion: currentSession?.clientVersion ?? null,
       });
       const devBypassAllowed = isTetherSecureClientBypassAllowed(submission.exam.institution?.slug ?? null);
       const gate = resolveSecureClientStartGate({ effectiveDeliveryMode: policy.deliveryMode, hasVerifiedTetherSession, devBypassAllowed });

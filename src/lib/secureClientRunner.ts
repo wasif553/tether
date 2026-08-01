@@ -27,6 +27,7 @@ import {
   signManifest,
   validateManifestContext,
 } from "@/lib/secureClient/secureLaunchManifest";
+import { resolveExamAttestationMode } from "@/lib/tetherAttestationConfig";
 import {
   overallStatusFromChecks,
   normaliseChecksForClientType,
@@ -534,6 +535,14 @@ async function getOrCreateSessionCore(tx: DbClient, params: GetOrCreateSessionPa
       verificationStatus: "NOT_CHECKED",
       manifestId: params.manifestId,
       policyHash: params.policyHash,
+      // Pre-Preview safety pass — snapshotted ONCE, here, at the moment
+      // this session is first created. Server-computed from the current
+      // environment resolver only — never recalculated later, never
+      // derived from any client-supplied value. See
+      // resolveEffectiveTetherVerification() in tetherAttestationConfig.ts,
+      // which reads this snapshot instead of the live environment
+      // variable for every subsequent request against this session.
+      attestationRequirement: resolveExamAttestationMode(),
     },
   });
 }

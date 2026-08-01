@@ -2,8 +2,9 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   ATTESTATION_PROTOCOL_VERSION,
   resolveExamAttestationMode,
-  isClientV2Capable,
+  parseAttestationRequirement,
   resolveEffectiveTetherVerification,
+  resolveMaxActiveInstallationsPerUser,
 } from "./tetherAttestationConfig";
 
 afterEach(() => {
@@ -43,40 +44,52 @@ describe("resolveExamAttestationMode", () => {
   });
 });
 
-describe("isClientV2Capable", () => {
-  it("null/missing version is never capable", () => {
-    expect(isClientV2Capable(null)).toBe(false);
+describe("parseAttestationRequirement — session snapshot parsing", () => {
+  it("null (session created before this column existed) is LEGACY", () => {
+    expect(parseAttestationRequirement(null)).toBe("LEGACY");
   });
-  it("a pre-1.5.0 client is not capable", () => {
-    expect(isClientV2Capable("1.4.0")).toBe(false);
-    expect(isClientV2Capable("1.3.0")).toBe(false);
+  it("unrecognised/malformed stored value is LEGACY, never re-derived from environment", () => {
+    expect(parseAttestationRequirement("garbage")).toBe("LEGACY");
+    expect(parseAttestationRequirement("")).toBe("LEGACY");
   });
-  it("1.5.0 and newer are capable", () => {
-    expect(isClientV2Capable("1.5.0")).toBe(true);
-    expect(isClientV2Capable("1.6.0")).toBe(true);
-    expect(isClientV2Capable("2.0.0")).toBe(true);
+  it("DUAL and V2_REQUIRED round-trip exactly", () => {
+    expect(parseAttestationRequirement("DUAL")).toBe("DUAL");
+    expect(parseAttestationRequirement("V2_REQUIRED")).toBe("V2_REQUIRED");
   });
 });
 
-describe("resolveEffectiveTetherVerification — mode truth table", () => {
-  it("LEGACY mode: only legacyVerified matters, v2Verified is ignored entirely", () => {
-    expect(resolveEffectiveTetherVerification({ mode: "LEGACY", legacyVerified: true, v2Verified: false, legacyClientVersion: "1.6.0" })).toBe(true);
-    expect(resolveEffectiveTetherVerification({ mode: "LEGACY", legacyVerified: false, v2Verified: true, legacyClientVersion: "1.6.0" })).toBe(false);
+describe("resolveMaxActiveInstallationsPerUser", () => {
+  it("defaults to 2", () => {
+    vi.stubEnv("TETHER_MAX_ACTIVE_INSTALLATIONS_PER_USER", "");
+    expect(resolveMaxActiveInstallationsPerUser()).toBe(2);
+  });
+  it("clamps to [1, 5]", () => {
+    vi.stubEnv("TETHER_MAX_ACTIVE_INSTALLATIONS_PER_USER", "0");
+    expect(resolveMaxActiveInstallationsPerUser()).toBe(1);
+    vi.stubEnv("TETHER_MAX_ACTIVE_INSTALLATIONS_PER_USER", "99");
+    expect(resolveMaxActiveInstallationsPerUser()).toBe(5);
+  });
+});
+
+describe("resolveEffectiveTetherVerification — session-snapshot truth table (no client-version input of any kind)", () => {
+  it("LEGACY requirement: only legacyVerified matters, v2Verified is ignored entirely", () => {
+    expect(resolveEffectiveTetherVerification({ sessionRequirement: "LEGACY", legacyVerified: true, v2Verified: false })).toBe(true);
+    expect(resolveEffectiveTetherVerification({ sessionRequirement: "LEGACY", legacyVerified: false, v2Verified: true })).toBe(false);
   });
 
-  it("DUAL mode + v2-capable client: BOTH legacy and v2 must be verified", () => {
-    expect(resolveEffectiveTetherVerification({ mode: "DUAL", legacyVerified: true, v2Verified: true, legacyClientVersion: "1.5.0" })).toBe(true);
-    expect(resolveEffectiveTetherVerification({ mode: "DUAL", legacyVerified: true, v2Verified: false, legacyClientVersion: "1.5.0" })).toBe(false);
-    expect(resolveEffectiveTetherVerification({ mode: "DUAL", legacyVerified: false, v2Verified: true, legacyClientVersion: "1.5.0" })).toBe(false);
+  it("DUAL requirement: BOTH legacy and v2 must be verified — unconditionally, no grandfathering by any version", () => {
+    expect(resolveEffectiveTetherVerification({ sessionRequirement: "DUAL", legacyVerified: true, v2Verified: true })).toBe(true);
+    expect(resolveEffectiveTetherVerification({ sessionRequirement: "DUAL", legacyVerified: true, v2Verified: false })).toBe(false);
+    expect(resolveEffectiveTetherVerification({ sessionRequirement: "DUAL", legacyVerified: false, v2Verified: true })).toBe(false);
   });
 
-  it("DUAL mode + pre-1.5.0 (v2-incapable) client: grandfathered on legacy alone", () => {
-    expect(resolveEffectiveTetherVerification({ mode: "DUAL", legacyVerified: true, v2Verified: false, legacyClientVersion: "1.3.0" })).toBe(true);
-    expect(resolveEffectiveTetherVerification({ mode: "DUAL", legacyVerified: true, v2Verified: false, legacyClientVersion: null })).toBe(true);
+  it("V2_REQUIRED requirement: only v2Verified matters, legacyVerified is ignored entirely", () => {
+    expect(resolveEffectiveTetherVerification({ sessionRequirement: "V2_REQUIRED", legacyVerified: false, v2Verified: true })).toBe(true);
+    expect(resolveEffectiveTetherVerification({ sessionRequirement: "V2_REQUIRED", legacyVerified: true, v2Verified: false })).toBe(false);
   });
 
-  it("V2_REQUIRED mode: only v2Verified matters, legacyVerified is ignored entirely", () => {
-    expect(resolveEffectiveTetherVerification({ mode: "V2_REQUIRED", legacyVerified: false, v2Verified: true, legacyClientVersion: null })).toBe(true);
-    expect(resolveEffectiveTetherVerification({ mode: "V2_REQUIRED", legacyVerified: true, v2Verified: false, legacyClientVersion: "1.6.0" })).toBe(false);
+  it("the function's own input type has no client-version field at all — a TypeScript-level guarantee, not just a runtime one", () => {
+    // @ts-expect-error — legacyClientVersion no longer exists on EffectiveTetherVerificationInput.
+    resolveEffectiveTetherVerification({ sessionRequirement: "DUAL", legacyVerified: true, v2Verified: true, legacyClientVersion: "1.0.0" });
   });
 });

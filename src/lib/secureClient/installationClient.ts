@@ -61,7 +61,14 @@ export async function ensureRegisteredInstallation(): Promise<string | null> {
     .catch(() => null);
   if (current?.installation?.id) return current.installation.id;
 
-  const challengeRes = await withTimeout(fetch("/api/tether/installation/registration-challenge", { method: "POST" }), INSTALLATION_CLIENT_TIMEOUT_MS).catch(() => null);
+  const challengeRes = await withTimeout(
+    fetch("/api/tether/installation/registration-challenge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ publicKey: keyInfo.publicKey }),
+    }),
+    INSTALLATION_CLIENT_TIMEOUT_MS,
+  ).catch(() => null);
   if (!challengeRes?.ok) return null;
   const { challenge, signature: challengeSignature } = await challengeRes.json();
 

@@ -1,28 +1,34 @@
 -- Secure Client Attestation v2 — EXAM_SESSION wiring into real exam
 -- sessions. See docs/tether-system-check-v1.md, "Real exam attestation —
--- installation-bound v2".
+-- installation-bound v2" and "Immutable per-session attestation
+-- requirement".
 --
 -- ALTERS the EXISTING "SecureClientSession" table (part of the original
 -- baseline schema, already live in Preview/Production — unlike the newer
 -- v2 tables, this table predates the "manual SQL only" discipline and has
--- no earlier docs/sql/*.sql file of its own). Adds FIVE new, entirely
+-- no earlier docs/sql/*.sql file of its own). Adds SIX new, entirely
 -- additive, nullable-or-defaulted columns plus one index and one advisory
 -- foreign key. Does not rename, drop, or change the type of any existing
 -- column; does not touch any other table. Existing rows get
 -- "installationAttestationVerified" = false and every other new column
--- NULL — never retroactively "verified".
+-- NULL — never retroactively "verified", never retroactively assigned an
+-- attestation requirement.
 --
--- These columns are evidence/outcome fields for the NEW v2 EXAM_SESSION
--- attestation path only. They are never read or written by the existing,
--- unmodified legacy attestation flow (recordAttestation() in
+-- Five of the six columns are evidence/outcome fields for the v2
+-- EXAM_SESSION attestation path. They are never read or written by the
+-- existing, unmodified legacy attestation flow (recordAttestation() in
 -- secureClientRunner.ts) — that flow continues to own
--- "status"/"verificationStatus" exactly as before. Whether v2 evidence
--- here actually gates real exam content access is decided entirely at
--- request time by resolveEffectiveTetherVerification()
--- (src/lib/secureClient/examAttestationMode.ts), governed by the
--- TETHER_EXAM_ATTESTATION_MODE environment variable — safe default
--- LEGACY, under which these new columns are recorded but have zero
--- effect on any access decision.
+-- "status"/"verificationStatus" exactly as before. The sixth,
+-- "attestationRequirement", is a pre-Preview-safety-pass addition:
+-- the resolved TETHER_EXAM_ATTESTATION_MODE snapshotted ONCE, server-side
+-- only, at the moment this session is first created — never recomputed
+-- from a later environment-variable change, never derived from any
+-- client-supplied value. Whether v2 evidence actually gates real exam
+-- content access is decided entirely at request time by
+-- resolveEffectiveTetherVerification() (src/lib/tetherAttestationConfig.ts),
+-- reading THIS column (falling back to "LEGACY" when NULL) rather than
+-- the live environment variable — safe default LEGACY, under which these
+-- new columns are recorded but have zero effect on any access decision.
 --
 -- Apply this file AFTER docs/sql/add-tether-client-installation.sql (the
 -- new foreign key references "TetherClientInstallation"."id").
@@ -37,12 +43,12 @@
 -- generated it.
 
 -- ---------------------------------------------------------------------------
--- Pre-application verification — run first. Expect the five new columns
+-- Pre-application verification — run first. Expect the six new columns
 -- to be ABSENT.
 -- ---------------------------------------------------------------------------
 -- SELECT column_name FROM information_schema.columns
 -- WHERE table_schema = 'public' AND table_name = 'SecureClientSession'
---   AND column_name LIKE 'installation%' OR column_name = 'clientInstallationId'
+--   AND (column_name LIKE 'installation%' OR column_name IN ('clientInstallationId', 'attestationRequirement'))
 -- ORDER BY column_name;
 -- (Expected: zero rows)
 
@@ -53,7 +59,8 @@ ALTER TABLE "public"."SecureClientSession"
     ADD COLUMN IF NOT EXISTS "installationAttestationVerified" BOOLEAN NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS "installationAttestationVerifiedAt" TIMESTAMP(3),
     ADD COLUMN IF NOT EXISTS "installationAttestationFailureReason" TEXT,
-    ADD COLUMN IF NOT EXISTS "installationVerificationId" TEXT;
+    ADD COLUMN IF NOT EXISTS "installationVerificationId" TEXT,
+    ADD COLUMN IF NOT EXISTS "attestationRequirement" TEXT;
 
 CREATE INDEX IF NOT EXISTS "SecureClientSession_clientInstallationId_idx"
     ON "public"."SecureClientSession" ("clientInstallationId");
@@ -79,9 +86,13 @@ COMMIT;
 -- WHERE table_schema = 'public' AND table_name = 'SecureClientSession'
 --   AND column_name IN ('clientInstallationId', 'installationAttestationVerified',
 --                        'installationAttestationVerifiedAt', 'installationAttestationFailureReason',
---                        'installationVerificationId')
+--                        'installationVerificationId', 'attestationRequirement')
 -- ORDER BY column_name;
--- (Expected: five rows)
+-- (Expected: six rows)
+--
+-- Existing rows never retroactively assigned a requirement:
+-- SELECT count(*) FROM "public"."SecureClientSession" WHERE "attestationRequirement" IS NOT NULL;
+-- (Expected: 0 immediately after applying)
 --
 -- SELECT indexname FROM pg_indexes
 -- WHERE schemaname = 'public' AND tablename = 'SecureClientSession'

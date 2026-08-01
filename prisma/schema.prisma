@@ -269,6 +269,8 @@ model User {
   systemCheckSecureClientVerifications SystemCheckSecureClientVerification[]
   // Secure Client Attestation v2 — see docs/tether-system-check-v1.md.
   tetherClientInstallations TetherClientInstallation[]
+  // Pre-Preview safety pass — see "Single-use registration challenges".
+  tetherInstallationRegistrationChallenges TetherInstallationRegistrationChallenge[]
 
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
@@ -2160,6 +2162,24 @@ model SecureClientSession {
   // for the latest successful v2 EXAM_SESSION attestation.
   installationVerificationId String?
 
+  // Pre-Preview safety pass — see docs/tether-system-check-v1.md,
+  // "Immutable per-session attestation requirement". The resolved
+  // TETHER_EXAM_ATTESTATION_MODE (LEGACY | DUAL | V2_REQUIRED), snapshotted
+  // ONCE by getOrCreateSessionCore at the moment this session is first
+  // created — server-computed from the environment resolver only, NEVER
+  // from any client-supplied value (in particular, never from the
+  // unsigned, renderer-controlled `clientVersion` field above). Read by
+  // resolveEffectiveTetherVerification() at every subsequent request
+  // instead of recomputing from the live environment variable, so (a) a
+  // later environment-variable change can never retroactively alter an
+  // already-in-progress session's access contract, and (b) DUAL's
+  // "legacy AND v2 both required" requirement can never be
+  // self-downgraded by a client claiming an older version. NULL for any
+  // session created before this column existed — treated as "LEGACY" by
+  // every reader (the safe, pre-v2 default), never re-derived from the
+  // current environment.
+  attestationRequirement String?
+
   manifestId String? @unique
 
   startedAt        DateTime  @default(now())
@@ -2421,6 +2441,31 @@ model SystemCheckSecureClientVerification {
   @@index([userId, createdAt])
   @@index([expiresAt])
   @@index([installationId])
+}
+
+// Pre-Preview safety pass — see docs/tether-system-check-v1.md,
+// "Single-use registration challenges". Records ONLY the atomic
+// CONSUMPTION of a registration challenge — never written at challenge
+// issuance time (that step is deliberately stateless, matching every
+// other short-lived signed challenge in this codebase). A row here
+// exists if and only if a registration challenge for this exact nonce
+// was successfully consumed; a second attempt with the same nonce fails
+// the unique constraint on nonceHash outright (registerInstallation
+// inserts this row inside the SAME transaction as creating the
+// TetherClientInstallation — both succeed together or neither does).
+// Deliberately minimal: no public key, no signature, no reusable token —
+// only enough to prove/audit that this specific challenge was consumed,
+// by whom, and for which key fingerprint.
+model TetherInstallationRegistrationChallenge {
+  id                   String   @id @default(cuid())
+  userId               String
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  publicKeyFingerprint String
+  nonceHash            String   @unique
+  consumedAt           DateTime @default(now())
+  createdAt            DateTime @default(now())
+
+  @@index([userId, createdAt])
 }
 
 // Secure Client Attestation v2 — see docs/tether-system-check-v1.md,

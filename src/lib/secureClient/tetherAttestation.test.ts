@@ -58,6 +58,7 @@ function baseRegistrationChallenge(overrides: Partial<RegistrationChallenge> = {
     notBefore: new Date(now).toISOString(),
     expiresAt: new Date(now + 5 * 60_000).toISOString(),
     nonce: generateAttestationNonce(),
+    publicKeyFingerprint: computePublicKeyFingerprint(installationAPublicKeyPem),
     ...overrides,
   };
 }
@@ -75,6 +76,7 @@ describe("registration challenge + proof of possession", () => {
     const result = validateRegistrationChallengeContext(challenge, signature, serverPublicKeyPem, {
       expectedAudience: "tether-installation-registration",
       expectedUserSubjectHash: computeUserSubjectHash("user-1"),
+      expectedPublicKeyFingerprint: computePublicKeyFingerprint(installationAPublicKeyPem),
       nowMs: Date.now(),
     });
     expect(result).toBe("VALID");
@@ -86,9 +88,35 @@ describe("registration challenge + proof of possession", () => {
     const result = validateRegistrationChallengeContext(challenge, signature, serverPublicKeyPem, {
       expectedAudience: "tether-installation-registration",
       expectedUserSubjectHash: computeUserSubjectHash("user-1"),
+      expectedPublicKeyFingerprint: computePublicKeyFingerprint(installationAPublicKeyPem),
       nowMs: Date.now(),
     });
     expect(result).toBe("WRONG_SUBJECT");
+  });
+
+  it("WRONG_PUBLIC_KEY if the challenge was issued for a different key than the one now being registered", () => {
+    const challenge = baseRegistrationChallenge({ publicKeyFingerprint: computePublicKeyFingerprint(installationBPublicKeyPem) });
+    const signature = signRegistrationChallenge(challenge, serverPrivateKeyPem);
+    const result = validateRegistrationChallengeContext(challenge, signature, serverPublicKeyPem, {
+      expectedAudience: "tether-installation-registration",
+      expectedUserSubjectHash: computeUserSubjectHash("user-1"),
+      expectedPublicKeyFingerprint: computePublicKeyFingerprint(installationAPublicKeyPem),
+      nowMs: Date.now(),
+    });
+    expect(result).toBe("WRONG_PUBLIC_KEY");
+  });
+
+  it("public-key-fingerprint tampering (post-signing) invalidates the signature", () => {
+    const challenge = baseRegistrationChallenge();
+    const signature = signRegistrationChallenge(challenge, serverPrivateKeyPem);
+    const tampered = { ...challenge, publicKeyFingerprint: computePublicKeyFingerprint(installationBPublicKeyPem) };
+    const result = validateRegistrationChallengeContext(tampered, signature, serverPublicKeyPem, {
+      expectedAudience: "tether-installation-registration",
+      expectedUserSubjectHash: computeUserSubjectHash("user-1"),
+      expectedPublicKeyFingerprint: computePublicKeyFingerprint(installationBPublicKeyPem),
+      nowMs: Date.now(),
+    });
+    expect(result).toBe("INVALID_SIGNATURE");
   });
 
   it("proof-of-possession: a signature over the challenge nonce verifies against the SAME keypair only", () => {

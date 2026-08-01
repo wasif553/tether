@@ -35,6 +35,7 @@ const challengeSchema = z.object({
   notBefore: z.string().min(1).max(64),
   expiresAt: z.string().min(1).max(64),
   nonce: z.string().min(1).max(512),
+  publicKeyFingerprint: z.string().min(1).max(200),
 });
 
 const bodySchema = z.object({
@@ -92,6 +93,9 @@ export async function POST(req: Request) {
   }
   if (result.outcome === "DUPLICATE_KEY") {
     return NextResponse.json({ registered: false, reason: "DUPLICATE_KEY" }, { status: 409 });
+  }
+  if (result.outcome === "CHALLENGE_ALREADY_CONSUMED") {
+    return NextResponse.json({ registered: false, reason: "CHALLENGE_ALREADY_CONSUMED" }, { status: 409 });
   }
   if (result.outcome === "LIMIT_REACHED") {
     return NextResponse.json(

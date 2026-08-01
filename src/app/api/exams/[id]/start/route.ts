@@ -26,7 +26,7 @@ import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/s
 import { isFinalExaminationPolicyEstablished } from "@/lib/assessmentType";
 import { systemCheckMode } from "@/lib/systemCheckConfig";
 import { evaluateFinalExamSystemCheckGate } from "@/lib/systemCheck/readiness";
-import { resolveExamAttestationMode, resolveEffectiveTetherVerification } from "@/lib/tetherAttestationConfig";
+import { parseAttestationRequirement, resolveEffectiveTetherVerification } from "@/lib/tetherAttestationConfig";
 
 // Tether launch/install flow v1 — Requirement 9 ("Production start
 // protection"). Additive response field: `{required: false}` for every
@@ -50,13 +50,14 @@ async function resolveSecureClientLaunchField(params: {
   const currentSession = await getCurrentSessionForSubmission(params.submissionId);
   // Secure Client Attestation v2 — see
   // src/lib/tetherAttestationConfig.ts for the full LEGACY/DUAL/V2_REQUIRED
-  // truth table this implements. Safe default (LEGACY) reproduces the
-  // exact prior behaviour byte-for-byte.
+  // truth table this implements. Reads the SESSION's own immutable
+  // requirement snapshot (attestationRequirement, set once at session
+  // creation) — never the live environment variable, and never any
+  // client-supplied version.
   const hasVerifiedTetherSession = resolveEffectiveTetherVerification({
-    mode: resolveExamAttestationMode(),
+    sessionRequirement: parseAttestationRequirement(currentSession?.attestationRequirement ?? null),
     legacyVerified: currentSession?.verificationStatus === "VERIFIED",
     v2Verified: currentSession?.installationAttestationVerified === true,
-    legacyClientVersion: currentSession?.clientVersion ?? null,
   });
   const devBypassAllowed = isTetherSecureClientBypassAllowed(params.institutionSlug);
   const gate = resolveSecureClientStartGate({ effectiveDeliveryMode, hasVerifiedTetherSession, devBypassAllowed });

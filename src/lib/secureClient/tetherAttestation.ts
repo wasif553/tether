@@ -75,6 +75,14 @@ export type RegistrationChallenge = {
   notBefore: string;
   expiresAt: string;
   nonce: string;
+  // Pre-Preview safety pass — binds this challenge to the SPECIFIC public
+  // key the client already generated locally before requesting it (the
+  // renderer always calls ensureInstallationKey() first — see
+  // src/lib/secureClient/installationClient.ts — so the key exists by
+  // this point). Structurally prevents completing registration with a
+  // DIFFERENT key than the one the challenge was issued for, even if an
+  // otherwise-valid challenge/signature pair is replayed.
+  publicKeyFingerprint: string;
 };
 
 export function canonicalRegistrationChallengeString(challenge: RegistrationChallenge): string {
@@ -102,6 +110,7 @@ export const VALIDATION_REASON_CODES = [
   "WRONG_SUBJECT",
   "INVALID_SIGNATURE",
   "UNSUPPORTED_PROTOCOL_VERSION",
+  "WRONG_PUBLIC_KEY",
 ] as const;
 export type ValidationReasonCode = (typeof VALIDATION_REASON_CODES)[number];
 
@@ -109,12 +118,13 @@ export function validateRegistrationChallengeContext(
   challenge: RegistrationChallenge,
   signatureBase64: string,
   publicKeyPem: string,
-  context: { expectedAudience: string; expectedUserSubjectHash: string; nowMs: number },
+  context: { expectedAudience: string; expectedUserSubjectHash: string; expectedPublicKeyFingerprint: string; nowMs: number },
 ): ValidationReasonCode {
   if (challenge.schemaVersion !== ATTESTATION_PROTOCOL_VERSION) return "UNSUPPORTED_PROTOCOL_VERSION";
   if (!verifyRegistrationChallengeSignature(challenge, signatureBase64, publicKeyPem)) return "INVALID_SIGNATURE";
   if (challenge.purpose !== REGISTRATION_PURPOSE) return "WRONG_PURPOSE";
   if (challenge.userSubjectHash !== context.expectedUserSubjectHash) return "WRONG_SUBJECT";
+  if (challenge.publicKeyFingerprint !== context.expectedPublicKeyFingerprint) return "WRONG_PUBLIC_KEY";
   const notBefore = Date.parse(challenge.notBefore);
   const expiresAt = Date.parse(challenge.expiresAt);
   if (Number.isFinite(notBefore) && context.nowMs < notBefore) return "NOT_YET_VALID";

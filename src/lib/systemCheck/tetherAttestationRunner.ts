@@ -62,6 +62,9 @@ export const ATTESTATION_CHALLENGE_TTL_SECONDS = 120;
 export const REGISTRATION_AUDIENCE = "tether-installation-registration";
 export const ATTESTATION_AUDIENCE = "tether-attestation";
 
+/** Internal sentinel — thrown ONLY when the TetherInstallationRegistrationChallenge nonceHash insert itself hits its unique constraint, so registerInstallation's outer catch can distinguish "this exact challenge was already consumed" from a genuinely duplicate public key without depending on Prisma's provider-specific P2002 error-metadata shape. Never exposed outside this module. */
+class ChallengeAlreadyConsumedError extends Error {}
+
 /**
  * Registration rate limit — bounds how many installations a single
  * authenticated user may successfully CREATE in a rolling window
@@ -99,8 +102,16 @@ export function isValidSystemCheckClientType(value: string): value is SystemChec
 // Installation registration (Part: "bootstrap and enrolment")
 // ---------------------------------------------------------------------------
 
-/** No database write — stateless, like the attestation challenge. */
-export function issueRegistrationChallenge(params: { userId: string }): { challenge: RegistrationChallenge; signature: string } {
+/**
+ * No database write at issuance — stateless, like the attestation
+ * challenge (single-use is enforced later, atomically, at CONSUMPTION
+ * time — see registerInstallation). Requires the caller's public key up
+ * front so the resulting challenge can bind
+ * `publicKeyFingerprint` — the renderer already has it by this point
+ * (it always calls ensureInstallationKey() before requesting a
+ * registration challenge — see src/lib/secureClient/installationClient.ts).
+ */
+export function issueRegistrationChallenge(params: { userId: string; publicKey: string }): { challenge: RegistrationChallenge; signature: string } {
   const now = new Date();
   const challenge: RegistrationChallenge = {
     schemaVersion: ATTESTATION_PROTOCOL_VERSION,
@@ -114,6 +125,7 @@ export function issueRegistrationChallenge(params: { userId: string }): { challe
     notBefore: now.toISOString(),
     expiresAt: new Date(now.getTime() + REGISTRATION_CHALLENGE_TTL_SECONDS * 1000).toISOString(),
     nonce: generateAttestationNonce(),
+    publicKeyFingerprint: computePublicKeyFingerprint(params.publicKey),
   };
   const signature = signRegistrationChallenge(challenge, getSigningPrivateKey());
   return { challenge, signature };
@@ -137,6 +149,7 @@ export type RegisterInstallationResult =
   | { outcome: "INVALID_CHALLENGE"; reason: ValidationReasonCode }
   | { outcome: "PROOF_OF_POSSESSION_INVALID" }
   | { outcome: "DUPLICATE_KEY" }
+  | { outcome: "CHALLENGE_ALREADY_CONSUMED" }
   | { outcome: "LIMIT_REACHED"; maxActiveInstallations: number }
   | { outcome: "RATE_LIMITED" };
 
@@ -176,27 +189,63 @@ export async function registerInstallation(params: RegisterInstallationParams): 
     return { outcome: "RATE_LIMITED" };
   }
 
+  const publicKeyFingerprint = computePublicKeyFingerprint(params.publicKey);
+
   const validation = validateRegistrationChallengeContext(params.challenge, params.challengeSignature, getSigningPublicKey(), {
     expectedAudience: REGISTRATION_AUDIENCE,
     expectedUserSubjectHash: computeUserSubjectHash(params.userId),
+    expectedPublicKeyFingerprint: publicKeyFingerprint,
     nowMs: Date.now(),
   });
   if (validation !== "VALID") {
     return { outcome: "INVALID_CHALLENGE", reason: validation };
   }
 
+  // Failed proof verification must never register an installation — this
+  // check, and everything above it, runs BEFORE the transaction that
+  // both consumes the challenge and creates the installation, so a
+  // failure here leaves the challenge unconsumed (and thus, unlike a
+  // successful registration, still theoretically retryable with a fresh
+  // proof attempt against the SAME challenge until it expires — which is
+  // fine: no installation is ever created without a genuinely valid
+  // proof, regardless of how many attempts against one challenge are
+  // made).
   if (!verifyRegistrationProofOfPossession(params.challenge.nonce, params.proofOfPossessionSignature, params.publicKey)) {
     return { outcome: "PROOF_OF_POSSESSION_INVALID" };
   }
 
-  const publicKeyFingerprint = computePublicKeyFingerprint(params.publicKey);
   const maxActiveInstallations = resolveMaxActiveInstallationsPerUser();
+  const nonceHash = hashNonce(params.challenge.nonce);
 
   try {
     const installationId = await prisma.$transaction(async (tx) => {
       const activeCount = await tx.tetherClientInstallation.count({ where: { userId: params.userId, status: "ACTIVE" } });
       if (activeCount >= maxActiveInstallations) {
         return null;
+      }
+      // Single-use enforcement: this INSERT is the atomic consumption
+      // gate. A concurrent or replayed second request for the SAME
+      // challenge hits the unique constraint on nonceHash here and the
+      // whole transaction (including the TetherClientInstallation
+      // create below) rolls back — "concurrent submissions accept at
+      // most one" holds by the same Postgres unique-index guarantee
+      // already relied on for attestation nonce replay protection.
+      //
+      // Caught and re-thrown as a distinct sentinel HERE (rather than
+      // disambiguated later from the generic P2002's error metadata,
+      // whose exact shape/target format is provider- and
+      // Prisma-version-dependent and not worth depending on) — the
+      // LOCATION of this catch is what unambiguously identifies which
+      // constraint fired, never string-matching.
+      try {
+        await tx.tetherInstallationRegistrationChallenge.create({
+          data: { userId: params.userId, publicKeyFingerprint, nonceHash },
+        });
+      } catch (challengeErr) {
+        if (challengeErr instanceof Prisma.PrismaClientKnownRequestError && challengeErr.code === "P2002") {
+          throw new ChallengeAlreadyConsumedError();
+        }
+        throw challengeErr;
       }
       const created = await tx.tetherClientInstallation.create({
         data: {
@@ -226,7 +275,14 @@ export async function registerInstallation(params: RegisterInstallationParams): 
     }).catch(() => {});
     return { outcome: "REGISTERED", installationId, publicKeyFingerprint };
   } catch (err) {
+    if (err instanceof ChallengeAlreadyConsumedError) {
+      return { outcome: "CHALLENGE_ALREADY_CONSUMED" };
+    }
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      // Only the TetherClientInstallation insert's own unique
+      // constraints (publicKeyFingerprint / (userId, publicKeyFingerprint))
+      // can reach this point — the challenge-consumption insert's P2002
+      // is already handled above.
       return { outcome: "DUPLICATE_KEY" };
     }
     throw err;

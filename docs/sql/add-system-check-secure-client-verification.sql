@@ -92,6 +92,7 @@ COMMIT;
 -- WHERE schemaname = 'public' AND tablename = 'SystemCheckSecureClientVerification'
 -- ORDER BY indexname;
 -- (Expected: SystemCheckSecureClientVerification_expiresAt_idx,
+--            SystemCheckSecureClientVerification_installationId_idx,
 --            SystemCheckSecureClientVerification_nonceHash_key,
 --            SystemCheckSecureClientVerification_pkey,
 --            SystemCheckSecureClientVerification_userId_createdAt_idx)

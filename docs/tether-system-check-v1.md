@@ -414,34 +414,41 @@ request time, by `resolveEffectiveTetherVerification()`
   deprecated) — v1.4.0 clients get `ATTESTATION_UNAVAILABLE` /
   `INSTALLATION_UNAVAILABLE`, never a silently-accepted weaker result.
 - `TETHER_EXAM_ATTESTATION_MODE` — the single central resolver
-  (`resolveExamAttestationMode()`) governing whether v2 evidence actually
-  gates real exam content access. Replaces the two independent booleans
-  (`TETHER_LEGACY_ATTESTATION_ALLOWED` / `TETHER_REQUIRE_EXAM_SESSION_V2`)
-  this document used to describe — neither was ever consumed by any real
-  enforcement code path, since that wiring didn't exist until this pass.
-  Consumed by `resolveEffectiveTetherVerification()`, called from BOTH
-  real enforcement points — `POST /api/exams/[id]/start` (decides whether
-  to redirect back into the Tether launch flow) and
+  (`resolveExamAttestationMode()`) consulted ONLY when a NEW
+  `SecureClientSession` is first created — see "Immutable per-session
+  attestation requirement" immediately below for why, and for the
+  pre-Preview safety pass that changed this from "read live at every
+  request" to "snapshotted once at creation". Replaces the two
+  independent booleans (`TETHER_LEGACY_ATTESTATION_ALLOWED` /
+  `TETHER_REQUIRE_EXAM_SESSION_V2`) this document used to describe —
+  neither was ever consumed by any real enforcement code path, since
+  that wiring didn't exist until this pass. The snapshotted requirement
+  is read by `resolveEffectiveTetherVerification()`, called from BOTH
+  real enforcement points — `POST /api/exams/[id]/start` (decides
+  whether to redirect back into the Tether launch flow) and
   `GET /api/submissions/[id]` (the actual content-exposure gate). Truth
   table:
 
-  | Mode | `hasVerifiedTetherSession` is true when… |
+  | Session's snapshotted requirement | `hasVerifiedTetherSession` is true when… |
   | --- | --- |
-  | `LEGACY` (safe default; any unrecognised value also falls back here) | `SecureClientSession.verificationStatus === "VERIFIED"` (the legacy flow) alone. v2 evidence is recorded but has zero effect. |
-  | `DUAL` | If the LEGACY-reported `clientVersion` is `>= 1.5.0` (i.e. new enough to have EVER been able to attempt v2): legacy `VERIFIED` **AND** `installationAttestationVerified`. If the reported version is older (or unknown — genuinely cannot produce v2 evidence): legacy `VERIFIED` alone (grandfathered). |
+  | `LEGACY` (safe default; any unrecognised or missing snapshot also falls back here) | `SecureClientSession.verificationStatus === "VERIFIED"` (the legacy flow) alone. v2 evidence is recorded but has zero effect. |
+  | `DUAL` | legacy `VERIFIED` **AND** `installationAttestationVerified` — unconditionally, for EVERY session snapshotted DUAL. There is no grandfathering by reported client version of any kind — see "Immutable per-session attestation requirement". |
   | `V2_REQUIRED` | `installationAttestationVerified` alone — legacy `VERIFIED` is ignored entirely. |
 
 - **Transition plan**: Phase 1 (commit `a0be316`) — `EXAM_SESSION` v2
-  built as additive groundwork only, nothing reads it. Phase 2 (this
-  pass) — v2 wired into the real decision via
+  built as additive groundwork only, nothing reads it. Phase 2 (commit
+  `5f285ec`) — v2 wired into the real decision via
   `TETHER_EXAM_ATTESTATION_MODE`, safe default `LEGACY` (zero behaviour
-  change from Phase 1 for every existing student). Phase 3 (future,
-  after physical Preview validation on real Tether Secure Browser
-  installs — see "First-pilot settings") — switch Preview to `DUAL`.
-  Phase 4 (future, after a full pilot with `DUAL` and no incidents) —
-  consider `V2_REQUIRED` for new final examinations. **This pass does
-  not enable `DUAL` or `V2_REQUIRED` in Production** — see "First-pilot
-  settings" below for the exact recommended values.
+  change for every existing student), but the mode was re-read LIVE at
+  every request — see the pre-Preview safety pass below for why that was
+  corrected. Phase 3 (this pass) — the requirement is snapshotted once,
+  server-side, at session creation, closing a client-controlled-downgrade
+  path. Phase 4 (future, after physical Preview validation on real
+  Tether Secure Browser installs — see "First-pilot settings") — switch
+  Preview to `DUAL`. Phase 5 (future, after a full pilot with `DUAL` and
+  no incidents) — consider `V2_REQUIRED` for new final examinations.
+  **This pass does not enable `DUAL` or `V2_REQUIRED` in Production** —
+  see "First-pilot settings" below for the exact recommended values.
 - Forced client upgrade: setting `TETHER_MINIMUM_SUPPORTED_VERSION` to
   `1.5.0` (the default) already reports any older client as `BLOCKED`
   for the readiness check; the EXAM_SESSION v2 challenge additionally
@@ -467,6 +474,53 @@ one bit — the real exam still requires its own genuine, submission-bound
 
 A first-time student can now reach overall `READY` on their very first
 standalone check, with zero prior exam activity.
+
+### Immutable per-session attestation requirement
+
+**Pre-Preview safety pass — closes a client-controlled downgrade path.**
+The original `TETHER_EXAM_ATTESTATION_MODE` wiring (commit `5f285ec`)
+re-derived DUAL mode's "is this client new enough to also require v2"
+decision from `SecureClientSession.clientVersion` — a column written
+completely UNSIGNED by the legacy attestation route
+(`recordAttestation()` in `secureClientRunner.ts`), straight from the
+renderer-supplied `POST` body. A modified client could simply claim an
+old `clientVersion` (or omit it, or manipulate the stored column
+directly) and downgrade itself to legacy-only treatment even under
+DUAL, bypassing the v2 requirement entirely.
+
+**Fix:** `SecureClientSession` gained a sixth additive column,
+`attestationRequirement` (`docs/sql/add-secure-client-session-installation-attestation.sql`,
+updated in place — see `docs/tether-attestation-v2-sql-rollout.md`).
+`getOrCreateSessionCore` (the SOLE real session-creation path — every
+other `SecureClientSession.create` call in this codebase is test-only)
+snapshots `resolveExamAttestationMode()`'s result onto this column
+**once**, at the moment the session is first created, server-side only.
+`resolveEffectiveTetherVerification()` was rewritten to accept this
+snapshot (via `parseAttestationRequirement`, which treats `NULL` — every
+session created before this column existed — as `LEGACY`) instead of a
+live `mode` + `legacyClientVersion` pair. **The function's input type no
+longer has a client-version field of any kind** — this is a
+compile-time guarantee, not just a runtime one; see the
+`resolveEffectiveTetherVerification` tests in `tetherAttestationConfig.test.ts`
+for the `@ts-expect-error` proof.
+
+**Consequences, all proven by tests in `tetherSystemCheck.routes.test.ts`
+("TETHER_EXAM_ATTESTATION_MODE — real enforcement wiring"):**
+- A DUAL-snapshotted session cannot be downgraded by claiming any
+  `clientVersion` in the (still-unsigned) legacy attestation body — not
+  `1.4.9`, not omitted entirely, not even by directly manipulating the
+  stored column to an arbitrary value.
+- A session's snapshot is genuinely immutable: a LEGACY-snapshotted
+  session stays LEGACY (and keeps granting access on legacy alone) even
+  if the environment is later changed to DUAL; a DUAL-snapshotted
+  session stays DUAL (and keeps requiring v2) even if the environment is
+  later changed back to LEGACY. An environment-variable change only ever
+  affects sessions created AFTER the change.
+- An incompatible client (one whose genuinely SIGNED v2 client version
+  is below the challenge's own required minimum) receives a
+  deterministic, distinguishable `CLIENT_VERSION_UNSUPPORTED` result —
+  never a silent grandfathering, never an indistinguishable generic
+  block.
 
 ### Session model
 
@@ -551,19 +605,24 @@ immediately following usability task.
 - **Server nonce proof of possession** — unchanged from `a0be316`:
   registration requires signing the registration challenge's nonce with
   the newly generated key, verified against the submitted public key.
-- **Nonce short-lived** — `REGISTRATION_CHALLENGE_TTL_SECONDS = 120`.
-  **Known limitation on single-use**: unlike the purpose-bound
-  attestation challenge (which tracks nonce consumption via a unique DB
-  index), the registration challenge is stateless and does not itself
-  track single-use — within its 120-second window, the SAME challenge
-  could theoretically be used to register more than one NEW key (each
-  still independently proving possession of a genuinely different
-  private key). This is bounded by the multi-device active-count limit
-  and requires the same authenticated session throughout; it does not
-  allow re-registering the same key twice (`DUPLICATE_KEY`) or bypass
-  authentication/ownership. Documented here rather than closed with a
-  new persistent nonce-tracking table, to avoid materially expanding
-  this pass's scope for a narrowly-bounded gap.
+- **Nonce short-lived AND single-use** — `REGISTRATION_CHALLENGE_TTL_SECONDS = 120`.
+  **Pre-Preview safety pass fix**: the registration challenge previously
+  had no single-use enforcement at all — within its TTL window, the SAME
+  challenge could be replayed to register more than one key. This is now
+  closed: the challenge is bound to the SPECIFIC public key the client
+  already generated locally (`RegistrationChallenge.publicKeyFingerprint`,
+  checked against the submitted key — a mismatch is `WRONG_PUBLIC_KEY`),
+  and a new minimal table, `TetherInstallationRegistrationChallenge`
+  (`userId`, `publicKeyFingerprint`, `nonceHash` UNIQUE, `consumedAt`),
+  is written ONLY at atomic consumption time — inside the SAME
+  transaction as creating the `TetherClientInstallation` row, so both
+  succeed together or neither does. A second attempt with the same
+  nonce fails the unique constraint outright (`CHALLENGE_ALREADY_CONSUMED`,
+  409) and — by the same Postgres unique-index guarantee already relied
+  on for attestation-nonce replay protection — concurrent submissions of
+  the identical challenge accept at most one. Failed proof-of-possession
+  verification happens entirely BEFORE this transaction, so it never
+  registers an installation or consumes the challenge either.
 - **Reject duplicate fingerprints** — `publicKeyFingerprint` is unique;
   a second registration of the same key fails outright (`DUPLICATE_KEY`).
 - **Reject `TPM_ATTESTED` claims and unknown protection levels** —
@@ -819,26 +878,27 @@ database (see `docs/migration-ledger.md`) — schema changes are never
 applied via `prisma db push`/`migrate`, only via a hand-written additive
 SQL file applied manually through the Supabase SQL Editor.
 
-**Files:**
-- `docs/sql/add-tether-system-check-readiness.sql` (`TetherSystemCheckRun`)
-- `docs/sql/add-system-check-secure-client-verification.sql`
-  (`SystemCheckSecureClientVerification`, now including the required
-  `installationId` column added by Secure Client Attestation v2)
-- `docs/sql/add-tether-client-installation.sql` (`TetherClientInstallation`
-  — Secure Client Attestation v2; apply this one first, or together with
-  the one above, since it is the more intuitive order even though
-  `installationId` has no enforced foreign key)
-- `docs/sql/add-secure-client-session-installation-attestation.sql` —
-  **ALTERS the pre-existing, already-live `SecureClientSession` table**
-  (unlike the three above, this is not a new table — see its own doc
-  comment). Adds five additive columns plus one index and one foreign
-  key to `TetherClientInstallation`. Apply AFTER
-  `add-tether-client-installation.sql` (the new foreign key references
-  it).
+**Authoritative manifest: `docs/tether-attestation-v2-sql-rollout.md`.**
+That document is the single source of truth for the complete, current
+list of SQL files this feature requires, their required execution
+order, per-file dependencies, and pre/post-application verification
+queries — it was produced by inspecting the full `git log`/`git diff`
+history for `docs/sql/` and `prisma/schema.prisma` against `origin/main`,
+not assembled from memory. The short summary below is kept only as a
+pointer; if the two ever disagree, the manifest is authoritative.
 
-Apply all three the same way, independently (none strictly depends on
-another at the SQL level, since advisory pointers are used throughout
-rather than foreign keys — see each file's own doc comment):
+**Files (five, in required order):**
+1. `docs/sql/add-tether-system-check-readiness.sql` (`TetherSystemCheckRun`)
+2. `docs/sql/add-tether-client-installation.sql` (`TetherClientInstallation`)
+3. `docs/sql/add-system-check-secure-client-verification.sql`
+   (`SystemCheckSecureClientVerification`)
+4. `docs/sql/add-tether-installation-registration-challenge.sql`
+   (`TetherInstallationRegistrationChallenge` — pre-Preview safety pass)
+5. `docs/sql/add-secure-client-session-installation-attestation.sql` —
+   **ALTERS the pre-existing, already-live `SecureClientSession` table**
+   (the only ALTER, not a CREATE, in this list). Has a **hard**
+   dependency on file 2 (its foreign key references
+   `TetherClientInstallation.id`) — must be applied after it.
 
 1. Open the Supabase SQL Editor for the shared Preview/Production
    database.
@@ -855,8 +915,9 @@ rather than foreign keys — see each file's own doc comment):
 6. Add one line per file to `docs/migration-ledger.md`'s "Confirmed
    applied" list once done.
 
-Neither file was applied by the assistant that generated it — apply
-manually after review, per this project's standing safety rule.
+None of these files was applied by the assistant that generated them —
+apply manually, in order, after review, per this project's standing
+safety rule.
 
 ## Release and rollback
 
@@ -897,29 +958,58 @@ manually after review, per this project's standing safety rule.
 
 **Document only — none of this is deployed or enabled by this pass.**
 
-- Recommended for the first pilot: `TETHER_SYSTEM_CHECK_MODE=WARN`,
-  `TETHER_EXAM_ATTESTATION_MODE=LEGACY` (both are the safe defaults —
-  effectively "document the intended starting point", not a change from
-  what an unset environment already does).
-- After physical validation on Preview with a real, packaged v1.6.0
-  Tether Secure Browser install (see "Manual Tether test plan" in the
-  final report) — advance Preview to `TETHER_EXAM_ATTESTATION_MODE=DUAL`.
-- **Do not recommend** `TETHER_EXAM_ATTESTATION_MODE=V2_REQUIRED` or
-  `TETHER_SYSTEM_CHECK_MODE=REQUIRE` until BOTH physical multi-device
-  validation (registering two real installations, revoking one,
-  confirming the other still works) and compatibility testing (a
-  pre-1.5.0-reporting client correctly grandfathered under `DUAL`) are
-  complete on real hardware — neither can be fully verified from this
-  development environment (no physical Windows multi-monitor hardware
-  or a second physical machine available here — see "Known
-  limitations").
-- **Rollback plan**: at any point, setting
-  `TETHER_EXAM_ATTESTATION_MODE` back to `LEGACY` (or removing it
-  entirely) immediately reverts every exam session's verification
-  decision to the legacy `recordAttestation()` flow alone, with zero
-  code deploy needed — v2 evidence keeps being recorded but stops
-  mattering. This is symmetric with `TETHER_SYSTEM_CHECK_MODE=OFF` for
-  the system-check feature.
+First-pilot Preview settings:
+
+```
+TETHER_SYSTEM_CHECK_MODE=WARN
+TETHER_EXAM_ATTESTATION_MODE=LEGACY
+TETHER_MAX_ACTIVE_INSTALLATIONS_PER_USER=2
+```
+
+All three are the safe defaults — this is "document the intended
+starting point", not a change from what an unset environment already
+does. Because `TETHER_EXAM_ATTESTATION_MODE` is now only consulted at
+NEW-session creation (see "Immutable per-session attestation
+requirement"), changing it later never disturbs a session already
+in progress.
+
+**Rollout sequence:**
+
+1. `LEGACY` on Preview, with v2 evidence collected for every new session
+   (recorded, not gating — see "Compatibility and rollout").
+2. Physical validation of a real, packaged v1.6.x Tether Secure Browser
+   install (see "Manual Tether test plan" in the corresponding report).
+3. `DUAL` for NEWLY CREATED Preview sessions only — existing in-progress
+   sessions keep their `LEGACY` snapshot untouched.
+4. Physical `DUAL` validation (a genuine v1.6.x install completing both
+   legacy and v2 successfully; multi-device registration/revocation
+   working; a below-minimum client receiving the deterministic
+   `CLIENT_VERSION_UNSUPPORTED` result rather than being silently
+   admitted).
+5. `LEGACY` rollout to Production (zero behaviour change from today).
+6. `DUAL` for Production only after the same compatibility evidence
+   gathered in steps 2 and 4 has been reviewed.
+7. `V2_REQUIRED` **remains disabled** — not recommended in this pass, in
+   either environment.
+
+**Do not recommend** `TETHER_EXAM_ATTESTATION_MODE=V2_REQUIRED` or
+`TETHER_SYSTEM_CHECK_MODE=REQUIRE` until steps 1–6 above are complete —
+neither can be fully verified from this development environment (no
+physical Windows multi-monitor hardware or a second physical machine
+available here — see "Known limitations").
+
+**Rollback plan**: at any point, setting `TETHER_EXAM_ATTESTATION_MODE`
+back to `LEGACY` (or removing it entirely) immediately reverts every
+NEWLY CREATED exam session's verification decision to the legacy
+`recordAttestation()` flow alone, with zero code deploy needed — v2
+evidence keeps being recorded but stops mattering for new sessions.
+Sessions already created under `DUAL` before the rollback keep their
+`DUAL` snapshot (by design — see "Immutable per-session attestation
+requirement") and continue requiring v2 until they end; this is
+intentional, not a gap — reverting the environment variable must never
+retroactively make an already-admitted-under-DUAL session's evidentiary
+record inconsistent with what it actually required. This is symmetric
+with `TETHER_SYSTEM_CHECK_MODE=OFF` for the system-check feature.
 
 ## Windows compatibility statement
 
@@ -1003,10 +1093,10 @@ Tether-Secure-Browser code paths.
   (`POST /api/tether/installation/[id]/revoke`). An institution wanting
   to revoke a specific student's installation (e.g. a shared lab
   computer flagged for reuse) would need direct database access today.
-- **Registration-challenge single-use is not independently tracked** —
-  see "Registration hardening" for the exact, narrowly-bounded gap and
-  why it was left as a documented limitation rather than closed with a
-  new persistent nonce table this pass.
+- ~~Registration-challenge single-use is not independently tracked~~ —
+  **fixed** by the pre-Preview safety pass; see "Registration
+  hardening" for `TetherInstallationRegistrationChallenge` and the
+  atomic consumption transaction.
 - **No large device-management dashboard** — multi-device support
   (registration up to a configurable limit, self-service revocation,
   `GET installation/list`) is complete server-side, but a polished
