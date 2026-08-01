@@ -90,6 +90,22 @@ describe("describeRevocationFailure", () => {
     expect(describeRevocationFailure("ACTIVE_EXAM_IN_PROGRESS")).not.toBe("ACTIVE_EXAM_IN_PROGRESS");
     expect(describeRevocationFailure("NOT_FOUND")).not.toBe("NOT_FOUND");
   });
+
+  it("ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE matches the exact required wording and never exposes internal terminology", () => {
+    const message = describeRevocationFailure("ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE");
+    expect(message).toBe("Tether computer access cannot be changed while your secure examination is in progress.");
+    expect(message).not.toBe("ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE");
+    expect(message.toLowerCase()).not.toContain("legacy");
+    expect(message.toLowerCase()).not.toContain("v2");
+    expect(message.toLowerCase()).not.toContain("attestation");
+    expect(message.toLowerCase()).not.toContain("session");
+  });
+
+  it("the two active-exam messages are distinct", () => {
+    expect(describeRevocationFailure("ACTIVE_EXAM_IN_PROGRESS")).not.toBe(
+      describeRevocationFailure("ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE"),
+    );
+  });
 });
 
 describe("buildRevokeConfirmCopy", () => {

@@ -53,6 +53,8 @@ export function describeRevocationFailure(code: string): string {
   switch (code) {
     case "ACTIVE_EXAM_IN_PROGRESS":
       return "This computer cannot be removed while a secure examination is in progress.";
+    case "ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE":
+      return "Tether computer access cannot be changed while your secure examination is in progress.";
     case "NOT_FOUND":
       return "This computer could not be found. It may have already been removed.";
     case "NETWORK_ERROR":

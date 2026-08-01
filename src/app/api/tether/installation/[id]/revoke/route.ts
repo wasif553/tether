@@ -34,6 +34,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (result.outcome === "ACTIVE_EXAM_IN_PROGRESS") {
     return NextResponse.json({ revoked: false, reason: "ACTIVE_EXAM_IN_PROGRESS" }, { status: 409 });
   }
+  if (result.outcome === "ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE") {
+    return NextResponse.json({ revoked: false, reason: "ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE" }, { status: 409 });
+  }
   return NextResponse.json({ revoked: true, installationId: result.installation.id });
 }
 

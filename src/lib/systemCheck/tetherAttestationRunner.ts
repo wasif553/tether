@@ -55,7 +55,7 @@ import { isValidDisplayTopologyClassification, evaluateDisplayTopology, evaluate
 import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 import { computePolicyHash } from "@/lib/secureClient/secureLaunchManifest";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
-import { resolveMaxActiveInstallationsPerUser } from "@/lib/tetherAttestationConfig";
+import { resolveMaxActiveInstallationsPerUser, parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
 
 export const REGISTRATION_CHALLENGE_TTL_SECONDS = 120;
 export const ATTESTATION_CHALLENGE_TTL_SECONDS = 120;
@@ -300,27 +300,17 @@ export async function loadOwnedInstallation(installationId: string, userId: stri
 const NON_TERMINAL_SESSION_STATUSES = ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] as const;
 
 /**
- * Device management UI v1 — "Active exam safety". True if this
- * installation is CURRENTLY bound (via SecureClientSession.clientInstallationId,
- * populated only by a genuine v2 EXAM_SESSION attestation — see
- * verifyExamSessionAttestation above) to a non-terminal secure-client
- * session whose submission is still IN_PROGRESS.
- *
- * KNOWN LIMITATION, documented rather than silently assumed away: this
- * binding only exists for sessions that have completed at least one v2
- * EXAM_SESSION attestation. Under the safe-default LEGACY compatibility
- * mode (see tetherAttestationConfig.ts), a session verified purely via
- * the legacy recordAttestation() flow never populates
- * clientInstallationId at all, so this check cannot detect that case —
- * revoking the installation behind a LEGACY-only active exam is not
- * blocked by this function. This is the narrowest safe server-side block
- * the current data model supports without inventing a new, independently
- * maintained "which installation is this session using" signal; closing
- * the LEGACY-mode gap would require wiring installation identity into
- * the legacy attestation path itself, which is out of scope for this
- * pass (see docs/tether-system-check-v1.md, "Known limitations").
+ * Device management UI v1 — "Active exam safety", installation-specific
+ * branch. Returns the id of a non-terminal secure-client session (whose
+ * submission is still IN_PROGRESS) that is CURRENTLY bound to this exact
+ * installation via SecureClientSession.clientInstallationId — populated
+ * only by a genuine v2 EXAM_SESSION attestation, see
+ * verifyExamSessionAttestation above — or null if none exists. Precise:
+ * never blocks a DIFFERENT installation than the one actually carrying
+ * the active session (see resolveActiveExamRevocationBlock below for how
+ * this composes with the LEGACY-mode conservative check).
  */
-async function isInstallationBoundToActiveExam(installationId: string): Promise<boolean> {
+async function findActiveBoundExamSessionId(installationId: string): Promise<string | null> {
   const activeSession = await prisma.secureClientSession.findFirst({
     where: {
       clientInstallationId: installationId,
@@ -329,13 +319,105 @@ async function isInstallationBoundToActiveExam(installationId: string): Promise<
     },
     select: { id: true },
   });
-  return activeSession !== null;
+  return activeSession?.id ?? null;
+}
+
+/**
+ * Device management UI v1 — "Active exam safety", conservative LEGACY-mode
+ * branch. Closes the gap findActiveBoundExamSessionId cannot see: under
+ * the safe-default LEGACY attestation mode, a real in-progress exam's
+ * SecureClientSession never populates clientInstallationId at all (only a
+ * genuine v2 EXAM_SESSION attestation does that), so the installation-
+ * specific check above is structurally blind to it. Rather than leaving
+ * that student able to revoke any installation mid-exam, this scans for
+ * ANY non-terminal, still-unbound, LEGACY-snapshotted session belonging to
+ * this student whose submission requires Tether
+ * (secureClientPolicySnapshotJson.deliveryMode === "TETHER_CLIENT_REQUIRED")
+ * and is still IN_PROGRESS — deliberately account-wide, not installation-
+ * specific, because the data model has no way to know which installation
+ * a LEGACY-only session is actually running on. Returns the blocking
+ * session's id, or null if no such session exists.
+ *
+ * Deliberately narrow in four ways so this can never over-block:
+ *  - `verificationStatus` must be exactly "VERIFIED" — the same
+ *    authoritative signal resolveEffectiveTetherVerification's own
+ *    `legacyVerified` input reads (SecureClientSession.verificationStatus
+ *    === "VERIFIED"). A session row that merely exists because the
+ *    student started the exam, but has never actually completed the
+ *    legacy attestation flow, is not yet "an active examination in
+ *    progress" in any sense that matters here — it grants no content
+ *    access either, so there is nothing real to protect yet.
+ *  - `attestationRequirement` must resolve (via parseAttestationRequirement,
+ *    the same reader used everywhere else — NULL/garbage values are
+ *    treated as LEGACY, matching the safe default) to exactly "LEGACY".
+ *    A DUAL- or V2_REQUIRED-snapshotted session that hasn't produced v2
+ *    evidence yet is not "verified" for content access either way
+ *    (resolveEffectiveTetherVerification), so it is intentionally left to
+ *    the ordinary installation-specific path once it does.
+ *  - Only sessions with `clientInstallationId: null` are considered — the
+ *    moment a session gains a real v2 binding, it is exclusively governed
+ *    by findActiveBoundExamSessionId above, never double-counted here.
+ *  - The submission's own immutable policy snapshot must show
+ *    TETHER_CLIENT_REQUIRED — an ordinary STANDARD_WEB/MONITORED_WEB
+ *    assessment, or one merely offering Tether as optional, never blocks
+ *    revocation of anything.
+ */
+async function findLegacyTetherRequiredActiveSessionId(userId: string): Promise<string | null> {
+  const candidates = await prisma.secureClientSession.findMany({
+    where: {
+      studentId: userId,
+      clientInstallationId: null,
+      status: { in: [...NON_TERMINAL_SESSION_STATUSES] },
+      clientType: { in: [...SYSTEM_CHECK_CLIENT_TYPES] },
+      verificationStatus: "VERIFIED",
+      submission: { status: "IN_PROGRESS" },
+    },
+    select: { id: true, attestationRequirement: true, submission: { select: { secureClientPolicySnapshotJson: true } } },
+  });
+  for (const candidate of candidates) {
+    if (parseAttestationRequirement(candidate.attestationRequirement) !== "LEGACY") continue;
+    const policy = parseSecureClientPolicy(candidate.submission.secureClientPolicySnapshotJson);
+    if (policy.deliveryMode === "TETHER_CLIENT_REQUIRED") return candidate.id;
+  }
+  return null;
+}
+
+export type ActiveExamRevocationBlock =
+  | { blocked: false }
+  | { blocked: true; kind: "INSTALLATION_BOUND"; sessionId: string }
+  | { blocked: true; kind: "LEGACY_ACCOUNT_WIDE"; sessionId: string };
+
+/**
+ * Single deterministic decision point for "may this installation be
+ * revoked right now" — composes the two checks above. Installation-bound
+ * (v2) is checked first and is always precise, regardless of the
+ * installation's own status (an installation can only ever be v2-bound to
+ * an active session while it is ACTIVE — attestation requires an ACTIVE
+ * installation, and revoking one that WAS bound already goes through this
+ * same gate — so this can never fire against a REVOKED installation in
+ * practice, but is left unconditional to match the historical guarantee
+ * exactly). The conservative LEGACY-mode check only ever applies to
+ * installations that are still ACTIVE — a REVOKED/REPLACED installation
+ * has nothing left to protect, and gating it here would only make a
+ * harmless idempotent re-revoke behave inconsistently.
+ */
+async function resolveActiveExamRevocationBlock(installationId: string, userId: string, installationStatus: string): Promise<ActiveExamRevocationBlock> {
+  const boundSessionId = await findActiveBoundExamSessionId(installationId);
+  if (boundSessionId) return { blocked: true, kind: "INSTALLATION_BOUND", sessionId: boundSessionId };
+
+  if (installationStatus !== "ACTIVE") return { blocked: false };
+
+  const legacySessionId = await findLegacyTetherRequiredActiveSessionId(userId);
+  if (legacySessionId) return { blocked: true, kind: "LEGACY_ACCOUNT_WIDE", sessionId: legacySessionId };
+
+  return { blocked: false };
 }
 
 export type RevokeInstallationResult =
   | { outcome: "REVOKED"; installation: NonNullable<Awaited<ReturnType<typeof loadOwnedInstallation>>> }
   | { outcome: "NOT_FOUND" }
-  | { outcome: "ACTIVE_EXAM_IN_PROGRESS" };
+  | { outcome: "ACTIVE_EXAM_IN_PROGRESS" }
+  | { outcome: "ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE" };
 
 /**
  * The student's own self-service "log out this device" action — used
@@ -344,26 +426,31 @@ export type RevokeInstallationResult =
  * revocation UI is out of scope for this pass (see "Known limitations").
  *
  * Device management UI v1 — refuses to revoke an installation currently
- * carrying an active examination session (see
- * isInstallationBoundToActiveExam above and its own documented
- * limitation). A blocked attempt is itself audited, distinctly from a
- * successful revocation, so an unusual pattern of blocked attempts is
+ * carrying an active examination session, precisely (v2-bound) or, under
+ * LEGACY mode, conservatively account-wide (see
+ * resolveActiveExamRevocationBlock above for the exact policy). A blocked
+ * attempt is itself audited, distinctly from a successful revocation and
+ * distinctly per block kind, so an unusual pattern of blocked attempts is
  * reviewable later.
  */
 export async function revokeInstallation(installationId: string, userId: string, reason: string): Promise<RevokeInstallationResult> {
   const owned = await loadOwnedInstallation(installationId, userId);
   if (!owned) return { outcome: "NOT_FOUND" };
 
-  if (await isInstallationBoundToActiveExam(installationId)) {
+  const block = await resolveActiveExamRevocationBlock(installationId, userId, owned.status);
+  if (block.blocked) {
     await createPlatformAuditLog({
       actorId: userId,
-      action: "TETHER_INSTALLATION_REVOCATION_BLOCKED_ACTIVE_EXAM",
+      action:
+        block.kind === "INSTALLATION_BOUND"
+          ? "TETHER_INSTALLATION_REVOCATION_BLOCKED_ACTIVE_EXAM"
+          : "TETHER_INSTALLATION_REVOCATION_BLOCKED_LEGACY_ACTIVE_EXAM",
       targetType: "TetherClientInstallation",
       targetId: installationId,
       institutionId: owned.institutionId,
-      metadata: { reason },
+      metadata: { reason, activeSecureClientSessionId: block.sessionId },
     }).catch(() => {});
-    return { outcome: "ACTIVE_EXAM_IN_PROGRESS" };
+    return { outcome: block.kind === "INSTALLATION_BOUND" ? "ACTIVE_EXAM_IN_PROGRESS" : "ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE" };
   }
 
   const revoked = await prisma.tetherClientInstallation.update({
