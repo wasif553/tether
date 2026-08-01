@@ -74,8 +74,39 @@
 // (no TPM hardware was available to verify against in this
 // environment) — see "Known limitations" in the doc above. Purely
 // additive to the bridge surface — no change to contextIsolation,
-// nodeIntegration, or sandbox.
-export const LOCKDOWN_VERSION = "1.5.0";
+// nodeIntegration, or sandbox. NEVER DISTRIBUTED — development-only,
+// superseded by v1.6.0 below before any real rollout.
+//
+// v1.6.0 — Wiring installation attestation into real exam sessions (see
+// docs/tether-system-check-v1.md, "Wiring installation attestation into
+// real exam sessions"). attestExamSession's signed canonical payload
+// grows three fields: the secure-client session ID (relayed from the
+// server-issued challenge, never chosen by the renderer), a fixed
+// comma-joined secure-client-capabilities snapshot (matching
+// getSecureClientCapabilities' own four booleans), and a signing
+// timestamp — bound into the SAME installation-key signature as the
+// existing exam/submission/policy-hash/display facts, so the
+// installation independently re-asserts the exact session it is
+// attesting for. The server now runs a full 20-point checklist
+// (protocol version, purpose, user/installation ownership, ACTIVE status,
+// key-protection-level acceptance, fingerprint match, installation
+// signature, minimum client version, supported platform, single-display
+// policy satisfaction, exam/submission/session/institution/policy-hash
+// match, nonce single-use) before a SecureClientSession may receive
+// v2-verified status — see verifyExamSessionAttestation in
+// tetherAttestationRunner.ts. Whether that verification actually gates
+// real exam content access is controlled by TETHER_EXAM_ATTESTATION_MODE
+// (LEGACY | DUAL | V2_REQUIRED, safe default LEGACY — see
+// tetherAttestationConfig.ts) — under LEGACY this is purely additive
+// evidence, exactly like v1.5.0's groundwork was. Still honestly
+// SOFTWARE_PROTECTED, still no TPM remote attestation. Multi-device
+// support (a student may register up to
+// TETHER_MAX_ACTIVE_INSTALLATIONS_PER_USER simultaneously ACTIVE
+// installations, default 2) lives entirely server-side — no bridge
+// surface change for it. Purely additive to the bridge surface — no
+// change to contextIsolation, nodeIntegration, or sandbox. v1.4.0 and
+// v1.5.0 were development-only and were never distributed.
+export const LOCKDOWN_VERSION = "1.6.0";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

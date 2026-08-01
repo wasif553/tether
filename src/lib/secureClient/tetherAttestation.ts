@@ -101,6 +101,7 @@ export const VALIDATION_REASON_CODES = [
   "WRONG_PURPOSE",
   "WRONG_SUBJECT",
   "INVALID_SIGNATURE",
+  "UNSUPPORTED_PROTOCOL_VERSION",
 ] as const;
 export type ValidationReasonCode = (typeof VALIDATION_REASON_CODES)[number];
 
@@ -110,6 +111,7 @@ export function validateRegistrationChallengeContext(
   publicKeyPem: string,
   context: { expectedAudience: string; expectedUserSubjectHash: string; nowMs: number },
 ): ValidationReasonCode {
+  if (challenge.schemaVersion !== ATTESTATION_PROTOCOL_VERSION) return "UNSUPPORTED_PROTOCOL_VERSION";
   if (!verifyRegistrationChallengeSignature(challenge, signatureBase64, publicKeyPem)) return "INVALID_SIGNATURE";
   if (challenge.purpose !== REGISTRATION_PURPOSE) return "WRONG_PURPOSE";
   if (challenge.userSubjectHash !== context.expectedUserSubjectHash) return "WRONG_SUBJECT";
@@ -157,10 +159,22 @@ export type AttestationChallenge = {
   notBefore: string;
   expiresAt: string;
   nonce: string;
-  // EXAM_SESSION only — always null for SYSTEM_CHECK.
+  // EXAM_SESSION only — always null for SYSTEM_CHECK. Binding these
+  // (rather than trusting anything the renderer/main process resubmits
+  // independently) is what makes a resulting installation signature
+  // provably tied to exactly one real exam attempt — see "Wiring
+  // installation attestation into real exam sessions" in
+  // docs/tether-system-check-v1.md.
   examId: string | null;
   submissionId: string | null;
   policyHash: string | null;
+  // EXAM_SESSION only, added when wiring v2 into the real exam-session
+  // gate — always null for SYSTEM_CHECK.
+  secureClientSessionId: string | null;
+  institutionId: string | null;
+  allowedClientType: string | null;
+  displayPolicy: string | null;
+  requiredMinimumClientVersion: string | null;
 };
 
 export function canonicalAttestationChallengeString(challenge: AttestationChallenge): string {
@@ -195,6 +209,7 @@ export function validateAttestationChallengeContext(
   publicKeyPem: string,
   context: AttestationChallengeValidationContext,
 ): ValidationReasonCode {
+  if (challenge.schemaVersion !== ATTESTATION_PROTOCOL_VERSION) return "UNSUPPORTED_PROTOCOL_VERSION";
   if (!verifyAttestationChallengeSignature(challenge, signatureBase64, publicKeyPem)) return "INVALID_SIGNATURE";
   if (challenge.purpose !== context.expectedPurpose) return "WRONG_PURPOSE";
   if (challenge.userSubjectHash !== context.expectedUserSubjectHash) return "WRONG_SUBJECT";
@@ -240,6 +255,18 @@ export type ExamSessionAttestationFacts = {
   examId: string;
   submissionId: string;
   policyHash: string;
+  // Added when wiring v2 into the real exam-session gate — the
+  // installation's OWN signature independently re-asserts the exact
+  // session it is attesting for (defense in depth beyond the server
+  // challenge's own binding of the same field), a fixed, comma-joined
+  // snapshot of the four secure-client-capability booleans the bridge
+  // already reports elsewhere (never free-form JSON — a stable, bounded
+  // shape only), and a client-supplied timestamp of when the signature
+  // was produced (evidence only — the server's own issuedAt/expiresAt on
+  // the challenge remain the actual freshness authority).
+  secureClientSessionId: string;
+  capabilities: string;
+  timestamp: string;
 };
 
 export function buildExamSessionAttestationCanonicalString(f: ExamSessionAttestationFacts): string {
@@ -255,6 +282,9 @@ export function buildExamSessionAttestationCanonicalString(f: ExamSessionAttesta
     f.examId,
     f.submissionId,
     f.policyHash,
+    f.secureClientSessionId,
+    f.capabilities,
+    f.timestamp,
   ].join("|");
 }
 

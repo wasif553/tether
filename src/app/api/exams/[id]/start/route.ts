@@ -26,6 +26,7 @@ import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/s
 import { isFinalExaminationPolicyEstablished } from "@/lib/assessmentType";
 import { systemCheckMode } from "@/lib/systemCheckConfig";
 import { evaluateFinalExamSystemCheckGate } from "@/lib/systemCheck/readiness";
+import { resolveExamAttestationMode, resolveEffectiveTetherVerification } from "@/lib/tetherAttestationConfig";
 
 // Tether launch/install flow v1 — Requirement 9 ("Production start
 // protection"). Additive response field: `{required: false}` for every
@@ -47,7 +48,16 @@ async function resolveSecureClientLaunchField(params: {
   if (effectiveDeliveryMode !== "TETHER_CLIENT_REQUIRED") return { required: false };
 
   const currentSession = await getCurrentSessionForSubmission(params.submissionId);
-  const hasVerifiedTetherSession = currentSession?.verificationStatus === "VERIFIED";
+  // Secure Client Attestation v2 — see
+  // src/lib/tetherAttestationConfig.ts for the full LEGACY/DUAL/V2_REQUIRED
+  // truth table this implements. Safe default (LEGACY) reproduces the
+  // exact prior behaviour byte-for-byte.
+  const hasVerifiedTetherSession = resolveEffectiveTetherVerification({
+    mode: resolveExamAttestationMode(),
+    legacyVerified: currentSession?.verificationStatus === "VERIFIED",
+    v2Verified: currentSession?.installationAttestationVerified === true,
+    legacyClientVersion: currentSession?.clientVersion ?? null,
+  });
   const devBypassAllowed = isTetherSecureClientBypassAllowed(params.institutionSlug);
   const gate = resolveSecureClientStartGate({ effectiveDeliveryMode, hasVerifiedTetherSession, devBypassAllowed });
   return {

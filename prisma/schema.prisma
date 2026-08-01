@@ -2132,6 +2132,34 @@ model SecureClientSession {
   clientInstallationIdHash String?
   policyHash               String?
 
+  // Secure Client Attestation v2 — EXAM_SESSION wiring. `clientInstallationId`
+  // is the real reference (advisory relation, onDelete: SetNull — a later
+  // installation revocation/replacement must never retroactively alter
+  // historical session evidence). `installationAttestationVerified` is the
+  // v2 verification OUTCOME for this session, populated ONLY by
+  // verifyExamSessionAttestation after all 20 required checks pass — see
+  // tetherAttestationRunner.ts. This is deliberately a SEPARATE field from
+  // `verificationStatus`/`status` (the legacy fields), never overwritten by
+  // them and never overwriting them: whether v2 verification actually
+  // gates exam content access is decided at request time by
+  // resolveEffectiveTetherVerification (src/lib/secureClient/examAttestationMode.ts),
+  // according to TETHER_EXAM_ATTESTATION_MODE — not by any column here.
+  clientInstallationId               String?
+  clientInstallation                 TetherClientInstallation? @relation(fields: [clientInstallationId], references: [id], onDelete: SetNull)
+  installationAttestationVerified    Boolean                   @default(false)
+  installationAttestationVerifiedAt  DateTime?
+  // Last v2 verification failure's reason code, if any — cleared to null on
+  // the next success. Never a stack trace or raw request body; always one
+  // of the ValidationReasonCode / VerifyExamSessionAttestationResult
+  // outcome strings.
+  installationAttestationFailureReason String?
+  // Advisory pointer (no FK, mirrors clientInstallationIdHash's own
+  // pattern) to the SystemCheckSecureClientVerification row holding the
+  // full evidence record (clientVersion, platform,
+  // displayTopologyClassification, nonceHash, challengeHash, verifiedAt)
+  // for the latest successful v2 EXAM_SESSION attestation.
+  installationVerificationId String?
+
   manifestId String? @unique
 
   startedAt        DateTime  @default(now())
@@ -2154,6 +2182,7 @@ model SecureClientSession {
   @@index([institutionId])
   @@index([status])
   @@index([studentId])
+  @@index([clientInstallationId])
 }
 
 // One structured preflight/client-verification result — see
@@ -2347,6 +2376,13 @@ model SystemCheckSecureClientVerification {
 
   purpose String @default("SYSTEM_CHECK")
 
+  // The attestation protocol version (AttestationChallenge.schemaVersion)
+  // this row was verified under — evidence only; there is no server code
+  // path that issues or accepts anything other than the current
+  // ATTESTATION_PROTOCOL_VERSION today, but retaining it lets a future
+  // protocol bump be told apart from older rows without guessing.
+  attestationProtocolVersion Int @default(2)
+
   // The specific TetherClientInstallation that produced this
   // attestation — required (never null) as of v2: every SYSTEM_CHECK
   // verification must be traceable to one genuine, registered,
@@ -2426,11 +2462,22 @@ model TetherClientInstallation {
   clientVersion String?
   platform      String?
 
-  // ACTIVE | REVOKED | REPLACED — at most one ACTIVE installation per
-  // user at a time (registering a new one marks any prior ACTIVE
-  // installation REPLACED; an administrator/security-review action sets
-  // REVOKED with a reason instead — see systemCheckSecureClientRunner.ts).
+  // ACTIVE | REVOKED | REPLACED — up to
+  // resolveMaxActiveInstallationsPerUser() (see tetherAttestationConfig.ts,
+  // default 2) installations may be ACTIVE per user at once (multi-device
+  // support). Registering beyond that limit is REJECTED (LIMIT_REACHED),
+  // never silently marks anything REPLACED — REPLACED is retained in the
+  // enum for backward-compatible reads only; no live code path writes it
+  // as of this pass. The student's own self-service revoke action (or an
+  // administrator/security-review action) sets REVOKED with a reason
+  // instead — see tetherAttestationRunner.ts.
   status String @default("ACTIVE")
+
+  // Advisory inverse side of SecureClientSession.clientInstallationId —
+  // every real exam session this installation ever produced a verified
+  // v2 EXAM_SESSION attestation for. Read-only evidence trail; revoking
+  // or replacing this installation never touches these historical rows.
+  secureClientSessions SecureClientSession[]
 
   installedAt      DateTime  @default(now())
   lastAttestedAt   DateTime?

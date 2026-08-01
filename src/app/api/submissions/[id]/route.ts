@@ -8,6 +8,7 @@ import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
 import { isTetherSecureClientBypassAllowed } from "@/lib/secureClientAvailability";
 import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
+import { resolveExamAttestationMode, resolveEffectiveTetherVerification } from "@/lib/tetherAttestationConfig";
 
 export async function GET(
   _req: Request,
@@ -55,7 +56,18 @@ export async function GET(
     const policy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
     if (policy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
       const currentSession = await getCurrentSessionForSubmission(submission.id);
-      const hasVerifiedTetherSession = currentSession?.verificationStatus === "VERIFIED";
+      // Secure Client Attestation v2 — the real content-exposure gate.
+      // See src/lib/tetherAttestationConfig.ts for the full
+      // LEGACY/DUAL/V2_REQUIRED truth table. Safe default (LEGACY)
+      // reproduces the exact prior behaviour byte-for-byte — no student
+      // can be locked out of an exam they could previously access merely
+      // because this pass exists.
+      const hasVerifiedTetherSession = resolveEffectiveTetherVerification({
+        mode: resolveExamAttestationMode(),
+        legacyVerified: currentSession?.verificationStatus === "VERIFIED",
+        v2Verified: currentSession?.installationAttestationVerified === true,
+        legacyClientVersion: currentSession?.clientVersion ?? null,
+      });
       const devBypassAllowed = isTetherSecureClientBypassAllowed(submission.exam.institution?.slug ?? null);
       const gate = resolveSecureClientStartGate({ effectiveDeliveryMode: policy.deliveryMode, hasVerifiedTetherSession, devBypassAllowed });
       if (gate.kind === "REDIRECT_TO_TETHER_LAUNCH") {

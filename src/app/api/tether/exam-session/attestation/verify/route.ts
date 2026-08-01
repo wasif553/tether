@@ -38,6 +38,11 @@ const challengeSchema = z.object({
   examId: z.string().min(1).max(100),
   submissionId: z.string().min(1).max(100),
   policyHash: z.string().min(1).max(200),
+  secureClientSessionId: z.string().min(1).max(100),
+  institutionId: z.string().min(1).max(100),
+  allowedClientType: z.string().min(1).max(60),
+  displayPolicy: z.string().min(1).max(60),
+  requiredMinimumClientVersion: z.string().min(1).max(40),
 });
 
 const bodySchema = z.object({
@@ -48,6 +53,8 @@ const bodySchema = z.object({
   platform: z.string().min(1).max(40),
   displayTopologyClassification: z.string().min(1).max(40),
   displayCount: z.number().int().min(0).max(64),
+  capabilities: z.string().min(1).max(200),
+  timestamp: z.string().min(1).max(64),
 });
 
 export async function POST(req: Request) {
@@ -72,6 +79,8 @@ export async function POST(req: Request) {
     platform: body.platform,
     displayTopologyClassification: body.displayTopologyClassification,
     displayCount: body.displayCount,
+    capabilities: body.capabilities,
+    timestamp: body.timestamp,
   });
 
   if (result.outcome === "INVALID") {
@@ -79,6 +88,9 @@ export async function POST(req: Request) {
   }
   if (result.outcome === "INSTALLATION_NOT_ACTIVE") {
     return NextResponse.json({ verified: false, reason: "INSTALLATION_NOT_ACTIVE" }, { status: 409 });
+  }
+  if (result.outcome === "INSTALLATION_KEY_PROTECTION_REJECTED") {
+    return NextResponse.json({ verified: false, reason: "INSTALLATION_KEY_PROTECTION_REJECTED" }, { status: 409 });
   }
   if (result.outcome === "INSTALLATION_SIGNATURE_INVALID") {
     return NextResponse.json({ verified: false, reason: "INSTALLATION_SIGNATURE_INVALID" }, { status: 400 });
@@ -88,6 +100,18 @@ export async function POST(req: Request) {
   }
   if (result.outcome === "BINDING_MISMATCH") {
     return NextResponse.json({ verified: false, reason: "BINDING_MISMATCH" }, { status: 400 });
+  }
+  if (result.outcome === "CLIENT_VERSION_UNSUPPORTED") {
+    return NextResponse.json({ verified: false, reason: "CLIENT_VERSION_UNSUPPORTED" }, { status: 400 });
+  }
+  if (result.outcome === "PLATFORM_UNSUPPORTED") {
+    return NextResponse.json({ verified: false, reason: "PLATFORM_UNSUPPORTED" }, { status: 400 });
+  }
+  if (result.outcome === "DISPLAY_POLICY_VIOLATION") {
+    return NextResponse.json({ verified: false, reason: "DISPLAY_POLICY_VIOLATION" }, { status: 400 });
+  }
+  if (result.outcome === "POLICY_HASH_MISMATCH") {
+    return NextResponse.json({ verified: false, reason: "POLICY_HASH_MISMATCH" }, { status: 400 });
   }
   if (result.outcome === "REPLAY") {
     return NextResponse.json({ verified: false, reason: "REPLAY" }, { status: 409 });

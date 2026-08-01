@@ -44,8 +44,24 @@ Three additive Prisma models (see `prisma/schema.prisma`):
 - **`TetherClientInstallation`** (Secure Client Attestation v2) — one
   row per registered installation: its public key, fingerprint,
   self-reported `keyProtectionLevel`, and lifecycle `status`
-  (`ACTIVE`/`REVOKED`/`REPLACED`). See "Secure Client Attestation v2"
-  and "Database model" below.
+  (`ACTIVE`/`REVOKED`/`REPLACED` — `REPLACED` is retained for
+  backward-compatible reads only; no live code path writes it as of
+  multi-device support, see "Multi-device support" below). Up to
+  `TETHER_MAX_ACTIVE_INSTALLATIONS_PER_USER` may be `ACTIVE` per user at
+  once. See "Secure Client Attestation v2" and "Database model" below.
+
+`SecureClientSession` (pre-existing, part of the original baseline
+schema — the only one of these tables genuinely live in
+Preview/Production already) gained five new, additive, nullable-or-
+defaulted columns for EXAM_SESSION v2 evidence: `clientInstallationId`
+(a REAL nullable relation to `TetherClientInstallation`, `onDelete: SetNull`
+— see "Session model" below for why this replaces reliance on the
+pre-existing `clientInstallationIdHash` field), `installationAttestationVerified`
+(boolean, the actual v2-verified outcome for this session),
+`installationAttestationVerifiedAt`, `installationAttestationFailureReason`
+(last failure's reason code, cleared on the next success), and
+`installationVerificationId` (an advisory pointer to the full evidence
+row in `SystemCheckSecureClientVerification`).
 
 ### API routes (`src/app/api/tether/system-check/`)
 
@@ -74,13 +90,25 @@ Three additive Prisma models (see `prisma/schema.prisma`):
 ### Installation and exam-session routes (`src/app/api/tether/`)
 
 - `POST installation/registration-challenge`, `POST installation/register`
-  — per-installation key registration (proof-of-possession required).
-- `GET installation/current` — the authenticated student's current
-  `ACTIVE` installation, if any (bounded, non-secret fields only).
+  — per-installation key registration (proof-of-possession required,
+  rate-limited, subject to the multi-device limit — see "Registration
+  hardening").
+- `POST installation/current` — does THIS device (identified by the
+  public key its local Electron main process holds) have a currently-
+  `ACTIVE` registered installation? **POST, not GET** (changed this pass):
+  with multi-device support a student may have more than one `ACTIVE`
+  installation at once, so this must be looked up by the exact public
+  key asking, never merely "any" active installation for the user
+  (bounded, non-secret response fields only — never a public key).
+- `GET installation/list` — the authenticated student's own devices
+  (creation date, last-attested date, status only — never a public key
+  or fingerprint) and the configured max-active limit. Pairs with the
+  existing self-service revoke route.
 - `POST installation/[id]/revoke` — student self-service revocation.
 - `POST exam-session/attestation/challenge`, `POST exam-session/attestation/verify`
-  — additive `EXAM_SESSION`-purpose attestation; see "Real exam
-  attestation — additive groundwork".
+  — installation-bound `EXAM_SESSION`-purpose attestation, now wired
+  into the real exam-session verification decision; see "Real exam
+  attestation — installation-bound v2 (wired)".
 
 ### System-check secure-client verification (corrective pass)
 
@@ -259,33 +287,124 @@ one bit — the real exam still requires its own genuine, submission-bound
 A first-time student can now reach overall `READY` on their very first
 standalone check, with zero prior exam activity.
 
-### Real exam attestation — additive groundwork
+### Real exam attestation — installation-bound v2 (wired)
 
 The pre-existing real exam-launch attestation route
 (`POST /api/secure-client/sessions/[sessionId]/attestation` →
-`recordAttestation` in `secureClientRunner.ts`) has the SAME
-unattested-facts weakness the original SYSTEM_CHECK design had — it
+`recordAttestation` in `secureClientRunner.ts`, "LEGACY" below) has the
+SAME unattested-facts weakness the original SYSTEM_CHECK design had — it
 accepts `checks`/`clientVersion`/`platform`/`displayTopology` directly
 from the request body with no client-side signature at all. This was
-flagged as an important finding during the first hardening pass.
+flagged as an important finding during the first hardening pass, and
+this pass is the follow-up that actually binds the installation-bound v2
+attestation added in commit `a0be316` into the real exam-session
+verification decision — see "Compatibility and rollout" for exactly how
+that's gated so it can never lock out an existing student.
 
-This pass adds a NEW, purely additive `EXAM_SESSION` attestation
-purpose (`POST /api/tether/exam-session/attestation/challenge` +
-`.../verify`) that DOES genuinely verify an installation-signed
-attestation bound to a specific exam/submission/policy hash — but it
-deliberately does **not** wire that verification into
-`SecureClientSession.status`/`.verificationStatus`, which remain
-governed entirely by the existing, unmodified `recordAttestation()`
-flow. A successful `EXAM_SESSION` verification only populates the
-existing (previously dormant — confirmed never written by any code
-path before this pass) `SecureClientSession.clientInstallationIdHash`
-field. This is a deliberate scoping decision, not an oversight: wiring
-new attestation logic into the actual READY/CANNOT_START decision for
-live exam-taking is a change with real production blast radius that
-deserves its own dedicated, separately-reviewed pass — see "Compatibility
-and rollout" below and "Known limitations". `TETHER_REQUIRE_EXAM_SESSION_V2`
-exists now (defaulting to unset/false) so that future enforcement work
-has a config surface ready to attach to.
+**The trust chain, end to end.** A student's exam page (via
+`tether-launch/page.tsx`, best-effort and additive under `LEGACY` mode —
+see below) requests a purpose=`EXAM_SESSION` challenge from
+`POST /api/tether/exam-session/attestation/challenge`, giving only
+`installationId` and `submissionId`. The server looks up the REAL,
+currently-live `SecureClientSession` for that submission and the
+submission's own immutable policy snapshot, and builds a challenge that
+SERVER-COMPUTES (never trusts client-supplied) and signs every one of:
+protocol version, purpose, the authenticated user's subject hash,
+installation ID, installation public-key fingerprint, the secure-client
+session ID, institution ID, exam ID, submission ID, a hash of the full
+policy snapshot, the session's allowed client type, the policy's display
+requirement, issued-at/expiry, a single-use nonce, and the minimum
+supported client version. The renderer relays that challenge, unmodified,
+to `window.sesLockdown.attestExamSession(...)` — Electron's main process
+(never the renderer) gathers its OWN facts (client version, platform,
+native display-topology classification, native display count, a fixed
+capabilities snapshot, a timestamp) and signs a canonical string binding
+ALL of them plus the challenge's nonce, installation fingerprint,
+exam/submission/policy-hash/session-id, using the installation's own
+private key (never exported from Electron's main process — see
+`installationKey.ts`). The renderer relays that signed response to
+`POST /api/tether/exam-session/attestation/verify`, which runs the full
+20-point checklist below.
+
+**Server verification — the 20 checks, all before any write.** See
+`verifyExamSessionAttestation` in `tetherAttestationRunner.ts` for the
+authoritative implementation; every one of these runs BEFORE any database
+write, and a failed check writes at most one non-verification field
+(`installationAttestationFailureReason`, a breadcrumb — never
+`installationAttestationVerified`) once the target session is known,
+never a partial "verified" state:
+
+1. server challenge signature (`validateAttestationChallengeContext` →
+   `verifyAttestationChallengeSignature`);
+2. protocol version (`challenge.schemaVersion === ATTESTATION_PROTOCOL_VERSION`,
+   → `UNSUPPORTED_PROTOCOL_VERSION`);
+3. purpose is exactly `EXAM_SESSION` (a `SYSTEM_CHECK` challenge fails
+   here — see "purpose isolation" below);
+4. authenticated user (`userSubjectHash` bound into the signed
+   challenge, checked against the caller's own session);
+5. challenge expiry (`notBefore`/`expiresAt`);
+6. nonce present/well-formed (format-checked here, single-use enforced
+   at #20);
+7. installation exists (`loadOwnedInstallation`);
+8. installation belongs to the expected user (same ownership-scoped
+   lookup — 404-equivalent semantics for "doesn't exist" and "belongs to
+   someone else", so `WRONG_SUBJECT` is architecturally unreachable via
+   this route and shows up as `INVALID_SIGNATURE` instead — a
+   deliberate, more secure, non-enumerable behaviour);
+9. installation status is `ACTIVE` (revoked/replaced installations are
+   rejected even with an otherwise-valid outstanding challenge);
+10. key-protection level is one this server still accepts
+    (`isSelfReportableKeyProtectionLevel` — defensive re-check, not just
+    at registration time);
+11. public-key fingerprint matches the challenge
+    (`validateAttestationChallengeContext`);
+12. installation signature is valid (`verifyInstallationSignature`
+    against THIS installation's registered public key, over the full
+    canonical `EXAM_SESSION` payload — session ID, capabilities, and
+    timestamp included);
+13. signed client version satisfies the challenge's own required minimum
+    (`compareVersions`, → `CLIENT_VERSION_UNSUPPORTED`);
+14. signed platform is supported (`evaluateOperatingSystem`, → `PLATFORM_UNSUPPORTED`);
+15. signed display facts satisfy the submission's ACTUAL, immutable
+    policy (`evaluateDisplayTopology` + display count, re-derived from
+    the submission's real stored snapshot — not merely the challenge's
+    own unverified copy — → `DISPLAY_POLICY_VIOLATION`);
+16. exam ID matches a REAL session looked up by the challenge's own
+    claimed secure-client session ID (→ `BINDING_MISMATCH`);
+17. submission ID matches that same session (→ `BINDING_MISMATCH`);
+18. secure-client session ID matches (the session is looked up BY this
+    field — `findUnique`, never `findFirst` — so a mismatched session ID
+    can only ever resolve to `SESSION_NOT_FOUND` or, if it resolves to a
+    genuine but wrong session, `BINDING_MISMATCH` on the exam/submission
+    cross-check);
+19. policy hash matches a RECOMPUTED hash of the submission's own current
+    `secureClientPolicySnapshotJson` (→ `POLICY_HASH_MISMATCH` — this is
+    what makes policy tampering structurally impossible, not merely
+    checked against itself);
+20. nonce not previously consumed (a unique index on
+    `SystemCheckSecureClientVerification.nonceHash` — a second attempt
+    with the same nonce fails the transaction outright, `REPLAY`; under
+    genuine concurrent replay, Postgres's own uniqueness enforcement
+    guarantees at most one of the two ever succeeds).
+
+**On success**, ALL of the following are written in a single Prisma
+interactive transaction (never partially): a
+`SystemCheckSecureClientVerification` row (purpose `EXAM_SESSION`,
+`attestationProtocolVersion`, full evidence — see "Session model"
+below), `SecureClientSession.clientInstallationId` (the real relation)
+and `.clientInstallationIdHash` (kept for continuity),
+`.installationAttestationVerified = true`,
+`.installationAttestationVerifiedAt`, `.installationAttestationFailureReason = null`,
+`.installationVerificationId` (pointing at the evidence row), and the
+installation's own `lastAttestedAt`.
+
+**Deliberately does NOT touch** `SecureClientSession.status` or
+`.verificationStatus` — those remain governed entirely by the existing,
+completely unmodified `recordAttestation()` flow. Whether v2 evidence
+here actually gates real exam content access is decided separately, at
+request time, by `resolveEffectiveTetherVerification()`
+(`src/lib/tetherAttestationConfig.ts`), according to
+`TETHER_EXAM_ATTESTATION_MODE` — see "Compatibility and rollout".
 
 ### Compatibility and rollout
 
@@ -294,31 +413,42 @@ has a config surface ready to attach to.
   no v1 SYSTEM_CHECK code path any more (removed entirely, not merely
   deprecated) — v1.4.0 clients get `ATTESTATION_UNAVAILABLE` /
   `INSTALLATION_UNAVAILABLE`, never a silently-accepted weaker result.
-- `TETHER_LEGACY_ATTESTATION_ALLOWED` (default: accepted/unset) governs
-  whether the LEGACY real exam-launch attestation route remains
-  accepted. Defaults to accepted because that route is still the ONLY
-  thing that establishes a verified `SecureClientSession` for a real
-  exam — flipping this before `EXAM_SESSION` v2 is genuinely wired into
-  that decision would lock every student out of every Tether-required
-  exam.
-- `TETHER_REQUIRE_EXAM_SESSION_V2` (default: `false`) — reserved for a
-  future pass; the enforcement path it would gate does not exist yet.
-- **Transition plan**: Phase 1 (this pass) — `EXAM_SESSION` v2 is
-  additive/optional; the legacy flow remains the sole real gate. Phase 2
-  (future, requires physical validation on real hardware first) — wire
-  `EXAM_SESSION` v2 into the exam-start/content gate for NEWLY created
-  final examinations only, behind `TETHER_REQUIRE_EXAM_SESSION_V2`,
-  with the legacy path still available as a fallback. Phase 3 (future) —
-  once Phase 2 has run in Production without incident, consider
-  flipping defaults and deprecating the legacy path. **This pass does
-  not enable Phase 2 or 3 in Production** — no enforcement code path
-  reads `TETHER_REQUIRE_EXAM_SESSION_V2` yet.
+- `TETHER_EXAM_ATTESTATION_MODE` — the single central resolver
+  (`resolveExamAttestationMode()`) governing whether v2 evidence actually
+  gates real exam content access. Replaces the two independent booleans
+  (`TETHER_LEGACY_ATTESTATION_ALLOWED` / `TETHER_REQUIRE_EXAM_SESSION_V2`)
+  this document used to describe — neither was ever consumed by any real
+  enforcement code path, since that wiring didn't exist until this pass.
+  Consumed by `resolveEffectiveTetherVerification()`, called from BOTH
+  real enforcement points — `POST /api/exams/[id]/start` (decides whether
+  to redirect back into the Tether launch flow) and
+  `GET /api/submissions/[id]` (the actual content-exposure gate). Truth
+  table:
+
+  | Mode | `hasVerifiedTetherSession` is true when… |
+  | --- | --- |
+  | `LEGACY` (safe default; any unrecognised value also falls back here) | `SecureClientSession.verificationStatus === "VERIFIED"` (the legacy flow) alone. v2 evidence is recorded but has zero effect. |
+  | `DUAL` | If the LEGACY-reported `clientVersion` is `>= 1.5.0` (i.e. new enough to have EVER been able to attempt v2): legacy `VERIFIED` **AND** `installationAttestationVerified`. If the reported version is older (or unknown — genuinely cannot produce v2 evidence): legacy `VERIFIED` alone (grandfathered). |
+  | `V2_REQUIRED` | `installationAttestationVerified` alone — legacy `VERIFIED` is ignored entirely. |
+
+- **Transition plan**: Phase 1 (commit `a0be316`) — `EXAM_SESSION` v2
+  built as additive groundwork only, nothing reads it. Phase 2 (this
+  pass) — v2 wired into the real decision via
+  `TETHER_EXAM_ATTESTATION_MODE`, safe default `LEGACY` (zero behaviour
+  change from Phase 1 for every existing student). Phase 3 (future,
+  after physical Preview validation on real Tether Secure Browser
+  installs — see "First-pilot settings") — switch Preview to `DUAL`.
+  Phase 4 (future, after a full pilot with `DUAL` and no incidents) —
+  consider `V2_REQUIRED` for new final examinations. **This pass does
+  not enable `DUAL` or `V2_REQUIRED` in Production** — see "First-pilot
+  settings" below for the exact recommended values.
 - Forced client upgrade: setting `TETHER_MINIMUM_SUPPORTED_VERSION` to
   `1.5.0` (the default) already reports any older client as `BLOCKED`
-  for the readiness check; a genuinely forced upgrade (refusing exam
-  start outright below a version floor) is a natural extension of the
-  same `evaluateClientVersion` comparison but is not separately wired
-  into exam-start enforcement in this pass.
+  for the readiness check; the EXAM_SESSION v2 challenge additionally
+  binds its own `requiredMinimumClientVersion` (from the same config
+  function) and the server rejects a signed response below it
+  (`CLIENT_VERSION_UNSUPPORTED`) — genuinely enforced, not merely
+  advisory, for any client that DOES attempt v2.
 
 **Why this is a separate table, not a nullable `submissionId` on
 `SecureClientSession`.** Nothing in the exam start/launch/attestation
@@ -337,6 +467,147 @@ one bit — the real exam still requires its own genuine, submission-bound
 
 A first-time student can now reach overall `READY` on their very first
 standalone check, with zero prior exam activity.
+
+### Session model
+
+`SecureClientSession.clientInstallationIdHash` was, until this pass, a
+dormant field (present in the schema, documented, but never written by
+any code path) that only ever held a hash of the installation's public
+key. This pass adds a REAL nullable relation,
+`clientInstallationId` → `TetherClientInstallation.id`
+(`onDelete: SetNull`), matching this schema's existing convention for a
+genuine, currently-relevant foreign entity (`SecureClientSession.configurationId`
+→ `SecureClientConfiguration` already does exactly this) — the hash-only
+field is kept for continuity but is no longer the primary reference.
+`onDelete: SetNull` (never `Cascade`): a later installation revocation
+must never retroactively erase historical session evidence beyond
+un-setting the now-dangling pointer.
+
+Evidence retained on a v2-verified session (all on `SecureClientSession`
+itself or reachable via `installationVerificationId` →
+`SystemCheckSecureClientVerification`): attestation protocol version
+(`attestationProtocolVersion`), the installation reference (`clientInstallationId`),
+key-protection level (via the installation row), client version,
+platform, display-topology result, verification timestamp
+(`installationAttestationVerifiedAt`), failure reason where applicable
+(`installationAttestationFailureReason`), and a challenge/response digest
+(`nonceHash`/`challengeHash` — SHA-256 hashes, never the raw reusable
+nonce or full challenge token). **Never stored anywhere**: the
+installation's private key (never leaves Electron's main process, and
+never even transits IPC to the renderer in serialisable form), raw
+DPAPI/`safeStorage` plaintext, a full reusable challenge token
+(digests only), authentication secrets, or any hardware identifier
+beyond the installation's own self-generated public key.
+
+### Multi-device support
+
+A student may now register up to `TETHER_MAX_ACTIVE_INSTALLATIONS_PER_USER`
+(default `2`, clamped to `[1, 5]`) simultaneously `ACTIVE` installations
+— replacing the prior "exactly one `ACTIVE` installation, auto-replaced
+on every new registration" behaviour, which would have forced a student
+to re-register (and implicitly lose easy access to) their original
+device the moment they needed a genuine replacement (a failed laptop the
+week of an exam, for instance).
+
+Registering beyond the limit is **rejected outright**
+(`LIMIT_REACHED`, 409) — it never silently revokes or replaces an
+existing device to make room; the student must explicitly revoke an old
+installation first (`POST /api/tether/installation/[id]/revoke`, already
+self-service) before registering a new one. `GET /api/tether/installation/list`
+lets a student see their own devices (creation date, last-attested date,
+status — never a public key or fingerprint) to decide which to revoke.
+`POST /api/tether/installation/current`'s lookup was changed from
+"any `ACTIVE` installation for this user" to "the `ACTIVE` installation
+whose public key matches THIS device" specifically because of multi-
+device support — with more than one `ACTIVE` installation possible,
+the old "any" lookup could non-deterministically hand back a
+DIFFERENT device's `installationId`, which the asking device physically
+cannot produce a matching signature for (a real functional bug, not
+just imprecise UX, once more than one device can be active).
+
+**Deliberately out of scope this pass** (per explicit instruction — "do
+not introduce a large device-management dashboard"): a polished
+self-service "manage my devices" UI page. The backend
+(`GET installation/list`, the existing `POST installation/[id]/revoke`,
+and the `LIMIT_REACHED` rejection) is complete and safe to build such a
+page against; only the page itself is deferred. Recommended as the
+immediately following usability task.
+
+### Registration hardening
+
+- **Authenticated user ownership** — every registration/revocation route
+  requires an authenticated `STUDENT` session; `revokeInstallation`
+  additionally re-checks ownership via the same 404-equivalent
+  ownership-scoped lookup used everywhere else in this feature.
+- **Rate limiting** — `registerInstallation` rejects
+  (`RATE_LIMITED`, 429) once a user has successfully CREATED
+  `REGISTRATION_RATE_LIMIT_MAX_ATTEMPTS` (10) installations within
+  `REGISTRATION_RATE_LIMIT_WINDOW_MS` (15 minutes) — generous enough to
+  never interfere with genuine multi-device use, bounds a scripted
+  registration-spam loop. Blind/brute-force attempts are separately
+  infeasible regardless (proof of possession requires a genuine Ed25519
+  signature, not a guessable secret) — this specifically targets
+  successful-creation spam.
+- **Server nonce proof of possession** — unchanged from `a0be316`:
+  registration requires signing the registration challenge's nonce with
+  the newly generated key, verified against the submitted public key.
+- **Nonce short-lived** — `REGISTRATION_CHALLENGE_TTL_SECONDS = 120`.
+  **Known limitation on single-use**: unlike the purpose-bound
+  attestation challenge (which tracks nonce consumption via a unique DB
+  index), the registration challenge is stateless and does not itself
+  track single-use — within its 120-second window, the SAME challenge
+  could theoretically be used to register more than one NEW key (each
+  still independently proving possession of a genuinely different
+  private key). This is bounded by the multi-device active-count limit
+  and requires the same authenticated session throughout; it does not
+  allow re-registering the same key twice (`DUPLICATE_KEY`) or bypass
+  authentication/ownership. Documented here rather than closed with a
+  new persistent nonce-tracking table, to avoid materially expanding
+  this pass's scope for a narrowly-bounded gap.
+- **Reject duplicate fingerprints** — `publicKeyFingerprint` is unique;
+  a second registration of the same key fails outright (`DUPLICATE_KEY`).
+- **Reject `TPM_ATTESTED` claims and unknown protection levels** —
+  unchanged from `a0be316`; `isSelfReportableKeyProtectionLevel` accepts
+  only `SOFTWARE_PROTECTED`/`TPM_UNATTESTED`, both at registration AND
+  (new this pass, defensively) again at every subsequent attestation
+  verification.
+- **Registration timestamp / client version / last-attested timestamp** —
+  `installedAt`, `clientVersion`, `lastAttestedAt` (bumped on every
+  successful attestation of either purpose).
+- **Revocation** — student self-service, unchanged from `a0be316`.
+- **Audit mechanism** — registration and revocation each write a
+  `PlatformAuditLog` row (`action: "TETHER_INSTALLATION_REGISTERED"` /
+  `"TETHER_INSTALLATION_REVOKED"`, `targetType: "TetherClientInstallation"`,
+  bounded metadata — never a public key) via the existing
+  `createPlatformAuditLog` helper (`src/lib/platformAdmin.ts`) — an
+  operational audit mechanism whose semantics already fit
+  (actor/action/target/institution/metadata), never `IntegrityEvent`
+  (which represents student academic-integrity signals, not
+  administrative/security operations — the two are semantically
+  unrelated and mixing them would be a category error).
+- Registration never claims to prove the official binary — see
+  "Assurance terminology" and "Known limitations".
+
+### Purpose isolation
+
+Proven by automated tests in `tetherSystemCheck.routes.test.ts`:
+`SYSTEM_CHECK` verification cannot set `SecureClientSession` verified
+(structural — `verifySystemCheckAttestation` never touches
+`SecureClientSession` at all); `SYSTEM_CHECK` verification cannot
+authorise submission content (see "Compatibility and rollout" — the
+effective-verification resolver never reads
+`SystemCheckSecureClientVerification`); `EXAM_SESSION` proof cannot
+create a system-check `READY` record (the two purposes write to the
+SAME table but with different `purpose` values — nothing reads an
+`EXAM_SESSION` row as a `SYSTEM_CHECK` result); `EXAM_SESSION` proof for
+one submission cannot verify another (checklist items 16–18); one
+installation cannot attest for another user (ownership-scoped lookup,
+checklist items 4/7/8); revoked installations cannot verify either
+purpose (checklist item 9, `installation.status !== "ACTIVE"`); purpose
+mutation invalidates the signature (the purpose tag is baked into the
+canonical signed string itself — `TETHER_ATTESTATION_V2|SYSTEM_CHECK|…`
+vs `…|EXAM_SESSION|…` — relabelling after signing produces a string the
+original signature never covered).
 
 ### Ordinary browser vs Tether Secure Browser
 
@@ -365,16 +636,44 @@ Four narrowly scoped, read-only preload methods, added in v1.3.0:
   build actually exposes (lets an older packaged install self-report as
   incomplete rather than silently failing).
 
-A fifth, added in v1.4.0 (security hardening pass):
+A fifth, added in v1.4.0 (security hardening pass) and reworked in
+v1.5.0 to sign with the per-installation key instead of the withdrawn
+global one:
 
 - `attestSystemCheck(nonce)` → `{ signature, clientVersion, platform,
   displayTopologyClassification } | null`. Takes only the server-issued
   challenge nonce; every fact in the response is gathered by the MAIN
   process itself (never an argument the renderer supplies) and signed
-  with the embedded client-attestation private key
-  (`clientAttestationKey.ts`) — see "Genuine client attestation" above.
-  The renderer never sees that key and cannot make this method sign
+  with the installation's own private key (`installationKey.ts`). The
+  renderer never sees that key and cannot make this method sign
   anything other than the one fixed canonical format main.ts builds.
+
+Four more, added in v1.5.0 (installation registration) and extended in
+v1.6.0 (`attestExamSession`, "Wiring installation attestation into real
+exam sessions"):
+
+- `getInstallationInfo()` / `ensureInstallationKey()` → public-key-only
+  installation info, safe to expose (never the private key).
+- `signRegistrationProof(nonce)` → a narrowly scoped, purpose-specific
+  signature over ONLY the registration challenge's nonce — not a
+  generic signing primitive.
+- `attestExamSession({ nonce, examId, submissionId, policyHash,
+  secureClientSessionId })` → `{ signature, clientVersion, platform,
+  displayTopologyClassification, displayCount, capabilities, timestamp } |
+  null`. The renderer relays four fields straight out of the server-
+  signed challenge it received (never chosen independently) — main does
+  NOT re-verify those against a local copy (it holds no challenge state;
+  only the server, which holds the signing key, can have issued a
+  genuine one). Every NATIVE fact in the signed response — client
+  version, platform, display-topology classification, display count, a
+  fixed capabilities snapshot, and a timestamp — is always gathered by
+  main itself, never accepted from the payload. The server independently
+  re-checks every relayed field against the real challenge and the real
+  `SecureClientSession`/`Submission` rows before accepting anything (see
+  "Real exam attestation — installation-bound v2 (wired)"'s 20-point
+  checklist). No generic "sign this data" method is exposed to the
+  renderer at any point — every signing operation here is purpose-bound
+  and shape-fixed.
 
 Each is backed by exactly one `ipcRenderer.invoke` to one narrowly
 scoped `ipcMain.handle`, returning only the named bounded value — no
@@ -478,8 +777,8 @@ this same guard now, uniformly, with no per-file configuration needed.
 | `TETHER_SYSTEM_CHECK_MODE` | `WARN` | `OFF` \| `WARN` \| `REQUIRE`. Any missing/unrecognised value falls back to `WARN` — this feature can never accidentally block all students due to a configuration typo. |
 | `TETHER_SYSTEM_CHECK_VALIDITY_HOURS` | `24` | Any missing/non-positive value falls back to the default. |
 | `TETHER_MINIMUM_SUPPORTED_VERSION` | `1.5.0` | Compared against the client-reported Tether version (Check C) using semantic, not lexical, comparison. v1.4.0 shipped a critical vulnerability and has been withdrawn — see "Release and rollback". |
-| `TETHER_LEGACY_ATTESTATION_ALLOWED` | accepted (any value other than the exact string `"false"`) | Whether the legacy, pre-v2 real exam-launch attestation route remains accepted — see "Compatibility and rollout". |
-| `TETHER_REQUIRE_EXAM_SESSION_V2` | `false`/unset | Reserved for a future pass — no enforcement code path reads this yet. |
+| `TETHER_EXAM_ATTESTATION_MODE` | `LEGACY` | `LEGACY` \| `DUAL` \| `V2_REQUIRED`. Single central resolver governing whether v2 installation-bound evidence gates real exam content access — see "Compatibility and rollout" for the full truth table. Any unrecognised value falls back to `LEGACY`. |
+| `TETHER_MAX_ACTIVE_INSTALLATIONS_PER_USER` | `2` | How many installations may be simultaneously `ACTIVE` per student — see "Multi-device support". Clamped to `[1, 5]`. |
 
 See `.env.example` for the exact same table inline with the rest of the
 Tether configuration. There is no server-side "attestation public key"
@@ -498,9 +797,14 @@ affected installation(s):
   limitations") calls `POST /api/tether/installation/[id]/revoke`. That
   installation can never attest again; every other installation is
   completely unaffected.
-- **A student gets a new/reimaged computer**: simply re-registering
-  (the normal first-run flow) automatically marks the old installation
-  `REPLACED` — no explicit revoke action needed.
+- **A student gets a new/reimaged computer**: simply re-registering (the
+  normal first-run flow) registers it as an additional `ACTIVE`
+  installation, up to `TETHER_MAX_ACTIVE_INSTALLATIONS_PER_USER` (default
+  `2`) — see "Multi-device support". It does NOT automatically revoke or
+  replace the old one (a change from the pre-multi-device behaviour);
+  once at the limit, the student revokes the old device themselves
+  (`POST /api/tether/installation/[id]/revoke`) before registering the
+  new one.
 - **The server's OWN `TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY` is
   compromised** (unchanged from before v2 — this key signs CHALLENGES,
   not installation attestations): rotate it exactly as documented in
@@ -524,6 +828,13 @@ SQL file applied manually through the Supabase SQL Editor.
   — Secure Client Attestation v2; apply this one first, or together with
   the one above, since it is the more intuitive order even though
   `installationId` has no enforced foreign key)
+- `docs/sql/add-secure-client-session-installation-attestation.sql` —
+  **ALTERS the pre-existing, already-live `SecureClientSession` table**
+  (unlike the three above, this is not a new table — see its own doc
+  comment). Adds five additive columns plus one index and one foreign
+  key to `TetherClientInstallation`. Apply AFTER
+  `add-tether-client-installation.sql` (the new foreign key references
+  it).
 
 Apply all three the same way, independently (none strictly depends on
 another at the SQL level, since advisory pointers are used throughout
@@ -581,6 +892,34 @@ manually after review, per this project's standing safety rule.
   "patch" it in place. `TETHER_MINIMUM_SUPPORTED_VERSION` defaults to
   `1.5.0` specifically so a v1.4.0 client is reported as unsupported by
   the readiness check even if one somehow remains installed somewhere.
+
+### First-pilot settings
+
+**Document only — none of this is deployed or enabled by this pass.**
+
+- Recommended for the first pilot: `TETHER_SYSTEM_CHECK_MODE=WARN`,
+  `TETHER_EXAM_ATTESTATION_MODE=LEGACY` (both are the safe defaults —
+  effectively "document the intended starting point", not a change from
+  what an unset environment already does).
+- After physical validation on Preview with a real, packaged v1.6.0
+  Tether Secure Browser install (see "Manual Tether test plan" in the
+  final report) — advance Preview to `TETHER_EXAM_ATTESTATION_MODE=DUAL`.
+- **Do not recommend** `TETHER_EXAM_ATTESTATION_MODE=V2_REQUIRED` or
+  `TETHER_SYSTEM_CHECK_MODE=REQUIRE` until BOTH physical multi-device
+  validation (registering two real installations, revoking one,
+  confirming the other still works) and compatibility testing (a
+  pre-1.5.0-reporting client correctly grandfathered under `DUAL`) are
+  complete on real hardware — neither can be fully verified from this
+  development environment (no physical Windows multi-monitor hardware
+  or a second physical machine available here — see "Known
+  limitations").
+- **Rollback plan**: at any point, setting
+  `TETHER_EXAM_ATTESTATION_MODE` back to `LEGACY` (or removing it
+  entirely) immediately reverts every exam session's verification
+  decision to the legacy `recordAttestation()` flow alone, with zero
+  code deploy needed — v2 evidence keeps being recorded but stops
+  mattering. This is symmetric with `TETHER_SYSTEM_CHECK_MODE=OFF` for
+  the system-check feature.
 
 ## Windows compatibility statement
 
@@ -647,30 +986,32 @@ Tether-Secure-Browser code paths.
   rejecting any client-claimed `TPM_ATTESTED` value outright (never
   silently downgrading it — a downgrade would be indistinguishable from
   an honest `SOFTWARE_PROTECTED` registration in the audit trail).
-- **The pre-existing real exam-launch attestation flow
+- **The pre-existing legacy real exam-launch attestation flow
   (`POST /api/secure-client/sessions/[sessionId]/attestation` →
-  `recordAttestation`) still has the unattested-facts weakness** — it
-  accepts `checks`/`clientVersion`/`platform`/`displayTopology` directly
-  from the request body with no client-side signature verification
-  gating `verificationStatus`/`status`. This pass adds a genuinely
-  verified, purpose-bound, installation-signed `EXAM_SESSION`
-  attestation path (`POST /api/tether/exam-session/attestation/*`) but
-  deliberately keeps it ADDITIVE ONLY (see "Real exam attestation —
-  additive groundwork") rather than wiring it into the actual
-  READY/CANNOT_START decision, to avoid an undertested change to the
-  live exam-taking path in this single pass. Wiring `EXAM_SESSION` v2
-  into that decision (Phase 2 of "Compatibility and rollout") is the
-  recommended, valuable follow-up.
+  `recordAttestation`) still has the unattested-facts weakness — and
+  under the safe default `TETHER_EXAM_ATTESTATION_MODE=LEGACY`, it
+  remains the SOLE real gate.** This pass genuinely wires installation-
+  bound `EXAM_SESSION` v2 evidence into the verification decision (see
+  "Real exam attestation — installation-bound v2 (wired)"), but only
+  actually GATES anything once `TETHER_EXAM_ATTESTATION_MODE` is
+  switched to `DUAL` or `V2_REQUIRED` — deliberately not done by this
+  pass in Production, to avoid an undertested change to the live
+  exam-taking path landing with no rollout period. See "First-pilot
+  settings" for the recommended path to actually turning it on.
 - **No administrative (lecturer/platform-admin) installation-revocation
   surface exists yet** — only student self-service revocation
   (`POST /api/tether/installation/[id]/revoke`). An institution wanting
   to revoke a specific student's installation (e.g. a shared lab
   computer flagged for reuse) would need direct database access today.
-- **At most one `ACTIVE` installation per user at a time** — registering
-  a new installation automatically replaces any prior one. A student
-  with two legitimate devices (e.g. home + campus lab) must re-register
-  each time they switch, rather than maintaining both simultaneously.
-  Multi-device support was out of scope for this pass.
+- **Registration-challenge single-use is not independently tracked** —
+  see "Registration hardening" for the exact, narrowly-bounded gap and
+  why it was left as a documented limitation rather than closed with a
+  new persistent nonce table this pass.
+- **No large device-management dashboard** — multi-device support
+  (registration up to a configurable limit, self-service revocation,
+  `GET installation/list`) is complete server-side, but a polished
+  student-facing "manage my devices" page was deliberately deferred —
+  see "Multi-device support".
 - **Operating-system self-report in an ordinary browser** is inferred
   from `navigator.userAgentData`/`navigator.platform`/`navigator.userAgent`,
   which a sufficiently motivated user could spoof via browser DevTools.

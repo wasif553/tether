@@ -18,6 +18,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
 import { buildTetherDashboardDeepLink } from "@/lib/tetherLaunch";
+import { ensureRegisteredInstallation } from "@/lib/secureClient/installationClient";
 import { classifyFrameQuality, computeLuminanceVariance } from "@/lib/cameraIntegrityDetection";
 import {
   computeOverallStatus,
@@ -226,56 +227,6 @@ const CHECK_TIMEOUT_MS = 8_000;
  * main.ts itself gathered. This function never constructs or trusts a
  * "verified" boolean itself — the server's response is authoritative.
  */
-/**
- * Secure Client Attestation v2 — see docs/tether-system-check-v1.md,
- * "Per-installation key" / "Installation registration". Ensures a
- * genuine, server-registered per-installation key exists for this
- * device, registering one (first-time-ever, or after a prior
- * revocation) if needed. Returns the installationId to attest with, or
- * null if registration could not be completed. The private key itself
- * never leaves the Electron main process at any point in this flow.
- */
-async function ensureRegisteredInstallation(): Promise<string | null> {
-  const current = await withTimeout(fetch("/api/tether/installation/current"), CHECK_TIMEOUT_MS)
-    .then((r) => (r.ok ? r.json() : null))
-    .catch(() => null);
-  if (current?.installation?.id) return current.installation.id;
-
-  if (typeof window.sesLockdown?.ensureInstallationKey !== "function" || typeof window.sesLockdown?.signRegistrationProof !== "function") {
-    return null;
-  }
-  const keyInfo = await withTimeout(window.sesLockdown.ensureInstallationKey(), CHECK_TIMEOUT_MS).catch(() => null);
-  if (!keyInfo?.hasKey || !keyInfo.publicKey) return null;
-
-  const challengeRes = await withTimeout(fetch("/api/tether/installation/registration-challenge", { method: "POST" }), CHECK_TIMEOUT_MS).catch(() => null);
-  if (!challengeRes?.ok) return null;
-  const { challenge, signature: challengeSignature } = await challengeRes.json();
-
-  const proof = await withTimeout(window.sesLockdown.signRegistrationProof(challenge.nonce), CHECK_TIMEOUT_MS).catch(() => null);
-  if (!proof) return null;
-
-  const registerRes = await withTimeout(
-    fetch("/api/tether/installation/register", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        challenge,
-        challengeSignature,
-        publicKey: proof.publicKey ?? keyInfo.publicKey,
-        keyAlgorithm: proof.keyAlgorithm ?? keyInfo.keyAlgorithm,
-        keyProtectionLevel: proof.keyProtectionLevel ?? keyInfo.keyProtectionLevel,
-        proofOfPossessionSignature: proof.signature,
-        clientVersion: window.sesLockdown?.version ?? null,
-        platform: null,
-      }),
-    }),
-    CHECK_TIMEOUT_MS,
-  ).catch(() => null);
-  if (!registerRes?.ok) return null;
-  const registerBody = await registerRes.json().catch(() => null);
-  return typeof registerBody?.installationId === "string" ? registerBody.installationId : null;
-}
-
 async function verifySecureClient(): Promise<{ display: CheckDisplay; verificationId: string | null }> {
   try {
     const installationId = await ensureRegisteredInstallation();

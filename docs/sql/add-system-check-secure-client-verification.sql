@@ -4,9 +4,12 @@
 -- native display-topology fact) + Secure Client Attestation v2 (adds
 -- "installationId", required — see
 -- docs/sql/add-tether-client-installation.sql for the companion table
--- this column references, and docs/tether-system-check-v1.md). This
--- table has not been applied to Preview/Production yet, so this file is
--- updated in place rather than adding a second ALTER TABLE file.
+-- this column references, and docs/tether-system-check-v1.md) + EXAM_SESSION
+-- v2 wiring (adds "attestationProtocolVersion", evidence-only — see
+-- docs/sql/add-secure-client-session-installation-attestation.sql for the
+-- companion SecureClientSession columns). This table has not been applied
+-- to Preview/Production yet, so this file is updated in place rather than
+-- adding a second ALTER TABLE file.
 --
 -- Adds ONE new, fully additive table: "SystemCheckSecureClientVerification".
 -- Does not alter, rename, or drop any existing table, column, index,
@@ -35,6 +38,7 @@ CREATE TABLE IF NOT EXISTS "public"."SystemCheckSecureClientVerification" (
     "userId"             TEXT NOT NULL,
     "institutionId"      TEXT NOT NULL,
     "purpose"            TEXT NOT NULL DEFAULT 'SYSTEM_CHECK',
+    "attestationProtocolVersion" INTEGER NOT NULL DEFAULT 2,
     "installationId"     TEXT NOT NULL,
     "clientType"         TEXT NOT NULL,
     "verificationStatus" TEXT NOT NULL DEFAULT 'NOT_CHECKED',

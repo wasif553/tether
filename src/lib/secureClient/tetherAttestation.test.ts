@@ -119,6 +119,11 @@ function baseAttestationChallenge(overrides: Partial<AttestationChallenge> = {})
     examId: null,
     submissionId: null,
     policyHash: null,
+    secureClientSessionId: null,
+    institutionId: null,
+    allowedClientType: null,
+    displayPolicy: null,
+    requiredMinimumClientVersion: null,
     ...overrides,
   };
 }
@@ -178,6 +183,25 @@ describe("purpose-bound attestation challenge", () => {
     const future = Date.parse(challenge.expiresAt) + 1000;
     expect(validateAttestationChallengeContext(challenge, signature, serverPublicKeyPem, { ...context, nowMs: future })).toBe("EXPIRED");
   });
+
+  it("UNSUPPORTED_PROTOCOL_VERSION for a challenge signed under a different schemaVersion, even if the signature itself is genuine", () => {
+    const challenge = baseAttestationChallenge({ schemaVersion: ATTESTATION_PROTOCOL_VERSION + 1 });
+    const signature = signAttestationChallenge(challenge, serverPrivateKeyPem);
+    expect(validateAttestationChallengeContext(challenge, signature, serverPublicKeyPem, { ...context, nowMs: Date.now() })).toBe("UNSUPPORTED_PROTOCOL_VERSION");
+  });
+
+  it("EXAM_SESSION session-id tampering (post-signing) invalidates the signature", () => {
+    const challenge = baseAttestationChallenge({ purpose: "EXAM_SESSION", secureClientSessionId: "session-1" });
+    const signature = signAttestationChallenge(challenge, serverPrivateKeyPem);
+    const tampered = { ...challenge, secureClientSessionId: "a-different-session" };
+    expect(
+      validateAttestationChallengeContext(tampered, signature, serverPublicKeyPem, {
+        ...context,
+        expectedPurpose: "EXAM_SESSION",
+        nowMs: Date.now(),
+      }),
+    ).toBe("INVALID_SIGNATURE");
+  });
 });
 
 describe("installation-signed attestation payloads (the proof Chrome cannot fabricate)", () => {
@@ -197,6 +221,9 @@ describe("installation-signed attestation payloads (the proof Chrome cannot fabr
       examId: "exam-1",
       submissionId: "sub-1",
       policyHash: "policy-hash-1",
+      secureClientSessionId: "session-1",
+      capabilities: "1,1,1,1",
+      timestamp: new Date(0).toISOString(),
     });
     expect(systemCheckString).not.toBe(examSessionString);
 
@@ -221,7 +248,16 @@ describe("installation-signed attestation payloads (the proof Chrome cannot fabr
   });
 
   it("14. submission tampering (EXAM_SESSION) invalidates the signature", () => {
-    const facts = { ...systemCheckFacts, displayCount: 1, examId: "exam-1", submissionId: "sub-1", policyHash: "policy-hash-1" };
+    const facts = {
+      ...systemCheckFacts,
+      displayCount: 1,
+      examId: "exam-1",
+      submissionId: "sub-1",
+      policyHash: "policy-hash-1",
+      secureClientSessionId: "session-1",
+      capabilities: "1,1,1,1",
+      timestamp: new Date(0).toISOString(),
+    };
     const canonicalString = buildExamSessionAttestationCanonicalString(facts);
     const signature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), installationAPrivateKeyPem).toString("base64");
     const tamperedString = buildExamSessionAttestationCanonicalString({ ...facts, submissionId: "a-different-submission" });
@@ -229,7 +265,16 @@ describe("installation-signed attestation payloads (the proof Chrome cannot fabr
   });
 
   it("13. exam tampering (EXAM_SESSION) invalidates the signature", () => {
-    const facts = { ...systemCheckFacts, displayCount: 1, examId: "exam-1", submissionId: "sub-1", policyHash: "policy-hash-1" };
+    const facts = {
+      ...systemCheckFacts,
+      displayCount: 1,
+      examId: "exam-1",
+      submissionId: "sub-1",
+      policyHash: "policy-hash-1",
+      secureClientSessionId: "session-1",
+      capabilities: "1,1,1,1",
+      timestamp: new Date(0).toISOString(),
+    };
     const canonicalString = buildExamSessionAttestationCanonicalString(facts);
     const signature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), installationAPrivateKeyPem).toString("base64");
     const tamperedString = buildExamSessionAttestationCanonicalString({ ...facts, examId: "a-different-exam" });
@@ -237,7 +282,16 @@ describe("installation-signed attestation payloads (the proof Chrome cannot fabr
   });
 
   it("15. policy-hash tampering (EXAM_SESSION) invalidates the signature", () => {
-    const facts = { ...systemCheckFacts, displayCount: 1, examId: "exam-1", submissionId: "sub-1", policyHash: "policy-hash-1" };
+    const facts = {
+      ...systemCheckFacts,
+      displayCount: 1,
+      examId: "exam-1",
+      submissionId: "sub-1",
+      policyHash: "policy-hash-1",
+      secureClientSessionId: "session-1",
+      capabilities: "1,1,1,1",
+      timestamp: new Date(0).toISOString(),
+    };
     const canonicalString = buildExamSessionAttestationCanonicalString(facts);
     const signature = crypto.sign(null, Buffer.from(canonicalString, "utf8"), installationAPrivateKeyPem).toString("base64");
     const tamperedString = buildExamSessionAttestationCanonicalString({ ...facts, policyHash: "a-different-policy-hash" });

@@ -43,6 +43,7 @@ import { useRouter } from "next/navigation";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
 import { buildTetherDeepLink, shouldShowInstallerFallback, resolveTetherLaunchFailureMessage } from "@/lib/tetherLaunch";
 import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
+import { ensureRegisteredInstallation } from "@/lib/secureClient/installationClient";
 
 // Exam Design Policy v1 — see docs/exam-design-policy-v1.md. Mirrors the
 // join page's own local type — this codebase does not share a central
@@ -330,6 +331,16 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       // has.
       if (consumed.sessionId) {
         await submitInitialAttestation(consumed.sessionId, submission.id);
+        // Secure Client Attestation v2 — see
+        // docs/tether-system-check-v1.md, "Wiring installation attestation
+        // into real exam sessions". Best-effort and additive: under the
+        // safe default TETHER_EXAM_ATTESTATION_MODE=LEGACY this has zero
+        // effect on whether the student can proceed (the legacy
+        // attestation above remains the sole real gate) — it only records
+        // genuine installation-bound evidence so DUAL/V2_REQUIRED can be
+        // enabled later without every existing session lacking it. Never
+        // blocks or delays entry into the exam on failure.
+        await submitExamSessionAttestationV2(consumed.sessionId, submission.id);
       }
 
       // Land directly in the exam; the Electron app's own live
@@ -391,6 +402,72 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       });
     } catch {
       logClientTetherDiagnostic("secure_client_session_verified", { ok: false, overallStatus: null });
+    }
+  }
+
+  /**
+   * Secure Client Attestation v2 — see docs/tether-system-check-v1.md,
+   * "Wiring installation attestation into real exam sessions". Registers
+   * (if needed) this installation, requests a purpose=EXAM_SESSION
+   * challenge bound to this exact session/exam/submission/policy, asks
+   * Tether's main process to sign a canonical response over facts it
+   * gathers itself (never a value this page supplies independently), and
+   * submits it for verification. Every failure path here is silent by
+   * design — an older packaged install simply won't expose
+   * attestExamSession yet, and under the default LEGACY compatibility
+   * mode this evidence has no bearing on whether the student can start
+   * their exam.
+   */
+  async function submitExamSessionAttestationV2(sessionId: string, submissionId: string): Promise<void> {
+    try {
+      const installationId = await ensureRegisteredInstallation();
+      if (!installationId || typeof window.sesLockdown?.attestExamSession !== "function") {
+        logClientTetherDiagnostic("exam_session_attestation_v2_skipped", { reason: !installationId ? "INSTALLATION_UNAVAILABLE" : "ATTESTATION_UNAVAILABLE" });
+        return;
+      }
+
+      const challengeRes = await fetch("/api/tether/exam-session/attestation/challenge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ installationId, submissionId }),
+      });
+      if (!challengeRes.ok) {
+        logClientTetherDiagnostic("exam_session_attestation_v2_skipped", { reason: "CHALLENGE_FAILED" });
+        return;
+      }
+      const { challenge, signature: challengeSignature } = await challengeRes.json();
+
+      const attestation = await window.sesLockdown.attestExamSession({
+        nonce: challenge.nonce,
+        examId: challenge.examId,
+        submissionId: challenge.submissionId,
+        policyHash: challenge.policyHash,
+        secureClientSessionId: challenge.secureClientSessionId,
+      });
+      if (!attestation) {
+        logClientTetherDiagnostic("exam_session_attestation_v2_skipped", { reason: "ATTESTATION_FAILED" });
+        return;
+      }
+
+      const verifyRes = await fetch("/api/tether/exam-session/attestation/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challenge,
+          challengeSignature,
+          installationSignature: attestation.signature,
+          clientVersion: attestation.clientVersion,
+          platform: attestation.platform,
+          displayTopologyClassification: attestation.displayTopologyClassification,
+          displayCount: attestation.displayCount,
+          capabilities: attestation.capabilities,
+          timestamp: attestation.timestamp,
+        }),
+      });
+      const body = await verifyRes.json().catch(() => null);
+      logClientTetherDiagnostic("exam_session_attestation_v2_result", { sessionId, verified: verifyRes.ok && body?.verified === true });
+    } catch {
+      logClientTetherDiagnostic("exam_session_attestation_v2_skipped", { reason: "EXCEPTION" });
     }
   }
 

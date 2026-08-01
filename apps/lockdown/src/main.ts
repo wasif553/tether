@@ -510,6 +510,9 @@ function buildExamSessionAttestationCanonicalString(params: {
   examId: string;
   submissionId: string;
   policyHash: string;
+  secureClientSessionId: string;
+  capabilities: string;
+  timestamp: string;
 }): string {
   return [
     "TETHER_ATTESTATION_V2",
@@ -523,7 +526,19 @@ function buildExamSessionAttestationCanonicalString(params: {
     params.examId,
     params.submissionId,
     params.policyHash,
+    params.secureClientSessionId,
+    params.capabilities,
+    params.timestamp,
   ].join("|");
+}
+
+// A fixed, comma-joined snapshot of the same four secure-client-capability
+// booleans lockdown:get-secure-client-capabilities reports — never
+// free-form JSON, always this exact bounded shape. Kept as a standalone
+// function (rather than reusing the IPC handler's own literal) so both
+// call sites are provably in lockstep.
+function secureClientCapabilitiesSnapshot(): string {
+  return "1,1,1,1";
 }
 
 function computePublicKeyFingerprint(publicKeyPem: string): string {
@@ -560,14 +575,28 @@ ipcMain.handle("lockdown:attest-system-check", async (_event, nonce: unknown) =>
   return { signature, clientVersion, platform, displayTopologyClassification };
 });
 
+// EXAM_SESSION attestation — see docs/tether-system-check-v1.md, "Wiring
+// installation attestation into real exam sessions". The renderer relays
+// examId/submissionId/policyHash/secureClientSessionId straight out of
+// the server-signed challenge it received (never chosen by the renderer
+// itself) — main does not re-verify those against a local copy of the
+// challenge (it has none; only the server holds the private signing key
+// needed to have issued a genuine one), but every one of them is bound
+// into THIS signature, and the SERVER independently re-checks each field
+// against its own challenge and the real SecureClientSession/Submission
+// rows before accepting anything (tetherAttestationRunner.ts). Native
+// facts (clientVersion, platform, displayTopologyClassification,
+// displayCount, capabilities, timestamp) are always gathered by main
+// itself — never accepted from the payload.
 ipcMain.handle("lockdown:attest-exam-session", async (_event, payload: unknown) => {
   if (typeof payload !== "object" || payload === null) return null;
-  const { nonce, examId, submissionId, policyHash } = payload as Record<string, unknown>;
+  const { nonce, examId, submissionId, policyHash, secureClientSessionId } = payload as Record<string, unknown>;
   if (
     typeof nonce !== "string" || nonce.length === 0 || nonce.length > 512 ||
     typeof examId !== "string" || examId.length === 0 ||
     typeof submissionId !== "string" || submissionId.length === 0 ||
-    typeof policyHash !== "string" || policyHash.length === 0
+    typeof policyHash !== "string" || policyHash.length === 0 ||
+    typeof secureClientSessionId !== "string" || secureClientSessionId.length === 0
   ) {
     return null;
   }
@@ -578,6 +607,8 @@ ipcMain.handle("lockdown:attest-exam-session", async (_event, payload: unknown) 
   const topology = await displayEnforcement.getOnDemandDisplayTopology();
   const displayTopologyClassification = topology.classification;
   const displayCount = displayEnforcement.getCurrentDisplayCount();
+  const capabilities = secureClientCapabilitiesSnapshot();
+  const timestamp = new Date().toISOString();
   const installationPublicKeyFingerprint = computePublicKeyFingerprint(info.publicKey);
   const canonicalString = buildExamSessionAttestationCanonicalString({
     nonce,
@@ -589,10 +620,13 @@ ipcMain.handle("lockdown:attest-exam-session", async (_event, payload: unknown) 
     examId,
     submissionId,
     policyHash,
+    secureClientSessionId,
+    capabilities,
+    timestamp,
   });
   const signature = signWithInstallationKey(store, safeStorage, canonicalString);
   if (!signature) return null;
-  return { signature, clientVersion, platform, displayTopologyClassification, displayCount };
+  return { signature, clientVersion, platform, displayTopologyClassification, displayCount, capabilities, timestamp };
 });
 
 // Tasks A/B — the hosted page reports the bounded, non-secret policy

@@ -72,7 +72,16 @@ type SesLockdownBridge = {
     examId: string;
     submissionId: string;
     policyHash: string;
-  }): Promise<{ signature: string; clientVersion: string; platform: string; displayTopologyClassification: string; displayCount: number } | null>;
+    secureClientSessionId: string;
+  }): Promise<{
+    signature: string;
+    clientVersion: string;
+    platform: string;
+    displayTopologyClassification: string;
+    displayCount: number;
+    capabilities: string;
+    timestamp: string;
+  } | null>;
 };
 
 declare global {

@@ -38,6 +38,11 @@ const challengeSchema = z.object({
   examId: z.null(),
   submissionId: z.null(),
   policyHash: z.null(),
+  secureClientSessionId: z.null(),
+  institutionId: z.null(),
+  allowedClientType: z.null(),
+  displayPolicy: z.null(),
+  requiredMinimumClientVersion: z.null(),
 });
 
 const bodySchema = z.object({
@@ -90,6 +95,9 @@ export async function POST(req: Request) {
   }
   if (result.outcome === "INSTALLATION_NOT_ACTIVE") {
     return NextResponse.json({ verified: false, reason: "INSTALLATION_NOT_ACTIVE" }, { status: 409 });
+  }
+  if (result.outcome === "INSTALLATION_KEY_PROTECTION_REJECTED") {
+    return NextResponse.json({ verified: false, reason: "INSTALLATION_KEY_PROTECTION_REJECTED" }, { status: 409 });
   }
   if (result.outcome === "INSTALLATION_SIGNATURE_INVALID") {
     return NextResponse.json({ verified: false, reason: "INSTALLATION_SIGNATURE_INVALID" }, { status: 400 });

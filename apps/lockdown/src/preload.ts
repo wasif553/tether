@@ -205,18 +205,28 @@ contextBridge.exposeInMainWorld("sesLockdown", {
     examId: string;
     submissionId: string;
     policyHash: string;
-  }): Promise<{ signature: string; clientVersion: string; platform: string; displayTopologyClassification: string; displayCount: number } | null> {
+    secureClientSessionId: string;
+  }): Promise<{
+    signature: string;
+    clientVersion: string;
+    platform: string;
+    displayTopologyClassification: string;
+    displayCount: number;
+    capabilities: string;
+    timestamp: string;
+  } | null> {
     if (typeof params !== "object" || params === null) return null;
-    const { nonce, examId, submissionId, policyHash } = params;
+    const { nonce, examId, submissionId, policyHash, secureClientSessionId } = params;
     if (
       typeof nonce !== "string" || nonce.length === 0 ||
       typeof examId !== "string" || examId.length === 0 ||
       typeof submissionId !== "string" || submissionId.length === 0 ||
-      typeof policyHash !== "string" || policyHash.length === 0
+      typeof policyHash !== "string" || policyHash.length === 0 ||
+      typeof secureClientSessionId !== "string" || secureClientSessionId.length === 0
     ) {
       return null;
     }
-    return ipcRenderer.invoke("lockdown:attest-exam-session", { nonce, examId, submissionId, policyHash });
+    return ipcRenderer.invoke("lockdown:attest-exam-session", { nonce, examId, submissionId, policyHash, secureClientSessionId });
   },
 });
 

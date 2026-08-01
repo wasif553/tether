@@ -93,6 +93,15 @@ export async function POST(req: Request) {
   if (result.outcome === "DUPLICATE_KEY") {
     return NextResponse.json({ registered: false, reason: "DUPLICATE_KEY" }, { status: 409 });
   }
+  if (result.outcome === "LIMIT_REACHED") {
+    return NextResponse.json(
+      { registered: false, reason: "LIMIT_REACHED", maxActiveInstallations: result.maxActiveInstallations },
+      { status: 409 },
+    );
+  }
+  if (result.outcome === "RATE_LIMITED") {
+    return NextResponse.json({ registered: false, reason: "RATE_LIMITED" }, { status: 429 });
+  }
 
   return NextResponse.json({ registered: true, installationId: result.installationId, publicKeyFingerprint: result.publicKeyFingerprint });
 }

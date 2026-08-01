@@ -3,45 +3,107 @@
  * configuration. See docs/tether-system-check-v1.md, "Compatibility and
  * rollout".
  *
- * Server-only. Reads process.env exactly once per call, with safe
- * defaults that can never accidentally lock out an existing student —
- * see each function's own doc comment.
+ * Server-only, pure otherwise (no Prisma, no Next.js — safe to import
+ * from anywhere, including plain vitest). Reads process.env exactly once
+ * per call, with a safe default (LEGACY) that can never accidentally
+ * lock out an existing student.
+ *
+ * Single central resolver, per the "if retaining an environment-variable
+ * design, centralise it in one deterministic resolver" instruction —
+ * replaces the two independent booleans this file used to export
+ * (isLegacyAttestationAllowed / isV2ExamSessionRequiredForNewFinalExams),
+ * which were built ahead of any real wiring and never consumed by
+ * anything. Now that EXAM_SESSION v2 is actually wired into the real
+ * exam-session verification decision (resolveEffectiveTetherVerification
+ * below, consumed by exams/[id]/start and submissions/[id] routes), a
+ * single three-state mode is the one true source of truth instead.
  */
+import { compareVersions } from "@/lib/systemCheck/readiness";
 
-/** The attestation protocol version THIS server issues challenges under. Always 2 as of this pass — there is no server-side code path that issues a v1 SYSTEM_CHECK challenge any more (the v1 globally-embedded-key design was removed entirely, not merely deprecated). */
+/** The attestation protocol version THIS server issues challenges under. */
 export const ATTESTATION_PROTOCOL_VERSION = 2;
 
-/**
- * Whether the LEGACY (pre-installation-key) real exam-launch attestation
- * route (`POST /api/secure-client/sessions/[sessionId]/attestation`,
- * `recordAttestation` in secureClientRunner.ts) remains accepted.
- *
- * Defaults to `true` (accepted) — this is the CORRECT safe default: that
- * route is the ONLY thing that currently establishes a verified
- * SecureClientSession for a real exam attempt (the new EXAM_SESSION v2
- * attestation flow in this pass is purely additive — see
- * "Real exam attestation — additive groundwork" in the doc above, and is
- * not wired into any enforcement decision yet). Flipping this to
- * `false` before EXAM_SESSION v2 is genuinely wired into the exam-start
- * gate would lock out every student attempting a Tether-required exam —
- * see "Known limitations". This flag exists now, ahead of that wiring,
- * so the rollout sequence documented below has somewhere to attach to
- * without a second config change later.
- */
-export function isLegacyAttestationAllowed(): boolean {
-  return process.env.TETHER_LEGACY_ATTESTATION_ALLOWED !== "false";
-}
+export const EXAM_ATTESTATION_MODES = ["LEGACY", "DUAL", "V2_REQUIRED"] as const;
+export type ExamAttestationMode = (typeof EXAM_ATTESTATION_MODES)[number];
 
 /**
- * Whether a NEWLY created final examination should require genuine
- * EXAM_SESSION v2 (installation-bound) attestation, once that
- * enforcement is actually wired up in a future pass. Defaults to
- * `false` — this pass explicitly does NOT enable v2-only Production
- * enforcement (per instruction) and the enforcement code path this flag
- * would gate does not exist yet. Present now purely so the rollout
- * sequence is configurable from day one of that future work, rather
- * than requiring a schema/env-var change at that point too.
+ * Truth table (see docs/tether-system-check-v1.md, "Compatibility and
+ * rollout" for the full rationale):
+ *
+ *  - LEGACY (default/safe): only the existing recordAttestation() flow
+ *    (secureClientRunner.ts) can mark a session verified. v2 EXAM_SESSION
+ *    evidence may still be recorded (SecureClientSession.installationAttestationVerified
+ *    etc.) but has zero effect on the access decision. No student can be
+ *    locked out by this pass merely existing.
+ *  - DUAL: for a client whose LEGACY-reported clientVersion is
+ *    v1.5.0-capable (>= V2_CAPABLE_MINIMUM_CLIENT_VERSION — i.e. new
+ *    enough to have EVER been able to attempt v2), genuine v2 evidence is
+ *    ADDITIONALLY required on top of the legacy VERIFIED status. An
+ *    older, pre-1.5.0 client (which physically cannot produce v2
+ *    evidence — that capability didn't exist yet) is grandfathered on
+ *    legacy alone, so DUAL can be turned on mid-rollout without stranding
+ *    students who haven't updated yet.
+ *  - V2_REQUIRED: only genuine, installation-bound v2 EXAM_SESSION
+ *    evidence verifies a session — legacy-only attestation is rejected
+ *    outright, regardless of reported client version. Never enabled in
+ *    Production by this pass (see docs/tether-system-check-v1.md).
+ *
+ * Only the EXACT strings "DUAL"/"V2_REQUIRED" opt in; any other value
+ * (missing, empty, typo) resolves to LEGACY.
  */
-export function isV2ExamSessionRequiredForNewFinalExams(): boolean {
-  return process.env.TETHER_REQUIRE_EXAM_SESSION_V2 === "true";
+export function resolveExamAttestationMode(): ExamAttestationMode {
+  const raw = process.env.TETHER_EXAM_ATTESTATION_MODE;
+  if (raw === "DUAL") return "DUAL";
+  if (raw === "V2_REQUIRED") return "V2_REQUIRED";
+  return "LEGACY";
+}
+
+/** The minimum LEGACY-reported client version capable of ever attempting v2 EXAM_SESSION attestation (the version installation-key registration first shipped in — see apps/lockdown/src/shared.ts). */
+export const V2_CAPABLE_MINIMUM_CLIENT_VERSION = "1.5.0";
+
+export function isClientV2Capable(legacyClientVersion: string | null): boolean {
+  if (!legacyClientVersion) return false;
+  return compareVersions(legacyClientVersion, V2_CAPABLE_MINIMUM_CLIENT_VERSION) >= 0;
+}
+
+export type EffectiveTetherVerificationInput = {
+  mode: ExamAttestationMode;
+  /** SecureClientSession.verificationStatus === "VERIFIED", from the existing, unmodified legacy flow. */
+  legacyVerified: boolean;
+  /** SecureClientSession.installationAttestationVerified — set only after all v2 checks pass (tetherAttestationRunner.ts). */
+  v2Verified: boolean;
+  /** SecureClientSession.clientVersion, as reported by the LEGACY attestation — used only to decide DUAL-mode grandfathering. */
+  legacyClientVersion: string | null;
+};
+
+/**
+ * The SINGLE function every real enforcement point (POST
+ * /api/exams/[id]/start, GET /api/submissions/[id]) must call instead of
+ * reading SecureClientSession.verificationStatus directly — see
+ * docs/tether-system-check-v1.md, "Compatibility and rollout" for the
+ * full truth table this implements.
+ */
+/** Safe default (2) — a student may need a replacement device if their original fails before an exam; never so large it defeats the point of a limit. Clamped to [1, 5] against a malformed env value. */
+const DEFAULT_MAX_ACTIVE_INSTALLATIONS_PER_USER = 2;
+const MIN_MAX_ACTIVE_INSTALLATIONS_PER_USER = 1;
+const MAX_MAX_ACTIVE_INSTALLATIONS_PER_USER = 5;
+
+export function resolveMaxActiveInstallationsPerUser(): number {
+  const raw = process.env.TETHER_MAX_ACTIVE_INSTALLATIONS_PER_USER;
+  const parsed = raw != null ? Number(raw) : NaN;
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) return DEFAULT_MAX_ACTIVE_INSTALLATIONS_PER_USER;
+  return Math.min(MAX_MAX_ACTIVE_INSTALLATIONS_PER_USER, Math.max(MIN_MAX_ACTIVE_INSTALLATIONS_PER_USER, parsed));
+}
+
+export function resolveEffectiveTetherVerification(input: EffectiveTetherVerificationInput): boolean {
+  switch (input.mode) {
+    case "LEGACY":
+      return input.legacyVerified;
+    case "DUAL":
+      return isClientV2Capable(input.legacyClientVersion) ? input.legacyVerified && input.v2Verified : input.legacyVerified;
+    case "V2_REQUIRED":
+      return input.v2Verified;
+    default:
+      return input.legacyVerified;
+  }
 }
