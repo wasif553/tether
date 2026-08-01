@@ -128,6 +128,51 @@ describe("Secure Exam Mode settings", () => {
     expect(body.secureSettings.blockCopyPaste).toBe(true);
   });
 
+  it("a genuinely partial PATCH (single field) never resets other secureSettings fields to their schema defaults", async () => {
+    // Regression test: secureSettingsInputSchema is
+    // secureExamSettingsSchema.partial(), and Zod's .partial() fills
+    // omitted fields with their .default(...) rather than leaving them
+    // undefined. A naive `{ ...current, ...parsed.secureSettings }` merge
+    // therefore silently overwrote every field the caller omitted back to
+    // its default — e.g. downgrading a published FINAL_EXAMINATION/
+    // TETHER_CLIENT_REQUIRED exam back to an ordinary QUIZ_OR_TEST/
+    // STANDARD_WEB exam just by PATCHing an unrelated field.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const exam = await prisma.exam.create({
+      data: {
+        title: "Final Exam Partial Patch Guard",
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: {
+          assessmentType: "FINAL_EXAMINATION",
+          deliveryMode: "TETHER_CLIENT_REQUIRED",
+          displayPolicy: "SINGLE_DISPLAY_REQUIRED",
+          allowLateSubmit: false,
+        },
+      },
+    });
+
+    const res = await examRoute.PATCH(
+      jsonRequest("PATCH", { secureSettings: { allowLateSubmit: true } }),
+      { params: Promise.resolve({ id: exam.id }) },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.secureSettings.allowLateSubmit).toBe(true);
+    // The fields the request never mentioned must survive untouched.
+    expect(body.secureSettings.assessmentType).toBe("FINAL_EXAMINATION");
+    expect(body.secureSettings.deliveryMode).toBe("TETHER_CLIENT_REQUIRED");
+    expect(body.secureSettings.displayPolicy).toBe("SINGLE_DISPLAY_REQUIRED");
+
+    const stored = await prisma.exam.findUniqueOrThrow({ where: { id: exam.id } });
+    const storedSettings = stored.secureSettings as Record<string, unknown>;
+    expect(storedSettings.assessmentType).toBe("FINAL_EXAMINATION");
+    expect(storedSettings.deliveryMode).toBe("TETHER_CLIENT_REQUIRED");
+    expect(storedSettings.displayPolicy).toBe("SINGLE_DISPLAY_REQUIRED");
+  });
+
   it("disables Secure Exam Mode again via PATCH", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
     const exam = await prisma.exam.create({

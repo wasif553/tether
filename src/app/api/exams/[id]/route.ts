@@ -41,6 +41,29 @@ const updateExamSchema = z
     { message: "availableUntil must be after availableFrom", path: ["availableUntil"] },
   );
 
+/**
+ * `secureSettingsInputSchema` is `secureExamSettingsSchema.partial()`, but
+ * Zod's `.partial()` does NOT leave a field the caller omitted as
+ * `undefined` when that field has a `.default(...)` — it fills it with the
+ * schema default instead (confirmed against the zod version this project
+ * pins). So `parsed.data.secureSettings` is always a FULL object, and a
+ * genuinely partial request body like `{ allowLateSubmit: true }` cannot be
+ * told apart from `{ allowLateSubmit: true, assessmentType: "QUIZ_OR_TEST",
+ * deliveryMode: "STANDARD_WEB", ... }` by looking at `parsed.data` alone.
+ * Spreading that straight over the exam's current settings would silently
+ * reset every field the caller never mentioned back to its default. This
+ * reads the field names from the RAW (pre-Zod) request body to know what
+ * was actually submitted, then picks only those keys from the
+ * Zod-validated/coerced values.
+ */
+function pickSubmittedSecureSettings<T extends object>(parsedSecureSettings: T, rawSecureSettings: unknown): Partial<T> {
+  if (rawSecureSettings == null || typeof rawSecureSettings !== "object") return {};
+  const submittedKeys = new Set(Object.keys(rawSecureSettings as Record<string, unknown>));
+  return Object.fromEntries(
+    Object.entries(parsedSecureSettings).filter(([key]) => submittedKeys.has(key)),
+  ) as Partial<T>;
+}
+
 /** Strips accessCodeHash from any exam object before it's ever sent in a response. */
 function omitAccessCodeHash<T extends { accessCodeHash?: string | null }>(
   exam: T,
@@ -168,7 +191,10 @@ export async function PATCH(
     } = parsed.data;
 
     const rawMergedSecureSettings = secureSettings
-      ? parseSecureSettings({ ...parseSecureSettings(exam.secureSettings), ...secureSettings })
+      ? parseSecureSettings({
+          ...parseSecureSettings(exam.secureSettings),
+          ...pickSubmittedSecureSettings(secureSettings, (body as { secureSettings?: unknown } | null)?.secureSettings),
+        })
       : undefined;
 
     // Mandatory Tether Delivery for Final Examinations — "automatically
