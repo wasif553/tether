@@ -75,10 +75,18 @@ export default function StudentDashboard() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">My Exams</h1>
         {/* Tether System Check and Exam Readiness v1 — see
-            docs/tether-system-check-v1.md. */}
-        <a href="/student/system-check" className="rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-800">
-          Check this computer
-        </a>
+            docs/tether-system-check-v1.md. Registered Tether Devices and
+            Revocation UI v1 adds the second link alongside it — kept to
+            these two small links so the dashboard itself stays
+            uncrowded. */}
+        <div className="flex items-center gap-2">
+          <a href="/student/system-check" className="rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-800">
+            Check this computer
+          </a>
+          <a href="/student/tether-devices" className="rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-800">
+            Registered computers
+          </a>
+        </div>
       </div>
 
       <div className="mt-6 space-y-3">

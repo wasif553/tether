@@ -74,6 +74,7 @@ const examSessionChallengeRoute = await import("../app/api/tether/exam-session/a
 const examSessionVerifyRoute = await import("../app/api/tether/exam-session/attestation/verify/route");
 const installationListRoute = await import("../app/api/tether/installation/list/route");
 const legacyAttestationRoute = await import("../app/api/secure-client/sessions/[sessionId]/attestation/route");
+const submitRoute = await import("../app/api/submissions/[id]/submit/route");
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT", institutionId: string) {
   return {
@@ -820,6 +821,671 @@ describe("POST /api/tether/installation/[id]/revoke", () => {
     expect(challengeRes.status).toBe(409);
     expect(verifyRes).toBeNull();
   });
+
+  it("13. revocation preserves the historical installation row rather than deleting it, and it still appears in the list as REVOKED", async () => {
+    const s = await freshStudent("Revoke Preserves History Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "Lost device" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(200);
+
+    const record = await prisma.tetherClientInstallation.findUnique({ where: { id: installationId } });
+    expect(record).not.toBeNull();
+    expect(record?.status).toBe("REVOKED");
+    expect(record?.revokedAt).not.toBeNull();
+
+    const listRes = await installationListRoute.GET();
+    const listBody = await listRes.json();
+    const row = listBody.installations.find((i: { id: string }) => i.id === installationId);
+    expect(row).toBeTruthy();
+    expect(row.status).toBe("REVOKED");
+  });
+
+  it("20. revocation deletes no Submission, Answer, or evidence records", async () => {
+    const s = await freshStudent("Revoke No Data Loss Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { exam, submission } = await startFinalExamWithSession(s, "revoke-no-data-loss");
+    const question = await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Evidence question" } });
+    await prisma.answer.create({ data: { submissionId: submission.id, questionId: question.id, response: "kept" } });
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(200);
+
+    expect(await prisma.submission.findUnique({ where: { id: submission.id } })).not.toBeNull();
+    const answers = await prisma.answer.findMany({ where: { submissionId: submission.id } });
+    expect(answers.length).toBe(1);
+    expect(answers[0].response).toBe("kept");
+  });
+
+  it("21. concurrent revoke requests for the same installation never leave inconsistent or partial state", async () => {
+    const s = await freshStudent("Concurrent Revoke Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const [r1, r2] = await Promise.all([
+      installationRevokeRoute.POST(jsonRequest("POST", { reason: "click 1" }), { params: Promise.resolve({ id: installationId }) }),
+      installationRevokeRoute.POST(jsonRequest("POST", { reason: "click 2" }), { params: Promise.resolve({ id: installationId }) }),
+    ]);
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+
+    const record = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
+    expect(record.status).toBe("REVOKED");
+  });
+});
+
+describe("Device management UI v1 — active-exam revocation safety", () => {
+  it("16. revocation is rejected server-side while the installation is bound to an active (IN_PROGRESS) exam session", async () => {
+    const s = await freshStudent("Active Exam Revoke Block Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission } = await startFinalExamWithSession(s, "active-exam-revoke-block");
+    const v2Res = await attestExamSessionV2(s, { installationId, privateKeyPem: reg.privateKeyPem }, submission.id);
+    expect(v2Res.status).toBe(200);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(409);
+    const body = await revokeRes.json();
+    expect(body.reason).toBe("ACTIVE_EXAM_IN_PROGRESS");
+
+    const record = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
+    expect(record.status).toBe("ACTIVE");
+  });
+
+  it("17. a blocked revocation attempt is itself operationally audited, distinctly from a successful revocation", async () => {
+    const s = await freshStudent("Active Exam Revoke Audit Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission } = await startFinalExamWithSession(s, "active-exam-revoke-audit");
+    await attestExamSessionV2(s, { installationId, privateKeyPem: reg.privateKeyPem }, submission.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+
+    const blockedAuditRows = await prisma.platformAuditLog.findMany({
+      where: { actorId: s.id, action: "TETHER_INSTALLATION_REVOCATION_BLOCKED_ACTIVE_EXAM" },
+    });
+    expect(blockedAuditRows.length).toBe(1);
+    expect(blockedAuditRows[0].targetId).toBe(installationId);
+
+    const successAuditRows = await prisma.platformAuditLog.findMany({ where: { actorId: s.id, action: "TETHER_INSTALLATION_REVOKED" } });
+    expect(successAuditRows.length).toBe(0);
+
+    const integrityEvents = await prisma.integrityEvent.count({ where: { studentId: s.id } });
+    expect(integrityEvents).toBe(0);
+  });
+
+  it("revocation becomes available once the bound submission is no longer IN_PROGRESS", async () => {
+    const s = await freshStudent("Active Exam Revoke After Submit Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission } = await startFinalExamWithSession(s, "active-exam-revoke-after-submit");
+    await attestExamSessionV2(s, { installationId, privateKeyPem: reg.privateKeyPem }, submission.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const blockedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(blockedRes.status).toBe(409);
+
+    await prisma.submission.update({ where: { id: submission.id }, data: { status: "SUBMITTED" } });
+
+    const allowedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(allowedRes.status).toBe(200);
+    const record = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
+    expect(record.status).toBe("REVOKED");
+  });
+
+  it("a LEGACY-only (non-v2-attested) active session now conservatively blocks revocation — closes the previously-documented data-model gap", async () => {
+    const s = await freshStudent("Legacy Active Exam Block Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    // A session that reaches an active exam purely via the legacy path
+    // never populates clientInstallationId — see
+    // findActiveBoundExamSessionId's own doc comment — so this is caught
+    // by the separate, account-wide findLegacyTetherRequiredActiveSessionId
+    // check instead.
+    const { session } = await startFinalExamWithSession(s, "legacy-active-exam-block");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(409);
+    const body = await revokeRes.json();
+    expect(body.reason).toBe("ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Closing the LEGACY-mode active-exam revocation gap — see
+// resolveActiveExamRevocationBlock / findLegacyTetherRequiredActiveSessionId
+// in tetherAttestationRunner.ts. Item 1 of the 14 scenarios below is
+// already proven by the flipped test directly above ("a LEGACY-only
+// (non-v2-attested) active session now conservatively blocks
+// revocation..."); items 2-14 are proven here.
+// ---------------------------------------------------------------------------
+describe("Legacy-mode active-exam revocation gap — closing pass", () => {
+  it("2. a LEGACY active Tether-required exam blocks revocation of every ACTIVE installation owned by that student, not just one", async () => {
+    const s = await freshStudent("Legacy Block Any Device Student");
+    const regA = await registerFreshInstallation(s.id, instId);
+    const { installationId: installationIdA } = await regA.registerRes.json();
+    const regB = await registerFreshInstallation(s.id, instId);
+    const { installationId: installationIdB } = await regB.registerRes.json();
+    const { session } = await startFinalExamWithSession(s, "legacy-block-any-device");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeA = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationIdA }) });
+    expect(revokeA.status).toBe(409);
+    const revokeB = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationIdB }) });
+    expect(revokeB.status).toBe(409);
+    const bodyB = await revokeB.json();
+    expect(bodyB.reason).toBe("ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE");
+  });
+
+  it("3. another student's active LEGACY Tether-required exam never blocks this student's revocation", async () => {
+    const blockedStudent = await freshStudent("Other Active Exam Student");
+    const { session: otherSession } = await startFinalExamWithSession(blockedStudent, "other-student-active-exam");
+    await establishLegacyVerifiedSession(otherSession.id);
+
+    const s = await freshStudent("Unaffected Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(200);
+  });
+
+  it("4. once the blocking LEGACY exam's submission is SUBMITTED, revocation is no longer blocked", async () => {
+    const s = await freshStudent("Legacy Submitted Unblock Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission, session } = await startFinalExamWithSession(s, "legacy-submitted-unblock");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const blockedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(blockedRes.status).toBe(409);
+
+    await prisma.submission.update({ where: { id: submission.id }, data: { status: "SUBMITTED" } });
+
+    const allowedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(allowedRes.status).toBe(200);
+  });
+
+  it("5. once the blocking LEGACY session reaches a terminal state (e.g. expired/ended), revocation is no longer blocked", async () => {
+    const s = await freshStudent("Legacy Expired Unblock Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { session } = await startFinalExamWithSession(s, "legacy-expired-unblock");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const blockedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(blockedRes.status).toBe(409);
+
+    // Terminal SESSION state alone (independent of the submission's own
+    // status) is enough to remove the block — mirrors an expired/ended
+    // attempt.
+    await prisma.secureClientSession.update({ where: { id: session.id }, data: { status: "ENDED", endedAt: new Date(), endReason: "EXPIRED" } });
+
+    const allowedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(allowedRes.status).toBe(200);
+  });
+
+  it("6. a non-final, non-Tether-required assessment's active session never blocks revocation", async () => {
+    const s = await freshStudent("Non Tether Assessment Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+
+    const exam = await createExam("non-tether-assessment");
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { assessmentType: "QUIZ_OR_TEST" }, published: true }), { params: Promise.resolve({ id: exam.id }) });
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(startRes.status).toBe(201);
+    const submission = await startRes.json();
+
+    // A genuinely VERIFIED, LEGACY, unbound, non-terminal Tether-typed
+    // session against an assessment whose OWN immutable policy snapshot
+    // never required Tether at all (STANDARD_WEB) — must never be
+    // conservatively blocked, even though every other condition for the
+    // block is otherwise met.
+    await prisma.secureClientSession.create({
+      data: {
+        institutionId: instId,
+        examId: exam.id,
+        submissionId: submission.id,
+        studentId: s.id,
+        clientType: "TETHER_SECURE_CLIENT",
+        status: "ACTIVE",
+        verificationStatus: "VERIFIED",
+        attestationRequirement: "LEGACY",
+      },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(200);
+  });
+
+  it("7. a v2-bound active exam blocks only its bound installation", async () => {
+    const s = await freshStudent("V2 Bound Only Student");
+    const regA = await registerFreshInstallation(s.id, instId);
+    const { installationId: installationIdA } = await regA.registerRes.json();
+    const { submission } = await startFinalExamWithSession(s, "v2-bound-only");
+    const v2Res = await attestExamSessionV2(s, { installationId: installationIdA, privateKeyPem: regA.privateKeyPem }, submission.id);
+    expect(v2Res.status).toBe(200);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeA = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationIdA }) });
+    expect(revokeA.status).toBe(409);
+    const bodyA = await revokeA.json();
+    expect(bodyA.reason).toBe("ACTIVE_EXAM_IN_PROGRESS");
+  });
+
+  it("8. a v2-bound active exam allows revocation of another, unbound installation", async () => {
+    const s = await freshStudent("V2 Bound Unrelated Allowed Student");
+    const regA = await registerFreshInstallation(s.id, instId);
+    const { installationId: installationIdA } = await regA.registerRes.json();
+    const regB = await registerFreshInstallation(s.id, instId);
+    const { installationId: installationIdB } = await regB.registerRes.json();
+    const { submission } = await startFinalExamWithSession(s, "v2-bound-unrelated-allowed");
+    const v2Res = await attestExamSessionV2(s, { installationId: installationIdA, privateKeyPem: regA.privateKeyPem }, submission.id);
+    expect(v2Res.status).toBe(200);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeB = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationIdB }) });
+    expect(revokeB.status).toBe(200);
+  });
+
+  it("9. a revoked installation cannot be revoked again inconsistently", async () => {
+    const s = await freshStudent("Double Revoke Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const first = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "first" }), { params: Promise.resolve({ id: installationId }) });
+    expect(first.status).toBe(200);
+
+    // Re-revoking an already-REVOKED installation is never subject to the
+    // active-exam guards (nothing ACTIVE is left to protect) and must
+    // never produce a partial or contradictory result.
+    const second = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "second" }), { params: Promise.resolve({ id: installationId }) });
+    expect(second.status).toBe(200);
+
+    const record = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
+    expect(record.status).toBe("REVOKED");
+    expect(record.revocationReason).toBe("second");
+  });
+
+  it("10/11. a conservatively-blocked revocation writes a distinct PlatformAuditLog row and never an IntegrityEvent", async () => {
+    const s = await freshStudent("Legacy Block Audit Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { session } = await startFinalExamWithSession(s, "legacy-block-audit");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(409);
+
+    const blockedRows = await prisma.platformAuditLog.findMany({
+      where: { actorId: s.id, action: "TETHER_INSTALLATION_REVOCATION_BLOCKED_LEGACY_ACTIVE_EXAM" },
+    });
+    expect(blockedRows.length).toBe(1);
+    expect(blockedRows[0].targetId).toBe(installationId);
+    const metadata = blockedRows[0].metadata as { activeSecureClientSessionId?: string; reason?: string } | null;
+    expect(metadata?.activeSecureClientSessionId).toBe(session.id);
+    expect(metadata?.reason).toBe("test");
+
+    const successRows = await prisma.platformAuditLog.findMany({ where: { actorId: s.id, action: "TETHER_INSTALLATION_REVOKED" } });
+    expect(successRows.length).toBe(0);
+
+    const integrityEvents = await prisma.integrityEvent.count({ where: { studentId: s.id } });
+    expect(integrityEvents).toBe(0);
+  });
+
+  it("12. a conservatively-blocked revocation deletes no Submission, Answer, or evidence records", async () => {
+    const s = await freshStudent("Legacy Block No Data Loss Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { exam, submission, session } = await startFinalExamWithSession(s, "legacy-block-no-data-loss");
+    await establishLegacyVerifiedSession(session.id);
+    const question = await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Evidence question" } });
+    await prisma.answer.create({ data: { submissionId: submission.id, questionId: question.id, response: "kept" } });
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(409);
+
+    expect(await prisma.submission.findUnique({ where: { id: submission.id } })).not.toBeNull();
+    const answers = await prisma.answer.findMany({ where: { submissionId: submission.id } });
+    expect(answers.length).toBe(1);
+    expect(answers[0].response).toBe("kept");
+
+    const installationRecord = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
+    expect(installationRecord.status).toBe("ACTIVE");
+  });
+
+  it("13. ownership isolation remains intact — another student cannot revoke this student's installation even while it is conservatively blocked", async () => {
+    const s = await freshStudent("Ownership Isolation Owner Student");
+    const attacker = await freshStudent("Ownership Isolation Attacker Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { session } = await startFinalExamWithSession(s, "ownership-isolation-legacy-block");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(attacker.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(404);
+
+    const record = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: installationId } });
+    expect(record.status).toBe("ACTIVE");
+  });
+
+  it("14. the shared Supabase database remains protected by the Vitest DB safety guard for this test area too", () => {
+    expect(process.env.VITEST).toBe("true");
+    expect(process.env.DATABASE_URL ?? "").toMatch(/localhost|127\.0\.0\.1|::1/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Authoritative exam expiry in the revocation guard — see
+// isWithinAuthoritativeSubmissionWindow in tetherAttestationRunner.ts.
+// Submission.status only ever leaves IN_PROGRESS through a real submit
+// request (student action or client-side auto-submit timer) — there is no
+// server-side sweep job, so an abandoned attempt (closed laptop, dead
+// battery, crashed browser, lost network) can leave IN_PROGRESS/non-
+// terminal statuses in the database indefinitely, long after the exam's
+// own deadline has genuinely passed. These tests drive that scenario
+// directly by moving Submission.startedAt into the past WITHOUT touching
+// any stored status field, and confirm the revocation guard reuses the
+// exact same submissionDeadline/canAcceptSubmit calculation
+// POST /api/submissions/[id]/submit itself already uses.
+// ---------------------------------------------------------------------------
+describe("Legacy-mode active-exam revocation gap — authoritative exam expiry", () => {
+  it("1. an IN_PROGRESS row whose authoritative exam time has expired no longer blocks revocation, even though the stored submission/session statuses are unchanged", async () => {
+    const s = await freshStudent("Authoritative Expiry Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-legacy");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const blockedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(blockedRes.status).toBe(409);
+
+    // Push the submission's own recorded start time far enough into the
+    // past that the exam's real 30-minute duration (see createExam) has
+    // authoritatively elapsed — WITHOUT touching Submission.status or
+    // SecureClientSession.status at all, simulating an abandoned attempt
+    // that no client-side auto-submit ever ran for.
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
+    expect((await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } })).status).toBe("IN_PROGRESS");
+    expect((await prisma.secureClientSession.findUniqueOrThrow({ where: { id: session.id } })).status).toBe("ACTIVE");
+
+    const allowedRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(allowedRes.status).toBe(200);
+  });
+
+  it("2. an IN_PROGRESS row past its nominal deadline but inside an explicitly authorised late-submit window still blocks revocation, matching the exam's own submit policy", async () => {
+    const s = await freshStudent("Late Submit Window Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    // allowLateSubmit is set BEFORE the attempt starts, so it's genuinely
+    // captured in the frozen timingPolicy snapshot — canAcceptSubmit (the
+    // SAME calculation POST /api/submissions/[id]/submit itself uses)
+    // treats this exam as still legitimately acceptable past its nominal
+    // deadline, so the revocation guard must agree.
+    const { submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-late-submit", undefined, { allowLateSubmit: true });
+    await establishLegacyVerifiedSession(session.id);
+
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(409);
+    const body = await revokeRes.json();
+    expect(body.reason).toBe("ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE");
+  });
+
+  it("3. an IN_PROGRESS row with remaining authoritative exam time still blocks revocation", async () => {
+    const s = await freshStudent("Remaining Time Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { session } = await startFinalExamWithSession(s, "authoritative-expiry-remaining-time");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(revokeRes.status).toBe(409);
+  });
+
+  it("4. a lecturer shortening the exam's duration mid-attempt does not retroactively expire it — the revocation guard uses the FROZEN duration captured at attempt start, never the live value (see 'Freeze timing policy for active exam attempts' below for the full suite)", async () => {
+    const s = await freshStudent("Duration Frozen Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { exam, submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-duration-frozen");
+    await establishLegacyVerifiedSession(session.id);
+
+    // 20 minutes elapsed against the exam's 30-minute duration at start
+    // time — still within the frozen window, still blocked.
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 20 * 60_000) } });
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const stillWithinDuration = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(stillWithinDuration.status).toBe(409);
+
+    // A lecturer shortening durationMins to 10 (below the 20 elapsed
+    // minutes) AFTER the attempt already started must have NO effect on
+    // this already-frozen attempt — still blocked, not "now expired".
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { durationMins: 10 }), { params: Promise.resolve({ id: exam.id }) });
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const stillBlockedAfterShortening = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(stillBlockedAfterShortening.status).toBe(409);
+  });
+
+  it("5. client-supplied clock/remaining-time values in the revoke request body have no effect on the expiry decision", async () => {
+    const s = await freshStudent("Client Clock Ignored Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-client-clock");
+    await establishLegacyVerifiedSession(session.id);
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+
+    // A forged body claiming the exam is already expired / has no
+    // remaining time — none of these fields exist in the revoke route's
+    // own zod schema (only `reason` does) and must be silently ignored.
+    // The exam is genuinely still within its window, so it must still be
+    // blocked.
+    const forgedButStillActive = await installationRevokeRoute.POST(
+      jsonRequest("POST", {
+        reason: "test",
+        now: new Date(0).toISOString(),
+        clientTime: 0,
+        remainingSeconds: -1,
+        deadline: new Date(0).toISOString(),
+        systemAutoSubmit: true,
+      }),
+      { params: Promise.resolve({ id: installationId }) },
+    );
+    expect(forgedButStillActive.status).toBe(409);
+
+    // Now genuinely expire it server-side (the only thing that actually
+    // matters) and confirm a forged "still plenty of remaining time" body
+    // has no power to keep the block alive either.
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
+    const forgedButExpired = await installationRevokeRoute.POST(
+      jsonRequest("POST", {
+        reason: "test",
+        now: new Date(Date.now() + 999_999_999).toISOString(),
+        remainingSeconds: 999_999,
+        deadline: new Date(Date.now() + 999_999_999).toISOString(),
+      }),
+      { params: Promise.resolve({ id: installationId }) },
+    );
+    expect(forgedButExpired.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Freeze timing policy for active exam attempts — see ExamTimingPolicy /
+// resolveSubmissionTimingPolicy in assessmentLifecycle.ts and
+// timingPolicy on ExamPolicySnapshot in examPolicy.ts. PATCH
+// /api/exams/[id] has NO restriction preventing a lecturer from editing
+// durationMins/allowLateSubmit/autoSubmitOnTimerEnd while students have
+// active IN_PROGRESS attempts — before this fix, every reader of "is
+// this submission still within its deadline" (submit, autosave, the
+// submissions GET route, and the device-revocation guard) read those
+// fields LIVE, so such an edit silently changed the rules for an attempt
+// already in progress. These tests prove every one of those readers now
+// uses the attempt's own FROZEN examPolicySnapshotJson.timingPolicy,
+// captured once at POST /api/exams/[id]/start, instead.
+// ---------------------------------------------------------------------------
+describe("Freeze timing policy for active exam attempts", () => {
+  it("1/4. PATCHing exam duration mid-attempt never changes an existing attempt's deadline, but a brand-new attempt (a different student) started afterwards gets the new duration", async () => {
+    const studentA = await freshStudent("Duration Frozen Existing Student");
+    const { exam, submission: submissionA, session: sessionA } = await startFinalExamWithSession(studentA, "freeze-duration-new-vs-existing");
+    // GET /api/submissions/[id] gates content (including `deadline`) on a
+    // verified Tether session for a TETHER_CLIENT_REQUIRED exam — this
+    // exam is a FINAL_EXAMINATION, so it's required here too.
+    await establishLegacyVerifiedSession(sessionA.id);
+    const expectedDeadlineA = new Date(new Date(submissionA.startedAt).getTime() + 30 * 60_000).toISOString();
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instId));
+    const beforeRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submissionA.id }) });
+    expect((await beforeRes.json()).deadline).toBe(expectedDeadlineA);
+
+    // Lecturer shortens duration to 5 minutes — AFTER studentA's attempt
+    // already started.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { durationMins: 5 }), { params: Promise.resolve({ id: exam.id }) });
+
+    // studentA's already-started attempt keeps its ORIGINAL 30-minute
+    // deadline, completely unaffected.
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instId));
+    const afterRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submissionA.id }) });
+    expect((await afterRes.json()).deadline).toBe(expectedDeadlineA);
+
+    // A brand-new attempt (a different student) started AFTER the PATCH
+    // gets the NEW 5-minute duration.
+    const studentB = await freshStudent("Duration New Attempt Student");
+    mockAuth.mockResolvedValue(sessionFor(studentB.id, "STUDENT", instId));
+    const startResB = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(startResB.status).toBe(201);
+    const submissionB = await startResB.json();
+    const sessionB = await prisma.secureClientSession.create({
+      data: {
+        institutionId: instId,
+        examId: exam.id,
+        submissionId: submissionB.id,
+        studentId: studentB.id,
+        clientType: "TETHER_SECURE_CLIENT",
+        status: "ACTIVE",
+        verificationStatus: "NOT_CHECKED",
+        attestationRequirement: resolveExamAttestationMode(),
+      },
+    });
+    await establishLegacyVerifiedSession(sessionB.id);
+    mockAuth.mockResolvedValue(sessionFor(studentB.id, "STUDENT", instId));
+    const getResB = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submissionB.id }) });
+    const expectedDeadlineB = new Date(new Date(submissionB.startedAt).getTime() + 5 * 60_000).toISOString();
+    expect((await getResB.json()).deadline).toBe(expectedDeadlineB);
+  });
+
+  it("2/6. changing allowLateSubmit after an attempt starts does not change whether that attempt's late manual submission is accepted — the frozen snapshot governs, matching the exam's own submit route", async () => {
+    const s = await freshStudent("Late Submit Frozen Student");
+    // allowLateSubmit defaults false — frozen into this attempt's snapshot at start.
+    const { exam, submission } = await startFinalExamWithSession(s, "freeze-late-submit");
+
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
+
+    // Lecturer now turns allowLateSubmit ON — AFTER the attempt started.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { allowLateSubmit: true } }), { params: Promise.resolve({ id: exam.id }) });
+
+    // The already-started attempt's frozen snapshot still says false — a
+    // manual late submit must still be rejected.
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const rejectedRes = await submitRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
+    expect(rejectedRes.status).toBe(409);
+    const rejectedBody = await rejectedRes.json();
+    expect(rejectedBody.code).toBe("DEADLINE_PASSED");
+
+    const record = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(record.status).toBe("IN_PROGRESS");
+  });
+
+  it("3/6. changing autoSubmitOnTimerEnd after an attempt starts does not change whether that attempt's forced system auto-submit is accepted — the frozen snapshot governs", async () => {
+    const s = await freshStudent("Auto Submit Frozen Student");
+    // autoSubmitOnTimerEnd defaults true — frozen into this attempt's snapshot at start.
+    const { exam, submission } = await startFinalExamWithSession(s, "freeze-auto-submit");
+
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
+
+    // Lecturer now turns autoSubmitOnTimerEnd OFF — AFTER the attempt started.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { autoSubmitOnTimerEnd: false } }), { params: Promise.resolve({ id: exam.id }) });
+
+    // The already-started attempt's frozen snapshot still says true — a
+    // forced system auto-submit past the deadline must still be accepted.
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const acceptedRes = await submitRoute.POST(jsonRequest("POST", { systemAutoSubmit: true }), { params: Promise.resolve({ id: submission.id }) });
+    expect(acceptedRes.status).toBe(200);
+    const record = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(record.status).not.toBe("IN_PROGRESS");
+  });
+
+  it("5. the device-revocation guard and submit acceptance agree — both derived from the exact same frozen snapshot", async () => {
+    const s = await freshStudent("Revoke Submit Parity Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { exam, submission, session } = await startFinalExamWithSession(s, "freeze-revoke-submit-parity");
+    await establishLegacyVerifiedSession(session.id);
+
+    // 20 minutes elapsed against the frozen 30-minute duration.
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 20 * 60_000) } });
+
+    // Lecturer shortens duration to 10 minutes (below the 20 elapsed)
+    // AFTER the attempt started — must have NO effect on either guard.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { durationMins: 10 }), { params: Promise.resolve({ id: exam.id }) });
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    // Still within the FROZEN 30-minute window (only 20 elapsed) — still blocked.
+    expect(revokeRes.status).toBe(409);
+
+    const submitRes = await submitRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
+    // Same frozen window — manual submit is accepted, exactly matching
+    // the revoke guard's "still active" verdict (both would have said
+    // "expired" if either used the live, shortened duration instead).
+    expect(submitRes.status).toBe(200);
+  });
+
+  it("7/8. server time remains authoritative for submission acceptance too — no client-supplied clock/deadline/remaining-time value in the submit request body can override the frozen snapshot", async () => {
+    const s = await freshStudent("Submit Server Time Authoritative Student");
+    const { submission } = await startFinalExamWithSession(s, "freeze-submit-server-time-authoritative");
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    // Genuinely still within the frozen window — a forged body claiming
+    // the deadline has already passed must have no effect. The submit
+    // route only ever reads `systemAutoSubmit` from the body; every
+    // other field here is inert by construction.
+    const res = await submitRoute.POST(
+      jsonRequest("POST", { now: new Date(0).toISOString(), deadline: new Date(0).toISOString(), remainingSeconds: -1, clientTime: 0 }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("POST /api/tether/installation/current", () => {
@@ -1418,8 +2084,36 @@ async function establishLegacyVerifiedSession(sessionId: string, clientVersion =
  * a session keeps a DIFFERENT requirement than whatever the environment
  * says at verification time.
  */
-async function startFinalExamWithSession(s: { id: string }, label: string, requirementOverride?: string) {
+async function startFinalExamWithSession(
+  s: { id: string },
+  label: string,
+  requirementOverride?: string,
+  // Freeze timing policy for active exam attempts — applied via a real
+  // lecturer PATCH BEFORE the attempt starts, so it's genuinely captured
+  // in the frozen examPolicySnapshotJson.timingPolicy the real start
+  // route builds, exactly like a lecturer configuring the exam ahead of
+  // time would.
+  secureSettingsOverride?: Record<string, unknown>,
+) {
   const exam = await publishFinalExam(label);
+  if (secureSettingsOverride) {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    // PATCHes the FULL current settings merged with the override — never
+    // a genuinely partial secureSettings body. secureSettingsInputSchema
+    // is `.partial()` over a schema whose fields carry `.default(...)`,
+    // so a truly partial PATCH body (e.g. just `{ allowLateSubmit: true
+    // }`) parses back out with every OTHER field filled in at its
+    // schema default, silently resetting them (assessmentType back to
+    // QUIZ_OR_TEST, deliveryMode back to STANDARD_WEB, etc.) instead of
+    // preserving the exam's actual current values — a real, separate bug
+    // in that schema/route (flagged, not fixed here). The real lecturer
+    // UI never triggers it because it always PATCHes the complete,
+    // already-fetched settings object — mirrored here for the same
+    // reason.
+    const currentRes = await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    const current = await currentRes.json();
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { ...current.secureSettings, ...secureSettingsOverride } }), { params: Promise.resolve({ id: exam.id }) });
+  }
   mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
   const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
   expect(startRes.status).toBe(201);

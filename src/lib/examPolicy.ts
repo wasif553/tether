@@ -11,6 +11,7 @@
  * policy" / "Activity was inconsistent with this exam policy" are review
  * observations, never proof.
  */
+import type { ExamTimingPolicy } from "@/lib/assessmentLifecycle";
 
 export const EXAM_POLICY_VERSION = "v1.0";
 /** Bumped only if the snapshot's shape changes in a way old snapshots can't be read as. */
@@ -333,18 +334,36 @@ export type ExamPolicySnapshot = {
   derivedProfile: ExamIntegrityProfile;
   studentAcknowledgedAt: string;
   snapshotCreatedAt: string;
+  /**
+   * Freeze timing policy for active exam attempts — the timing-critical
+   * settings (Exam.durationMins, secureSettings.allowLateSubmit,
+   * secureSettings.autoSubmitOnTimerEnd) as they existed at the moment
+   * THIS attempt started, reused (never recomputed) as the sole
+   * authoritative source for this attempt's deadline/late-submit rules
+   * everywhere they matter (submission deadline calculation, final
+   * submission acceptance, the Tether device-revocation guard). See
+   * resolveSubmissionTimingPolicy in assessmentLifecycle.ts, the only
+   * function that should ever read this field. A lecturer editing these
+   * settings after this attempt started never changes what's returned
+   * for this attempt — see PATCH /api/exams/[id], which has no
+   * in-progress-attempt restriction and so applies to future attempts
+   * only via this snapshot.
+   */
+  timingPolicy: ExamTimingPolicy;
 };
 
 /**
  * Builds the immutable snapshot recorded once at attempt start. Contains
  * no secrets, no correct answers, no hidden question-pool contents, no
  * session-binding hashes, no IP information, and no reviewer comments —
- * only policy fields, the relevant secure-settings subset, and the
- * derived profile, exactly as they existed at that moment.
+ * only policy fields, the relevant secure-settings subset, the frozen
+ * timing policy, and the derived profile, exactly as they existed at that
+ * moment.
  */
 export function buildExamPolicySnapshot(
   policy: ExamPolicy,
   secureSettings: RelevantSecureSettings,
+  timingPolicy: ExamTimingPolicy,
   studentAcknowledgedAt: Date,
   now: Date,
 ): ExamPolicySnapshot {
@@ -360,6 +379,7 @@ export function buildExamPolicySnapshot(
     derivedProfile: deriveExamIntegrityProfile(policy, secureSettings),
     studentAcknowledgedAt: studentAcknowledgedAt.toISOString(),
     snapshotCreatedAt: now.toISOString(),
+    timingPolicy,
   };
 }
 

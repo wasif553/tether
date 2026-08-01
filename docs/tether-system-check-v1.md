@@ -1053,6 +1053,26 @@ Tether-Secure-Browser code paths.
   content regardless of any of the above — the real security boundary
   for an actual exam attempt is, and remains, the unmodified legacy
   `recordAttestation()` flow at real exam start.
+- **Registered Tether Devices and Revocation UI v1** (`/student/tether-devices`,
+  reusing the existing installation list/current/register/revoke API
+  surface unchanged — no new API routes) — the student-facing device
+  management page. `revokeInstallation` now refuses to revoke an
+  installation currently bound to a non-terminal `SecureClientSession`
+  whose submission is `IN_PROGRESS` (audited distinctly as
+  `TETHER_INSTALLATION_REVOCATION_BLOCKED_ACTIVE_EXAM`), but this
+  binding (`SecureClientSession.clientInstallationId`) is populated ONLY
+  by a genuine v2 EXAM_SESSION attestation. **Under the safe-default
+  `LEGACY` compatibility mode, a session verified purely via the legacy
+  `recordAttestation()` flow never populates that field, so this guard
+  cannot detect that case** — revoking the installation behind a
+  LEGACY-only active exam is not blocked. This is the narrowest safe
+  server-side block the current data model supports without inventing a
+  second, independently maintained "which installation is this session
+  using" signal; closing this gap for LEGACY-mode sessions is a
+  follow-up, not attempted this pass. Device labels ("Windows computer
+  N" / "Current Windows computer") are entirely derived, display-only,
+  and never persisted — no schema change, and no computer name, Windows
+  account name, serial number, or MAC address is ever collected.
 - **Real hardware-backed (TPM/CNG) key storage was investigated and
   deliberately NOT implemented this pass.** Windows supports TPM-backed,
   non-exportable keys via the Microsoft Platform Crypto Provider (CNG),

@@ -7,6 +7,7 @@ import {
   isFinalizedSubmissionStatus,
   nextAttemptNumber,
   remainingSeconds,
+  resolveSubmissionTimingPolicy,
   shouldAutoSubmit,
   shouldRunExamTimer,
   submissionDeadline,
@@ -125,6 +126,46 @@ describe("assessment lifecycle timer helpers", () => {
         systemAutoSubmit: false,
       }),
     ).toBe(true);
+  });
+});
+
+describe("Freeze timing policy for active exam attempts — resolveSubmissionTimingPolicy", () => {
+  const currentSecureSettings = { allowLateSubmit: true, autoSubmitOnTimerEnd: false };
+
+  it("prefers the frozen snapshot's timingPolicy over the exam's current live settings", () => {
+    const result = resolveSubmissionTimingPolicy({
+      examPolicySnapshotJson: { timingPolicy: { durationMins: 30, allowLateSubmit: false, autoSubmitOnTimerEnd: true } },
+      currentExamDurationMins: 90,
+      currentSecureSettings,
+    });
+    expect(result).toEqual({ durationMins: 30, allowLateSubmit: false, autoSubmitOnTimerEnd: true });
+  });
+
+  it("falls back to the exam's current live settings when the snapshot is null (legacy submission, predates this field)", () => {
+    const result = resolveSubmissionTimingPolicy({
+      examPolicySnapshotJson: null,
+      currentExamDurationMins: 90,
+      currentSecureSettings,
+    });
+    expect(result).toEqual({ durationMins: 90, allowLateSubmit: true, autoSubmitOnTimerEnd: false });
+  });
+
+  it("falls back when the snapshot exists but has no timingPolicy key at all (an older snapshot shape from before this field was added)", () => {
+    const result = resolveSubmissionTimingPolicy({
+      examPolicySnapshotJson: { examMode: "CUSTOM" },
+      currentExamDurationMins: 90,
+      currentSecureSettings,
+    });
+    expect(result).toEqual({ durationMins: 90, allowLateSubmit: true, autoSubmitOnTimerEnd: false });
+  });
+
+  it("falls back when timingPolicy is present but malformed (never trusts a partially-shaped value)", () => {
+    const result = resolveSubmissionTimingPolicy({
+      examPolicySnapshotJson: { timingPolicy: { durationMins: "not-a-number" } },
+      currentExamDurationMins: 90,
+      currentSecureSettings,
+    });
+    expect(result).toEqual({ durationMins: 90, allowLateSubmit: true, autoSubmitOnTimerEnd: false });
   });
 });
 

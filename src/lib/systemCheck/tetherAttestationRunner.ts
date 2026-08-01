@@ -18,13 +18,24 @@
  * shared secret.
  *
  * Structural non-authorization guarantee (unchanged from v1): nothing in
- * this file creates, reads, or updates Submission, Answer,
+ * this file creates, writes, or updates Submission, Answer,
  * IntegrityEvent, or ExamAttemptSession. `verifyExamSessionAttestation`
  * DOES read/update an EXISTING SecureClientSession row (additive only —
  * see its own doc comment) but never creates one, and
  * `verifySystemCheckAttestation` never touches SecureClientSession at
  * all — see the "purpose isolation" tests in
  * tetherAttestation.routes.test.ts for the automated proof.
+ *
+ * One READ-only exception (device-management revocation guard, see
+ * resolveActiveExamRevocationBlock below): it reads
+ * Submission.startedAt/Submission.examPolicySnapshotJson/
+ * Exam.durationMins/Exam.secureSettings — the same inputs
+ * resolveSubmissionTimingPolicy (assessmentLifecycle.ts) resolves from
+ * for POST /api/submissions/[id]/submit — to decide whether a candidate
+ * session is still within its authoritative, FROZEN submission window
+ * (submissionDeadline/canAcceptSubmit in assessmentLifecycle.ts; see
+ * "Freeze timing policy for active exam attempts"). Still never writes to
+ * Submission/Answer/IntegrityEvent/ExamAttemptSession.
  */
 import { randomBytes, createHash } from "crypto";
 import { prisma } from "@/lib/prisma";
@@ -55,7 +66,9 @@ import { isValidDisplayTopologyClassification, evaluateDisplayTopology, evaluate
 import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 import { computePolicyHash } from "@/lib/secureClient/secureLaunchManifest";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
-import { resolveMaxActiveInstallationsPerUser } from "@/lib/tetherAttestationConfig";
+import { resolveMaxActiveInstallationsPerUser, parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
+import { parseSecureSettings } from "@/lib/secureExam";
+import { submissionDeadline, canAcceptSubmit, resolveSubmissionTimingPolicy, type ExamTimingPolicy } from "@/lib/assessmentLifecycle";
 
 export const REGISTRATION_CHALLENGE_TTL_SECONDS = 120;
 export const ATTESTATION_CHALLENGE_TTL_SECONDS = 120;
@@ -296,15 +309,251 @@ export async function loadOwnedInstallation(installationId: string, userId: stri
   return record;
 }
 
+/** Non-terminal SecureClientSession states — mirrors the set used throughout secureClientRunner.ts (getOrCreateSessionCore's own "still open" check). */
+const NON_TERMINAL_SESSION_STATUSES = ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] as const;
+
+/**
+ * Device management UI v1 — "Active exam safety", authoritative-expiry
+ * gate. `Submission.status` only ever leaves IN_PROGRESS through POST
+ * /api/submissions/[id]/submit (explicit student action, or a client-side
+ * auto-submit timer post — see shouldAutoSubmit in assessmentLifecycle.ts,
+ * driven from the STUDENT's own browser). There is no server-side sweep
+ * job that expires a stale row: a closed laptop, dead battery, crashed
+ * browser, or an abandoned attempt leaves Submission.status IN_PROGRESS
+ * and the SecureClientSession non-terminal FOREVER, even long after the
+ * exam's own deadline has genuinely passed. A revocation guard keyed only
+ * on those two stored statuses would therefore block a student's devices
+ * indefinitely for an exam that, in every real sense, is already over.
+ *
+ * This reuses — never reimplements — the EXACT same calculation the real
+ * enforcement point (POST /api/submissions/[id]/submit) already uses to
+ * decide whether a submit attempt would even be accepted right now:
+ * submissionDeadline(startedAt, durationMins) + canAcceptSubmit(...), both
+ * from assessmentLifecycle.ts. Freeze timing policy for active exam
+ * attempts: the duration/allowLateSubmit/autoSubmitOnTimerEnd inputs are
+ * resolved via resolveSubmissionTimingPolicy — THIS attempt's own frozen
+ * `examPolicySnapshotJson.timingPolicy` snapshot when present, falling
+ * back to the exam's current settings only for a legacy submission that
+ * predates it. A lecturer editing Exam.durationMins/secureSettings after
+ * this attempt started never changes what this returns for it — see
+ * PATCH /api/exams/[id], which has no in-progress-attempt restriction and
+ * so only ever affects attempts started afterwards. `systemAutoSubmit` is
+ * always passed as `false`: that flag exists only to let the submit
+ * route's OWN forced-auto-submit call through past the deadline for
+ * `autoSubmitOnTimerEnd`, and is irrelevant to "is this exam still
+ * genuinely ongoing" — an `allowLateSubmit` exam is correctly still
+ * "ongoing" past its nominal timer (canAcceptSubmit already returns true
+ * for that case); one that neither allows late submission nor has had
+ * its forced auto-submit actually run yet is not.
+ *
+ * `now` is always this server's own `new Date()` — nothing here ever
+ * reads a client-supplied clock, timestamp, or remaining-time value (the
+ * revoke API's own request body only ever accepts `reason`; nothing else
+ * it might contain can reach this calculation).
+ */
+function isWithinAuthoritativeSubmissionWindow(startedAt: Date, timingPolicy: ExamTimingPolicy): boolean {
+  const deadline = submissionDeadline(startedAt, timingPolicy.durationMins);
+  return canAcceptSubmit({ now: new Date(), deadline, settings: timingPolicy, systemAutoSubmit: false });
+}
+
+/** Fields needed to resolve a candidate submission's frozen (or legacy-fallback) timing policy — shared shape between findActiveBoundExamSessionId's and findLegacyTetherRequiredActiveSessionId's Prisma selects. */
+type TimingCandidateSubmission = {
+  startedAt: Date;
+  examPolicySnapshotJson: unknown;
+  exam: { durationMins: number; secureSettings: unknown };
+};
+
+function isCandidateWithinAuthoritativeWindow(submission: TimingCandidateSubmission): boolean {
+  const timingPolicy = resolveSubmissionTimingPolicy({
+    examPolicySnapshotJson: submission.examPolicySnapshotJson,
+    currentExamDurationMins: submission.exam.durationMins,
+    currentSecureSettings: parseSecureSettings(submission.exam.secureSettings),
+  });
+  return isWithinAuthoritativeSubmissionWindow(submission.startedAt, timingPolicy);
+}
+
+/**
+ * Device management UI v1 — "Active exam safety", installation-specific
+ * branch. Returns the id of a non-terminal secure-client session (whose
+ * submission is still IN_PROGRESS AND still within its authoritative
+ * submission window — see isWithinAuthoritativeSubmissionWindow above)
+ * that is CURRENTLY bound to this exact installation via
+ * SecureClientSession.clientInstallationId — populated only by a genuine
+ * v2 EXAM_SESSION attestation, see verifyExamSessionAttestation above —
+ * or null if none exists. Precise: never blocks a DIFFERENT installation
+ * than the one actually carrying the active session (see
+ * resolveActiveExamRevocationBlock below for how this composes with the
+ * LEGACY-mode conservative check).
+ */
+async function findActiveBoundExamSessionId(installationId: string): Promise<string | null> {
+  const candidates = await prisma.secureClientSession.findMany({
+    where: {
+      clientInstallationId: installationId,
+      status: { in: [...NON_TERMINAL_SESSION_STATUSES] },
+      submission: { status: "IN_PROGRESS" },
+    },
+    select: {
+      id: true,
+      submission: { select: { startedAt: true, examPolicySnapshotJson: true, exam: { select: { durationMins: true, secureSettings: true } } } },
+    },
+  });
+  for (const candidate of candidates) {
+    if (isCandidateWithinAuthoritativeWindow(candidate.submission)) {
+      return candidate.id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Device management UI v1 — "Active exam safety", conservative LEGACY-mode
+ * branch. Closes the gap findActiveBoundExamSessionId cannot see: under
+ * the safe-default LEGACY attestation mode, a real in-progress exam's
+ * SecureClientSession never populates clientInstallationId at all (only a
+ * genuine v2 EXAM_SESSION attestation does that), so the installation-
+ * specific check above is structurally blind to it. Rather than leaving
+ * that student able to revoke any installation mid-exam, this scans for
+ * ANY non-terminal, still-unbound, LEGACY-snapshotted session belonging to
+ * this student whose submission requires Tether
+ * (secureClientPolicySnapshotJson.deliveryMode === "TETHER_CLIENT_REQUIRED")
+ * and is still IN_PROGRESS — deliberately account-wide, not installation-
+ * specific, because the data model has no way to know which installation
+ * a LEGACY-only session is actually running on. Returns the blocking
+ * session's id, or null if no such session exists.
+ *
+ * Deliberately narrow in four ways so this can never over-block:
+ *  - `verificationStatus` must be exactly "VERIFIED" — the same
+ *    authoritative signal resolveEffectiveTetherVerification's own
+ *    `legacyVerified` input reads (SecureClientSession.verificationStatus
+ *    === "VERIFIED"). A session row that merely exists because the
+ *    student started the exam, but has never actually completed the
+ *    legacy attestation flow, is not yet "an active examination in
+ *    progress" in any sense that matters here — it grants no content
+ *    access either, so there is nothing real to protect yet.
+ *  - `attestationRequirement` must resolve (via parseAttestationRequirement,
+ *    the same reader used everywhere else — NULL/garbage values are
+ *    treated as LEGACY, matching the safe default) to exactly "LEGACY".
+ *    A DUAL- or V2_REQUIRED-snapshotted session that hasn't produced v2
+ *    evidence yet is not "verified" for content access either way
+ *    (resolveEffectiveTetherVerification), so it is intentionally left to
+ *    the ordinary installation-specific path once it does.
+ *  - Only sessions with `clientInstallationId: null` are considered — the
+ *    moment a session gains a real v2 binding, it is exclusively governed
+ *    by findActiveBoundExamSessionId above, never double-counted here.
+ *  - The submission's own immutable policy snapshot must show
+ *    TETHER_CLIENT_REQUIRED — an ordinary STANDARD_WEB/MONITORED_WEB
+ *    assessment, or one merely offering Tether as optional, never blocks
+ *    revocation of anything.
+ *  - The submission must still be within its authoritative submission
+ *    window — see isWithinAuthoritativeSubmissionWindow above. A
+ *    genuinely expired attempt (deadline passed, late submission not
+ *    permitted) never blocks, no matter how stale the stored
+ *    IN_PROGRESS/non-terminal statuses are.
+ */
+async function findLegacyTetherRequiredActiveSessionId(userId: string): Promise<string | null> {
+  const candidates = await prisma.secureClientSession.findMany({
+    where: {
+      studentId: userId,
+      clientInstallationId: null,
+      status: { in: [...NON_TERMINAL_SESSION_STATUSES] },
+      clientType: { in: [...SYSTEM_CHECK_CLIENT_TYPES] },
+      verificationStatus: "VERIFIED",
+      submission: { status: "IN_PROGRESS" },
+    },
+    select: {
+      id: true,
+      attestationRequirement: true,
+      submission: {
+        select: {
+          startedAt: true,
+          secureClientPolicySnapshotJson: true,
+          examPolicySnapshotJson: true,
+          exam: { select: { durationMins: true, secureSettings: true } },
+        },
+      },
+    },
+  });
+  for (const candidate of candidates) {
+    if (parseAttestationRequirement(candidate.attestationRequirement) !== "LEGACY") continue;
+    const policy = parseSecureClientPolicy(candidate.submission.secureClientPolicySnapshotJson);
+    if (policy.deliveryMode !== "TETHER_CLIENT_REQUIRED") continue;
+    if (!isCandidateWithinAuthoritativeWindow(candidate.submission)) continue;
+    return candidate.id;
+  }
+  return null;
+}
+
+export type ActiveExamRevocationBlock =
+  | { blocked: false }
+  | { blocked: true; kind: "INSTALLATION_BOUND"; sessionId: string }
+  | { blocked: true; kind: "LEGACY_ACCOUNT_WIDE"; sessionId: string };
+
+/**
+ * Single deterministic decision point for "may this installation be
+ * revoked right now" — composes the two checks above. Installation-bound
+ * (v2) is checked first and is always precise, regardless of the
+ * installation's own status (an installation can only ever be v2-bound to
+ * an active session while it is ACTIVE — attestation requires an ACTIVE
+ * installation, and revoking one that WAS bound already goes through this
+ * same gate — so this can never fire against a REVOKED installation in
+ * practice, but is left unconditional to match the historical guarantee
+ * exactly). The conservative LEGACY-mode check only ever applies to
+ * installations that are still ACTIVE — a REVOKED/REPLACED installation
+ * has nothing left to protect, and gating it here would only make a
+ * harmless idempotent re-revoke behave inconsistently.
+ */
+async function resolveActiveExamRevocationBlock(installationId: string, userId: string, installationStatus: string): Promise<ActiveExamRevocationBlock> {
+  const boundSessionId = await findActiveBoundExamSessionId(installationId);
+  if (boundSessionId) return { blocked: true, kind: "INSTALLATION_BOUND", sessionId: boundSessionId };
+
+  if (installationStatus !== "ACTIVE") return { blocked: false };
+
+  const legacySessionId = await findLegacyTetherRequiredActiveSessionId(userId);
+  if (legacySessionId) return { blocked: true, kind: "LEGACY_ACCOUNT_WIDE", sessionId: legacySessionId };
+
+  return { blocked: false };
+}
+
+export type RevokeInstallationResult =
+  | { outcome: "REVOKED"; installation: NonNullable<Awaited<ReturnType<typeof loadOwnedInstallation>>> }
+  | { outcome: "NOT_FOUND" }
+  | { outcome: "ACTIVE_EXAM_IN_PROGRESS" }
+  | { outcome: "ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE" };
+
 /**
  * The student's own self-service "log out this device" action — used
  * both to free up a slot under the multi-device limit and to revoke a
  * lost/shared/lab device. An administrative (lecturer/platform-admin)
  * revocation UI is out of scope for this pass (see "Known limitations").
+ *
+ * Device management UI v1 — refuses to revoke an installation currently
+ * carrying an active examination session, precisely (v2-bound) or, under
+ * LEGACY mode, conservatively account-wide (see
+ * resolveActiveExamRevocationBlock above for the exact policy). A blocked
+ * attempt is itself audited, distinctly from a successful revocation and
+ * distinctly per block kind, so an unusual pattern of blocked attempts is
+ * reviewable later.
  */
-export async function revokeInstallation(installationId: string, userId: string, reason: string) {
+export async function revokeInstallation(installationId: string, userId: string, reason: string): Promise<RevokeInstallationResult> {
   const owned = await loadOwnedInstallation(installationId, userId);
-  if (!owned) return null;
+  if (!owned) return { outcome: "NOT_FOUND" };
+
+  const block = await resolveActiveExamRevocationBlock(installationId, userId, owned.status);
+  if (block.blocked) {
+    await createPlatformAuditLog({
+      actorId: userId,
+      action:
+        block.kind === "INSTALLATION_BOUND"
+          ? "TETHER_INSTALLATION_REVOCATION_BLOCKED_ACTIVE_EXAM"
+          : "TETHER_INSTALLATION_REVOCATION_BLOCKED_LEGACY_ACTIVE_EXAM",
+      targetType: "TetherClientInstallation",
+      targetId: installationId,
+      institutionId: owned.institutionId,
+      metadata: { reason, activeSecureClientSessionId: block.sessionId },
+    }).catch(() => {});
+    return { outcome: block.kind === "INSTALLATION_BOUND" ? "ACTIVE_EXAM_IN_PROGRESS" : "ACTIVE_EXAM_IN_PROGRESS_ACCOUNT_WIDE" };
+  }
+
   const revoked = await prisma.tetherClientInstallation.update({
     where: { id: installationId },
     data: { status: "REVOKED", revokedAt: new Date(), revocationReason: reason },
@@ -317,7 +566,7 @@ export async function revokeInstallation(installationId: string, userId: string,
     institutionId: owned.institutionId,
     metadata: { reason },
   }).catch(() => {});
-  return revoked;
+  return { outcome: "REVOKED", installation: revoked };
 }
 
 /**

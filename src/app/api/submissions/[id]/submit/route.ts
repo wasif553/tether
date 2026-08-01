@@ -5,7 +5,7 @@ import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
 import { parseSecureSettings, questionPoolsActive, severityFor } from "@/lib/secureExam";
 import { Prisma } from "@/generated/prisma/client";
 import { captureNetworkEvidence, getClientIpFromRequest } from "@/lib/networkEvidence";
-import { canAcceptSubmit, submissionDeadline } from "@/lib/assessmentLifecycle";
+import { canAcceptSubmit, resolveSubmissionTimingPolicy, submissionDeadline } from "@/lib/assessmentLifecycle";
 import { resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
 import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { endExamAttemptSessionsForSubmission } from "@/lib/examAttemptSessionRunner";
@@ -73,8 +73,18 @@ export async function POST(
     }
 
     const settings = parseSecureSettings(submission.exam.secureSettings);
-    const deadline = submissionDeadline(submission.startedAt, submission.exam.durationMins);
-    if (!canAcceptSubmit({ now: new Date(), deadline, settings, systemAutoSubmit })) {
+    // Freeze timing policy for active exam attempts — deadline/late-
+    // submit/auto-submit acceptance is decided from THIS attempt's own
+    // frozen timingPolicy snapshot (captured at start), never the exam's
+    // possibly-since-edited live durationMins/secureSettings. See
+    // resolveSubmissionTimingPolicy in assessmentLifecycle.ts.
+    const timingPolicy = resolveSubmissionTimingPolicy({
+      examPolicySnapshotJson: submission.examPolicySnapshotJson,
+      currentExamDurationMins: submission.exam.durationMins,
+      currentSecureSettings: settings,
+    });
+    const deadline = submissionDeadline(submission.startedAt, timingPolicy.durationMins);
+    if (!canAcceptSubmit({ now: new Date(), deadline, settings: timingPolicy, systemAutoSubmit })) {
       await prisma.integrityEvent.create({
         data: {
           submissionId: id,

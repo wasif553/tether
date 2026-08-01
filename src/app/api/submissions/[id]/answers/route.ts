@@ -3,7 +3,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { parseSecureSettings } from "@/lib/secureExam";
-import { submissionDeadline } from "@/lib/assessmentLifecycle";
+import { resolveSubmissionTimingPolicy, submissionDeadline } from "@/lib/assessmentLifecycle";
 import { recordAnswerSavedActivity } from "@/lib/answerActivityTelemetry";
 import { findMostRecentSessionId } from "@/lib/examAttemptSessionRunner";
 
@@ -35,9 +35,17 @@ export async function PATCH(
     return NextResponse.json({ error: "Submission already finalized" }, { status: 409 });
   }
 
-  const deadline = submissionDeadline(submission.startedAt, submission.exam.durationMins);
-  const settings = parseSecureSettings(submission.exam.secureSettings);
-  if (new Date() > deadline && !settings.allowLateSubmit) {
+  // Freeze timing policy for active exam attempts — see
+  // resolveSubmissionTimingPolicy in assessmentLifecycle.ts. Never the
+  // exam's live durationMins/allowLateSubmit, which a lecturer may have
+  // edited after this attempt started.
+  const timingPolicy = resolveSubmissionTimingPolicy({
+    examPolicySnapshotJson: submission.examPolicySnapshotJson,
+    currentExamDurationMins: submission.exam.durationMins,
+    currentSecureSettings: parseSecureSettings(submission.exam.secureSettings),
+  });
+  const deadline = submissionDeadline(submission.startedAt, timingPolicy.durationMins);
+  if (new Date() > deadline && !timingPolicy.allowLateSubmit) {
     return NextResponse.json({ error: "Time is up" }, { status: 409 });
   }
 
