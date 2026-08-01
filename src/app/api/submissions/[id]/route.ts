@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { parseSecureSettings, questionPoolsActive } from "@/lib/secureExam";
-import { canStudentViewMarks, submissionDeadline } from "@/lib/assessmentLifecycle";
+import { canStudentViewMarks, resolveSubmissionTimingPolicy, submissionDeadline } from "@/lib/assessmentLifecycle";
 import { resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
 import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
@@ -83,7 +83,18 @@ export async function GET(
     }
   }
 
-  const deadline = submissionDeadline(submission.startedAt, submission.exam.durationMins);
+  const settings = parseSecureSettings(submission.exam.secureSettings);
+  // Freeze timing policy for active exam attempts — the deadline shown
+  // to the student/lecturer always reflects THIS attempt's own frozen
+  // timingPolicy snapshot (captured at start), never the exam's
+  // possibly-since-edited live durationMins. See
+  // resolveSubmissionTimingPolicy in assessmentLifecycle.ts.
+  const timingPolicy = resolveSubmissionTimingPolicy({
+    examPolicySnapshotJson: submission.examPolicySnapshotJson,
+    currentExamDurationMins: submission.exam.durationMins,
+    currentSecureSettings: settings,
+  });
+  const deadline = submissionDeadline(submission.startedAt, timingPolicy.durationMins);
   const studentCanViewMarks = canStudentViewMarks({
     role: session.user.role,
     isOwner,
@@ -92,8 +103,6 @@ export async function GET(
   const canViewMarks = isExamOwner || studentCanViewMarks;
   const canViewQuestionPoints =
     isExamOwner || submission.status === "IN_PROGRESS" || studentCanViewMarks;
-
-  const settings = parseSecureSettings(submission.exam.secureSettings);
   // One-Question-At-A-Time Exam Delivery v1 — see
   // docs/one-question-delivery-v1.md. Only ever applies to the STUDENT's
   // own in-progress view — the lecturer's grading view (isExamOwner)

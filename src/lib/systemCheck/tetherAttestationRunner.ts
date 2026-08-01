@@ -28,12 +28,14 @@
  *
  * One READ-only exception (device-management revocation guard, see
  * resolveActiveExamRevocationBlock below): it reads
- * Submission.startedAt/Exam.durationMins/Exam.secureSettings — the exact
- * same fields POST /api/submissions/[id]/submit already reads — to decide
- * whether a candidate session is still within its authoritative
- * submission window (submissionDeadline/canAcceptSubmit in
- * assessmentLifecycle.ts). Still never writes to Submission/Answer/
- * IntegrityEvent/ExamAttemptSession.
+ * Submission.startedAt/Submission.examPolicySnapshotJson/
+ * Exam.durationMins/Exam.secureSettings — the same inputs
+ * resolveSubmissionTimingPolicy (assessmentLifecycle.ts) resolves from
+ * for POST /api/submissions/[id]/submit — to decide whether a candidate
+ * session is still within its authoritative, FROZEN submission window
+ * (submissionDeadline/canAcceptSubmit in assessmentLifecycle.ts; see
+ * "Freeze timing policy for active exam attempts"). Still never writes to
+ * Submission/Answer/IntegrityEvent/ExamAttemptSession.
  */
 import { randomBytes, createHash } from "crypto";
 import { prisma } from "@/lib/prisma";
@@ -66,7 +68,7 @@ import { computePolicyHash } from "@/lib/secureClient/secureLaunchManifest";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { resolveMaxActiveInstallationsPerUser, parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
 import { parseSecureSettings } from "@/lib/secureExam";
-import { submissionDeadline, canAcceptSubmit } from "@/lib/assessmentLifecycle";
+import { submissionDeadline, canAcceptSubmit, resolveSubmissionTimingPolicy, type ExamTimingPolicy } from "@/lib/assessmentLifecycle";
 
 export const REGISTRATION_CHALLENGE_TTL_SECONDS = 120;
 export const ATTESTATION_CHALLENGE_TTL_SECONDS = 120;
@@ -327,27 +329,47 @@ const NON_TERMINAL_SESSION_STATUSES = ["CREATED", "PREFLIGHT", "ACTIVE", "INTERR
  * enforcement point (POST /api/submissions/[id]/submit) already uses to
  * decide whether a submit attempt would even be accepted right now:
  * submissionDeadline(startedAt, durationMins) + canAcceptSubmit(...), both
- * from assessmentLifecycle.ts, read from the SAME live source that route
- * reads (submission.startedAt, exam.durationMins,
- * parseSecureSettings(exam.secureSettings) — there is no separate frozen
- * per-attempt duration/late-submit snapshot anywhere in this codebase to
- * prefer instead). `systemAutoSubmit` is always passed as `false`: that
- * flag exists only to let the submit route's OWN forced-auto-submit call
- * through past the deadline for `autoSubmitOnTimerEnd`, and is irrelevant
- * to "is this exam still genuinely ongoing" — an `allowLateSubmit` exam is
- * correctly still "ongoing" past its nominal timer (canAcceptSubmit
- * already returns true for that case); one that neither allows late
- * submission nor has had its forced auto-submit actually run yet is not.
+ * from assessmentLifecycle.ts. Freeze timing policy for active exam
+ * attempts: the duration/allowLateSubmit/autoSubmitOnTimerEnd inputs are
+ * resolved via resolveSubmissionTimingPolicy — THIS attempt's own frozen
+ * `examPolicySnapshotJson.timingPolicy` snapshot when present, falling
+ * back to the exam's current settings only for a legacy submission that
+ * predates it. A lecturer editing Exam.durationMins/secureSettings after
+ * this attempt started never changes what this returns for it — see
+ * PATCH /api/exams/[id], which has no in-progress-attempt restriction and
+ * so only ever affects attempts started afterwards. `systemAutoSubmit` is
+ * always passed as `false`: that flag exists only to let the submit
+ * route's OWN forced-auto-submit call through past the deadline for
+ * `autoSubmitOnTimerEnd`, and is irrelevant to "is this exam still
+ * genuinely ongoing" — an `allowLateSubmit` exam is correctly still
+ * "ongoing" past its nominal timer (canAcceptSubmit already returns true
+ * for that case); one that neither allows late submission nor has had
+ * its forced auto-submit actually run yet is not.
  *
  * `now` is always this server's own `new Date()` — nothing here ever
  * reads a client-supplied clock, timestamp, or remaining-time value (the
  * revoke API's own request body only ever accepts `reason`; nothing else
  * it might contain can reach this calculation).
  */
-function isWithinAuthoritativeSubmissionWindow(startedAt: Date, durationMins: number, secureSettings: unknown): boolean {
-  const settings = parseSecureSettings(secureSettings);
-  const deadline = submissionDeadline(startedAt, durationMins);
-  return canAcceptSubmit({ now: new Date(), deadline, settings, systemAutoSubmit: false });
+function isWithinAuthoritativeSubmissionWindow(startedAt: Date, timingPolicy: ExamTimingPolicy): boolean {
+  const deadline = submissionDeadline(startedAt, timingPolicy.durationMins);
+  return canAcceptSubmit({ now: new Date(), deadline, settings: timingPolicy, systemAutoSubmit: false });
+}
+
+/** Fields needed to resolve a candidate submission's frozen (or legacy-fallback) timing policy — shared shape between findActiveBoundExamSessionId's and findLegacyTetherRequiredActiveSessionId's Prisma selects. */
+type TimingCandidateSubmission = {
+  startedAt: Date;
+  examPolicySnapshotJson: unknown;
+  exam: { durationMins: number; secureSettings: unknown };
+};
+
+function isCandidateWithinAuthoritativeWindow(submission: TimingCandidateSubmission): boolean {
+  const timingPolicy = resolveSubmissionTimingPolicy({
+    examPolicySnapshotJson: submission.examPolicySnapshotJson,
+    currentExamDurationMins: submission.exam.durationMins,
+    currentSecureSettings: parseSecureSettings(submission.exam.secureSettings),
+  });
+  return isWithinAuthoritativeSubmissionWindow(submission.startedAt, timingPolicy);
 }
 
 /**
@@ -372,12 +394,11 @@ async function findActiveBoundExamSessionId(installationId: string): Promise<str
     },
     select: {
       id: true,
-      submission: { select: { startedAt: true, exam: { select: { durationMins: true, secureSettings: true } } } },
+      submission: { select: { startedAt: true, examPolicySnapshotJson: true, exam: { select: { durationMins: true, secureSettings: true } } } },
     },
   });
   for (const candidate of candidates) {
-    const { startedAt, exam } = candidate.submission;
-    if (isWithinAuthoritativeSubmissionWindow(startedAt, exam.durationMins, exam.secureSettings)) {
+    if (isCandidateWithinAuthoritativeWindow(candidate.submission)) {
       return candidate.id;
     }
   }
@@ -442,15 +463,21 @@ async function findLegacyTetherRequiredActiveSessionId(userId: string): Promise<
     select: {
       id: true,
       attestationRequirement: true,
-      submission: { select: { startedAt: true, secureClientPolicySnapshotJson: true, exam: { select: { durationMins: true, secureSettings: true } } } },
+      submission: {
+        select: {
+          startedAt: true,
+          secureClientPolicySnapshotJson: true,
+          examPolicySnapshotJson: true,
+          exam: { select: { durationMins: true, secureSettings: true } },
+        },
+      },
     },
   });
   for (const candidate of candidates) {
     if (parseAttestationRequirement(candidate.attestationRequirement) !== "LEGACY") continue;
     const policy = parseSecureClientPolicy(candidate.submission.secureClientPolicySnapshotJson);
     if (policy.deliveryMode !== "TETHER_CLIENT_REQUIRED") continue;
-    const { startedAt, exam } = candidate.submission;
-    if (!isWithinAuthoritativeSubmissionWindow(startedAt, exam.durationMins, exam.secureSettings)) continue;
+    if (!isCandidateWithinAuthoritativeWindow(candidate.submission)) continue;
     return candidate.id;
   }
   return null;

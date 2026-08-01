@@ -306,6 +306,17 @@ export async function POST(
       requireCamera: settings.requireCamera,
       enableAiCameraIntegrityChecks: settings.enableAiCameraIntegrityChecks,
     },
+    // Freeze timing policy for active exam attempts — captured once,
+    // here, from the exam's CURRENT duration/late-submit/auto-submit
+    // settings. Never recomputed for this attempt afterwards, even if
+    // the lecturer edits Exam.durationMins or these secureSettings —
+    // see resolveSubmissionTimingPolicy in assessmentLifecycle.ts, the
+    // only function that should ever read it back.
+    {
+      durationMins: exam.durationMins,
+      allowLateSubmit: settings.allowLateSubmit,
+      autoSubmitOnTimerEnd: settings.autoSubmitOnTimerEnd,
+    },
     policyAcknowledgedAt,
     new Date(),
   );

@@ -74,6 +74,7 @@ const examSessionChallengeRoute = await import("../app/api/tether/exam-session/a
 const examSessionVerifyRoute = await import("../app/api/tether/exam-session/attestation/verify/route");
 const installationListRoute = await import("../app/api/tether/installation/list/route");
 const legacyAttestationRoute = await import("../app/api/secure-client/sessions/[sessionId]/attestation/route");
+const submitRoute = await import("../app/api/submissions/[id]/submit/route");
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT", institutionId: string) {
   return {
@@ -1238,15 +1239,13 @@ describe("Legacy-mode active-exam revocation gap — authoritative exam expiry",
     const s = await freshStudent("Late Submit Window Student");
     const reg = await registerFreshInstallation(s.id, instId);
     const { installationId } = await reg.registerRes.json();
-    const { exam, submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-late-submit");
+    // allowLateSubmit is set BEFORE the attempt starts, so it's genuinely
+    // captured in the frozen timingPolicy snapshot — canAcceptSubmit (the
+    // SAME calculation POST /api/submissions/[id]/submit itself uses)
+    // treats this exam as still legitimately acceptable past its nominal
+    // deadline, so the revocation guard must agree.
+    const { submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-late-submit", undefined, { allowLateSubmit: true });
     await establishLegacyVerifiedSession(session.id);
-
-    // Explicitly allow late submission for this exam — canAcceptSubmit
-    // (the SAME calculation POST /api/submissions/[id]/submit itself
-    // uses) treats this exam as still legitimately acceptable past its
-    // nominal deadline, so the revocation guard must agree.
-    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
-    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { allowLateSubmit: true } }), { params: Promise.resolve({ id: exam.id }) });
 
     await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
 
@@ -1269,36 +1268,28 @@ describe("Legacy-mode active-exam revocation gap — authoritative exam expiry",
     expect(revokeRes.status).toBe(409);
   });
 
-  it("4. the exam's own duration input — the only 'extra time' concept that exists anywhere in this codebase (there is no separate per-student accommodation field) — genuinely participates in the expiry calculation", async () => {
-    const s = await freshStudent("Duration Included Student");
+  it("4. a lecturer shortening the exam's duration mid-attempt does not retroactively expire it — the revocation guard uses the FROZEN duration captured at attempt start, never the live value (see 'Freeze timing policy for active exam attempts' below for the full suite)", async () => {
+    const s = await freshStudent("Duration Frozen Student");
     const reg = await registerFreshInstallation(s.id, instId);
     const { installationId } = await reg.registerRes.json();
-    const { exam, submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-duration");
+    const { exam, submission, session } = await startFinalExamWithSession(s, "authoritative-expiry-duration-frozen");
     await establishLegacyVerifiedSession(session.id);
 
-    // 20 minutes elapsed against the exam's stored 30-minute duration —
-    // still within the window, still blocked.
+    // 20 minutes elapsed against the exam's 30-minute duration at start
+    // time — still within the frozen window, still blocked.
     await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 20 * 60_000) } });
     mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
     const stillWithinDuration = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
     expect(stillWithinDuration.status).toBe(409);
 
-    // Extending the exam's own duration (the only "extra time" input the
-    // authoritative calculation reads) pushes the deadline out further —
-    // proving durationMins genuinely participates, not just startedAt.
-    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
-    await examRoute.PATCH(jsonRequest("PATCH", { durationMins: 90 }), { params: Promise.resolve({ id: exam.id }) });
-    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-    const extendedStillBlocked = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
-    expect(extendedStillBlocked.status).toBe(409);
-
-    // Shrinking duration back down below the already-elapsed time removes
-    // the block — same startedAt, only the duration input changed.
+    // A lecturer shortening durationMins to 10 (below the 20 elapsed
+    // minutes) AFTER the attempt already started must have NO effect on
+    // this already-frozen attempt — still blocked, not "now expired".
     mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
     await examRoute.PATCH(jsonRequest("PATCH", { durationMins: 10 }), { params: Promise.resolve({ id: exam.id }) });
     mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-    const nowExpired = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
-    expect(nowExpired.status).toBe(200);
+    const stillBlockedAfterShortening = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    expect(stillBlockedAfterShortening.status).toBe(409);
   });
 
   it("5. client-supplied clock/remaining-time values in the revoke request body have no effect on the expiry decision", async () => {
@@ -1342,6 +1333,158 @@ describe("Legacy-mode active-exam revocation gap — authoritative exam expiry",
       { params: Promise.resolve({ id: installationId }) },
     );
     expect(forgedButExpired.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Freeze timing policy for active exam attempts — see ExamTimingPolicy /
+// resolveSubmissionTimingPolicy in assessmentLifecycle.ts and
+// timingPolicy on ExamPolicySnapshot in examPolicy.ts. PATCH
+// /api/exams/[id] has NO restriction preventing a lecturer from editing
+// durationMins/allowLateSubmit/autoSubmitOnTimerEnd while students have
+// active IN_PROGRESS attempts — before this fix, every reader of "is
+// this submission still within its deadline" (submit, autosave, the
+// submissions GET route, and the device-revocation guard) read those
+// fields LIVE, so such an edit silently changed the rules for an attempt
+// already in progress. These tests prove every one of those readers now
+// uses the attempt's own FROZEN examPolicySnapshotJson.timingPolicy,
+// captured once at POST /api/exams/[id]/start, instead.
+// ---------------------------------------------------------------------------
+describe("Freeze timing policy for active exam attempts", () => {
+  it("1/4. PATCHing exam duration mid-attempt never changes an existing attempt's deadline, but a brand-new attempt (a different student) started afterwards gets the new duration", async () => {
+    const studentA = await freshStudent("Duration Frozen Existing Student");
+    const { exam, submission: submissionA, session: sessionA } = await startFinalExamWithSession(studentA, "freeze-duration-new-vs-existing");
+    // GET /api/submissions/[id] gates content (including `deadline`) on a
+    // verified Tether session for a TETHER_CLIENT_REQUIRED exam — this
+    // exam is a FINAL_EXAMINATION, so it's required here too.
+    await establishLegacyVerifiedSession(sessionA.id);
+    const expectedDeadlineA = new Date(new Date(submissionA.startedAt).getTime() + 30 * 60_000).toISOString();
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instId));
+    const beforeRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submissionA.id }) });
+    expect((await beforeRes.json()).deadline).toBe(expectedDeadlineA);
+
+    // Lecturer shortens duration to 5 minutes — AFTER studentA's attempt
+    // already started.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { durationMins: 5 }), { params: Promise.resolve({ id: exam.id }) });
+
+    // studentA's already-started attempt keeps its ORIGINAL 30-minute
+    // deadline, completely unaffected.
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instId));
+    const afterRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submissionA.id }) });
+    expect((await afterRes.json()).deadline).toBe(expectedDeadlineA);
+
+    // A brand-new attempt (a different student) started AFTER the PATCH
+    // gets the NEW 5-minute duration.
+    const studentB = await freshStudent("Duration New Attempt Student");
+    mockAuth.mockResolvedValue(sessionFor(studentB.id, "STUDENT", instId));
+    const startResB = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(startResB.status).toBe(201);
+    const submissionB = await startResB.json();
+    const sessionB = await prisma.secureClientSession.create({
+      data: {
+        institutionId: instId,
+        examId: exam.id,
+        submissionId: submissionB.id,
+        studentId: studentB.id,
+        clientType: "TETHER_SECURE_CLIENT",
+        status: "ACTIVE",
+        verificationStatus: "NOT_CHECKED",
+        attestationRequirement: resolveExamAttestationMode(),
+      },
+    });
+    await establishLegacyVerifiedSession(sessionB.id);
+    mockAuth.mockResolvedValue(sessionFor(studentB.id, "STUDENT", instId));
+    const getResB = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submissionB.id }) });
+    const expectedDeadlineB = new Date(new Date(submissionB.startedAt).getTime() + 5 * 60_000).toISOString();
+    expect((await getResB.json()).deadline).toBe(expectedDeadlineB);
+  });
+
+  it("2/6. changing allowLateSubmit after an attempt starts does not change whether that attempt's late manual submission is accepted — the frozen snapshot governs, matching the exam's own submit route", async () => {
+    const s = await freshStudent("Late Submit Frozen Student");
+    // allowLateSubmit defaults false — frozen into this attempt's snapshot at start.
+    const { exam, submission } = await startFinalExamWithSession(s, "freeze-late-submit");
+
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
+
+    // Lecturer now turns allowLateSubmit ON — AFTER the attempt started.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { allowLateSubmit: true } }), { params: Promise.resolve({ id: exam.id }) });
+
+    // The already-started attempt's frozen snapshot still says false — a
+    // manual late submit must still be rejected.
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const rejectedRes = await submitRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
+    expect(rejectedRes.status).toBe(409);
+    const rejectedBody = await rejectedRes.json();
+    expect(rejectedBody.code).toBe("DEADLINE_PASSED");
+
+    const record = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(record.status).toBe("IN_PROGRESS");
+  });
+
+  it("3/6. changing autoSubmitOnTimerEnd after an attempt starts does not change whether that attempt's forced system auto-submit is accepted — the frozen snapshot governs", async () => {
+    const s = await freshStudent("Auto Submit Frozen Student");
+    // autoSubmitOnTimerEnd defaults true — frozen into this attempt's snapshot at start.
+    const { exam, submission } = await startFinalExamWithSession(s, "freeze-auto-submit");
+
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
+
+    // Lecturer now turns autoSubmitOnTimerEnd OFF — AFTER the attempt started.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { autoSubmitOnTimerEnd: false } }), { params: Promise.resolve({ id: exam.id }) });
+
+    // The already-started attempt's frozen snapshot still says true — a
+    // forced system auto-submit past the deadline must still be accepted.
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const acceptedRes = await submitRoute.POST(jsonRequest("POST", { systemAutoSubmit: true }), { params: Promise.resolve({ id: submission.id }) });
+    expect(acceptedRes.status).toBe(200);
+    const record = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(record.status).not.toBe("IN_PROGRESS");
+  });
+
+  it("5. the device-revocation guard and submit acceptance agree — both derived from the exact same frozen snapshot", async () => {
+    const s = await freshStudent("Revoke Submit Parity Student");
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    const { exam, submission, session } = await startFinalExamWithSession(s, "freeze-revoke-submit-parity");
+    await establishLegacyVerifiedSession(session.id);
+
+    // 20 minutes elapsed against the frozen 30-minute duration.
+    await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 20 * 60_000) } });
+
+    // Lecturer shortens duration to 10 minutes (below the 20 elapsed)
+    // AFTER the attempt started — must have NO effect on either guard.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { durationMins: 10 }), { params: Promise.resolve({ id: exam.id }) });
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    const revokeRes = await installationRevokeRoute.POST(jsonRequest("POST", { reason: "test" }), { params: Promise.resolve({ id: installationId }) });
+    // Still within the FROZEN 30-minute window (only 20 elapsed) — still blocked.
+    expect(revokeRes.status).toBe(409);
+
+    const submitRes = await submitRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
+    // Same frozen window — manual submit is accepted, exactly matching
+    // the revoke guard's "still active" verdict (both would have said
+    // "expired" if either used the live, shortened duration instead).
+    expect(submitRes.status).toBe(200);
+  });
+
+  it("7/8. server time remains authoritative for submission acceptance too — no client-supplied clock/deadline/remaining-time value in the submit request body can override the frozen snapshot", async () => {
+    const s = await freshStudent("Submit Server Time Authoritative Student");
+    const { submission } = await startFinalExamWithSession(s, "freeze-submit-server-time-authoritative");
+
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    // Genuinely still within the frozen window — a forged body claiming
+    // the deadline has already passed must have no effect. The submit
+    // route only ever reads `systemAutoSubmit` from the body; every
+    // other field here is inert by construction.
+    const res = await submitRoute.POST(
+      jsonRequest("POST", { now: new Date(0).toISOString(), deadline: new Date(0).toISOString(), remainingSeconds: -1, clientTime: 0 }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(200);
   });
 });
 
@@ -1941,8 +2084,36 @@ async function establishLegacyVerifiedSession(sessionId: string, clientVersion =
  * a session keeps a DIFFERENT requirement than whatever the environment
  * says at verification time.
  */
-async function startFinalExamWithSession(s: { id: string }, label: string, requirementOverride?: string) {
+async function startFinalExamWithSession(
+  s: { id: string },
+  label: string,
+  requirementOverride?: string,
+  // Freeze timing policy for active exam attempts — applied via a real
+  // lecturer PATCH BEFORE the attempt starts, so it's genuinely captured
+  // in the frozen examPolicySnapshotJson.timingPolicy the real start
+  // route builds, exactly like a lecturer configuring the exam ahead of
+  // time would.
+  secureSettingsOverride?: Record<string, unknown>,
+) {
   const exam = await publishFinalExam(label);
+  if (secureSettingsOverride) {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    // PATCHes the FULL current settings merged with the override — never
+    // a genuinely partial secureSettings body. secureSettingsInputSchema
+    // is `.partial()` over a schema whose fields carry `.default(...)`,
+    // so a truly partial PATCH body (e.g. just `{ allowLateSubmit: true
+    // }`) parses back out with every OTHER field filled in at its
+    // schema default, silently resetting them (assessmentType back to
+    // QUIZ_OR_TEST, deliveryMode back to STANDARD_WEB, etc.) instead of
+    // preserving the exam's actual current values — a real, separate bug
+    // in that schema/route (flagged, not fixed here). The real lecturer
+    // UI never triggers it because it always PATCHes the complete,
+    // already-fetched settings object — mirrored here for the same
+    // reason.
+    const currentRes = await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    const current = await currentRes.json();
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { ...current.secureSettings, ...secureSettingsOverride } }), { params: Promise.resolve({ id: exam.id }) });
+  }
   mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
   const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
   expect(startRes.status).toBe(201);

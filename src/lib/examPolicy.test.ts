@@ -17,6 +17,7 @@ import {
   type ExamPolicy,
   type RelevantSecureSettings,
 } from "./examPolicy";
+import type { ExamTimingPolicy } from "./assessmentLifecycle";
 
 const NEUTRAL_SETTINGS: RelevantSecureSettings = {
   secureModeEnabled: false,
@@ -35,6 +36,8 @@ const STRICT_SETTINGS: RelevantSecureSettings = {
   requireCamera: true,
   enableAiCameraIntegrityChecks: true,
 };
+
+const TIMING_POLICY: ExamTimingPolicy = { durationMins: 60, allowLateSubmit: false, autoSubmitOnTimerEnd: true };
 
 function policy(overrides: Partial<ExamPolicy> = {}): ExamPolicy {
   return { ...DEFAULT_EXAM_POLICY, ...overrides };
@@ -215,17 +218,22 @@ describe("14. policy snapshot is immutable after attempt start", () => {
   it("buildExamPolicySnapshot is a pure function — same inputs produce the same output", () => {
     const ack = new Date("2026-07-18T10:00:00Z");
     const now = new Date("2026-07-18T10:00:05Z");
-    const a = buildExamPolicySnapshot(policy({ examMode: "CLOSED_BOOK" }), STRICT_SETTINGS, ack, now);
-    const b = buildExamPolicySnapshot(policy({ examMode: "CLOSED_BOOK" }), STRICT_SETTINGS, ack, now);
+    const a = buildExamPolicySnapshot(policy({ examMode: "CLOSED_BOOK" }), STRICT_SETTINGS, TIMING_POLICY, ack, now);
+    const b = buildExamPolicySnapshot(policy({ examMode: "CLOSED_BOOK" }), STRICT_SETTINGS, TIMING_POLICY, ack, now);
     expect(a).toEqual(b);
     expect(a.snapshotCreatedAt).toBe(now.toISOString());
     expect(a.studentAcknowledgedAt).toBe(ack.toISOString());
+  });
+
+  it("carries the frozen timingPolicy through unchanged", () => {
+    const snapshot = buildExamPolicySnapshot(policy({ examMode: "CLOSED_BOOK" }), STRICT_SETTINGS, TIMING_POLICY, new Date(), new Date());
+    expect(snapshot.timingPolicy).toEqual(TIMING_POLICY);
   });
 });
 
 describe("15. student-safe policy DTO contains no secrets", () => {
   it("buildStudentExamPolicySummary never includes hashes, secrets, or raw settings JSON keys beyond the documented shape", () => {
-    const snapshot = buildExamPolicySnapshot(policy({ examMode: "CLOSED_BOOK", calculatorAllowed: true }), STRICT_SETTINGS, new Date(), new Date());
+    const snapshot = buildExamPolicySnapshot(policy({ examMode: "CLOSED_BOOK", calculatorAllowed: true }), STRICT_SETTINGS, TIMING_POLICY, new Date(), new Date());
     const summary = buildStudentExamPolicySummary(snapshot);
     const text = JSON.stringify(summary);
     expect(text).not.toMatch(/hash|secret|token|correctAnswer/i);
@@ -250,7 +258,7 @@ describe("16/17. lecturer summary and snapshot independence", () => {
 
   it("editing the exam policy after a snapshot was built does not change that snapshot (pure function, no shared mutable state)", () => {
     const originalPolicy = policy({ examMode: "CLOSED_BOOK" });
-    const snapshot = buildExamPolicySnapshot(originalPolicy, STRICT_SETTINGS, new Date(), new Date());
+    const snapshot = buildExamPolicySnapshot(originalPolicy, STRICT_SETTINGS, TIMING_POLICY, new Date(), new Date());
     // Simulate the lecturer changing the policy afterwards.
     const changedPolicy = { ...originalPolicy, examMode: "OPEN_BOOK" as const, internetAllowed: true };
     void changedPolicy;
