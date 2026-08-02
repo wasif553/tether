@@ -60,6 +60,37 @@ export function isHeartbeatOverdue(lastHeartbeatAtMs: number, nowMs: number, pol
 }
 
 /**
+ * Tether Secure Exam Recovery and Resilient Autosave v1 — see
+ * docs/tether-secure-resume-recovery-v1.md, "Server-authoritative
+ * recovery state". A session's `verificationStatus`/
+ * `installationAttestationVerified` are booleans that persist in the
+ * database exactly as they were the moment they were last written — a
+ * Tether crash, a killed process, or a Windows restart does not itself
+ * change them. Left unchecked, that means a session verified minutes (or
+ * hours) before a crash would still read as "verified" forever after,
+ * which is exactly the "previously verified session trusted indefinitely"
+ * gap this feature closes. This function answers a narrower question than
+ * `isHeartbeatOverdue`: not just "is a heartbeat currently overdue" (which
+ * an ordinary short reconnect already self-heals from, see
+ * `deriveSessionStatus`/`recordHeartbeat`), but "has enough time passed
+ * with no contact at all that the underlying client process may genuinely
+ * be gone" — i.e. overdue AND still overdue after the bounded
+ * "TEMPORARILY_DISCONNECTED / keep answering while reconnecting" window
+ * (`offlineContinueMs`) has also fully elapsed. Only past that combined
+ * threshold does a previously-verified session stop being trusted by the
+ * real content-access gates (see resolveTrustedTetherVerification in
+ * src/lib/tetherRecovery.ts) — an ordinary brief network blip, well
+ * within `offlineContinueMs`, never forces a fresh attestation.
+ */
+export function isVerificationStillFresh(
+  baselineMs: number,
+  nowMs: number,
+  policy: HeartbeatPolicy & { offlineContinueMs: number },
+): boolean {
+  return nowMs <= heartbeatDeadlineMs(baselineMs, policy) + policy.offlineContinueMs;
+}
+
+/**
  * Derives whether an ACTIVE session should now be considered interrupted
  * — called on demand (reconnect / lecturer view / start-resume), never
  * from a background job. A session that has never sent a heartbeat uses

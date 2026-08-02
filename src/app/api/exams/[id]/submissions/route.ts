@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
+import { resolveExamSubmissionsRecoveryStatuses } from "@/lib/tetherRecoveryRunner";
 
 export async function GET(
   _req: Request,
@@ -58,6 +59,14 @@ export async function GET(
     }
   }
 
+  // Tether Secure Exam Recovery and Resilient Autosave v1 (Part 12) —
+  // batched (never N+1) — see resolveExamSubmissionsRecoveryStatuses's
+  // own doc comment. Compact fields only: state/label, last server
+  // contact, resume count, pending-save count where reliable — never
+  // local answer contents, tokens, public keys, signatures, installation
+  // secrets, or stack traces.
+  const recoveryStatuses = await resolveExamSubmissionsRecoveryStatuses(submissions.map((s) => s.id));
+
   return NextResponse.json(
     submissions.map((s) => ({
       ...s,
@@ -65,6 +74,7 @@ export async function GET(
       canvasStatus: s.gradePassback?.status ?? null,
       gradePassback: undefined,
       systemCheck: latestCheckByStudent.get(s.student.id) ?? null,
+      recovery: recoveryStatuses.get(s.id) ?? null,
     })),
   );
 }

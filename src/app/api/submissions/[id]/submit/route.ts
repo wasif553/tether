@@ -11,6 +11,7 @@ import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { endExamAttemptSessionsForSubmission } from "@/lib/examAttemptSessionRunner";
 import { parseAnswerProvenancePolicy, isAnswerProvenanceEnabled } from "@/lib/answerProvenancePolicy";
 import { isSourceDeclarationSatisfied, createFinalDevelopmentRecordsWithTx } from "@/lib/answerDevelopmentRunner";
+import { createPlatformAuditLog } from "@/lib/platformAdmin";
 
 function studentSubmitResponse(submission: {
   id: string;
@@ -34,6 +35,32 @@ function studentSubmitResponse(submission: {
 /** Thrown inside the finalisation transaction when another request has already finalized the submission — never a real failure, just routes to the same ALREADY_FINALIZED response as the P2025 fallback below. */
 class AlreadyFinalizedError extends Error {}
 
+/**
+ * Tether Secure Exam Recovery and Resilient Autosave v1 (Part 9) — final
+ * submission idempotency. Called from every ALREADY_FINALIZED response
+ * path. Distinguishes a genuinely IDEMPOTENT replay (the caller's own
+ * `submissionRequestId` matches the one that first finalized this
+ * submission — a duplicate click, a timeout-after-commit retry, or a
+ * reconnect-and-retry after a crash) from an ordinary "already submitted
+ * by some other means" (no id sent, or the ids differ) — only the former
+ * is audited, and distinctly, per Part 13 ("idempotent final-submission
+ * replay resolved"). Best-effort: never allowed to affect the response.
+ */
+async function auditIdempotentSubmitReplayIfMatching(
+  current: { id: string; studentId: string; finalSubmissionRequestId: string | null; exam?: { institutionId?: string | null } | null },
+  submissionRequestId: string | null,
+): Promise<void> {
+  if (!submissionRequestId || !current.finalSubmissionRequestId || submissionRequestId !== current.finalSubmissionRequestId) return;
+  await createPlatformAuditLog({
+    actorId: current.studentId,
+    action: "TETHER_IDEMPOTENT_FINAL_SUBMISSION_REPLAY_RESOLVED",
+    targetType: "Submission",
+    targetId: current.id,
+    institutionId: current.exam?.institutionId ?? null,
+    metadata: { submissionRequestId },
+  }).catch(() => {});
+}
+
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -44,10 +71,23 @@ export async function POST(
   }
 
   const { id } = await params;
+  // Declared outside the try block (Part 9) so BOTH the inner
+  // already-finalized catch and the outer defensive P2025 fallback catch
+  // below can audit an idempotent replay by the same request id.
+  let submissionRequestId: string | null = null;
 
   try {
     const body = await req.json().catch(() => ({}));
     const systemAutoSubmit = body?.systemAutoSubmit === true;
+    // Final submission idempotency (Part 9) — optional, backward-
+    // compatible client-generated id (bounded, no schema/type
+    // enforcement needed beyond "a non-empty string of sane length" since
+    // it is only ever compared for exact equality, never parsed or
+    // interpreted).
+    submissionRequestId =
+      typeof body?.submissionRequestId === "string" && body.submissionRequestId.length > 0 && body.submissionRequestId.length <= 200
+        ? body.submissionRequestId
+        : null;
 
     // --- Reads outside any transaction: submission + exam + questions.
     // Deadline/declaration gates and the effective question set are all
@@ -66,6 +106,7 @@ export async function POST(
     }
 
     if (submission.status !== "IN_PROGRESS") {
+      await auditIdempotentSubmitReplayIfMatching(submission, submissionRequestId);
       return NextResponse.json({
         ...studentSubmitResponse(submission),
         code: "ALREADY_FINALIZED",
@@ -210,6 +251,13 @@ export async function POST(
             submittedAt: now,
             gradedAt: hasEssay ? null : now,
             totalScore: hasEssay ? null : autoScore,
+            // Final submission idempotency (Part 9) — this update only
+            // ever runs once per submission (the where clause's own
+            // status:"IN_PROGRESS" guard, plus the advisory lock and
+            // fresh-status re-check above, together guarantee that), so
+            // this is always the request that FIRST actually finalized
+            // the submission — never overwritten by a later retry.
+            finalSubmissionRequestId: submissionRequestId ?? undefined,
           },
         });
 
@@ -235,9 +283,10 @@ export async function POST(
       if (err instanceof AlreadyFinalizedError || (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025")) {
         const current = await prisma.submission.findUnique({
           where: { id },
-          include: { exam: { select: { marksReleasedAt: true } } },
+          include: { exam: { select: { marksReleasedAt: true, institutionId: true } } },
         });
         if (current) {
+          await auditIdempotentSubmitReplayIfMatching(current, submissionRequestId);
           return NextResponse.json({ ...studentSubmitResponse(current), code: "ALREADY_FINALIZED" });
         }
       }
@@ -314,9 +363,10 @@ export async function POST(
     ) {
       const current = await prisma.submission.findUnique({
         where: { id },
-        include: { exam: { select: { marksReleasedAt: true } } },
+        include: { exam: { select: { marksReleasedAt: true, institutionId: true } } },
       });
       if (current) {
+        await auditIdempotentSubmitReplayIfMatching(current, submissionRequestId);
         return NextResponse.json({
           ...studentSubmitResponse(current),
           code: "ALREADY_FINALIZED",

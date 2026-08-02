@@ -51,6 +51,13 @@ export const SECURE_CLIENT_EVENT_TYPES = [
   "SECURE_CLIENT_ENDED",
   "CLIENT_TECHNICAL_FAILURE",
   "LECTURER_OVERRIDE_GRANTED",
+  // Tether Secure Exam Recovery and Resilient Autosave v1 — Part 5/12. A
+  // student's client reporting how many locally-queued answer saves are
+  // still unacknowledged, piggy-backed on the existing exam-attempt
+  // heartbeat (see POST /api/submissions/[id]/session-heartbeat). This is
+  // operational/technical telemetry — never a misconduct signal, never
+  // eligible for anything above INFORMATIONAL.
+  "AUTOSAVE_PENDING_COUNT_REPORTED",
 ] as const;
 export type SecureClientEventType = (typeof SECURE_CLIENT_EVENT_TYPES)[number];
 export function isValidSecureClientEventType(value: string): value is SecureClientEventType {
@@ -97,6 +104,7 @@ export const DEFAULT_SECURE_CLIENT_EVENT_LEVEL: Record<SecureClientEventType, Se
   SECURE_CLIENT_ENDED: "INFORMATIONAL",
   CLIENT_TECHNICAL_FAILURE: "CONTEXT",
   LECTURER_OVERRIDE_GRANTED: "REVIEW_CONTEXT",
+  AUTOSAVE_PENDING_COUNT_REPORTED: "INFORMATIONAL",
 };
 
 // ---------------------------------------------------------------------------
@@ -120,6 +128,7 @@ const prohibitedProcessMetadataSchema = z
   .strict();
 const displayMetadataSchema = z.object({ displayCount: z.number().int().min(0).max(64).optional() }).strict();
 const endMetadataSchema = z.object({ endReason: z.string().max(200).optional() }).strict();
+const pendingSaveCountMetadataSchema = z.object({ pendingSaveCount: z.number().int().min(0).max(100_000) }).strict();
 
 export const SECURE_CLIENT_EVENT_METADATA_SCHEMAS: Record<SecureClientEventType, z.ZodTypeAny> = {
   SECURE_CLIENT_LAUNCH_REQUESTED: emptyMetadataSchema,
@@ -154,6 +163,7 @@ export const SECURE_CLIENT_EVENT_METADATA_SCHEMAS: Record<SecureClientEventType,
   SECURE_CLIENT_ENDED: endMetadataSchema,
   CLIENT_TECHNICAL_FAILURE: reasonMetadataSchema,
   LECTURER_OVERRIDE_GRANTED: reasonMetadataSchema,
+  AUTOSAVE_PENDING_COUNT_REPORTED: pendingSaveCountMetadataSchema,
 };
 
 export type SecureClientEventMetadataValidation = { success: true; data: Record<string, unknown> } | { success: false; error: string };

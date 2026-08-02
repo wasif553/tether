@@ -807,7 +807,20 @@ export type VerifyExamSessionAttestationParams = {
 };
 
 export type VerifyExamSessionAttestationResult =
-  | { outcome: "VERIFIED"; sessionId: string; installationPublicKeyFingerprint: string }
+  | {
+      outcome: "VERIFIED";
+      sessionId: string;
+      installationPublicKeyFingerprint: string;
+      // Tether Secure Exam Recovery and Resilient Autosave v1 — true only
+      // when this session (a) supersedes an earlier one for the same
+      // submission (recoveryOfSessionId set) AND (b) is verifying for the
+      // first time. The caller (the verify route, never this file — see
+      // the structural non-authorization guarantee in this file's
+      // top-level doc comment) uses this to decide whether to call
+      // recordSecureResumeCompleted (tetherRecoveryRunner.ts), which is
+      // the only thing in this whole flow that writes to Submission.
+      isRecoveryCompletion: boolean;
+    }
   | { outcome: "REPLAY" }
   | { outcome: "INVALID"; reason: ValidationReasonCode }
   | { outcome: "INSTALLATION_NOT_ACTIVE" }
@@ -818,7 +831,11 @@ export type VerifyExamSessionAttestationResult =
   | { outcome: "CLIENT_VERSION_UNSUPPORTED" }
   | { outcome: "PLATFORM_UNSUPPORTED" }
   | { outcome: "DISPLAY_POLICY_VIOLATION" }
-  | { outcome: "POLICY_HASH_MISMATCH" };
+  | { outcome: "POLICY_HASH_MISMATCH" }
+  // Tether Secure Exam Recovery and Resilient Autosave v1 — Part 8 (same
+  // device / device change). See the check just before the verification
+  // transaction below.
+  | { outcome: "DEVICE_CHANGE_DETECTED" };
 
 /**
  * Best-effort, single-field failure-reason breadcrumb — never sets
@@ -972,6 +989,42 @@ export async function verifyExamSessionAttestation(params: VerifyExamSessionAtte
     return { outcome: "BINDING_MISMATCH" };
   }
 
+  // Tether Secure Exam Recovery and Resilient Autosave v1 — Part 8 (same
+  // device / device change). This IS the real, authoritative enforcement
+  // gate (the recovery-state resolver's own device-change check — see
+  // resolveRecoveryState in src/lib/tetherRecovery.ts — is a proactive,
+  // non-authoritative UI hint only). If this session supersedes an
+  // earlier one for the same submission (recoveryOfSessionId set — see
+  // getOrCreateSessionCore in secureClientRunner.ts) and that earlier
+  // session was already bound to a DIFFERENT, real installation, a
+  // different ACTIVE installation must never silently take over the
+  // attempt: refuse verification and audit the blocked attempt (never an
+  // IntegrityEvent — a device change is a technical/administrative fact,
+  // not a misconduct signal; see Part 8/13 of the spec).
+  const wasAlreadyVerified = session.installationAttestationVerified;
+  if (session.recoveryOfSessionId) {
+    const priorSession = await prisma.secureClientSession.findUnique({
+      where: { id: session.recoveryOfSessionId },
+      select: { clientInstallationId: true },
+    });
+    if (priorSession?.clientInstallationId && priorSession.clientInstallationId !== loaded.installation.id) {
+      await recordExamSessionFailure(session.id, "DEVICE_CHANGE_DETECTED");
+      await createPlatformAuditLog({
+        actorId: params.userId,
+        action: "TETHER_SECURE_RESUME_DENIED_DEVICE_CHANGE",
+        targetType: "Submission",
+        targetId: session.submissionId,
+        institutionId: session.institutionId,
+        metadata: {
+          secureClientSessionId: session.id,
+          boundInstallationId: priorSession.clientInstallationId,
+          attemptingInstallationId: loaded.installation.id,
+        },
+      }).catch(() => {});
+      return { outcome: "DEVICE_CHANGE_DETECTED" };
+    }
+  }
+
   // 6, 20: nonce not previously consumed — enforced by the unique index
   // on nonceHash; a second attempt with the same nonce fails the
   // transaction outright (P2002) and NOTHING below it is applied,
@@ -1014,7 +1067,12 @@ export async function verifyExamSessionAttestation(params: VerifyExamSessionAtte
       await tx.tetherClientInstallation.update({ where: { id: loaded.installation.id }, data: { lastAttestedAt: new Date() } });
       return session.id;
     });
-    return { outcome: "VERIFIED", sessionId, installationPublicKeyFingerprint: loaded.installation.publicKeyFingerprint };
+    return {
+      outcome: "VERIFIED",
+      sessionId,
+      installationPublicKeyFingerprint: loaded.installation.publicKeyFingerprint,
+      isRecoveryCompletion: Boolean(session.recoveryOfSessionId) && !wasAlreadyVerified,
+    };
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       return { outcome: "REPLAY" };

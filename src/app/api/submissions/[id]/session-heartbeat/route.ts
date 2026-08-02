@@ -22,11 +22,20 @@ import {
   browserSessionCookieOptions,
   deviceTokenCookieOptions,
 } from "@/lib/sessionBinding";
+import { getCurrentSessionForSubmission, recordHeartbeat, recordSecureClientEvent } from "@/lib/secureClientRunner";
+import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 
 const bodySchema = z.object({
   timezone: z.string().max(100).optional(),
   screenWidth: z.number().int().positive().max(20_000).optional(),
   cameraPermissionState: z.string().max(50).optional(),
+  // Tether Secure Exam Recovery and Resilient Autosave v1 (Part 5) —
+  // optional, backward-compatible: a caller that omits it (any client
+  // predating this feature) is completely unaffected. Never answer
+  // content — see src/lib/pendingSaveQueue.ts, "the queue may store
+  // only ... never send answer content through heartbeat" (Part 5's own
+  // "do not send" list).
+  pendingSaveCount: z.number().int().min(0).max(100_000).optional(),
 });
 
 /** Heartbeat rows are simple markers — rate-limited so a fast client retry loop can't flood the table. */
@@ -65,6 +74,47 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     eventType: "HEARTBEAT",
     dedupeWindowMs: HEARTBEAT_DEDUPE_WINDOW_MS,
   }).catch(() => {});
+
+  // Tether Secure Exam Recovery and Resilient Autosave v1 (Part 5) —
+  // piggy-backs the SecureClientSession heartbeat (lastHeartbeatAt, and
+  // the existing INTERRUPTED -> ACTIVE self-heal) onto this ALREADY
+  // wired, already-called-every-~25s heartbeat, rather than requiring a
+  // separate client-side call — this is the real fix for
+  // SecureClientSession.lastHeartbeatAt previously never being updated by
+  // any real exam-taking flow at all (it was only ever touched by the
+  // dedicated POST .../secure-client/sessions/[id]/heartbeat route, which
+  // nothing in the student exam page actually calls). AWAITED (unlike the
+  // pending-save-count event below) — recording contact is this route's
+  // own core new purpose, not decorative telemetry, so the response must
+  // not be sent before it's actually durable; a failure here still never
+  // fails the request itself (caught, not rethrown). No-ops entirely for
+  // a non-Tether exam (no current session exists to touch).
+  const currentSecureClientSession = await getCurrentSessionForSubmission(id);
+  if (currentSecureClientSession) {
+    const policy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
+    await recordHeartbeat(currentSecureClientSession.id, {
+      heartbeatIntervalSeconds: policy.heartbeatIntervalSeconds,
+      heartbeatGraceSeconds: policy.heartbeatGraceSeconds,
+    }).catch(() => {});
+
+    // Part 12 — "pending-save count where reliable". Only recorded when
+    // actually nonzero, to avoid a steady stream of empty rows on the
+    // (very common) common case of nothing pending — the lecturer badge
+    // treats "no recent report" as zero/none.
+    if (parsed.data.pendingSaveCount != null && parsed.data.pendingSaveCount > 0) {
+      recordSecureClientEvent({
+        secureClientSessionId: currentSecureClientSession.id,
+        submissionId: id,
+        examId: currentSecureClientSession.examId,
+        institutionId: currentSecureClientSession.institutionId,
+        eventType: "AUTOSAVE_PENDING_COUNT_REPORTED",
+        clientRequestId: null,
+        sequenceNumber: null,
+        clientElapsedMs: null,
+        metadata: { pendingSaveCount: parsed.data.pendingSaveCount },
+      }).catch(() => {});
+    }
+  }
 
   const response = NextResponse.json({
     sessionStatus: "ACTIVE",

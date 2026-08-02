@@ -20,6 +20,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { verifyExamSessionAttestation } from "@/lib/systemCheck/tetherAttestationRunner";
+import { recordSecureResumeCompleted } from "@/lib/tetherRecoveryRunner";
 
 const challengeSchema = z.object({
   schemaVersion: z.number().int(),
@@ -115,6 +116,25 @@ export async function POST(req: Request) {
   }
   if (result.outcome === "REPLAY") {
     return NextResponse.json({ verified: false, reason: "REPLAY" }, { status: 409 });
+  }
+  // Tether Secure Exam Recovery and Resilient Autosave v1 — Part 8. This
+  // session supersedes an earlier one that was already bound to a
+  // DIFFERENT registered installation — never silently let a different
+  // computer take over the attempt. The recovery-status endpoint
+  // (GET /api/submissions/[id]/recovery-status) independently surfaces
+  // this as MANUAL_REVIEW_REQUIRED for the student-facing UI.
+  if (result.outcome === "DEVICE_CHANGE_DETECTED") {
+    return NextResponse.json({ verified: false, reason: "DEVICE_CHANGE_DETECTED" }, { status: 409 });
+  }
+
+  // Tether Secure Exam Recovery and Resilient Autosave v1 — the ONLY
+  // place a successful EXAM_SESSION verification is allowed to touch
+  // Submission (resumeCount/lastResumedAt) — verifyExamSessionAttestation
+  // itself deliberately never does (see its own doc comment). Best-effort:
+  // never allowed to turn a successful verification into a failure
+  // response.
+  if (result.isRecoveryCompletion) {
+    await recordSecureResumeCompleted(result.sessionId).catch(() => {});
   }
 
   return NextResponse.json({ verified: true, sessionId: result.sessionId });

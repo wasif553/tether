@@ -19,14 +19,23 @@ import { buildExamPolicySnapshot } from "@/lib/examPolicy";
 import { buildAiAssistancePolicySnapshot } from "@/lib/aiAssistancePolicy";
 import { buildScreenSharePolicySnapshot } from "@/lib/screenSharePolicy";
 import { buildAnswerProvenancePolicySnapshot } from "@/lib/answerProvenancePolicy";
-import { buildSecureClientPolicySnapshot, resolveEffectiveDeliveryMode, type DeliveryMode, type SecureClientAvailability } from "@/lib/secureClientPolicy";
+import {
+  buildSecureClientPolicySnapshot,
+  resolveEffectiveDeliveryMode,
+  DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+  DEFAULT_HEARTBEAT_GRACE_SECONDS,
+  type DeliveryMode,
+  type SecureClientAvailability,
+} from "@/lib/secureClientPolicy";
 import { secureClientAvailabilityForInstitution, isTetherSecureClientBypassAllowed } from "@/lib/secureClientAvailability";
 import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
 import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
 import { isFinalExaminationPolicyEstablished } from "@/lib/assessmentType";
 import { systemCheckMode } from "@/lib/systemCheckConfig";
 import { evaluateFinalExamSystemCheckGate } from "@/lib/systemCheck/readiness";
-import { parseAttestationRequirement, resolveEffectiveTetherVerification } from "@/lib/tetherAttestationConfig";
+import { parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
+import { resolveTrustedTetherVerification } from "@/lib/tetherRecovery";
+import { resolveOfflineContinueMs } from "@/lib/tetherRecoveryConfig";
 
 // Tether launch/install flow v1 — Requirement 9 ("Production start
 // protection"). Additive response field: `{required: false}` for every
@@ -53,11 +62,26 @@ async function resolveSecureClientLaunchField(params: {
   // truth table this implements. Reads the SESSION's own immutable
   // requirement snapshot (attestationRequirement, set once at session
   // creation) — never the live environment variable, and never any
-  // client-supplied version.
-  const hasVerifiedTetherSession = resolveEffectiveTetherVerification({
+  // client-supplied version. Tether Secure Exam Recovery v1 — wraps this
+  // in resolveTrustedTetherVerification (src/lib/tetherRecovery.ts)
+  // rather than calling resolveEffectiveTetherVerification directly, so a
+  // session verified before a crash/kill/relaunch eventually stops being
+  // trusted once contact has genuinely gone stale (see that function's
+  // own doc comment for the exact boundary) — an ordinary short reconnect
+  // never crosses it. Uses the DEFAULT heartbeat interval/grace (this
+  // function only receives deliveryMode, not the full frozen per-attempt
+  // policy) rather than the exact per-exam configured cadence — a
+  // deliberately small, documented imprecision; TETHER_OFFLINE_CONTINUE_MINUTES
+  // (minimum 2 minutes) dominates the total staleness window regardless.
+  const hasVerifiedTetherSession = resolveTrustedTetherVerification({
     sessionRequirement: parseAttestationRequirement(currentSession?.attestationRequirement ?? null),
     legacyVerified: currentSession?.verificationStatus === "VERIFIED",
     v2Verified: currentSession?.installationAttestationVerified === true,
+    lastHeartbeatAtMs: currentSession?.lastHeartbeatAt?.getTime() ?? null,
+    sessionStartedAtMs: currentSession?.startedAt?.getTime() ?? 0,
+    nowMs: Date.now(),
+    heartbeatPolicy: { heartbeatIntervalSeconds: DEFAULT_HEARTBEAT_INTERVAL_SECONDS, heartbeatGraceSeconds: DEFAULT_HEARTBEAT_GRACE_SECONDS },
+    offlineContinueMs: resolveOfflineContinueMs(),
   });
   const devBypassAllowed = isTetherSecureClientBypassAllowed(params.institutionSlug);
   const gate = resolveSecureClientStartGate({ effectiveDeliveryMode, hasVerifiedTetherSession, devBypassAllowed });

@@ -153,6 +153,7 @@ Interpretation:
 | 12 | `docs/cohort-collusion-graph-v1-migration.sql` | Cohort-Level Collusion Detection and Integrity Graph v1 | **Applied 2026-07-24** | **Applied 2026-07-24 (same shared database as Preview)** | Confirmed applied — do not re-apply. Five new tables (`CohortCollusionAnalysis`, `CollusionPairEdge`, `CollusionSignal`, `CollusionCluster`, `CollusionClusterMember`) — zero columns added to any existing table. |
 | 13 | `docs/answer-development-provenance-v1-migration.sql` | Answer-Development Provenance v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — answer-development provenance migration" below for the full read-only confirmation record. |
 | 14 | `docs/secure-client-foundation-seb-v1-migration.sql` | Tether Secure Client Foundation + Safe Exam Browser Compatibility v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — secure client foundation migration" below for the full read-only confirmation record. |
+| 15 | `docs/sql/add-tether-secure-resume-recovery.sql` | Tether Secure Exam Recovery and Resilient Autosave v1 | **NOT YET APPLIED** | **NOT YET APPLIED (same shared database as Preview)** | Additive only — three new nullable/defaulted columns on `SecureClientSession`, four on `Submission` (one unique), two on `Answer`, plus one index and one self-referencing foreign key. See docs/tether-secure-resume-recovery-v1.md and "Deployment procedure" below. Must be applied AFTER row 14 (`docs/secure-client-foundation-seb-v1-migration.sql`) — the new `recoveryOfSessionId` foreign key targets `SecureClientSession`, which that earlier migration creates. |
 
 Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -531,3 +532,49 @@ one new nullable column:
   `deliveryMode: "STANDARD_WEB"` for every exam, ensuring no exam is
   switched to a SEB/Tether-required delivery mode is the practical
   "rollback" for almost any issue, rather than reverting the schema.
+
+## Deployment procedure — `docs/sql/add-tether-secure-resume-recovery.sql`
+
+**NOT YET APPLIED — do not apply as part of the same change that adds
+this row to the ledger.** Preview and Production share ONE Supabase
+database — apply this file **once**, not once per environment, and only
+after independent review.
+
+1. Take a pre-migration backup of the shared database (Supabase project
+   → Database → Backups, or a manual `pg_dump`) before applying anything.
+2. Run the pre-check queries embedded at the top of
+   `docs/sql/add-tether-secure-resume-recovery.sql` first, to confirm the
+   migration has not already been applied.
+3. Confirm row 14 (`docs/secure-client-foundation-seb-v1-migration.sql`)
+   shows as applied above — this file's `recoveryOfSessionId` foreign key
+   targets the `SecureClientSession` table that migration creates.
+4. Open the (shared) Supabase project → SQL Editor.
+5. Paste and run the file's single `BEGIN` ... `COMMIT` block — it is
+   already in execution order (`SecureClientSession` columns + index +
+   FK, then `Submission` columns + unique constraint, then `Answer`
+   columns).
+6. Run the file's own "Post-application verification" queries to confirm
+   all nine new columns, the index, and both constraints landed, and that
+   every existing row's new columns are NULL/default (never
+   retroactively populated).
+7. Record the date in the Ledger table above (row 15) — a single date is
+   sufficient given the shared database.
+8. Do not enable/rely on any resume-recovery behaviour for a real exam
+   until this has been applied — every application code path already
+   treats the pre-migration (missing-column) state as "recovery feature
+   inactive for this row," so there is no urgency window where existing
+   exams behave incorrectly before this is applied; it is safe to deploy
+   the application code ahead of this migration.
+9. Do not apply this file a second time — re-running it after a
+   successful apply is idempotent (every statement uses
+   `IF NOT EXISTS`/`ADD COLUMN IF NOT EXISTS` guards) but is not expected
+   to be necessary.
+
+### Rollback — `docs/sql/add-tether-secure-resume-recovery.sql`
+
+See the SQL file's own embedded "Rollback" section for the exact
+`DROP COLUMN`/`DROP CONSTRAINT`/`DROP INDEX` statements. Additive-only,
+touches no existing row's data — the practical rollback for almost any
+issue is simply ensuring no exam relies on the new recovery behaviour
+(every code path already treats a missing value as "no recovery history
+on record"), rather than reverting the schema.

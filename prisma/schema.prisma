@@ -185,34 +185,34 @@ model PlatformAuditLog {
 }
 
 model User {
-  id                String           @id @default(cuid())
-  name              String
-  email             String           @unique
-  passwordHash      String
-  role              Role
-  createdAt         DateTime         @default(now())
-  examsCreated      Exam[]           @relation("ExamCreator")
-  submissions       Submission[]
-  integrityEvents   IntegrityEvent[] @relation("IntegrityEventStudent")
-  resolvedEvents    IntegrityEvent[] @relation("IntegrityEventResolver")
-  networkEvidence   NetworkEvidence[] @relation("NetworkEvidenceStudent")
+  id                   String             @id @default(cuid())
+  name                 String
+  email                String             @unique
+  passwordHash         String
+  role                 Role
+  createdAt            DateTime           @default(now())
+  examsCreated         Exam[]             @relation("ExamCreator")
+  submissions          Submission[]
+  integrityEvents      IntegrityEvent[]   @relation("IntegrityEventStudent")
+  resolvedEvents       IntegrityEvent[]   @relation("IntegrityEventResolver")
+  networkEvidence      NetworkEvidence[]  @relation("NetworkEvidenceStudent")
   // canvasUserId is unique per institution, not globally — a self-hosted
   // Canvas instance at a different institution could otherwise collide
   // with another institution's user id. See docs/multi-tenant-migration.md.
-  canvasUserId      String?
-  canvasCourseIds   String[]         @default([])
-  questionBanks     QuestionBank[]
+  canvasUserId         String?
+  canvasCourseIds      String[]           @default([])
+  questionBanks        QuestionBank[]
   // Multi-Tenant Architecture v1 (additive, nullable — see
   // docs/multi-tenant-migration.md). Nullable at the DB level; application
   // code treats it as required via src/lib/institutionScope.ts.
-  institutionId     String?
-  institution       Institution?     @relation(fields: [institutionId], references: [id])
+  institutionId        String?
+  institution          Institution?       @relation(fields: [institutionId], references: [id])
   // Platform Admin Onboarding v2 — see docs/platform-admin-onboarding.md.
-  platformAuditLogs PlatformAuditLog[]
+  platformAuditLogs    PlatformAuditLog[]
   // Course, Enrolment, Exam Assignment, Scheduling v1 — see
   // docs/course-enrolment-and-exam-assignment.md.
-  courseEnrollments CourseEnrollment[]
-  examAssignments   ExamAssignment[]
+  courseEnrollments    CourseEnrollment[]
+  examAssignments      ExamAssignment[]
   // Assessment Operations v1 (additive) — see
   // docs/assessment-operations-v1.md. An optional institution-issued
   // student ID (e.g. a roll number or SIS ID), distinct from this row's
@@ -230,20 +230,20 @@ model User {
 
   // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
   aiUseReviewAnalysesRequested AiUseReviewAnalysis[] @relation("AiUseReviewRequestedBy")
-  reviewedAiUseReviewSignals   AiUseReviewSignal[]    @relation("AiUseReviewSignalReviewer")
+  reviewedAiUseReviewSignals   AiUseReviewSignal[]   @relation("AiUseReviewSignalReviewer")
 
   // Exam Session Binding + Time Anomaly Review v1 (additive) — see
   // docs/exam-session-binding-v1.md and docs/time-anomaly-review-v1.md.
-  examAttemptSessions              ExamAttemptSession[]      @relation("ExamAttemptSessionUser")
-  reviewedSessionIntegritySignals  SessionIntegritySignal[]  @relation("SessionIntegritySignalReviewer")
-  timingAnalysesRequested          TimingAnalysis[]          @relation("TimingAnalysisRequestedBy")
-  reviewedTimingIntegritySignals   TimingIntegritySignal[]   @relation("TimingIntegritySignalReviewer")
+  examAttemptSessions             ExamAttemptSession[]     @relation("ExamAttemptSessionUser")
+  reviewedSessionIntegritySignals SessionIntegritySignal[] @relation("SessionIntegritySignalReviewer")
+  timingAnalysesRequested         TimingAnalysis[]         @relation("TimingAnalysisRequestedBy")
+  reviewedTimingIntegritySignals  TimingIntegritySignal[]  @relation("TimingIntegritySignalReviewer")
 
   // Exam Design Policy + Evidence Review v1 (additive) — see
   // docs/evidence-review-workflow-v1.md.
-  reviewedIntegrityEvents      IntegrityEvent[]                @relation("IntegrityEventReviewer")
-  integrityReviewComments      IntegrityReviewComment[]        @relation("IntegrityReviewCommentAuthor")
-  integrityReviewStatusChanges IntegrityReviewStatusHistory[]  @relation("IntegrityReviewStatusChanger")
+  reviewedIntegrityEvents      IntegrityEvent[]               @relation("IntegrityEventReviewer")
+  integrityReviewComments      IntegrityReviewComment[]       @relation("IntegrityReviewCommentAuthor")
+  integrityReviewStatusChanges IntegrityReviewStatusHistory[] @relation("IntegrityReviewStatusChanger")
 
   // Controlled AI Brainstorming Assistance v1 (additive) — see
   // docs/controlled-ai-brainstorming-assistance-v1.md.
@@ -264,11 +264,11 @@ model User {
 
   // Tether System Check and Exam Readiness v1 (additive) — see
   // docs/tether-system-check-v1.md.
-  tetherSystemCheckRuns TetherSystemCheckRun[]
+  tetherSystemCheckRuns                    TetherSystemCheckRun[]
   // Corrective pass — first-time SYSTEM_CHECK secure-client verification.
-  systemCheckSecureClientVerifications SystemCheckSecureClientVerification[]
+  systemCheckSecureClientVerifications     SystemCheckSecureClientVerification[]
   // Secure Client Attestation v2 — see docs/tether-system-check-v1.md.
-  tetherClientInstallations TetherClientInstallation[]
+  tetherClientInstallations                TetherClientInstallation[]
   // Pre-Preview safety pass — see "Single-use registration challenges".
   tetherInstallationRegistrationChallenges TetherInstallationRegistrationChallenge[]
 
@@ -277,38 +277,38 @@ model User {
 }
 
 model Exam {
-  id              String           @id @default(cuid())
-  title           String
-  description     String?
-  durationMins    Int
-  published       Boolean          @default(false)
-  startsAt        DateTime?
-  endsAt          DateTime?
-  createdById     String
-  createdBy       User             @relation("ExamCreator", fields: [createdById], references: [id])
-  questions       Question[]
-  submissions     Submission[]
-  integrityEvents  IntegrityEvent[]
-  ltiExamLinks     LtiExamLink[]
-  networkEvidence  NetworkEvidence[]
+  id                 String                   @id @default(cuid())
+  title              String
+  description        String?
+  durationMins       Int
+  published          Boolean                  @default(false)
+  startsAt           DateTime?
+  endsAt             DateTime?
+  createdById        String
+  createdBy          User                     @relation("ExamCreator", fields: [createdById], references: [id])
+  questions          Question[]
+  submissions        Submission[]
+  integrityEvents    IntegrityEvent[]
+  ltiExamLinks       LtiExamLink[]
+  networkEvidence    NetworkEvidence[]
   // On-Device AI Camera Integrity Detection v1 — Evidence Frames
   // (additive, opt-in). See docs/on-device-ai-integrity-detection-v1.md.
-  evidenceAssets   IntegrityEvidenceAsset[]
+  evidenceAssets     IntegrityEvidenceAsset[]
   // Secure Exam Mode v1 settings (see src/lib/secureExam.ts for shape/defaults).
   // A single JSON column rather than ~10 booleans/ints, since this app has no
   // other multi-flag settings model and these are read/written together.
-  secureSettings  Json?
-  createdAt       DateTime         @default(now())
+  secureSettings     Json?
+  createdAt          DateTime                 @default(now())
   // Multi-Tenant Architecture v1 (additive, nullable) — see
   // docs/multi-tenant-migration.md.
-  institutionId   String?
-  institution     Institution?     @relation(fields: [institutionId], references: [id])
+  institutionId      String?
+  institution        Institution?             @relation(fields: [institutionId], references: [id])
   // Student Onboarding and Exam Access v1 (additive) — see
   // docs/student-onboarding-and-exam-access.md. Never store the plaintext
   // code; accessCodeRequired is a separate flag (not just "hash is set")
   // so clearing the code is an explicit, unambiguous action.
   accessCodeHash     String?
-  accessCodeRequired Boolean       @default(false)
+  accessCodeRequired Boolean                  @default(false)
   // Assessment Lifecycle v1: exam-level marks release. Students only see
   // score/feedback data after this is set by the owning lecturer/admin.
   marksReleasedAt    DateTime?
@@ -329,8 +329,8 @@ model Exam {
   // and "availability window"). availableFrom/availableUntil are the new,
   // explicit scheduling fields; both remain optional so unset exams have
   // no window restriction (see docs/course-enrolment-and-exam-assignment.md).
-  availableFrom    DateTime?
-  availableUntil   DateTime?
+  availableFrom  DateTime?
+  availableUntil DateTime?
 
   // Question Pools v1 (additive, opt-in) — see docs/question-pools-v1.md.
   questionPools QuestionPool[]
@@ -356,9 +356,9 @@ model Exam {
   // (additive, opt-in) — see docs/secure-client-foundation-seb-v1.md. The
   // web platform remains fully functional without any of this — see
   // deliveryMode default STANDARD_WEB in src/lib/secureClientPolicy.ts.
-  secureClientConfigurations   SecureClientConfiguration[]
-  secureClientLaunchManifests  SecureClientLaunchManifest[]
-  secureClientSessions         SecureClientSession[]
+  secureClientConfigurations  SecureClientConfiguration[]
+  secureClientLaunchManifests SecureClientLaunchManifest[]
+  secureClientSessions        SecureClientSession[]
 
   @@index([institutionId])
   @@index([courseId])
@@ -382,39 +382,39 @@ model QuestionPool {
   // docs/question-pools-v1.md. If greater than the number of questions
   // actually in the pool, every available question is included instead
   // of erroring.
-  drawCount Int?
-  order     Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  questions Question[]
+  drawCount   Int?
+  order       Int        @default(0)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  questions   Question[]
 
   @@index([examId])
 }
 
 model Question {
-  id            String       @id @default(cuid())
-  examId        String
-  exam          Exam         @relation(fields: [examId], references: [id], onDelete: Cascade)
-  type          QuestionType
-  text          String
-  options       Json?
-  correctAnswer String?
-  points        Int          @default(1)
-  order         Int          @default(0)
+  id                       String                      @id @default(cuid())
+  examId                   String
+  exam                     Exam                        @relation(fields: [examId], references: [id], onDelete: Cascade)
+  type                     QuestionType
+  text                     String
+  options                  Json?
+  correctAnswer            String?
+  points                   Int                         @default(1)
+  order                    Int                         @default(0)
   // Question Pools v1 (additive, opt-in, nullable) — see
   // docs/question-pools-v1.md. Null means "not in any pool" — always
   // included for every student regardless of pool settings.
-  questionPoolId String?
-  questionPool   QuestionPool? @relation(fields: [questionPoolId], references: [id], onDelete: SetNull)
-  answers       Answer[]
+  questionPoolId           String?
+  questionPool             QuestionPool?               @relation(fields: [questionPoolId], references: [id], onDelete: SetNull)
+  answers                  Answer[]
   // Answer Similarity Review v1 (additive) — see
   // docs/answer-similarity-review-v1.md.
-  similarityMatches SubmissionSimilarityMatch[]
+  similarityMatches        SubmissionSimilarityMatch[]
   // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
-  aiUseReviewSignals AiUseReviewSignal[]
+  aiUseReviewSignals       AiUseReviewSignal[]
   // Exam Session Binding + Time Anomaly Review v1 (additive) — see
   // docs/exam-session-binding-v1.md.
-  answerActivityEvents AnswerActivityEvent[]
+  answerActivityEvents     AnswerActivityEvent[]
   // Question Navigator v1 (additive, opt-in) — see
   // docs/question-navigator-v1.md.
   submissionQuestionStates SubmissionQuestionState[]
@@ -424,8 +424,8 @@ model Question {
 
   // Answer-Development Provenance v1 (additive, opt-in) — see
   // docs/answer-development-provenance-v1.md.
-  developmentVersions AnswerDevelopmentVersion[]
-  developmentEvents   AnswerDevelopmentEvent[]
+  developmentVersions  AnswerDevelopmentVersion[]
+  developmentEvents    AnswerDevelopmentEvent[]
   developmentArtifacts AnswerDevelopmentArtifact[]
   codeExecutionEvents  CodeExecutionEvent[]
 }
@@ -439,19 +439,19 @@ model Question {
 // Everything here is a REVIEW SIGNAL for a human lecturer — never an
 // automatic misconduct finding, never a grade input.
 model SubmissionSimilarityAnalysis {
-  id     String @id @default(cuid())
-  examId String
-  exam   Exam   @relation(fields: [examId], references: [id], onDelete: Cascade)
+  id               String                      @id @default(cuid())
+  examId           String
+  exam             Exam                        @relation(fields: [examId], references: [id], onDelete: Cascade)
   // Set when the run was scoped to a single submission; null for a
   // whole-exam run (the v1 default).
   submissionId     String?
-  status           String    @default("PENDING") // PENDING | PROCESSING | COMPLETE | FAILED
-  overallRisk      String    @default("NONE") // NONE | LOW | MEDIUM | HIGH
+  status           String                      @default("PENDING") // PENDING | PROCESSING | COMPLETE | FAILED
+  overallRisk      String                      @default("NONE") // NONE | LOW | MEDIUM | HIGH
   analysedAt       DateTime?
   algorithmVersion String
   summaryJson      Json?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  createdAt        DateTime                    @default(now())
+  updatedAt        DateTime                    @updatedAt
   matches          SubmissionSimilarityMatch[]
 
   @@index([examId])
@@ -519,18 +519,18 @@ model OralVerification {
 }
 
 model Submission {
-  id          String           @id @default(cuid())
-  examId      String
-  exam        Exam             @relation(fields: [examId], references: [id], onDelete: Cascade)
-  studentId   String
-  student     User             @relation(fields: [studentId], references: [id])
-  status      SubmissionStatus @default(IN_PROGRESS)
-  attemptNumber Int              @default(1)
-  startedAt   DateTime         @default(now())
-  submittedAt DateTime?
-  gradedAt    DateTime?
-  totalScore  Int?
-  answers     Answer[]
+  id              String                   @id @default(cuid())
+  examId          String
+  exam            Exam                     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  studentId       String
+  student         User                     @relation(fields: [studentId], references: [id])
+  status          SubmissionStatus         @default(IN_PROGRESS)
+  attemptNumber   Int                      @default(1)
+  startedAt       DateTime                 @default(now())
+  submittedAt     DateTime?
+  gradedAt        DateTime?
+  totalScore      Int?
+  answers         Answer[]
   integrityEvents IntegrityEvent[]
   gradePassback   CanvasGradePassback?
   networkEvidence NetworkEvidence[]
@@ -562,10 +562,10 @@ model Submission {
 
   // Exam Session Binding + Time Anomaly Review v1 (additive) — see
   // docs/exam-session-binding-v1.md and docs/time-anomaly-review-v1.md.
-  examAttemptSessions      ExamAttemptSession[]
-  sessionIntegritySignals  SessionIntegritySignal[]
-  answerActivityEvents     AnswerActivityEvent[]
-  timingAnalysis           TimingAnalysis?
+  examAttemptSessions     ExamAttemptSession[]
+  sessionIntegritySignals SessionIntegritySignal[]
+  answerActivityEvents    AnswerActivityEvent[]
+  timingAnalysis          TimingAnalysis?
 
   // Exam Design Policy + Evidence Review v1 (additive) — see
   // docs/exam-design-policy-v1.md. The immutable policy snapshot taken
@@ -577,9 +577,9 @@ model Submission {
   // alignment rather than retrospectively judged against a policy that
   // did not exist when the attempt happened. Never rewritten after
   // creation, even if the exam's own secureSettings/policy change later.
-  examPolicySnapshotJson Json?
-  integrityReviewComments       IntegrityReviewComment[]
-  integrityReviewStatusHistory  IntegrityReviewStatusHistory[]
+  examPolicySnapshotJson       Json?
+  integrityReviewComments      IntegrityReviewComment[]
+  integrityReviewStatusHistory IntegrityReviewStatusHistory[]
 
   // Question Navigator v1 (additive, opt-in) — see
   // docs/question-navigator-v1.md.
@@ -611,9 +611,9 @@ model Submission {
   // see docs/cohort-collusion-graph-v1.md. A submission is a graph node;
   // an edge represents a possible relationship with another submission,
   // never a finding on its own.
-  collusionEdgesAsSource       CollusionPairEdge[]       @relation("CollusionEdgeSource")
-  collusionEdgesAsCompared     CollusionPairEdge[]       @relation("CollusionEdgeCompared")
-  collusionClusterMemberships  CollusionClusterMember[]
+  collusionEdgesAsSource      CollusionPairEdge[]      @relation("CollusionEdgeSource")
+  collusionEdgesAsCompared    CollusionPairEdge[]      @relation("CollusionEdgeCompared")
+  collusionClusterMemberships CollusionClusterMember[]
 
   // Answer-Development Provenance v1 (additive, opt-in) — see
   // docs/answer-development-provenance-v1.md. Same immutable-snapshot
@@ -640,10 +640,31 @@ model Submission {
   // attempt at deploy time can never retroactively become secure-client-
   // required, exactly like every other snapshot in this codebase.
   secureClientPolicySnapshotJson Json?
-  secureClientLaunchManifests     SecureClientLaunchManifest[]
-  secureClientSessions            SecureClientSession[]
-  secureClientEvents              SecureClientEvent[]
-  secureClientRecoveryGrants      SecureClientRecoveryGrant[]
+  secureClientLaunchManifests    SecureClientLaunchManifest[]
+  secureClientSessions           SecureClientSession[]
+  secureClientEvents             SecureClientEvent[]
+  secureClientRecoveryGrants     SecureClientRecoveryGrant[]
+
+  // Tether Secure Exam Recovery and Resilient Autosave v1 (additive) — see
+  // docs/tether-secure-resume-recovery-v1.md. resumeCount/lastResumedAt
+  // are informational/audit fields only — incremented ONLY once a fresh
+  // SecureClientSession created for this submission actually completes a
+  // genuine EXAM_SESSION attestation (see recordSecureResumeCompleted in
+  // src/lib/tetherRecoveryRunner.ts), never merely because a recovery was
+  // attempted. lastAutosaveAcknowledgedAt is the last time ANY answer
+  // autosave for this submission was accepted (used only for lecturer
+  // "last server contact" visibility — never authoritative for timing).
+  // finalSubmissionRequestId stores the client-generated idempotency key
+  // of whichever request FIRST actually transitioned this submission to
+  // SUBMITTED/GRADED (null for a request that omitted one, or for
+  // submissions finalized before this field existed) — lets a client that
+  // lost the response after a timeout confirm "was my specific submit
+  // request the one that got accepted" via GET /api/submissions/[id],
+  // never used to authorize a second write.
+  resumeCount                Int       @default(0)
+  lastResumedAt              DateTime?
+  lastAutosaveAcknowledgedAt DateTime?
+  finalSubmissionRequestId   String?   @unique
 
   @@unique([examId, studentId, attemptNumber])
   @@index([examId, studentId])
@@ -657,16 +678,16 @@ model Submission {
 // question with no row is simply "not visited, not flagged" — no row is
 // ever required to exist.
 model SubmissionQuestionState {
-  id             String     @id @default(cuid())
-  submissionId   String
-  submission     Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
-  questionId     String
-  question       Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
-  firstVisitedAt DateTime?
-  lastVisitedAt  DateTime?
-  flaggedForReview Boolean  @default(false)
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  id               String     @id @default(cuid())
+  submissionId     String
+  submission       Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  questionId       String
+  question         Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  firstVisitedAt   DateTime?
+  lastVisitedAt    DateTime?
+  flaggedForReview Boolean    @default(false)
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
 
   @@unique([submissionId, questionId])
   @@index([submissionId])
@@ -675,49 +696,67 @@ model SubmissionQuestionState {
 }
 
 model Answer {
-  id           String     @id @default(cuid())
-  submissionId String
-  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
-  questionId   String
-  question     Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
-  response          String?
-  score             Int?
-  feedback          String?
-  isCorrect         Boolean?
-  timeSpentSeconds  Int?
-  aiDraftScore      Float?
-  aiReasoning       String?
-  aiGradedAt        DateTime?
+  id                 String              @id @default(cuid())
+  submissionId       String
+  submission         Submission          @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  questionId         String
+  question           Question            @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  response           String?
+  score              Int?
+  feedback           String?
+  isCorrect          Boolean?
+  timeSpentSeconds   Int?
+  aiDraftScore       Float?
+  aiReasoning        String?
+  aiGradedAt         DateTime?
   // AI-Use Answer Review v1 (additive) — see docs/ai-use-answer-review-v1.md.
   aiUseReviewSignals AiUseReviewSignal[]
 
   // Answer-Development Provenance v1 (additive, opt-in) — see
   // docs/answer-development-provenance-v1.md.
-  developmentVersions AnswerDevelopmentVersion[]
-  developmentEvents   AnswerDevelopmentEvent[]
+  developmentVersions  AnswerDevelopmentVersion[]
+  developmentEvents    AnswerDevelopmentEvent[]
   developmentArtifacts AnswerDevelopmentArtifact[]
   codeExecutionEvents  CodeExecutionEvent[]
+
+  // Tether Secure Exam Recovery and Resilient Autosave v1 (additive) — see
+  // docs/tether-secure-resume-recovery-v1.md, "Autosave idempotency and
+  // revision control". lastClientRequestId is the client-generated id of
+  // whichever save request most recently actually wrote `response` below
+  // — a retry of that SAME id short-circuits to the current row without
+  // writing again. clientRevision is that same request's own
+  // monotonically-increasing sequence number (per submission+question);
+  // a save whose clientRevision is not strictly greater than the current
+  // value is accepted as a no-op replay/stale-arrival, never applied,
+  // and never regresses `response`. Both null for every row saved before
+  // this field existed, or by a caller that never sent an id/revision —
+  // treated as "no idempotency key on record", so the very next
+  // idempotent-aware save from that same question is simply accepted
+  // and starts tracking normally (never blocked, never requires a
+  // migration/backfill).
+  lastClientRequestId String?
+  clientRevision      Int?
 
   @@unique([submissionId, questionId])
 }
 
 model IntegrityEvent {
-  id             String             @id @default(cuid())
+  id             String                  @id @default(cuid())
   submissionId   String
-  submission     Submission         @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  submission     Submission              @relation(fields: [submissionId], references: [id], onDelete: Cascade)
   examId         String
-  exam           Exam               @relation(fields: [examId], references: [id], onDelete: Cascade)
+  exam           Exam                    @relation(fields: [examId], references: [id], onDelete: Cascade)
   studentId      String
-  student        User               @relation("IntegrityEventStudent", fields: [studentId], references: [id])
+  student        User                    @relation("IntegrityEventStudent", fields: [studentId], references: [id])
   eventType      IntegrityEventType
   severity       IntegritySeverity
   message        String
   metadataJson   Json?
   occurredAt     DateTime
-  createdAt      DateTime           @default(now())
+  createdAt      DateTime                @default(now())
   resolvedAt     DateTime?
   resolvedById   String?
-  resolvedBy     User?              @relation("IntegrityEventResolver", fields: [resolvedById], references: [id])
+  resolvedBy     User?                   @relation("IntegrityEventResolver", fields: [resolvedById], references: [id])
   resolutionNote String?
   // On-Device AI Camera Integrity Detection v1 — Evidence Frames
   // (additive, opt-in). See docs/on-device-ai-integrity-detection-v1.md.
@@ -736,11 +775,11 @@ model IntegrityEvent {
   // — see src/lib/integrityReview.ts. reviewedAt/reviewedById/reviewNote
   // are new, separate from the legacy trio above, because "reviewed — no
   // concern" is not the same fact as "resolved".
-  reviewStatus  String    @default("NEEDS_REVIEW") // NEEDS_REVIEW | REVIEWED_NO_CONCERN | REVIEWED_CONCERN_REMAINS | ESCALATED | RESOLVED
-  reviewedAt    DateTime?
-  reviewedById  String?
-  reviewedBy    User?     @relation("IntegrityEventReviewer", fields: [reviewedById], references: [id])
-  reviewNote    String?
+  reviewStatus String    @default("NEEDS_REVIEW") // NEEDS_REVIEW | REVIEWED_NO_CONCERN | REVIEWED_CONCERN_REMAINS | ESCALATED | RESOLVED
+  reviewedAt   DateTime?
+  reviewedById String?
+  reviewedBy   User?     @relation("IntegrityEventReviewer", fields: [reviewedById], references: [id])
+  reviewNote   String?
 
   comments      IntegrityReviewComment[]
   statusHistory IntegrityReviewStatusHistory[]
@@ -821,17 +860,17 @@ model IntegrityReviewStatusHistory {
 // one Institution, and cross-institution access is still governed by
 // institutionScope.ts exactly as before.
 model Course {
-  id            String             @id @default(cuid())
-  institutionId String
-  institution   Institution        @relation(fields: [institutionId], references: [id])
-  name          String
-  code          String
-  description   String?
-  active        Boolean            @default(true)
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
-  enrollments   CourseEnrollment[]
-  exams         Exam[]
+  id             String             @id @default(cuid())
+  institutionId  String
+  institution    Institution        @relation(fields: [institutionId], references: [id])
+  name           String
+  code           String
+  description    String?
+  active         Boolean            @default(true)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  enrollments    CourseEnrollment[]
+  exams          Exam[]
   // Canvas/LTI mapping hook (v1 foundation only) — see
   // docs/course-enrolment-and-exam-assignment.md Part 7. Exam-level
   // Canvas mapping already exists via LtiExamLink; these are the
@@ -874,21 +913,21 @@ model ExamAssignment {
 }
 
 model LtiPlatform {
-  id            String       @id @default(cuid())
-  issuer        String       @unique
+  id            String        @id @default(cuid())
+  issuer        String        @unique
   clientId      String
   authEndpoint  String
   tokenEndpoint String
   jwksUrl       String
   deploymentId  String
-  createdAt     DateTime     @default(now())
+  createdAt     DateTime      @default(now())
   sessions      LtiSession[]
   examLinks     LtiExamLink[]
   launches      LtiLaunch[]
   // Multi-Tenant Architecture v1 (additive, nullable) — one platform
   // (Canvas instance) belongs to exactly one institution.
   institutionId String?
-  institution   Institution? @relation(fields: [institutionId], references: [id])
+  institution   Institution?  @relation(fields: [institutionId], references: [id])
 }
 
 model LtiSession {
@@ -903,29 +942,29 @@ model LtiSession {
 }
 
 model LtiExamLink {
-  id                 String   @id @default(cuid())
+  id                 String      @id @default(cuid())
   examId             String
-  exam               Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  exam               Exam        @relation(fields: [examId], references: [id], onDelete: Cascade)
   platformId         String
   platform           LtiPlatform @relation(fields: [platformId], references: [id])
   resourceLinkId     String
   canvasCourseId     String?
   canvasAssignmentId String?
   label              String?
-  createdAt          DateTime @default(now())
+  createdAt          DateTime    @default(now())
 
   @@unique([platformId, resourceLinkId])
   @@index([examId])
 }
 
 model LtiLaunch {
-  id                 String   @id @default(cuid())
+  id                 String                @id @default(cuid())
   platformId         String
   // Relation field added so launches can be scoped to their platform's
   // institution (see docs/multi-tenant-migration.md). This does not add a
   // database column — platformId already existed; this only adds the
   // Prisma-level join, matching the existing pattern on LtiSession/LtiExamLink.
-  platform           LtiPlatform @relation(fields: [platformId], references: [id])
+  platform           LtiPlatform           @relation(fields: [platformId], references: [id])
   canvasUserId       String
   canvasCourseId     String
   canvasAssignmentId String?
@@ -943,8 +982,8 @@ model LtiLaunch {
   // Never returned to students or in any client-facing API response.
   launchClaimsJson   Json?
   launchRole         String?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
   gradePassbacks     CanvasGradePassback[]
 }
 
@@ -974,13 +1013,13 @@ model CanvasGradePassback {
 // open and exam submit. Evidence-only: never blocks a student, never
 // auto-determines misconduct.
 model NetworkEvidence {
-  id               String   @id @default(cuid())
+  id               String     @id @default(cuid())
   submissionId     String
   submission       Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
   examId           String
-  exam             Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  exam             Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
   studentId        String
-  student          User     @relation("NetworkEvidenceStudent", fields: [studentId], references: [id])
+  student          User       @relation("NetworkEvidenceStudent", fields: [studentId], references: [id])
   institutionId    String
   // source: EXAM_START captured at new submission creation;
   // EXAM_SUBMIT captured on final submit.
@@ -995,11 +1034,11 @@ model NetworkEvidence {
   region           String?
   city             String?
   timezone         String?
-  locationAccuracy String   @default("UNAVAILABLE")
-  vpnOrProxySignal Boolean  @default(false)
-  networkChanged   Boolean  @default(false)
+  locationAccuracy String     @default("UNAVAILABLE")
+  vpnOrProxySignal Boolean    @default(false)
+  networkChanged   Boolean    @default(false)
   metadata         Json?
-  createdAt        DateTime @default(now())
+  createdAt        DateTime   @default(now())
 
   @@index([submissionId])
   @@index([examId])
@@ -1022,13 +1061,13 @@ model NetworkEvidence {
 // route. institutionId is a plain scoping column, not a navigated
 // relation — mirrors NetworkEvidence.institutionId above.
 model IntegrityEvidenceAsset {
-  id               String                 @id @default(cuid())
-  integrityEventId String                 @unique
-  integrityEvent   IntegrityEvent         @relation(fields: [integrityEventId], references: [id], onDelete: Cascade)
+  id               String         @id @default(cuid())
+  integrityEventId String         @unique
+  integrityEvent   IntegrityEvent @relation(fields: [integrityEventId], references: [id], onDelete: Cascade)
   submissionId     String
-  submission       Submission             @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  submission       Submission     @relation(fields: [submissionId], references: [id], onDelete: Cascade)
   examId           String
-  exam             Exam                   @relation(fields: [examId], references: [id], onDelete: Cascade)
+  exam             Exam           @relation(fields: [examId], references: [id], onDelete: Cascade)
   institutionId    String
 
   kind      String // "AI_CAMERA_EVIDENCE_FRAME" in v1 — see src/lib/aiCameraEvidenceFrame.ts
@@ -1081,28 +1120,28 @@ model IntegrityEvidenceAsset {
 // submission (a re-run replaces its prior signals, mirroring
 // runSimilarityAnalysisForExam's reuse pattern).
 model AiUseReviewAnalysis {
-  id           String     @id @default(cuid())
-  submissionId String     @unique
-  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
-  examId       String
-  exam         Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
-  status       String     @default("PENDING") // PENDING | PROCESSING | COMPLETE | FAILED | NOT_CONFIGURED
-  overallSignalLevel String @default("NONE") // NONE | LOW | MEDIUM | HIGH
+  id                 String              @id @default(cuid())
+  submissionId       String              @unique
+  submission         Submission          @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  examId             String
+  exam               Exam                @relation(fields: [examId], references: [id], onDelete: Cascade)
+  status             String              @default("PENDING") // PENDING | PROCESSING | COMPLETE | FAILED | NOT_CONFIGURED
+  overallSignalLevel String              @default("NONE") // NONE | LOW | MEDIUM | HIGH
   // "deterministic" (Layer A only) or "anthropic" (Layer A + optional
   // Layer B) — never a claim about who/what "detected" anything.
-  provider        String
-  modelIdentifier String?
-  algorithmVersion String
-  analysedAt      DateTime?
-  requestedById   String
-  requestedBy     User      @relation("AiUseReviewRequestedBy", fields: [requestedById], references: [id])
-  failureCode     String?
-  recommendation  String    @default("NO_IMMEDIATE_ACTION") // NO_IMMEDIATE_ACTION | LECTURER_REVIEW_RECOMMENDED | ORAL_VERIFICATION_RECOMMENDED
-  reasonCodesJson Json?
-  summaryJson     Json?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  signals         AiUseReviewSignal[]
+  provider           String
+  modelIdentifier    String?
+  algorithmVersion   String
+  analysedAt         DateTime?
+  requestedById      String
+  requestedBy        User                @relation("AiUseReviewRequestedBy", fields: [requestedById], references: [id])
+  failureCode        String?
+  recommendation     String              @default("NO_IMMEDIATE_ACTION") // NO_IMMEDIATE_ACTION | LECTURER_REVIEW_RECOMMENDED | ORAL_VERIFICATION_RECOMMENDED
+  reasonCodesJson    Json?
+  summaryJson        Json?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  signals            AiUseReviewSignal[]
 
   @@index([examId])
   @@index([status])
@@ -1127,13 +1166,13 @@ model AiUseReviewSignal {
   signalLevel  String // NONE | LOW | MEDIUM | HIGH
   explanation  String
   evidenceJson Json?
-  reviewStatus String    @default("NEEDS_REVIEW") // NEEDS_REVIEW | REVIEWED_NO_CONCERN | REVIEWED_CONCERN_REMAINS | ESCALATED | RESOLVED
+  reviewStatus String              @default("NEEDS_REVIEW") // NEEDS_REVIEW | REVIEWED_NO_CONCERN | REVIEWED_CONCERN_REMAINS | ESCALATED | RESOLVED
   reviewedAt   DateTime?
   reviewedById String?
-  reviewedBy   User?     @relation("AiUseReviewSignalReviewer", fields: [reviewedById], references: [id])
+  reviewedBy   User?               @relation("AiUseReviewSignalReviewer", fields: [reviewedById], references: [id])
   reviewNote   String?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
 
   @@index([analysisId])
   @@index([questionId])
@@ -1183,17 +1222,17 @@ model ExamAttemptSession {
   // absence is "unknown", never treated as a violation.
   cameraPermissionState String @default("unknown")
 
-  startedAt DateTime  @default(now())
-  firstSeenAt DateTime @default(now())
-  lastSeenAt  DateTime @default(now())
+  startedAt   DateTime  @default(now())
+  firstSeenAt DateTime  @default(now())
+  lastSeenAt  DateTime  @default(now())
   endedAt     DateTime?
   status      String    @default("ACTIVE") // ACTIVE | STALE | ENDED | REPLACED
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  signals SessionIntegritySignal[]
-  activityEvents AnswerActivityEvent[]
+  signals           SessionIntegritySignal[]
+  activityEvents    AnswerActivityEvent[]
   // Answer-Development Provenance v1 (additive, opt-in) — see
   // docs/answer-development-provenance-v1.md.
   developmentEvents AnswerDevelopmentEvent[]
@@ -1255,14 +1294,14 @@ model AnswerActivityEvent {
 
   eventType String // ATTEMPT_STARTED | QUESTION_OPENED | ANSWER_SAVED | QUESTION_NAVIGATED | HEARTBEAT | PAGE_HIDDEN | PAGE_VISIBLE | ATTEMPT_SUBMITTED
 
-  serverReceivedAt  DateTime @default(now())
-  clientElapsedMs   Int?
-  questionIndex     Int?
-  responseLength    Int?
-  responseHash      String?
+  serverReceivedAt    DateTime @default(now())
+  clientElapsedMs     Int?
+  questionIndex       Int?
+  responseLength      Int?
+  responseHash        String?
   responseLengthDelta Int?
-  previousEventId   String?
-  metadataJson      Json?
+  previousEventId     String?
+  metadataJson        Json?
 
   createdAt DateTime @default(now())
 
@@ -1451,10 +1490,10 @@ model AiAssistanceInteraction {
   // Structured verifier output (Part 8) — riskCodesJson is a JSON array of
   // strings (DIRECT_ANSWER, NEAR_COMPLETE_ANSWER, etc; empty array for a
   // BLOCKED or cleanly-APPROVED interaction with nothing flagged).
-  riskCodesJson        Json?
-  riskScore            Float @default(0)
-  cumulativeRiskScore  Float @default(0)
-  specificityLevel     Int   @default(0)
+  riskCodesJson       Json?
+  riskScore           Float @default(0)
+  cumulativeRiskScore Float @default(0)
+  specificityLevel    Int   @default(0)
 
   providerModel String?
   latencyMs     Int?
@@ -1497,9 +1536,9 @@ model CohortCollusionAnalysis {
   algorithmVersion String
   analysedAt       DateTime?
 
-  submissionCount   Int @default(0)
-  eligibleEdgeCount Int @default(0)
-  clusterCount      Int @default(0)
+  submissionCount    Int    @default(0)
+  eligibleEdgeCount  Int    @default(0)
+  clusterCount       Int    @default(0)
   // NONE | WATCH | NEEDS_REVIEW | HIGHER_CONCERN — highest concernLevel of
   // any cluster produced by this run; NONE when no cluster was formed.
   overallReviewLevel String @default("NONE")
@@ -1541,15 +1580,15 @@ model CollusionPairEdge {
   comparedSubmissionId String
   comparedSubmission   Submission @relation("CollusionEdgeCompared", fields: [comparedSubmissionId], references: [id], onDelete: Cascade)
 
-  combinedScore           Float
-  independentFamilyCount  Int
-  eligibleForClustering   Boolean @default(false)
+  combinedScore          Float
+  independentFamilyCount Int
+  eligibleForClustering  Boolean @default(false)
   // Per-family capped contribution to combinedScore — see
   // FAMILY_SCORE_CAPS in src/lib/cohortCollusionThresholds.ts. Keyed by
   // signal family (ANSWER_CONTENT | RARE_MISTAKE | MCQ_PATTERN |
   // TIMING_SYNCHRONISATION | SESSION_NETWORK_DEVICE | CROSS_EXAM_RECURRENCE).
-  familyScoresJson Json?
-  summaryJson      Json?
+  familyScoresJson       Json?
+  summaryJson            Json?
 
   createdAt DateTime @default(now())
 
@@ -1609,10 +1648,10 @@ model CollusionCluster {
   edgeCount              Int
   // NONE | WATCH | NEEDS_REVIEW | HIGHER_CONCERN — see
   // HIGHER_CONCERN_RULES in src/lib/cohortCollusionThresholds.ts.
-  concernLevel String @default("NEEDS_REVIEW")
+  concernLevel           String @default("NEEDS_REVIEW")
   // NEEDS_REVIEW | REVIEWED_NO_CONCERN | REVIEWED_CONCERN_REMAINS |
   // ORAL_VERIFICATION_REQUESTED | ESCALATED | RESOLVED
-  reviewStatus String @default("NEEDS_REVIEW")
+  reviewStatus           String @default("NEEDS_REVIEW")
 
   summaryJson Json?
 
@@ -1702,8 +1741,10 @@ model AnswerDevelopmentVersion {
 
   charactersAdded   Int
   charactersRemoved Int
-  /** Fraction of the prior version's length that changed, in [0, 1] (0 for INITIAL_TEXT). */
-  changeRatio Float
+  /**
+   * Fraction of the prior version's length that changed, in [0, 1] (0 for INITIAL_TEXT).
+   */
+  changeRatio       Float
 
   // AUTOSAVE | TIMER | PASTE | NAVIGATION | SUBMISSION | STUDENT_ACTION
   source String
@@ -1751,7 +1792,7 @@ model AnswerDevelopmentEvent {
   // CODE_RUN_COMPLETED | CODE_RUN_FAILED | TEST_RUN_COMPLETED |
   // SOURCE_DECLARATION_CREATED | SOURCE_DECLARATION_UPDATED |
   // FINAL_ANSWER_SUBMITTED — see src/lib/answerDevelopment.ts.
-  eventType String
+  eventType  String
   // INFORMATIONAL | CONTEXT | REVIEW_CONTEXT — never MISCONDUCT/VIOLATION.
   eventLevel String
 
@@ -1956,22 +1997,22 @@ model SecureClientConfiguration {
   // SAFE_EXAM_BROWSER | TETHER_SECURE_CLIENT
   provider String
   // DRAFT | ACTIVE | REVOKED | ARCHIVED
-  status String @default("DRAFT")
+  status   String @default("DRAFT")
 
   displayName          String?
   configurationVersion Int     @default(1)
   // Immutable once status becomes ACTIVE — see
   // src/lib/secureClient/secureClientConfigRunner.ts.
-  configurationHash String?
+  configurationHash    String?
 
-  startUrlTemplate String?
-  quitUrlTemplate  String?
+  startUrlTemplate     String?
+  quitUrlTemplate      String?
   allowedOriginsJson   Json?
   allowedPlatformsJson Json?
   minimumVersionsJson  Json?
   // Bounded, allowlisted settings only — never arbitrary JSON accepted
   // from a client; see the strict schema in src/lib/secureClientPolicy.ts.
-  settingsJson Json?
+  settingsJson         Json?
 
   createdById   String
   createdBy     User      @relation("SecureClientConfigCreatedBy", fields: [createdById], references: [id])
@@ -2055,7 +2096,7 @@ model SebAllowedExamKey {
 // reusable general-purpose exam token: bound to institution, exam,
 // submission, student, policy (policyHash), and client type all at once.
 model SecureClientLaunchManifest {
-  id            String @id @default(cuid())
+  id            String     @id @default(cuid())
   institutionId String
   examId        String
   exam          Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
@@ -2109,7 +2150,7 @@ model SecureClientLaunchManifest {
 // IN ('ENDED', 'REJECTED')), so a browser refresh never silently creates
 // a second session; recovery/end must be explicit.
 model SecureClientSession {
-  id            String @id @default(cuid())
+  id            String     @id @default(cuid())
   institutionId String
   examId        String
   exam          Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
@@ -2121,9 +2162,9 @@ model SecureClientSession {
   configuration   SecureClientConfiguration? @relation(fields: [configurationId], references: [id], onDelete: SetNull)
 
   // SAFE_EXAM_BROWSER | TETHER_SECURE_CLIENT | MOCK_TETHER_CLIENT
-  clientType String
+  clientType         String
   // CREATED | PREFLIGHT | ACTIVE | INTERRUPTED | RECOVERY_REQUIRED | ENDED | REJECTED
-  status String @default("CREATED")
+  status             String @default("CREATED")
   // NOT_CHECKED | VERIFIED | INVALID_CONFIGURATION | UNSUPPORTED_VERSION |
   // UNVERIFIED_CLIENT | EXPIRED_LAUNCH | REPLAY_REJECTED |
   // TECHNICAL_FAILURE | LECTURER_OVERRIDE
@@ -2146,10 +2187,10 @@ model SecureClientSession {
   // gates exam content access is decided at request time by
   // resolveEffectiveTetherVerification (src/lib/secureClient/examAttestationMode.ts),
   // according to TETHER_EXAM_ATTESTATION_MODE — not by any column here.
-  clientInstallationId               String?
-  clientInstallation                 TetherClientInstallation? @relation(fields: [clientInstallationId], references: [id], onDelete: SetNull)
-  installationAttestationVerified    Boolean                   @default(false)
-  installationAttestationVerifiedAt  DateTime?
+  clientInstallationId                 String?
+  clientInstallation                   TetherClientInstallation? @relation(fields: [clientInstallationId], references: [id], onDelete: SetNull)
+  installationAttestationVerified      Boolean                   @default(false)
+  installationAttestationVerifiedAt    DateTime?
   // Last v2 verification failure's reason code, if any — cleared to null on
   // the next success. Never a stack trace or raw request body; always one
   // of the ValidationReasonCode / VerifyExamSessionAttestationResult
@@ -2160,7 +2201,7 @@ model SecureClientSession {
   // full evidence record (clientVersion, platform,
   // displayTopologyClassification, nonceHash, challengeHash, verifiedAt)
   // for the latest successful v2 EXAM_SESSION attestation.
-  installationVerificationId String?
+  installationVerificationId           String?
 
   // Pre-Preview safety pass — see docs/tether-system-check-v1.md,
   // "Immutable per-session attestation requirement". The resolved
@@ -2182,20 +2223,44 @@ model SecureClientSession {
 
   manifestId String? @unique
 
-  startedAt        DateTime  @default(now())
-  verifiedAt       DateTime?
-  lastHeartbeatAt  DateTime?
-  interruptedAt    DateTime?
-  recoveredAt      DateTime?
-  endedAt          DateTime?
-  endReason        String?
+  startedAt       DateTime  @default(now())
+  verifiedAt      DateTime?
+  lastHeartbeatAt DateTime?
+  interruptedAt   DateTime?
+  recoveredAt     DateTime?
+  endedAt         DateTime?
+  endReason       String?
+
+  // Tether Secure Exam Recovery and Resilient Autosave v1 (additive) — see
+  // docs/tether-secure-resume-recovery-v1.md, "Crash, relaunch and
+  // Windows-restart recovery". A crash/relaunch (or any re-entry through
+  // the launch-manifest flow while a non-terminal session already exists
+  // for the submission — see getOrCreateSessionCore in
+  // secureClientRunner.ts) NEVER reuses the old session's already-VERIFIED
+  // state: the old session is superseded — status set to the existing
+  // terminal "ENDED" (so every existing terminal/non-terminal-aware query
+  // needs no further change), PLUS these two fields set to record WHY,
+  // distinctly from a student-initiated POST .../end (which sets
+  // endedAt/endReason but leaves these two null). recoveryOfSessionId on
+  // the NEW session (self-relation, onDelete: SetNull so a later prune of
+  // an old superseded row can never cascade-delete the session that
+  // replaced it) points back at the superseded session it replaced — null
+  // for every session that is a submission's first-ever launch, never
+  // set retroactively. A fresh EXAM_SESSION attestation is always
+  // required on the new session before it can grant content access —
+  // recoveryOfSessionId alone confers no trust.
+  closedAt            DateTime?
+  closeReason         String?
+  recoveryOfSessionId String?
+  recoveryOfSession   SecureClientSession?  @relation("SecureClientSessionRecovery", fields: [recoveryOfSessionId], references: [id], onDelete: SetNull)
+  recoverySessions    SecureClientSession[] @relation("SecureClientSessionRecovery")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  attestations    SecureClientAttestation[]
-  events          SecureClientEvent[]
-  recoveryGrants  SecureClientRecoveryGrant[]
+  attestations   SecureClientAttestation[]
+  events         SecureClientEvent[]
+  recoveryGrants SecureClientRecoveryGrant[]
 
   @@index([submissionId])
   @@index([examId])
@@ -2203,6 +2268,7 @@ model SecureClientSession {
   @@index([status])
   @@index([studentId])
   @@index([clientInstallationId])
+  @@index([recoveryOfSessionId])
 }
 
 // One structured preflight/client-verification result — see
@@ -2218,27 +2284,27 @@ model SecureClientAttestation {
   secureClientSessionId String
   session               SecureClientSession @relation(fields: [secureClientSessionId], references: [id], onDelete: Cascade)
 
-  attestationVersion String @default("v1")
+  attestationVersion String  @default("v1")
   // SAFE_EXAM_BROWSER | TETHER_SECURE_CLIENT | MOCK_TETHER_CLIENT
-  clientType String
-  platform      String?
-  osVersion     String?
-  clientVersion String?
-  clientBuild   String?
+  clientType         String
+  platform           String?
+  osVersion          String?
+  clientVersion      String?
+  clientBuild        String?
 
   // Every *Status field below: PASS | FAIL | WARNING | NOT_CHECKED |
   // NOT_SUPPORTED | UNKNOWN — see src/lib/secureClient/attestation.ts.
-  clientSignatureStatus            String?
-  configurationVerificationStatus  String?
-  displayCount                     Int?
-  displayCheckStatus               String?
-  remoteSessionStatus              String?
-  virtualMachineStatus             String?
-  processCheckStatus               String?
-  captureProtectionStatus          String?
-  clipboardPolicyStatus            String?
-  printingPolicyStatus             String?
-  externalNavigationPolicyStatus   String?
+  clientSignatureStatus           String?
+  configurationVerificationStatus String?
+  displayCount                    Int?
+  displayCheckStatus              String?
+  remoteSessionStatus             String?
+  virtualMachineStatus            String?
+  processCheckStatus              String?
+  captureProtectionStatus         String?
+  clipboardPolicyStatus           String?
+  printingPolicyStatus            String?
+  externalNavigationPolicyStatus  String?
 
   // READY | ACTION_REQUIRED | CANNOT_START | NOT_SUPPORTED | TECHNICAL_FAILURE
   overallStatus String
@@ -2270,7 +2336,7 @@ model SecureClientEvent {
   examId                String
   institutionId         String
 
-  eventType String
+  eventType  String
   // INFORMATIONAL | CONTEXT | ACTION_REQUIRED | REVIEW_CONTEXT
   eventLevel String
 
@@ -2309,8 +2375,8 @@ model SecureClientRecoveryGrant {
   grantCodeHash String @unique
 
   issuedById String
-  issuedBy   User     @relation("SecureClientRecoveryGrantIssuedBy", fields: [issuedById], references: [id])
-  issuedAt   DateTime @default(now())
+  issuedBy   User      @relation("SecureClientRecoveryGrantIssuedBy", fields: [issuedById], references: [id])
+  issuedAt   DateTime  @default(now())
   expiresAt  DateTime
   consumedAt DateTime?
   revokedAt  DateTime?
@@ -2344,7 +2410,7 @@ model TetherSystemCheckRun {
   user   User   @relation(fields: [userId], references: [id])
 
   // READY | READY_WITH_WARNINGS | NOT_READY
-  overallStatus String
+  overallStatus    String
   // BROWSER | TETHER_SECURE_CLIENT
   sourceClientType String
 
@@ -2413,12 +2479,12 @@ model SystemCheckSecureClientVerification {
   installationId String
 
   // TETHER_SECURE_CLIENT | MOCK_TETHER_CLIENT
-  clientType String
+  clientType         String
   // NOT_CHECKED | VERIFIED | INVALID_SIGNATURE | EXPIRED | REPLAY_REJECTED | WRONG_SUBJECT | WRONG_PURPOSE | INSTALLATION_NOT_ACTIVE | UNSUPPORTED_VERSION | TECHNICAL_FAILURE
   verificationStatus String @default("NOT_CHECKED")
 
-  clientVersion String?
-  platform      String?
+  clientVersion                 String?
+  platform                      String?
   // The AUTHORITATIVE, installation-signature-bound native display-
   // topology classification gathered by the Electron main process
   // itself (never a value the renderer could tamper with independently
@@ -2500,9 +2566,9 @@ model TetherClientInstallation {
   publicKey            String
   publicKeyFingerprint String @unique
   // "Ed25519" today; "ECDSA_P256" reserved for a future TPM/CNG-backed installation.
-  keyAlgorithm String
+  keyAlgorithm         String
   // SOFTWARE_PROTECTED | TPM_UNATTESTED | TPM_ATTESTED — see doc comment above.
-  keyProtectionLevel String @default("SOFTWARE_PROTECTED")
+  keyProtectionLevel   String @default("SOFTWARE_PROTECTED")
 
   clientVersion String?
   platform      String?
