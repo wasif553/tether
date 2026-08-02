@@ -30,6 +30,8 @@ export type PackagedReleaseVerificationInput = {
   packagedMainJsContent: string | null;
   /** The PACKAGED app's compiled dist/displayEnforcement.js contents. */
   packagedDisplayEnforcementJsContent: string | null;
+  /** Tether Windows Lockdown Hardening v1 — the PACKAGED app's compiled dist/processDetection.js contents. */
+  packagedProcessDetectionJsContent: string | null;
 };
 
 export type PackagedReleaseVerificationResult = {
@@ -43,8 +45,16 @@ export type PackagedReleaseVerificationResult = {
  * fail-closed rewrite (e.g. a stale v1.2.0 unpacked directory left over
  * from before this pass), not just on a missing file.
  */
-const REQUIRED_MAIN_JS_MARKERS = ["lockdown:set-secure-client-enforcement-state", "lockdown:get-diagnostics-snapshot"];
+const REQUIRED_MAIN_JS_MARKERS = [
+  "lockdown:set-secure-client-enforcement-state",
+  "lockdown:get-diagnostics-snapshot",
+  // Tether Windows Lockdown Hardening v1 — fails loudly on a stale
+  // pre-v1.7.0 build that predates this pass's Electron hardening.
+  "lockdown:run-preflight-scan",
+  "findUnsafeCommandLineSwitch",
+];
 const REQUIRED_DISPLAY_ENFORCEMENT_JS_MARKERS = ["setEnforcementState", "resolveReadinessGatedDisplayEnforcementState"];
+const REQUIRED_PROCESS_DETECTION_JS_MARKERS = ["runPreflightScan", "setExamActive"];
 
 export function verifyPackagedReleaseContents(input: PackagedReleaseVerificationInput): PackagedReleaseVerificationResult {
   const errors: string[] = [];
@@ -89,6 +99,16 @@ export function verifyPackagedReleaseContents(input: PackagedReleaseVerification
     }
   }
 
+  if (!input.packagedProcessDetectionJsContent) {
+    errors.push("Packaged dist/processDetection.js was not found.");
+  } else {
+    for (const marker of REQUIRED_PROCESS_DETECTION_JS_MARKERS) {
+      if (!input.packagedProcessDetectionJsContent.includes(marker)) {
+        errors.push(`Packaged dist/processDetection.js is missing "${marker}" — the packaged build does not contain the current Windows lockdown hardening logic.`);
+      }
+    }
+  }
+
   return { ok: errors.length === 0, errors };
 }
 
@@ -115,6 +135,7 @@ if (require.main === module) {
     packagedSharedJsContent: readIfExists(path.join(appDir, "dist", "shared.js")),
     packagedMainJsContent: readIfExists(path.join(appDir, "dist", "main.js")),
     packagedDisplayEnforcementJsContent: readIfExists(path.join(appDir, "dist", "displayEnforcement.js")),
+    packagedProcessDetectionJsContent: readIfExists(path.join(appDir, "dist", "processDetection.js")),
   });
 
   if (!result.ok) {

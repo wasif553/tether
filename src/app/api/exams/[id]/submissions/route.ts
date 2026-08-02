@@ -3,6 +3,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 import { resolveExamSubmissionsRecoveryStatuses } from "@/lib/tetherRecoveryRunner";
+import { resolveExamSubmissionsLockdownStatuses } from "@/lib/lockdownStatusRunner";
 
 export async function GET(
   _req: Request,
@@ -67,6 +68,11 @@ export async function GET(
   // secrets, or stack traces.
   const recoveryStatuses = await resolveExamSubmissionsRecoveryStatuses(submissions.map((s) => s.id));
 
+  // Tether Windows Lockdown Hardening v1 (Part 14) — batched (never
+  // N+1), compact fields only — see resolveExamSubmissionsLockdownStatuses's
+  // own doc comment.
+  const lockdownStatuses = await resolveExamSubmissionsLockdownStatuses(submissions.map((s) => s.id));
+
   return NextResponse.json(
     submissions.map((s) => ({
       ...s,
@@ -75,6 +81,7 @@ export async function GET(
       gradePassback: undefined,
       systemCheck: latestCheckByStudent.get(s.student.id) ?? null,
       recovery: recoveryStatuses.get(s.id) ?? null,
+      lockdown: lockdownStatuses.get(s.id) ?? null,
     })),
   );
 }

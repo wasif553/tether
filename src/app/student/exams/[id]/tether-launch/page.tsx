@@ -38,13 +38,15 @@
  *    returns to the dashboard to find it themselves.
  */
 
-import { useEffect, useState, use as usePromise } from "react";
+import { useEffect, useRef, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
 import { buildTetherDeepLink, shouldShowInstallerFallback, resolveTetherLaunchFailureMessage } from "@/lib/tetherLaunch";
 import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 import { ensureRegisteredInstallation } from "@/lib/secureClient/installationClient";
 import { ManualReviewNotice } from "@/components/ManualReviewNotice";
+import { LockdownApplicationCheck } from "@/components/LockdownApplicationCheck";
+import { ensureLockdownBridgeInitialized, type LockdownCapabilityInfo } from "@/lib/lockdownClient";
 
 // Exam Design Policy v1 — see docs/exam-design-policy-v1.md. Mirrors the
 // join page's own local type — this codebase does not share a central
@@ -221,6 +223,86 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   // starts.
   const [manualReview, setManualReview] = useState(false);
 
+  // Tether Windows Lockdown Hardening v1, Part 3 — see
+  // docs/tether-windows-lockdown-hardening-v1.md. `lockdownBlocked` and
+  // `lockdownUnavailable` are mutually exclusive with `manualReview`
+  // above and with each other; `pendingLaunchCodeRef` remembers which
+  // launch attempt (auto-resume vs a manual Start click, and if manual,
+  // with which access code) was interrupted by the preflight check, so
+  // "Check again" can resume the EXACT same attempt rather than
+  // re-deriving it.
+  const [lockdownBlocked, setLockdownBlocked] = useState<string[] | null>(null);
+  const [lockdownUnavailable, setLockdownUnavailable] = useState(false);
+  const [lockdownChecking, setLockdownChecking] = useState(false);
+  const pendingLaunchCodeRef = useRef<string | null>(null);
+  const pendingIsFinalExamRef = useRef(false);
+  const lockdownCapabilityInfoRef = useRef<Map<string, LockdownCapabilityInfo> | null>(null);
+
+  /**
+   * Part 3/5 — returns true when it is safe to proceed into
+   * runLaunchSequence. Fails OPEN when this packaged build predates the
+   * lockdown bridge (older installs simply don't expose
+   * runLockdownPreflightScan — feature-detected like every other
+   * optional bridge method) so existing installations are never broken
+   * by this addition. `isFinalExamination` is passed explicitly (never
+   * read from the `result` component-state closure) because this
+   * function is also called from inside the mount effect's async
+   * callback, before `result` state has been set for the first time —
+   * reading the stale closure there would silently apply the WRONG
+   * exam-type gate.
+   */
+  async function checkLockdownPreflight(code: string | null, isFinalExamination: boolean): Promise<boolean> {
+    pendingLaunchCodeRef.current = code;
+    pendingIsFinalExamRef.current = isFinalExamination;
+    if (typeof window.sesLockdown?.runLockdownPreflightScan !== "function") return true;
+    lockdownCapabilityInfoRef.current = await ensureLockdownBridgeInitialized();
+    setLockdownChecking(true);
+    try {
+      const scan = await window.sesLockdown.runLockdownPreflightScan();
+      if (scan.state === "BLOCKED") {
+        const names = scan.matchedCapabilityIds.map((id) => lockdownCapabilityInfoRef.current?.get(id)?.displayName ?? "an application");
+        setLockdownBlocked([...new Set(names)]);
+        window.sesLockdown?.reportLockdownAuditFact?.("TETHER_LOCKDOWN_PREFLIGHT_BLOCKED", { examId, capabilityCount: scan.matchedCapabilityIds.length });
+        return false;
+      }
+      if (scan.state === "UNAVAILABLE") {
+        setLockdownUnavailable(true);
+        window.sesLockdown?.reportLockdownAuditFact?.("TETHER_LOCKDOWN_PROCESS_INSPECTION_UNAVAILABLE", { examId, reason: scan.reason });
+        return false;
+      }
+      // Part 5 — "fail closed for final examinations when remote-session
+      // state cannot be safely resolved and policy requires it; ordinary
+      // non-final assessments must remain unchanged unless configured."
+      // Checked only after the process scan itself is clean, and only
+      // for final examinations — a non-final Tether exam never runs this
+      // check at all (Part 16 item 32).
+      if (isFinalExamination) {
+        const session = await window.sesLockdown?.getRemoteSessionStatus?.();
+        if (!session || session.remoteSessionSignalSource === "UNAVAILABLE") {
+          setLockdownUnavailable(true);
+          window.sesLockdown?.reportLockdownAuditFact?.("TETHER_LOCKDOWN_REMOTE_SESSION_CHECK_FAILED_CLOSED", { examId });
+          return false;
+        }
+        if (session.isRemoteSession) {
+          setLockdownBlocked(["Remote Desktop session"]);
+          window.sesLockdown?.reportLockdownAuditFact?.("TETHER_LOCKDOWN_PREFLIGHT_BLOCKED", { examId, capabilityCount: 1, reason: "REMOTE_SESSION" });
+          return false;
+        }
+      }
+      setLockdownBlocked(null);
+      setLockdownUnavailable(false);
+      return true;
+    } finally {
+      setLockdownChecking(false);
+    }
+  }
+
+  function checkLockdownAgain() {
+    void checkLockdownPreflight(pendingLaunchCodeRef.current, pendingIsFinalExamRef.current).then((ok) => {
+      if (ok) void runLaunchSequence(pendingLaunchCodeRef.current);
+    });
+  }
+
   useEffect(() => {
     fetch(`/api/exams/${examId}/access-check`)
       .then((res) => res.json())
@@ -236,6 +318,8 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
             setManualReview(true);
             return;
           }
+          const preflightOk = await checkLockdownPreflight(null, data.exam.assessmentType === "FINAL_EXAMINATION");
+          if (!preflightOk) return;
           void runLaunchSequence(null);
         }
       })
@@ -520,6 +604,11 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   /** Task 3 — un-cover only on a definitive launch failure, so the error/retry UI on this page is visible and usable. There is no exam content to protect yet at this point; re-clicking Start/Continue re-arms the cover from the top of runLaunchSequence. */
   function uncoverOnFailure() {
     window.sesLockdown?.setSecureClientEnforcementState?.({ active: false, ready: false, requireSingleDisplay: false });
+    // Part 10 — "failed exam launch" / "failed attestation" is one of
+    // the explicit restoration triggers; safe to call even though
+    // nothing lockdown-specific may have activated yet this attempt (see
+    // lockdownLifecycle.ts's own idempotency doc comment).
+    window.sesLockdown?.restoreLockdownControls?.("launch-failure");
     logClientTetherDiagnostic("exam_entry_cover_released_on_failure", { examId });
   }
 
@@ -549,6 +638,16 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   // and no further automatic action happens here.
   if (manualReview) {
     return <ManualReviewNotice />;
+  }
+
+  // Part 3 — takes priority for the same reason as manualReview above:
+  // no launch/relaunch was attempted while a blocking capability was
+  // detected or process inspection could not be verified.
+  if (lockdownBlocked) {
+    return <LockdownApplicationCheck state="BLOCKED" applicationNames={lockdownBlocked} onCheckAgain={checkLockdownAgain} checking={lockdownChecking} />;
+  }
+  if (lockdownUnavailable) {
+    return <LockdownApplicationCheck state="UNAVAILABLE" onCheckAgain={checkLockdownAgain} checking={lockdownChecking} />;
   }
 
   if (result.existingSubmission?.status === "IN_PROGRESS" || busy) {
@@ -635,11 +734,15 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       )}
 
       <button
-        onClick={() => void runLaunchSequence(accessCode || null)}
-        disabled={busy || !policyAcknowledged || (result.exam.accessCodeRequired && !accessCode.trim())}
+        onClick={() =>
+          void checkLockdownPreflight(accessCode || null, result.exam.assessmentType === "FINAL_EXAMINATION").then((ok) => {
+            if (ok) void runLaunchSequence(accessCode || null);
+          })
+        }
+        disabled={busy || lockdownChecking || !policyAcknowledged || (result.exam.accessCodeRequired && !accessCode.trim())}
         className="mt-4 w-full rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
       >
-        {busy ? "Starting..." : "Start exam"}
+        {busy ? "Starting..." : lockdownChecking ? "Checking…" : "Start exam"}
       </button>
       {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
     </div>

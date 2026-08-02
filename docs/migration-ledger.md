@@ -155,6 +155,7 @@ Interpretation:
 | 13 | `docs/answer-development-provenance-v1-migration.sql` | Answer-Development Provenance v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — answer-development provenance migration" below for the full read-only confirmation record. |
 | 14 | `docs/secure-client-foundation-seb-v1-migration.sql` | Tether Secure Client Foundation + Safe Exam Browser Compatibility v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — secure client foundation migration" below for the full read-only confirmation record. |
 | 15 | `docs/sql/add-tether-secure-resume-recovery.sql` | Tether Secure Exam Recovery and Resilient Autosave v1 | **APPLIED ONCE — 2026-08-02** | **APPLIED ONCE — 2026-08-02 (same shared database as Preview)** | Confirmed applied — do not re-apply. Additive only — three new nullable/defaulted columns on `SecureClientSession`, four on `Submission` (one unique), two on `Answer`, plus one index and one self-referencing foreign key. See docs/tether-secure-resume-recovery-v1.md and "Verification — secure recovery migration" below for the full read-only confirmation record. |
+| 16 | `docs/sql/add-tether-windows-lockdown-hardening.sql` | Tether Windows Lockdown Hardening v1 | **NOT YET APPLIED** | **NOT YET APPLIED (same shared database as Preview)** | Additive only — five new `IntegrityEventType` enum values (`REMOTE_CONTROL_SOFTWARE_DETECTED`, `SCREEN_CAPTURE_SOFTWARE_DETECTED`, `DEBUGGING_TOOL_DETECTED`, `PROHIBITED_APPLICATION_DETECTED`, `PROHIBITED_APPLICATION_CLOSED`) — no new table, no new column. Every other lockdown fact is `PlatformAuditLog` only (its `action` column is a plain string, needing no schema change). See docs/tether-windows-lockdown-hardening-v1.md and "Deployment procedure" below. Do not apply as part of the same change that adds this row. |
 
 Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -634,3 +635,45 @@ touches no existing row's data — the practical rollback for almost any
 issue is simply ensuring no exam relies on the new recovery behaviour
 (every code path already treats a missing value as "no recovery history
 on record"), rather than reverting the schema.
+
+## Deployment procedure — `docs/sql/add-tether-windows-lockdown-hardening.sql`
+
+**NOT YET APPLIED — do not apply as part of the same change that adds
+this row to the ledger.** Preview and Production share ONE Supabase
+database — apply this file **once**, not once per environment, and only
+after independent review.
+
+1. Take a pre-migration backup of the shared database (Supabase project
+   → Database → Backups, or a manual `pg_dump`) before applying anything.
+2. Run the pre-check query embedded at the top of
+   `docs/sql/add-tether-windows-lockdown-hardening.sql` first, to confirm
+   the migration has not already been applied.
+3. Open the (shared) Supabase project → SQL Editor.
+4. Paste and run the file's five `ALTER TYPE ... ADD VALUE IF NOT
+   EXISTS` statements — order does not matter between them (each is
+   independent), but the file is already in a sensible order.
+5. Run the file's own "Post-application verification" queries to confirm
+   all five new enum values landed and that no existing `IntegrityEvent`
+   row uses any of them yet.
+6. Record the date in the Ledger table above (row 16) — a single date is
+   sufficient given the shared database.
+7. Do not rely on any lockdown-hardening detection behaviour blocking
+   real exam content until this has been applied — every application
+   code path already treats "this enum value doesn't exist yet" the same
+   way any other genuinely new Postgres enum value would behave (the
+   route that writes it would fail if called before the value exists);
+   in practice this only matters once a real detection actually occurs,
+   which requires apps/lockdown v1.7.0+ to be installed AND a prohibited
+   application to actually be found — deploy the application code and
+   this migration together, not the application code first.
+8. Do not apply this file a second time — re-running it after a
+   successful apply is idempotent (`ADD VALUE IF NOT EXISTS`) but is not
+   expected to be necessary.
+
+### Rollback — `docs/sql/add-tether-windows-lockdown-hardening.sql`
+
+See the SQL file's own embedded "Rollback" section. Postgres cannot
+remove an enum value once added — leaving the five unused values in
+place is safe and is the recommended forward-fix; the practical rollback
+for almost any issue is simply not shipping the application code that
+writes them, rather than attempting an enum rebuild.

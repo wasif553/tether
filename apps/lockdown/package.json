@@ -1,8 +1,8 @@
 {
   "name": "ses-lockdown",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
-  "description": "Tether Secure Browser v1.6.0 (binds Secure Client Attestation v2 installation-bound signing into real exam sessions: attestExamSession now signs the secure-client session ID, secure-client capabilities snapshot, and a timestamp alongside the existing exam/submission/policy-hash facts, verified server-side against a full 20-point checklist before a SecureClientSession can receive v2-verified status. Compatibility governed by TETHER_EXAM_ATTESTATION_MODE=LEGACY|DUAL|V2_REQUIRED, safe default LEGACY. v1.4.0 and v1.5.0 were development-only, never distributed.)",
+  "description": "Tether Secure Browser v1.7.0 (Tether Windows Lockdown Hardening v1 — adds a Windows-only process-detection service for known remote-control/debugging/virtualization/screen-capture applications, a remote-session/VM indicator, a main-owned preflight gate and during-exam blocking overlay, an idempotent restoration lifecycle, and materially strengthened Electron hardening: a permission allowlist, denied navigation/window.open/downloads, packaged-build DevTools prevention, rejected unsafe command-line switches, and blocked browser-chrome keyboard shortcuts. See docs/tether-windows-lockdown-hardening-v1.md. v1.4.0 and v1.5.0 were development-only, never distributed.)",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",

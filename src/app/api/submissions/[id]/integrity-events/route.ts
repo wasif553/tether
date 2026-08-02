@@ -62,6 +62,19 @@ const INTEGRITY_EVENT_TYPES = [
   "SCREEN_SHARE_INTERRUPTED",
   "SCREEN_SHARE_RESTORED",
   "SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED",
+  // Tether Windows Lockdown Hardening v1 — see
+  // docs/tether-windows-lockdown-hardening-v1.md. Episode-based (the
+  // Electron client itself only reports a transition once per
+  // continuous detection episode — see
+  // apps/lockdown/src/processDetectionLogic.ts's diffDetectionEpisodes),
+  // so the debounce windows below are a defense-in-depth backstop
+  // against a renderer restart mid-episode re-announcing DETECTED, not
+  // the primary dedup mechanism.
+  "REMOTE_CONTROL_SOFTWARE_DETECTED",
+  "SCREEN_CAPTURE_SOFTWARE_DETECTED",
+  "DEBUGGING_TOOL_DETECTED",
+  "PROHIBITED_APPLICATION_DETECTED",
+  "PROHIBITED_APPLICATION_CLOSED",
 ] as const;
 
 const INTEGRITY_SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH"] as const;
@@ -128,6 +141,16 @@ const DEBOUNCE_WINDOWS_MS: Partial<Record<(typeof INTEGRITY_EVENT_TYPES)[number]
   SCREEN_SHARE_RESTORED: 5_000,
   SCREEN_SHARE_STARTED: 5_000,
   SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED: 10_000,
+  // Tether Windows Lockdown Hardening v1 — a defense-in-depth backstop
+  // (see the allow-list comment above); the client's own episode
+  // tracking is the primary dedup mechanism, so this window only needs
+  // to be long enough to absorb a renderer restart, not tuned to the
+  // process-scan cadence itself.
+  REMOTE_CONTROL_SOFTWARE_DETECTED: 60_000,
+  SCREEN_CAPTURE_SOFTWARE_DETECTED: 60_000,
+  DEBUGGING_TOOL_DETECTED: 60_000,
+  PROHIBITED_APPLICATION_DETECTED: 60_000,
+  PROHIBITED_APPLICATION_CLOSED: 10_000,
 };
 
 export async function POST(

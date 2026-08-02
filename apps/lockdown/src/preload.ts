@@ -18,7 +18,19 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+type LockdownCapabilityTransitionPayload = {
+  capabilityId: string;
+  effectiveAction: string;
+  phase: "DETECTED" | "CLEARED";
+  detectedAtMsForClear: number | null;
+};
+type LockdownScanUnavailablePayload = { reason: string };
+type LockdownRestorationResultPayload = { trigger: string; state: string; errors: string[] };
+
 const warningListeners: Array<(message: string) => void> = [];
+const capabilityTransitionListeners: Array<(payload: LockdownCapabilityTransitionPayload) => void> = [];
+const scanUnavailableListeners: Array<(payload: LockdownScanUnavailablePayload) => void> = [];
+const restorationResultListeners: Array<(payload: LockdownRestorationResultPayload) => void> = [];
 // Tether launch/install flow v1 — fed by main's debounced, policy-aware
 // display-count evaluation (displayEnforcement.ts). The blocking overlay
 // itself is entirely main-owned; this only lets the hosted page report
@@ -46,6 +58,18 @@ ipcRenderer.on("lockdown:display-enforcement-event", (_event, payload: { eventTy
 ipcRenderer.on("lockdown:diagnostics-snapshot", (_event, snapshot: TetherDiagnosticsSnapshot) => {
   for (const listener of diagnosticsListeners) listener(snapshot);
   renderDiagnosticsPanel(snapshot);
+});
+
+ipcRenderer.on("lockdown:capability-transition", (_event, payload: LockdownCapabilityTransitionPayload) => {
+  for (const listener of capabilityTransitionListeners) listener(payload);
+});
+
+ipcRenderer.on("lockdown:scan-unavailable", (_event, payload: LockdownScanUnavailablePayload) => {
+  for (const listener of scanUnavailableListeners) listener(payload);
+});
+
+ipcRenderer.on("lockdown:restoration-result", (_event, payload: LockdownRestorationResultPayload) => {
+  for (const listener of restorationResultListeners) listener(payload);
 });
 
 contextBridge.exposeInMainWorld("sesLockdown", {
@@ -227,6 +251,79 @@ contextBridge.exposeInMainWorld("sesLockdown", {
       return null;
     }
     return ipcRenderer.invoke("lockdown:attest-exam-session", { nonce, examId, submissionId, policyHash, secureClientSessionId });
+  },
+
+  // Tether Windows Lockdown Hardening v1 — see
+  // docs/tether-windows-lockdown-hardening-v1.md. Every method below is
+  // narrowly scoped exactly like the Secure Client Attestation v2 group
+  // above: no raw process lists, no command-line arguments, no
+  // executable paths ever cross this boundary — only capability
+  // ids/categories/display names and bounded booleans/enums.
+
+  /** Part 12 — server-resolved policy toggles, relayed from GET /api/tether/lockdown/policy. Never accepts a value this renderer invented on its own beyond the four documented booleans. */
+  setLockdownPolicyToggles(toggles: { blockRemoteControl: boolean; blockScreenCaptureTools: boolean; blockDebugTools: boolean; blockVirtualMachines: boolean }): void {
+    if (typeof toggles !== "object" || toggles === null) return;
+    ipcRenderer.send("lockdown:set-lockdown-policy-toggles", {
+      blockRemoteControl: Boolean(toggles.blockRemoteControl),
+      blockScreenCaptureTools: Boolean(toggles.blockScreenCaptureTools),
+      blockDebugTools: Boolean(toggles.blockDebugTools),
+      blockVirtualMachines: Boolean(toggles.blockVirtualMachines),
+    });
+  },
+
+  /** Part 3 — one-shot preflight scan. */
+  async runLockdownPreflightScan(): Promise<
+    | { state: "CLEAN" }
+    | { state: "BLOCKED"; matchedCapabilityIds: string[] }
+    | { state: "UNAVAILABLE"; reason: string }
+  > {
+    return ipcRenderer.invoke("lockdown:run-preflight-scan");
+  },
+
+  /** Part 4 — starts/stops the background during-exam poll. */
+  setLockdownExamActive(active: boolean): void {
+    ipcRenderer.send("lockdown:set-lockdown-exam-active", Boolean(active));
+  },
+
+  onLockdownCapabilityTransition(callback: (payload: LockdownCapabilityTransitionPayload) => void): void {
+    if (typeof callback === "function") capabilityTransitionListeners.push(callback);
+  },
+
+  onLockdownScanUnavailable(callback: (payload: { reason: string }) => void): void {
+    if (typeof callback === "function") scanUnavailableListeners.push(callback);
+  },
+
+  onLockdownRestorationResult(callback: (payload: { trigger: string; state: string; errors: string[] }) => void): void {
+    if (typeof callback === "function") restorationResultListeners.push(callback);
+  },
+
+  /** Part 5 — remote-session/VM classification, on demand. */
+  async getRemoteSessionStatus(): Promise<{
+    isRemoteSession: boolean;
+    remoteSessionSignalSource: string;
+    isLikelyVirtualMachine: boolean;
+    vmSignatureMatched: string | null;
+  }> {
+    return ipcRenderer.invoke("lockdown:get-remote-session-status");
+  },
+
+  /** Part 10 — see restoreLockdownControls's own doc comment in main.ts for every automatic trigger; the page additionally calls this explicitly at every normal-exit/failure point it already knows about. */
+  restoreLockdownControls(trigger: string): void {
+    ipcRenderer.send("lockdown:restore-lockdown-controls", isNonEmptyString(trigger) ? trigger.slice(0, 100) : "page-requested");
+  },
+
+  async getLockdownLifecycleState(): Promise<string> {
+    return ipcRenderer.invoke("lockdown:get-lockdown-lifecycle-state");
+  },
+
+  async getLockdownCapabilityInfo(): Promise<Array<{ id: string; category: string; displayName: string }>> {
+    return ipcRenderer.invoke("lockdown:get-lockdown-capability-info");
+  },
+
+  /** Part 11 — PlatformAuditLog-only facts the PAGE itself observes (e.g. the preflight screen was shown, the student closed an application before content opened). `action` is re-validated against a fixed allow-list server-side — this is not a trust boundary by itself. */
+  reportLockdownAuditFact(action: string, metadata?: Record<string, unknown>): void {
+    if (!isNonEmptyString(action)) return;
+    ipcRenderer.send("lockdown:report-lockdown-audit-fact", { action, metadata: typeof metadata === "object" && metadata !== null ? sanitizeMetadata(metadata) : {} });
   },
 });
 

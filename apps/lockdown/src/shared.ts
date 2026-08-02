@@ -106,7 +106,28 @@
 // surface change for it. Purely additive to the bridge surface — no
 // change to contextIsolation, nodeIntegration, or sandbox. v1.4.0 and
 // v1.5.0 were development-only and were never distributed.
-export const LOCKDOWN_VERSION = "1.6.0";
+// v1.7.0 — Tether Windows Lockdown Hardening v1 (see
+// docs/tether-windows-lockdown-hardening-v1.md). Adds a Windows-only
+// process-detection service (lockdownCapabilityRegistry.ts /
+// processDetection.ts) that scans for known remote-control, debugging,
+// virtualization, and screen-capture applications before and during a
+// final exam; a remote-session/virtual-machine indicator
+// (windowsSessionDetection.ts); a main-owned "close applications before
+// continuing" preflight gate and a live during-exam blocking overlay,
+// both fail-safe (never trap the student — closing Tether is always
+// allowed, and every temporary control is torn down through an
+// idempotent restoration lifecycle — lockdownLifecycle.ts); and
+// materially strengthened Electron hardening — a permission-request
+// allowlist (camera/fullscreen only, everything else denied), denied
+// navigation outside the SES origin, denied window.open/downloads,
+// packaged-build DevTools prevention, rejected unsafe command-line
+// switches (--remote-debugging-port, --inspect, --disable-web-security,
+// ...), and blocked browser-chrome keyboard shortcuts
+// (keyboardHardeningLogic.ts). Every detection is an integrity SIGNAL
+// for lecturer review, never an automatic misconduct conclusion — see
+// that doc's "Core principles". No kernel driver, no TPM attestation, no
+// permanent Windows-setting change, no blanket process termination.
+export const LOCKDOWN_VERSION = "1.7.0";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see
@@ -158,7 +179,18 @@ export type LockdownIntegrityEventType =
   | "WINDOW_BLUR"
   | "WINDOW_FOCUS_RETURN"
   | "FULLSCREEN_EXIT"
-  | "MANUAL_WARNING";
+  | "MANUAL_WARNING"
+  // Tether Windows Lockdown Hardening v1 — main-observed signals (never
+  // page-reported, so these are never added to preload.ts's
+  // ALLOWED_LOG_EVENT_TYPES renderer-input allow-list). Process-
+  // detection capability transitions (REMOTE_CONTROL_SOFTWARE_DETECTED
+  // etc.) are deliberately NOT reported through this queue — they are
+  // relayed to the hosted page via a dedicated IPC event instead, and
+  // the page itself calls the integrity-events route with its own
+  // authenticated fetch, exactly like display-enforcement events already
+  // do — see main.ts's onCapabilityTransition wiring.
+  | "KEYBOARD_SHORTCUT_BLOCKED"
+  | "DEBUGGING_TOOL_DETECTED";
 
 export type LockdownEventMetadata = {
   source: "electron-lockdown";
