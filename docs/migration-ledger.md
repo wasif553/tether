@@ -22,11 +22,11 @@ migrations in this ledger were written before this was confirmed
 explicitly — re-run the pre-check query for any of them before assuming
 a second apply is actually needed.
 
-**Confirmed applied — do not re-apply.** As of 2026-07-25, the following
-six migration files have each been applied exactly once to the one
-shared Preview/Production Supabase database (confirmed via the read-only
-verification queries below returning the expected tables/columns/enum
-values):
+**Confirmed applied — do not re-apply.** As of 2026-08-02, the following
+seven migration files have each been applied exactly once to the one
+shared Preview/Production Supabase database (project ref
+`ugckdvbjzauvcovcqebw`; confirmed via the read-only verification queries
+below returning the expected tables/columns/enum values):
 
 - `docs/ai-brainstorming-assistance-migration.sql` — applied 2026-07-22.
 - `docs/screen-share-evidence-migration.sql` — applied 2026-07-23.
@@ -34,12 +34,13 @@ values):
 - `docs/cohort-collusion-graph-v1-migration.sql` — applied 2026-07-24.
 - `docs/answer-development-provenance-v1-migration.sql` — applied 2026-07-25.
 - `docs/secure-client-foundation-seb-v1-migration.sql` — applied 2026-07-25.
+- `docs/sql/add-tether-secure-resume-recovery.sql` — applied 2026-08-02.
 
 Because Preview and Production are the same database, there is no
 separate "now apply it to the other environment" step for any of these
-six — that single application already covers both. **None of these six
-files should be run again against this database.** Re-running any of
-them will error on `CREATE TABLE`/`ADD COLUMN` (see each file's own
+seven — that single application already covers both. **None of these
+seven files should be run again against this database.** Re-running any
+of them will error on `CREATE TABLE`/`ADD COLUMN` (see each file's own
 idempotency note) at best, or silently duplicate rows at worst if a
 statement happens to be re-runnable — always re-run the relevant
 pre-check query first if there is ever any doubt.
@@ -153,7 +154,7 @@ Interpretation:
 | 12 | `docs/cohort-collusion-graph-v1-migration.sql` | Cohort-Level Collusion Detection and Integrity Graph v1 | **Applied 2026-07-24** | **Applied 2026-07-24 (same shared database as Preview)** | Confirmed applied — do not re-apply. Five new tables (`CohortCollusionAnalysis`, `CollusionPairEdge`, `CollusionSignal`, `CollusionCluster`, `CollusionClusterMember`) — zero columns added to any existing table. |
 | 13 | `docs/answer-development-provenance-v1-migration.sql` | Answer-Development Provenance v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — answer-development provenance migration" below for the full read-only confirmation record. |
 | 14 | `docs/secure-client-foundation-seb-v1-migration.sql` | Tether Secure Client Foundation + Safe Exam Browser Compatibility v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — secure client foundation migration" below for the full read-only confirmation record. |
-| 15 | `docs/sql/add-tether-secure-resume-recovery.sql` | Tether Secure Exam Recovery and Resilient Autosave v1 | **NOT YET APPLIED** | **NOT YET APPLIED (same shared database as Preview)** | Additive only — three new nullable/defaulted columns on `SecureClientSession`, four on `Submission` (one unique), two on `Answer`, plus one index and one self-referencing foreign key. See docs/tether-secure-resume-recovery-v1.md and "Deployment procedure" below. Must be applied AFTER row 14 (`docs/secure-client-foundation-seb-v1-migration.sql`) — the new `recoveryOfSessionId` foreign key targets `SecureClientSession`, which that earlier migration creates. |
+| 15 | `docs/sql/add-tether-secure-resume-recovery.sql` | Tether Secure Exam Recovery and Resilient Autosave v1 | **APPLIED ONCE — 2026-08-02** | **APPLIED ONCE — 2026-08-02 (same shared database as Preview)** | Confirmed applied — do not re-apply. Additive only — three new nullable/defaulted columns on `SecureClientSession`, four on `Submission` (one unique), two on `Answer`, plus one index and one self-referencing foreign key. See docs/tether-secure-resume-recovery-v1.md and "Verification — secure recovery migration" below for the full read-only confirmation record. |
 
 Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -535,40 +536,95 @@ one new nullable column:
 
 ## Deployment procedure — `docs/sql/add-tether-secure-resume-recovery.sql`
 
-**NOT YET APPLIED — do not apply as part of the same change that adds
-this row to the ledger.** Preview and Production share ONE Supabase
-database — apply this file **once**, not once per environment, and only
-after independent review.
+**Already applied — 2026-08-02, to the one shared Preview/Production
+Supabase database (project ref `ugckdvbjzauvcovcqebw`). Do not run this
+file again.** The steps below are kept as a historical record of the
+procedure that was followed. See "Verification — secure recovery
+migration" further below for the full read-only confirmation record.
 
-1. Take a pre-migration backup of the shared database (Supabase project
-   → Database → Backups, or a manual `pg_dump`) before applying anything.
-2. Run the pre-check queries embedded at the top of
-   `docs/sql/add-tether-secure-resume-recovery.sql` first, to confirm the
-   migration has not already been applied.
-3. Confirm row 14 (`docs/secure-client-foundation-seb-v1-migration.sql`)
+Preview and Production share ONE Supabase database — this file was
+applied **once**, not once per environment; there is no separate
+Production application still pending, and it must not be applied a
+second time to either environment.
+
+1. Took a pre-migration backup of the shared database (Supabase project
+   → Database → Backups) before applying anything.
+2. Ran the pre-check queries embedded at the top of
+   `docs/sql/add-tether-secure-resume-recovery.sql` first, confirming the
+   migration had not already been applied.
+3. Confirmed row 14 (`docs/secure-client-foundation-seb-v1-migration.sql`)
    shows as applied above — this file's `recoveryOfSessionId` foreign key
    targets the `SecureClientSession` table that migration creates.
-4. Open the (shared) Supabase project → SQL Editor.
-5. Paste and run the file's single `BEGIN` ... `COMMIT` block — it is
-   already in execution order (`SecureClientSession` columns + index +
+4. Opened the (shared) Supabase project → SQL Editor.
+5. Pasted and ran the file's single `BEGIN` ... `COMMIT` block once — it
+   is already in execution order (`SecureClientSession` columns + index +
    FK, then `Submission` columns + unique constraint, then `Answer`
-   columns).
-6. Run the file's own "Post-application verification" queries to confirm
+   columns). No `prisma db push`, `prisma migrate dev`, `prisma migrate
+   deploy`, or `prisma migrate resolve` command was used at any point —
+   applied manually through the Supabase SQL Editor only, per this
+   project's migration convention.
+6. Ran the file's own "Post-application verification" queries to confirm
    all nine new columns, the index, and both constraints landed, and that
    every existing row's new columns are NULL/default (never
    retroactively populated).
-7. Record the date in the Ledger table above (row 15) — a single date is
-   sufficient given the shared database.
+7. Recorded the date in the Ledger table above (row 15) — a single date
+   is sufficient given the shared database.
 8. Do not enable/rely on any resume-recovery behaviour for a real exam
-   until this has been applied — every application code path already
-   treats the pre-migration (missing-column) state as "recovery feature
-   inactive for this row," so there is no urgency window where existing
-   exams behave incorrectly before this is applied; it is safe to deploy
-   the application code ahead of this migration.
+   until the institutional pilot-readiness checklist in
+   docs/pilot-readiness.md is complete.
 9. Do not apply this file a second time — re-running it after a
    successful apply is idempotent (every statement uses
    `IF NOT EXISTS`/`ADD COLUMN IF NOT EXISTS` guards) but is not expected
-   to be necessary.
+   to be necessary and should not be done deliberately.
+
+### Verification — secure recovery migration
+
+Confirmed via read-only queries against the shared Supabase database
+(project ref `ugckdvbjzauvcovcqebw`) on 2026-08-02, immediately after
+this migration was applied. **Preview and Production point at this same
+shared Supabase database — this migration has now been applied to that
+one database and must not be applied again, in either environment.**
+
+- A full database backup was taken and confirmed completed before the
+  migration was applied.
+- The pre-application checks embedded at the top of
+  `docs/sql/add-tether-secure-resume-recovery.sql` were run first and
+  confirmed the migration had not already been applied (all pre-check
+  queries returned zero rows).
+- The migration was applied exactly once, manually, through the Supabase
+  SQL Editor — the file's single `BEGIN` ... `COMMIT` block, run as one
+  statement. No `prisma migrate` command and no `prisma db push` was run
+  against this database at any point in this rollout.
+- All nine new columns were verified present with the expected
+  types/nullability/defaults (`information_schema.columns`):
+  - `SecureClientSession`: `closedAt` (nullable `timestamp`),
+    `closeReason` (nullable `text`), `recoveryOfSessionId` (nullable
+    `text`).
+  - `Submission`: `resumeCount` (`integer`, `NOT NULL`, default `0`),
+    `lastResumedAt` (nullable `timestamp`),
+    `lastAutosaveAcknowledgedAt` (nullable `timestamp`),
+    `finalSubmissionRequestId` (nullable `text`).
+  - `Answer`: `lastClientRequestId` (nullable `text`), `clientRevision`
+    (nullable `integer`).
+- The index was verified: `SecureClientSession_recoveryOfSessionId_idx`
+  exists on `SecureClientSession("recoveryOfSessionId")`
+  (`pg_indexes`).
+- The self-referencing foreign key was verified:
+  `SecureClientSession_recoveryOfSessionId_fkey` exists
+  (`SecureClientSession."recoveryOfSessionId"` →
+  `SecureClientSession."id"`, `ON DELETE SET NULL ON UPDATE CASCADE`)
+  (`pg_constraint`).
+- The unique constraint was verified:
+  `Submission_finalSubmissionRequestId_key` exists on
+  `Submission("finalSubmissionRequestId")` (`pg_constraint`).
+- Every existing row's new columns were confirmed NULL/default
+  immediately after migration (the file's own "Existing rows never
+  retroactively populated" queries all returned `0`) — no existing
+  `SecureClientSession`, `Submission`, or `Answer` row was retroactively
+  affected, and row counts on all three tables were unchanged
+  before/after.
+
+**This migration must not be applied again.**
 
 ### Rollback — `docs/sql/add-tether-secure-resume-recovery.sql`
 
