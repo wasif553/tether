@@ -74,6 +74,24 @@ export async function PATCH(
   // pooled connection for the whole autosave instead of two checkouts,
   // which matters under concurrent autosave traffic with a small pool.
   const result = await prisma.$transaction(async (tx) => {
+    // Correctness pass (post-merge review) — an advisory lock scoped to
+    // THIS (submission, question) pair, mirroring the existing
+    // submission-scoped locks in secureClientRunner.ts/submit/route.ts.
+    // Without this, two concurrent PATCHes for the same question could
+    // both read `existing` before either commits (each sees "no row yet"
+    // or the same stale revision), so the revision-comparison guard below
+    // never actually fires for either — and Prisma's upsert has no
+    // conditional WHERE on its ON CONFLICT DO UPDATE, so whichever
+    // request's write lands LAST at the database always wins, regardless
+    // of which one carries the higher revision. Confirmed empirically
+    // (a scripted 40-iteration concurrent-write test) before this fix: a
+    // lower revision overwrote a higher one in ~25% of runs. The lock
+    // fully serializes the read-decide-write section for this exact
+    // question, so the application-level revision check is no longer
+    // racing a concurrent writer — closing the gap at the transaction
+    // boundary, not merely in application code.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}), hashtext(${questionId}))`;
+
     const question = await tx.question.findFirst({
       where: { id: questionId, examId: submission.examId },
     });

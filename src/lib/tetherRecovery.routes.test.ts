@@ -287,6 +287,51 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
     expect(rows[0].response).toBe("revision two");
   });
 
+  // Post-merge correctness review — the sequential test above ("3/34")
+  // only proves the app-level revision check works when the newer save
+  // has already COMMITTED before the stale one is even sent. It does NOT
+  // exercise genuine concurrency: two requests racing so closely that
+  // BOTH read "no existing row / no conflicting revision yet" before
+  // either commits. Before the fix (an advisory lock scoped to
+  // (submissionId, questionId) — see answers/route.ts), Prisma's
+  // upsert() compiles to an unconditional `ON CONFLICT DO UPDATE` with no
+  // WHERE guard, so whichever request's write physically landed LAST at
+  // the database always won — a lower revision could silently overwrite
+  // a higher one. Repeated across many iterations (a single race can get
+  // lucky) with genuinely concurrent Promise.all calls, each targeting a
+  // FRESH question so no request ever benefits from a prior committed row
+  // to read as a guard.
+  it("3b/4b. concurrent PATCHes with differing revisions never let the lower one win, across many repeated races", async () => {
+    const exam = await createTetherExam("Concurrent Differing Revisions");
+    const submission = await startAsStudent(exam.id);
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+
+    const ITERATIONS = 25;
+    for (let i = 0; i < ITERATIONS; i++) {
+      const question = await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: `Race Q${i}`, points: 1 } });
+
+      const [low, high] = await Promise.all([
+        answersRoute.PATCH(
+          jsonRequest("PATCH", { questionId: question.id, response: "LOW", clientRequestId: `race-low-${i}`, clientRevision: 1 }),
+          { params: Promise.resolve({ id: submission.id }) },
+        ),
+        answersRoute.PATCH(
+          jsonRequest("PATCH", { questionId: question.id, response: "HIGH", clientRequestId: `race-high-${i}`, clientRevision: 5 }),
+          { params: Promise.resolve({ id: submission.id }) },
+        ),
+      ]);
+      expect(low.status).toBe(200);
+      expect(high.status).toBe(200);
+
+      const rows = await prisma.answer.findMany({ where: { submissionId: submission.id, questionId: question.id } });
+      expect(rows).toHaveLength(1);
+      // The higher revision must be the one on record, regardless of
+      // which request's fetch happened to resolve/commit last.
+      expect(rows[0].clientRevision).toBe(5);
+      expect(rows[0].response).toBe("HIGH");
+    }
+  });
+
   it("4. a genuinely newer revision safely supersedes an earlier acknowledged one", async () => {
     const exam = await createTetherExam("Newer Revision Supersedes");
     const submission = await startAsStudent(exam.id);

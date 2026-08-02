@@ -111,12 +111,22 @@ export function useResilientAutosave({ userId, examId, submissionId, enabled }: 
       const isStillCurrent = current?.clientRequestId === entry.clientRequestId;
 
       if (outcome === "SAVED" || outcome === "CONFLICT") {
+        // Correctness pass (post-merge review) — deleteEntry is keyed
+        // only by (userId, submissionId, questionId), not by revision or
+        // clientRequestId (see pendingSaveQueueStore.ts). If a NEWER
+        // entry has already superseded this one in `queueRef` (and, via
+        // its own putEntry call, in IndexedDB) while THIS request was
+        // still in flight, deleting here would wipe the newer entry's
+        // persisted safety net out from under it — a crash/reload before
+        // the newer entry's own resolution would then lose that draft
+        // entirely, defeating the whole point of the queue. Only delete
+        // when this is still the current entry for the question.
         if (isStillCurrent) {
           queueRef.current.delete(entry.questionId);
           syncCount();
           setStatus(outcome);
+          await deleteEntry(entry.userId, entry.submissionId, entry.questionId);
         }
-        await deleteEntry(entry.userId, entry.submissionId, entry.questionId);
         return true;
       }
 
