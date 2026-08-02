@@ -47,6 +47,7 @@ import {
 } from "@/lib/secureClient/secureClientEvents";
 import { deriveSessionStatus, checkRecoveryGrant, type SessionStatus } from "@/lib/secureClient/secureClientSession";
 import { parseSecureClientPolicy, isSecureClientDeliveryEnabled, type SecureClientPolicy } from "@/lib/secureClientPolicy";
+import { createPlatformAuditLog } from "@/lib/platformAdmin";
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
 
@@ -517,13 +518,46 @@ type GetOrCreateSessionParams = {
   policyHash: string;
 };
 
+/**
+ * Tether Secure Exam Recovery and Resilient Autosave v1 — see
+ * docs/tether-secure-resume-recovery-v1.md, "Crash, relaunch and
+ * Windows-restart recovery". Before this feature, a second manifest
+ * consumption for a submission that already had a non-terminal session
+ * silently REUSED that existing session — meaning its already-VERIFIED
+ * state (from before a crash, kill, or Windows restart) carried straight
+ * through with no new attestation of any kind. Now: an existing
+ * non-terminal session is always SUPERSEDED (never reused) — closed with
+ * closedAt/closeReason (and the existing terminal status "ENDED" +
+ * endedAt/endReason, so every other terminal/non-terminal-aware query in
+ * this codebase needs no further change) — and a genuinely fresh session
+ * is created, pointing back at it via recoveryOfSessionId. The fresh
+ * session starts at verificationStatus NOT_CHECKED /
+ * installationAttestationVerified false, exactly like a submission's
+ * very first launch — so resolveEffectiveTetherVerification (and
+ * resolveTrustedTetherVerification, which every real content-access gate
+ * actually calls — see src/lib/tetherRecovery.ts) can never treat this
+ * fresh session as already verified. Best-effort audit trail: never
+ * allowed to fail the actual manifest consumption.
+ */
 async function getOrCreateSessionCore(tx: DbClient, params: GetOrCreateSessionParams) {
   const existing = await tx.secureClientSession.findFirst({
     where: { submissionId: params.submissionId, status: { in: ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] } },
   });
-  if (existing) return existing;
 
-  return tx.secureClientSession.create({
+  if (existing) {
+    await tx.secureClientSession.update({
+      where: { id: existing.id },
+      data: {
+        status: "ENDED",
+        endedAt: new Date(),
+        endReason: "SUPERSEDED_BY_RELAUNCH",
+        closedAt: new Date(),
+        closeReason: "SUPERSEDED_BY_RELAUNCH",
+      },
+    });
+  }
+
+  const created = await tx.secureClientSession.create({
     data: {
       institutionId: params.institutionId,
       examId: params.examId,
@@ -543,8 +577,22 @@ async function getOrCreateSessionCore(tx: DbClient, params: GetOrCreateSessionPa
       // which reads this snapshot instead of the live environment
       // variable for every subsequent request against this session.
       attestationRequirement: resolveExamAttestationMode(),
+      recoveryOfSessionId: existing ? existing.id : null,
     },
   });
+
+  if (existing) {
+    await createPlatformAuditLog({
+      actorId: params.studentId,
+      action: "TETHER_SECURE_RESUME_INITIATED",
+      targetType: "Submission",
+      targetId: params.submissionId,
+      institutionId: params.institutionId,
+      metadata: { supersededSessionId: existing.id, newSessionId: created.id },
+    }).catch(() => {});
+  }
+
+  return created;
 }
 
 export async function getCurrentSessionForSubmission(submissionId: string) {

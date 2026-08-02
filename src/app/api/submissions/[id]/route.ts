@@ -8,7 +8,9 @@ import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
 import { isTetherSecureClientBypassAllowed } from "@/lib/secureClientAvailability";
 import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
-import { parseAttestationRequirement, resolveEffectiveTetherVerification } from "@/lib/tetherAttestationConfig";
+import { parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
+import { resolveTrustedTetherVerification } from "@/lib/tetherRecovery";
+import { resolveOfflineContinueMs } from "@/lib/tetherRecoveryConfig";
 
 export async function GET(
   _req: Request,
@@ -62,11 +64,22 @@ export async function GET(
       // immutable requirement snapshot — never the live environment
       // variable, and never any client-supplied version (closes the
       // client-controlled-downgrade path the pre-Preview safety pass
-      // found in the previous design).
-      const hasVerifiedTetherSession = resolveEffectiveTetherVerification({
+      // found in the previous design). Tether Secure Exam Recovery v1 —
+      // wraps this in resolveTrustedTetherVerification
+      // (src/lib/tetherRecovery.ts) so a session verified before a
+      // crash/kill/relaunch eventually stops being trusted once contact
+      // has genuinely gone stale — see that function's own doc comment.
+      // `policy` here is this attempt's own FROZEN heartbeat cadence, so
+      // this uses the exact configured bounds, not a default.
+      const hasVerifiedTetherSession = resolveTrustedTetherVerification({
         sessionRequirement: parseAttestationRequirement(currentSession?.attestationRequirement ?? null),
         legacyVerified: currentSession?.verificationStatus === "VERIFIED",
         v2Verified: currentSession?.installationAttestationVerified === true,
+        lastHeartbeatAtMs: currentSession?.lastHeartbeatAt?.getTime() ?? null,
+        sessionStartedAtMs: currentSession?.startedAt?.getTime() ?? 0,
+        nowMs: Date.now(),
+        heartbeatPolicy: { heartbeatIntervalSeconds: policy.heartbeatIntervalSeconds, heartbeatGraceSeconds: policy.heartbeatGraceSeconds },
+        offlineContinueMs: resolveOfflineContinueMs(),
       });
       const devBypassAllowed = isTetherSecureClientBypassAllowed(submission.exam.institution?.slug ?? null);
       const gate = resolveSecureClientStartGate({ effectiveDeliveryMode: policy.deliveryMode, hasVerifiedTetherSession, devBypassAllowed });

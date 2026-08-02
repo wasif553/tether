@@ -18,6 +18,18 @@ type SubmissionRow = {
   // docs/tether-system-check-v1.md. The student's most recent check,
   // regardless of which exam it was run for; null means not checked yet.
   systemCheck: { overallStatus: "READY" | "READY_WITH_WARNINGS" | "NOT_READY"; checkedAt: string; clientVersion: string | null } | null;
+  // Tether Secure Exam Recovery and Resilient Autosave v1 (Part 12) — see
+  // docs/tether-secure-resume-recovery-v1.md. Compact status only: never
+  // local answer contents, tokens, public keys, signatures, installation
+  // secrets, or internal stack traces. Null for a non-Tether exam or a
+  // submission with no recovery-relevant activity yet.
+  recovery: {
+    state: string;
+    label: string;
+    lastServerContactAt: string | null;
+    resumeCount: number;
+    pendingSaveCount: number | null;
+  } | null;
 };
 
 const SYSTEM_CHECK_LABELS: Record<"READY" | "READY_WITH_WARNINGS" | "NOT_READY", string> = {
@@ -71,6 +83,36 @@ function CanvasBadge({ status }: { status: CanvasStatus }) {
   );
 }
 
+// Tether Secure Exam Recovery and Resilient Autosave v1 (Part 12) — see
+// docs/tether-secure-resume-recovery-v1.md. Same badge micro-pattern as
+// CanvasBadge/SystemCheckBadge above.
+const RECOVERY_BADGE_STYLES: Record<string, string> = {
+  ACTIVE: "bg-green-100 text-green-700",
+  Resumed: "bg-blue-100 text-blue-700",
+  TEMPORARILY_DISCONNECTED: "bg-amber-100 text-amber-800",
+  MANUAL_REVIEW_REQUIRED: "bg-red-100 text-red-700",
+  SUBMITTED: "bg-gray-100 text-gray-600",
+  EXPIRED: "bg-gray-100 text-gray-500",
+  DEFAULT: "bg-gray-100 text-gray-600",
+};
+
+function RecoveryBadge({ recovery }: { recovery: SubmissionRow["recovery"] }) {
+  if (!recovery || recovery.state === "NOT_STARTED") return null;
+  const styleKey = recovery.label === "Resumed" ? "Resumed" : recovery.state;
+  const title = [
+    recovery.lastServerContactAt ? `Last server contact ${new Date(recovery.lastServerContactAt).toLocaleString()}` : "No server contact yet",
+    `Resume count: ${recovery.resumeCount}`,
+    recovery.pendingSaveCount != null ? `Pending saves: ${recovery.pendingSaveCount}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <span className={`rounded px-2 py-0.5 text-xs ${RECOVERY_BADGE_STYLES[styleKey] ?? RECOVERY_BADGE_STYLES.DEFAULT}`} title={title}>
+      {recovery.label}
+    </span>
+  );
+}
+
 export default function SubmissionsListPage({
   params,
 }: {
@@ -112,6 +154,7 @@ export default function SubmissionsListPage({
               </span>
               <CanvasBadge status={s.canvasStatus} />
               <SystemCheckBadge systemCheck={s.systemCheck} />
+              <RecoveryBadge recovery={s.recovery} />
               <Link
                 href={`/lecturer/submissions/${s.id}/evidence`}
                 className="text-sm underline"

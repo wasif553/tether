@@ -101,6 +101,8 @@ import { AiBrainstormPanel } from "@/components/AiBrainstormPanel";
 import { AnswerDevelopmentPanel } from "@/components/AnswerDevelopmentPanel";
 import { useScreenShareLifecycle } from "@/hooks/useScreenShareLifecycle";
 import { useAnswerDevelopmentCapture } from "@/hooks/useAnswerDevelopmentCapture";
+import { useResilientAutosave } from "@/hooks/useResilientAutosave";
+import { RecoveryStatusBanner } from "@/components/RecoveryStatusBanner";
 
 /**
  * Strengthened phone detection (Part 3/4) — converts raw detector output
@@ -873,6 +875,93 @@ export default function TakeExamPage({
   // added here.
   const submissionId = data?.id;
   const submissionStatus = data?.status;
+
+  // Tether Secure Exam Recovery and Resilient Autosave v1 — see
+  // docs/tether-secure-resume-recovery-v1.md. Declared here (rather than
+  // inline in saveAnswer/flushAnswerNow below) so its pendingCount can
+  // also ride the existing session-heartbeat call (Part 5 — "pending-save
+  // count"). `enabled` mirrors shouldRunExamTimer's own IN_PROGRESS gate —
+  // never active for a finalized/not-yet-loaded submission.
+  const resilientAutosave = useResilientAutosave({
+    userId: data?.student.id,
+    examId: data?.exam.id ?? "",
+    submissionId: submissionId ?? "",
+    enabled: Boolean(submissionId) && submissionStatus === "IN_PROGRESS",
+  });
+  // Ref mirror so the heartbeat closure below (created once per
+  // effect run, not re-run on every pendingCount change) always reads the
+  // CURRENT count rather than a stale one captured at effect-mount time —
+  // same "a ref never goes stale mid-await/mid-closure" convention used
+  // throughout this file (see e.g. cameraLifecycleRef).
+  const pendingSaveCountRef = useRef(0);
+  useEffect(() => {
+    pendingSaveCountRef.current = resilientAutosave.pendingCount;
+  }, [resilientAutosave.pendingCount]);
+  const [offlineNow, setOfflineNow] = useState(false);
+  // Tether Secure Exam Recovery and Resilient Autosave v1 — the single
+  // authoritative recovery message (Part 1/6/8), fetched from
+  // GET /api/submissions/[id]/recovery-status (never computed locally —
+  // see that route's own doc comment: "the ONE read path"). Only fetched
+  // when there's a real signal something may be wrong (the heartbeat
+  // itself failing), not on a tight poll — this is a supplementary
+  // check, not the primary connectivity signal (the browser's own
+  // online/offline events and the autosave queue's own status already
+  // cover the common case).
+  const [recoveryStatusMessage, setRecoveryStatusMessage] = useState<string | null>(null);
+  const [recoveryRedirectTo, setRecoveryRedirectTo] = useState<string | null>(null);
+  const refreshRecoveryStatus = useCallback(async () => {
+    if (!submissionId) return;
+    try {
+      const res = await fetch(`/api/submissions/${submissionId}/recovery-status`);
+      if (!res.ok) return;
+      const body: { state: string; detail: string; redirectTo: string | null; deadline: string } = await res.json();
+      if (body.state === "ACTIVE" || body.state === "TEMPORARILY_DISCONNECTED") {
+        setRecoveryStatusMessage(null);
+        setRecoveryRedirectTo(null);
+      } else if (body.state !== "SUBMITTED" && body.state !== "EXPIRED") {
+        setRecoveryStatusMessage(body.detail);
+        setRecoveryRedirectTo(body.redirectTo);
+      }
+      // Timer authority (Part 10) — "resume recalculates remaining time
+      // from server time". The deadline itself never actually changes
+      // (it's frozen at attempt start — see submissionDeadline in
+      // assessmentLifecycle.ts), but re-confirming it from THIS
+      // authoritative response after a reconnect/recovery event (rather
+      // than only ever trusting the one-time value fetched at page load)
+      // means a resumed attempt's displayed countdown is always re-
+      // grounded in a fresh server read, never a stale client-held
+      // reference from before a long gap.
+      setData((prev) => (prev ? { ...prev, deadline: body.deadline } : prev));
+    } catch {
+      // Best-effort — the local connection banner already covers the
+      // common case if this supplementary check itself can't complete.
+    }
+  }, [submissionId]);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (typeof navigator !== "undefined") setOfflineNow(navigator.onLine === false);
+    const handleOffline = () => setOfflineNow(true);
+    const handleOnline = () => setOfflineNow(false);
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
+    return () => {
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("online", handleOnline);
+    };
+  }, []);
+
+  // A failing exam-attempt heartbeat is exactly the signal worth an
+  // authoritative recovery-status check (Part 1/6) — the ordinary
+  // connection/save banner already covers plain network blips on its
+  // own; this is specifically for "does the SERVER think something more
+  // than a blip is going on" (stale session, device change, expired
+  // exam). Re-checked once whenever the connection state actually
+  // transitions, not on a tight poll.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (sessionConnectionState === "unconfirmed") void refreshRecoveryStatus();
+  }, [sessionConnectionState, refreshRecoveryStatus]);
+
   useEffect(() => {
     if (!submissionId || submissionStatus !== "IN_PROGRESS") return;
 
@@ -887,6 +976,7 @@ export default function TakeExamPage({
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           screenWidth: typeof window !== "undefined" ? window.screen.width : undefined,
           cameraPermissionState: mappedCameraPermission,
+          pendingSaveCount: pendingSaveCountRef.current,
         }),
       })
         .then((res) => {
@@ -960,25 +1050,24 @@ export default function TakeExamPage({
     clearTimeout(saveTimers.current[questionId]);
     const response = responses[questionId];
     if (response === undefined) return true;
-    try {
-      const res = await fetch(`/api/submissions/${id}/answers`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ questionId, response }),
-      });
-      if (!res.ok) {
-        if (secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
-        return false;
-      }
-      // Answer-Development Provenance v1 — a navigation-triggered
-      // checkpoint, after the ordinary autosave above has already
-      // succeeded. Best-effort; never blocks navigation.
-      answerDevelopmentCapture.flushNavigation(questionId, response);
-      return true;
-    } catch {
+    // Tether Secure Exam Recovery and Resilient Autosave v1 — routes
+    // through the resilient queue (persists to IndexedDB before
+    // attempting the network call) instead of a raw fetch. External
+    // contract UNCHANGED: resolves true only once the server has
+    // actually acknowledged — a caller here still blocks navigation on
+    // false, exactly as before. What's new: on false, the draft is now
+    // safely queued and retried automatically, rather than only living
+    // in this component's in-memory `responses` state.
+    const acknowledged = await resilientAutosave.save(questionId, response);
+    if (!acknowledged) {
       if (secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
       return false;
     }
+    // Answer-Development Provenance v1 — a navigation-triggered
+    // checkpoint, after the ordinary autosave above has already
+    // succeeded. Best-effort; never blocks navigation.
+    answerDevelopmentCapture.flushNavigation(questionId, response);
+    return true;
   }
 
   // One-Question-At-A-Time Exam Delivery v1 — the only place the current
@@ -1369,14 +1458,12 @@ export default function TakeExamPage({
     Object.values(saveTimers.current).forEach((timer) => clearTimeout(timer));
     saveTimers.current = {};
 
+    // Tether Secure Exam Recovery and Resilient Autosave v1 — routes
+    // through the resilient queue so a flush-before-submit that fails to
+    // reach the server (Part 4/9) is safely queued/retried rather than
+    // simply dropped, exactly like every other autosave path.
     await Promise.allSettled(
-      Object.entries(responses).map(([questionId, response]) =>
-        fetch(`/api/submissions/${id}/answers`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ questionId, response }),
-        }),
-      ),
+      Object.entries(responses).map(([questionId, response]) => resilientAutosave.save(questionId, response)),
     );
   }
 
@@ -1389,19 +1476,51 @@ export default function TakeExamPage({
       await flushResponsesBeforeSubmit();
     }
 
+    // Final submission idempotency (Part 9) — a fresh id per attempt; the
+    // server's own advisory-lock + conditional-status-update idempotency
+    // (already in place) is the real correctness guarantee regardless of
+    // whether a retry happens to reuse this id — this is primarily for
+    // audit/reconciliation ("was my specific request the one accepted").
+    const submissionRequestId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+
     const res = await fetch(`/api/submissions/${id}/submit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ systemAutoSubmit: options.systemAutoSubmit === true }),
+      body: JSON.stringify({ systemAutoSubmit: options.systemAutoSubmit === true, submissionRequestId }),
     }).catch(() => null);
     setSubmitting(false);
 
     if (!res) {
+      // Final submission idempotency (Part 9) — a network failure here
+      // does NOT necessarily mean the server never received/committed
+      // the request (it may have committed and the response was simply
+      // lost). "Checking submission status" resolves that ambiguity by
+      // querying the authoritative GET route rather than assuming
+      // failure.
+      setSubmitMessage("Checking submission status...");
+      const latest = await loadSubmission().catch(() => null);
+      if (latest && isFinalizedSubmissionStatus(latest.status)) {
+        terminalSubmitRef.current = true;
+        setTimerStopped(true);
+        setAutoSubmitLocked(false);
+        stopCamera();
+        stopAiDetection();
+        screenShare.stop();
+        await resilientAutosave.clearAll();
+        setSubmitMessage(
+          options.systemAutoSubmit
+            ? "Time is up. Your exam has been submitted."
+            : "Submission received.",
+        );
+        router.refresh();
+        return;
+      }
       if (options.systemAutoSubmit) setAutoSubmitLocked(false);
       setSubmitMessage(
         options.systemAutoSubmit
-          ? "Time is up. Automatic submission could not reach the server. Please retry submission now."
-          : "Submission failed. Please try again.",
+          ? "Time is up. Automatic submission could not be confirmed. Contact your lecturer or exam support if this continues."
+          : "Save could not yet be confirmed. Please try submitting again.",
       );
       return;
     }
@@ -1421,6 +1540,10 @@ export default function TakeExamPage({
         stopCamera();
         stopAiDetection();
         screenShare.stop();
+        // Pending local drafts are cleared only after CONFIRMED server
+        // submission (Part 9/15) — this branch just confirmed exactly
+        // that via the authoritative GET.
+        await resilientAutosave.clearAll();
         router.refresh();
         return;
       }
@@ -1440,8 +1563,15 @@ export default function TakeExamPage({
       setTimerStopped(true);
       setAutoSubmitLocked(false);
       setData((prev) => (prev ? { ...prev, status: updated.status, totalScore: updated.totalScore } : prev));
+      // Pending local drafts are cleared only after CONFIRMED server
+      // submission (Part 9/15) — res.ok here means the server actually
+      // finalized the submission (a fresh submit or an idempotent
+      // ALREADY_FINALIZED replay both return 200 — see the submit route).
+      await resilientAutosave.clearAll();
       if (options.systemAutoSubmit) {
         setSubmitMessage("Time is up. Your exam has been submitted automatically.");
+      } else {
+        setSubmitMessage("Submission received.");
       }
       router.refresh();
     }
@@ -2938,24 +3068,26 @@ export default function TakeExamPage({
     (questionId: string, response: string) => {
       clearTimeout(saveTimers.current[questionId]);
       saveTimers.current[questionId] = setTimeout(() => {
-        fetch(`/api/submissions/${id}/answers`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ questionId, response }),
-        })
-          .then((res) => {
-            if (!res.ok && secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
+        // Tether Secure Exam Recovery and Resilient Autosave v1 — routes
+        // through the resilient queue (see flushAnswerNow's own comment
+        // for the full rationale). Fire-and-forget here, exactly like the
+        // raw fetch it replaces — this debounced path never blocks
+        // typing.
+        resilientAutosave
+          .save(questionId, response)
+          .then((acknowledged) => {
+            if (!acknowledged && secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
             // Question Navigator v1 — Part 12: progress counts must
             // update after every answer save, not only after
             // navigation. Best-effort; never blocks/delays the save.
-            else if (oneQuestionAtATime && secureSettings?.showQuestionNavigator) loadNavigator();
+            else if (acknowledged && oneQuestionAtATime && secureSettings?.showQuestionNavigator) loadNavigator();
           })
           .catch(() => {
             if (secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
           });
       }, 600);
     },
-    [id, secureModeEnabled, reportIntegrityEvent, oneQuestionAtATime, secureSettings?.showQuestionNavigator, loadNavigator],
+    [secureModeEnabled, reportIntegrityEvent, oneQuestionAtATime, secureSettings?.showQuestionNavigator, loadNavigator, resilientAutosave.save],
   );
 
   function handleChange(questionId: string, value: string) {
@@ -3513,6 +3645,31 @@ export default function TakeExamPage({
       {banner && (
         <div className="mt-3 rounded border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
           {banner}
+        </div>
+      )}
+
+      {/* Tether Secure Exam Recovery and Resilient Autosave v1 — see
+          docs/tether-secure-resume-recovery-v1.md, Part 4/16. Renders
+          nothing during ordinary, uneventful exam-taking (see
+          RecoveryStatusBanner's own early-return) — only appears while
+          offline, while a save is queued/failed/conflicted, or once a
+          server-authoritative recovery message is available. */}
+      {submissionStatus === "IN_PROGRESS" && (
+        <div className="mt-3">
+          <RecoveryStatusBanner
+            connectionStatus={resilientAutosave.status}
+            pendingCount={resilientAutosave.pendingCount}
+            offline={offlineNow}
+            recoveryMessage={recoveryStatusMessage}
+            onRetryNow={() => {
+              if (recoveryRedirectTo) {
+                router.push(recoveryRedirectTo);
+                return;
+              }
+              void resilientAutosave.flushNow();
+              void refreshRecoveryStatus();
+            }}
+          />
         </div>
       )}
 
