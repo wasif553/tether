@@ -692,3 +692,234 @@ describe("Recovery-status endpoint authorization and non-final-assessment regres
     expect(submitBody.status).toBe("GRADED");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Secure-recovery hardening v1 — Part D required test matrix (20 items).
+// Numbered comments below map directly to the task spec's own numbering.
+// Several items are also proven independently at the pure-logic level in
+// tetherRecovery.test.ts (see its own "Part A" describe block) — these
+// DB-backed versions exercise the real routes/DB end to end, which the
+// pure tests cannot (installation registration, real Ed25519 attestation,
+// real Prisma transactions/locking).
+// ---------------------------------------------------------------------------
+describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", () => {
+  it("1/15. bound original + same installation + fresh attestation resumes, incrementing resumeCount exactly once and restoring content", async () => {
+    const testStudent = await makeStudent("matrix-1");
+    const exam = await createTetherExam("Matrix 1 Bound Same Installation");
+    const submission = await startAsStudent(exam.id, testStudent);
+    const installation = await registerInstallation(testStudent, "matrix-1");
+
+    await launchAndConsume(testStudent, submission.id);
+    const attest1 = await attestExamSessionV2(testStudent, submission.id, installation);
+    expect(attest1.body.verified).toBe(true);
+
+    await launchAndConsume(testStudent, submission.id); // simulated crash/relaunch
+    const before = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(before.resumeCount).toBe(0);
+
+    const attest2 = await attestExamSessionV2(testStudent, submission.id, installation);
+    expect(attest2.status).toBe(200);
+    expect(attest2.body.verified).toBe(true);
+
+    const after = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(after.resumeCount).toBe(1);
+
+    mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
+    const statusRes = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect((await statusRes.json()).state).toBe("ACTIVE");
+
+    const getRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect(getRes.status).toBe(200);
+  });
+
+  it("2/7/13. bound original + a different installation attempting recovery returns MANUAL_REVIEW_REQUIRED, blocks content, and never increments resumeCount", async () => {
+    const testStudent = await makeStudent("matrix-2");
+    const exam = await createTetherExam("Matrix 2 Different Installation");
+    const submission = await startAsStudent(exam.id, testStudent);
+    const installationA = await registerInstallation(testStudent, "matrix-2-a");
+    const installationB = await registerInstallation(testStudent, "matrix-2-b");
+
+    await launchAndConsume(testStudent, submission.id);
+    const attest1 = await attestExamSessionV2(testStudent, submission.id, installationA);
+    expect(attest1.body.verified).toBe(true);
+
+    await launchAndConsume(testStudent, submission.id); // relaunch — supersede
+
+    const deviceChangeAttempt = await attestExamSessionV2(testStudent, submission.id, installationB);
+    expect(deviceChangeAttempt.status).toBe(409);
+    expect(deviceChangeAttempt.body.reason).toBe("DEVICE_CHANGE_DETECTED");
+
+    mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
+    const statusRes = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect((await statusRes.json()).state).toBe("MANUAL_REVIEW_REQUIRED");
+
+    const getRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect(getRes.status).toBe(403);
+    expect((await getRes.json()).code).toBe("TETHER_SESSION_REQUIRED");
+
+    const after = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(after.resumeCount).toBe(0);
+  });
+
+  it("3/4/10/14. an unbound LEGACY-only original attempt can never automatically resume — content stays blocked, resumeCount never increments, and no fresh LEGACY re-attestation can restore it", async () => {
+    const testStudent = await makeStudent("matrix-3");
+    const exam = await createTetherExam("Matrix 3 Legacy Unbound");
+    const submission = await startAsStudent(exam.id, testStudent);
+
+    const session1Id = await launchAndConsume(testStudent, submission.id);
+    mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
+    const attestationRoute = await import("../app/api/secure-client/sessions/[sessionId]/attestation/route");
+    const legacyAttest1 = await attestationRoute.POST(jsonRequest("POST", { clientType: "TETHER_SECURE_CLIENT", checks: {}, required: {} }), {
+      params: Promise.resolve({ sessionId: session1Id }),
+    });
+    expect(legacyAttest1.status).toBe(201);
+    const session1 = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: session1Id } });
+    expect(session1.verificationStatus).toBe("VERIFIED");
+    expect(session1.clientInstallationId).toBeNull();
+
+    // Content is accessible on the ORIGINAL attempt — ordinary LEGACY-mode behaviour, completely unaffected (requirement 4).
+    const originalGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect(originalGet.status).toBe(200);
+
+    // Simulated crash/relaunch — session1 is superseded, and it was never installation-bound.
+    const session2Id = await launchAndConsume(testStudent, submission.id);
+    const session2 = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: session2Id } });
+    expect(session2.recoveryOfSessionId).toBe(session1Id);
+
+    mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
+    const statusRes = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect((await statusRes.json()).state).toBe("MANUAL_REVIEW_REQUIRED");
+
+    const blockedGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect(blockedGet.status).toBe(403);
+
+    // 4 — a fresh LEGACY attestation on the RECOVERY session (the only
+    // thing this device can offer, absent v2) still never restores
+    // content, even though the legacy verification itself still succeeds.
+    const legacyAttest2 = await attestationRoute.POST(jsonRequest("POST", { clientType: "TETHER_SECURE_CLIENT", checks: {}, required: {} }), {
+      params: Promise.resolve({ sessionId: session2Id }),
+    });
+    expect(legacyAttest2.status).toBe(201);
+    const session2After = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: session2Id } });
+    expect(session2After.verificationStatus).toBe("VERIFIED");
+    const stillBlockedGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect(stillBlockedGet.status).toBe(403);
+
+    // 14 — resumeCount never increments for a manual-review outcome.
+    const finalSubmission = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(finalSubmission.resumeCount).toBe(0);
+
+    // 10 — no IntegrityEvent from any of this (a device-binding gap is a
+    // technical/administrative fact, never a misconduct signal).
+    const integrityEvents = await prisma.integrityEvent.count({ where: { submissionId: submission.id } });
+    expect(integrityEvents).toBe(0);
+  });
+
+  it("5. a revoked installation cannot complete a recovery attestation, even though it was the ORIGINAL trusted binding", async () => {
+    const testStudent = await makeStudent("matrix-5");
+    const exam = await createTetherExam("Matrix 5 Revoked Installation");
+    const submission = await startAsStudent(exam.id, testStudent);
+    const installation = await registerInstallation(testStudent, "matrix-5");
+
+    await launchAndConsume(testStudent, submission.id);
+    const attest1 = await attestExamSessionV2(testStudent, submission.id, installation);
+    expect(attest1.body.verified).toBe(true);
+
+    await prisma.tetherClientInstallation.update({ where: { id: installation.installationId }, data: { status: "REVOKED", revokedAt: new Date() } });
+
+    await launchAndConsume(testStudent, submission.id); // relaunch — supersede
+
+    const recoveryAttempt = await attestExamSessionV2(testStudent, submission.id, installation);
+    expect(recoveryAttempt.status).toBe(409);
+
+    const after = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(after.resumeCount).toBe(0);
+    const getRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect(getRes.status).toBe(403);
+  });
+
+  it("6. another student's own registered installation can never be used to attempt this submission's recovery", async () => {
+    const testStudent = await makeStudent("matrix-6-owner");
+    const intruder = await makeStudent("matrix-6-intruder");
+    const exam = await createTetherExam("Matrix 6 Cross Student Installation");
+    const submission = await startAsStudent(exam.id, testStudent);
+    const ownInstallation = await registerInstallation(testStudent, "matrix-6-own");
+    const intruderInstallation = await registerInstallation(intruder, "matrix-6-intruder");
+
+    await launchAndConsume(testStudent, submission.id);
+    const attest1 = await attestExamSessionV2(testStudent, submission.id, ownInstallation);
+    expect(attest1.body.verified).toBe(true);
+
+    await launchAndConsume(testStudent, submission.id); // relaunch — supersede
+
+    // Authenticated as testStudent (the submission's real owner) but
+    // referencing the INTRUDER's own installation id — ownership scoping
+    // in issueAttestationChallenge (loadOwnedInstallation) refuses it
+    // regardless of who is asking.
+    const attempt = await attestExamSessionV2(testStudent, submission.id, intruderInstallation);
+    expect(attempt.status).toBe(404);
+
+    const after = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(after.resumeCount).toBe(0);
+  });
+
+  it("11. repeated recovery-status polling while MANUAL_REVIEW_REQUIRED never duplicates the audit record", async () => {
+    const testStudent = await makeStudent("matrix-11");
+    const exam = await createTetherExam("Matrix 11 Poll Dedup");
+    const submission = await startAsStudent(exam.id, testStudent);
+    const session1Id = await launchAndConsume(testStudent, submission.id);
+    // LEGACY-verify the original session (so it genuinely unlocked
+    // content once) WITHOUT ever v2/installation-binding it — the actual
+    // Part A scenario, not merely "never verified at all".
+    mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
+    const attestationRoute = await import("../app/api/secure-client/sessions/[sessionId]/attestation/route");
+    await attestationRoute.POST(jsonRequest("POST", { clientType: "TETHER_SECURE_CLIENT", checks: {}, required: {} }), {
+      params: Promise.resolve({ sessionId: session1Id }),
+    });
+
+    await launchAndConsume(testStudent, submission.id); // relaunch of a never-installation-bound original -> MANUAL_REVIEW_REQUIRED
+
+    mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
+    for (let i = 0; i < 5; i++) {
+      const res = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+      expect((await res.json()).state).toBe("MANUAL_REVIEW_REQUIRED");
+    }
+
+    const auditCount = await prisma.platformAuditLog.count({
+      where: { action: "TETHER_SECURE_RESUME_MANUAL_REVIEW_REQUIRED", targetId: submission.id },
+    });
+    expect(auditCount).toBe(1);
+  });
+
+  it("12. two concurrent duplicate verify requests for the same recovery session (double-click) increment resumeCount at most once", async () => {
+    const testStudent = await makeStudent("matrix-12");
+    const exam = await createTetherExam("Matrix 12 Double Click");
+    const submission = await startAsStudent(exam.id, testStudent);
+    const installation = await registerInstallation(testStudent, "matrix-12");
+
+    await launchAndConsume(testStudent, submission.id);
+    const attest1 = await attestExamSessionV2(testStudent, submission.id, installation);
+    expect(attest1.body.verified).toBe(true);
+
+    await launchAndConsume(testStudent, submission.id); // relaunch — session2 unverified
+
+    // Two concurrent, independently-challenged/signed verify attempts —
+    // e.g. a double-click firing the relaunch sequence twice, or a React
+    // rerender re-triggering it. Each gets its OWN nonce, so this is a
+    // genuine race on the conditional updateMany, not a nonce replay.
+    const [first, second] = await Promise.all([
+      attestExamSessionV2(testStudent, submission.id, installation),
+      attestExamSessionV2(testStudent, submission.id, installation),
+    ]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.body.verified).toBe(true);
+    expect(second.body.verified).toBe(true);
+
+    const after = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(after.resumeCount).toBe(1);
+
+    const completedAudit = await prisma.platformAuditLog.count({ where: { action: "TETHER_SECURE_RESUME_COMPLETED", targetId: submission.id } });
+    expect(completedAudit).toBe(1);
+  });
+});

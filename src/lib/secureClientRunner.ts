@@ -590,6 +590,27 @@ async function getOrCreateSessionCore(tx: DbClient, params: GetOrCreateSessionPa
       institutionId: params.institutionId,
       metadata: { supersededSessionId: existing.id, newSessionId: created.id },
     }).catch(() => {});
+
+    // Secure-recovery hardening v1, Part A/B — the superseded session
+    // never had a trusted (v2 installation-bound) reference at all
+    // (LEGACY-only original attempt): automatic recovery can never be
+    // granted for this new session, regardless of what attestation it
+    // later presents (see resolveTrustedTetherVerification's own doc
+    // comment). Audited exactly ONCE, here, at the moment this is first
+    // known to be true — never re-logged by later status polling (see
+    // resolveSubmissionRecoveryState in tetherRecoveryRunner.ts, which is
+    // a pure read with no audit side effect of its own) or by repeated
+    // relaunch attempts against this SAME new session.
+    if (!existing.clientInstallationId) {
+      await createPlatformAuditLog({
+        actorId: params.studentId,
+        action: "TETHER_SECURE_RESUME_MANUAL_REVIEW_REQUIRED",
+        targetType: "Submission",
+        targetId: params.submissionId,
+        institutionId: params.institutionId,
+        metadata: { newSessionId: created.id, reason: "UNBOUND_ORIGINAL_ATTEMPT" },
+      }).catch(() => {});
+    }
   }
 
   return created;
@@ -600,6 +621,54 @@ export async function getCurrentSessionForSubmission(submissionId: string) {
     where: { submissionId, status: { in: ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] } },
     orderBy: { createdAt: "desc" },
   });
+}
+
+export type PriorSessionTrust = {
+  /** The prior session's genuine, v2 installation-bound reference, or null if it was never installation-bound (LEGACY-only, or never verified at all). */
+  trustedInstallationId: string | null;
+  /**
+   * True if the prior session ever reached a genuinely VERIFIED state by
+   * ANY means (legacy verificationStatus === "VERIFIED", or v2
+   * installationAttestationVerified) — i.e. exam content was actually
+   * unlocked on it at some point. Distinguishes "a real attempt that got
+   * as far as LEGACY verification but was never installation-bound"
+   * (Part A's fail-closed target) from "a session that was created but
+   * crashed before ever completing its OWN first attestation" (nothing
+   * was ever unlocked to protect — relaunching this is no different from
+   * an ordinary first launch, and must resolve exactly like one; see
+   * requirement 4, "ordinary initial exam-start compatibility must
+   * remain unchanged", and the "Immutable timing-policy tests" regression
+   * this distinction was added to keep green).
+   */
+  everVerified: boolean;
+};
+
+/**
+ * Secure-recovery hardening v1, Part A — for a session that supersedes
+ * an earlier one (recoveryOfSessionId set), resolves whether that PRIOR
+ * session ever established a trusted (genuine, v2 installation-bound)
+ * reference, AND whether it was ever verified by any means at all. The
+ * single place every content-gate, the recovery-state resolver, and the
+ * attestation runner all consult to decide "is automatic recovery even
+ * eligible to be considered for this attempt" — see
+ * resolveTrustedTetherVerification (src/lib/tetherRecovery.ts) for how
+ * the result is actually used. clientInstallationId, once set by a
+ * genuine v2 attestation, is never cleared — so checking only the
+ * DIRECT prior session (rather than walking the full supersession
+ * chain) is sufficient: if the chain was ever bound, the most recent
+ * link before this one already carries that binding forward.
+ */
+export async function resolvePriorSessionTrust(recoveryOfSessionId: string | null): Promise<PriorSessionTrust> {
+  if (!recoveryOfSessionId) return { trustedInstallationId: null, everVerified: false };
+  const prior = await prisma.secureClientSession.findUnique({
+    where: { id: recoveryOfSessionId },
+    select: { clientInstallationId: true, verificationStatus: true, installationAttestationVerified: true },
+  });
+  if (!prior) return { trustedInstallationId: null, everVerified: false };
+  return {
+    trustedInstallationId: prior.clientInstallationId,
+    everVerified: prior.verificationStatus === "VERIFIED" || prior.installationAttestationVerified === true,
+  };
 }
 
 export type RecordAttestationInput = {

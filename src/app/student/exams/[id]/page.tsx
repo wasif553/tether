@@ -103,6 +103,7 @@ import { useScreenShareLifecycle } from "@/hooks/useScreenShareLifecycle";
 import { useAnswerDevelopmentCapture } from "@/hooks/useAnswerDevelopmentCapture";
 import { useResilientAutosave } from "@/hooks/useResilientAutosave";
 import { RecoveryStatusBanner } from "@/components/RecoveryStatusBanner";
+import { ManualReviewNotice } from "@/components/ManualReviewNotice";
 
 /**
  * Strengthened phone detection (Part 3/4) — converts raw detector output
@@ -596,6 +597,14 @@ export default function TakeExamPage({
 
   const [data, setData] = useState<SubmissionData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Secure-recovery hardening v1, Part B — declared early (before
+  // loadSubmission below, which needs to set it) so a bounce straight
+  // out of loadSubmission's 403 handler never hits a temporal-dead-zone
+  // issue. True once the authoritative recovery-status endpoint reports
+  // MANUAL_REVIEW_REQUIRED — takes over the entire page render (see the
+  // early-return render branch further down) instead of either the
+  // TETHER_SESSION_REQUIRED redirect loop or any stale exam content.
+  const [manualReviewRequired, setManualReviewRequired] = useState(false);
   const [responses, setResponses] = useState<Record<string, string>>({});
   const [remainingSecs, setRemainingSecs] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -817,6 +826,23 @@ export default function TakeExamPage({
         setResponses(initial);
   }, []);
 
+  // Secure-recovery hardening v1, Part B — best-effort, read-only check
+  // against the authoritative GET /api/submissions/[id]/recovery-status
+  // endpoint. Fails OPEN (returns false) on any network/parse error: on
+  // failure this simply falls through to the existing
+  // TETHER_SESSION_REQUIRED redirect behaviour, unchanged from before
+  // this hardening pass.
+  const checkManualReviewRequired = useCallback(async (): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/submissions/${id}/recovery-status`);
+      if (!res.ok) return false;
+      const body: { state?: string } = await res.json();
+      return body.state === "MANUAL_REVIEW_REQUIRED";
+    } catch {
+      return false;
+    }
+  }, [id]);
+
   const loadSubmission = useCallback(async () => {
     try {
       const res = await fetch(`/api/submissions/${id}`);
@@ -828,6 +854,20 @@ export default function TakeExamPage({
         // directly, outside Tether) — send them to the Tether launch
         // page instead of showing a dead-end access error.
         if (res.status === 403 && body?.code === "TETHER_SESSION_REQUIRED" && typeof body?.action?.redirectTo === "string") {
+          // Secure-recovery hardening v1, Part B — before bouncing to the
+          // tether-launch page (which, for an ordinary session gap, would
+          // just relaunch and bounce straight back here), check whether
+          // the authoritative recovery state already says this attempt
+          // needs manual review. If so, stay here and show the notice
+          // instead of entering the redirect loop between this page and
+          // tether-launch — this is the other half of that loop (see
+          // tether-launch/page.tsx's own checkManualReviewRequired for
+          // the first half).
+          const requiresManualReview = await checkManualReviewRequired();
+          if (requiresManualReview) {
+            setManualReviewRequired(true);
+            return null;
+          }
           router.replace(body.action.redirectTo);
           return null;
         }
@@ -850,7 +890,7 @@ export default function TakeExamPage({
       setLoadError("Could not load this exam — check your connection and try refreshing the page.");
       return null;
     }
-  }, [id, applySubmissionData, router]);
+  }, [id, applySubmissionData, router, checkManualReviewRequired]);
 
   // One-Question-At-A-Time Exam Delivery v1 — see
   // docs/one-question-delivery-v1.md. Declared early (ahead of
@@ -918,6 +958,12 @@ export default function TakeExamPage({
       if (body.state === "ACTIVE" || body.state === "TEMPORARILY_DISCONNECTED") {
         setRecoveryStatusMessage(null);
         setRecoveryRedirectTo(null);
+        setManualReviewRequired(false);
+      } else if (body.state === "MANUAL_REVIEW_REQUIRED") {
+        // Secure-recovery hardening v1, Part B — takes over the whole
+        // page render (see the early-return branch below); the ordinary
+        // banner message/redirect are irrelevant once this is set.
+        setManualReviewRequired(true);
       } else if (body.state !== "SUBMITTED" && body.state !== "EXPIRED") {
         setRecoveryStatusMessage(body.detail);
         setRecoveryRedirectTo(body.redirectTo);
@@ -3099,6 +3145,16 @@ export default function TakeExamPage({
     // insertion (paste-like); otherwise the periodic timer in the hook
     // covers it. No-ops entirely when provenance is OFF.
     answerDevelopmentCapture.notifyTextChange(questionId, value);
+  }
+
+  // Secure-recovery hardening v1, Part B — takes priority over every
+  // other render branch below, including stale `data` from before this
+  // was set (e.g. a mid-session recovery-status poll discovering the
+  // device mismatch after the exam content had already loaded): exam
+  // content must stay blocked, and the generic TETHER_SESSION_REQUIRED
+  // redirect loop must never re-enter from here either.
+  if (manualReviewRequired) {
+    return <ManualReviewNotice pendingCount={resilientAutosave.pendingCount} />;
   }
 
   if (!data && loadError) {

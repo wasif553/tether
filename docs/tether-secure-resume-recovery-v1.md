@@ -340,24 +340,18 @@ authoritative server gate):
   actually attempting THIS attestation. A mismatch returns
   `DEVICE_CHANGE_DETECTED` (409) — verification is refused, nothing is
   granted, and a `TETHER_SECURE_RESUME_DENIED_DEVICE_CHANGE`
-  `PlatformAuditLog` entry is written. **Never an `IntegrityEvent`** — a
-  device change is a technical/administrative fact, not a misconduct
-  signal.
+  `PlatformAuditLog` entry is written (deduplicated against the
+  session's own last-recorded failure reason, so a retry sequence
+  against the same session never re-logs). **Never an `IntegrityEvent`**
+  — a device change is a technical/administrative fact, not a
+  misconduct signal.
 - **Proactive UI hint**: `resolveRecoveryState` accepts an optional
   `requestingInstallationId` (a client claim — see its own doc comment);
   when it differs from the current session's bound installation, the
-  state is `MANUAL_REVIEW_REQUIRED` and
-  `GET /api/submissions/[id]/recovery-status` also writes a
-  `TETHER_DEVICE_CHANGE_RECOVERY_BLOCKED` audit entry, so the student
-  never even attempts the doomed attestation. This is read-only and
-  confers no trust by itself.
-
-The exact message: *"This examination was started on another registered
-computer. Contact your lecturer or exam support."* — no broad lecturer-
-approval UI was built (none existed to reuse safely within this task's
-scope); a lecturer can still see `Manual review required` on the
-submissions list (see [Lecturer visibility](#lecturer-visibility)) and
-follow up directly.
+  state is `MANUAL_REVIEW_REQUIRED`. This is read-only and confers no
+  trust by itself — `GET /api/submissions/[id]/recovery-status` is a
+  pure read with no audit side effect of its own (see "Secure-recovery
+  hardening v1" below for where the actual audit entries are written).
 
 A revoked installation cannot attest at all (existing, unchanged
 `INSTALLATION_NOT_ACTIVE` check, confirmed rejecting even a recovery
@@ -365,6 +359,105 @@ attempt in test "23"). The SAME installation may always resume after
 completing fresh verification — nothing about "same device" requires any
 special-casing beyond the ordinary attestation checklist succeeding
 again.
+
+## Secure-recovery hardening v1 — fail-closed recovery for unbound (LEGACY-only) attempts
+
+A follow-up hardening pass closed a gap in the original design above:
+automatic same-device recovery is only ever trustworthy when the
+*original* attempt has a server-verified, genuinely installation-bound
+`clientInstallationId` (established through Secure Client Attestation
+v2's `EXAM_SESSION` challenge/response — see
+[`docs/tether-system-check-v1.md`](tether-system-check-v1.md)). Under
+`TETHER_EXAM_ATTESTATION_MODE=LEGACY`, an original attempt may have been
+verified through the plain, unsigned LEGACY checks payload alone
+(`recordAttestation` in `secureClientRunner.ts`) — which proves nothing
+about which physical device produced it. Before this pass, a *different*
+computer could complete a fresh LEGACY re-attestation on a recovery
+session and be treated as a legitimate resume, without ever proving it
+was the machine the attempt actually started on.
+
+**Behaviour now:**
+
+- If the original active attempt has a trusted, genuinely v2
+  installation-bound `clientInstallationId`: automatic recovery requires
+  a fresh `SecureClientSession` **and** a fresh, genuine v2
+  `EXAM_SESSION` attestation from that *same* installation. A revoked
+  installation, or a different (even same-student) installation, is
+  refused — `RECOVERY_STATE = MANUAL_REVIEW_REQUIRED` for the latter,
+  `DEVICE_CHANGE_DETECTED` (409) at the attestation layer.
+- If the original active attempt has **no** trusted installation
+  binding (LEGACY-only, but was genuinely verified by some means —
+  `priorSessionEverVerified`): the server never infers or claims "same
+  device" from a renderer-supplied installation id or from a fresh
+  LEGACY re-attestation alone. `resolveRecoveryState` returns
+  `MANUAL_REVIEW_REQUIRED` immediately, before even checking this new
+  session's own attestation result — exam content stays blocked, pending
+  IndexedDB drafts are preserved untouched, and the attempt requires
+  lecturer/exam-support review.
+- If the original active attempt was **never verified at all** (it
+  crashed before completing even its own first LEGACY/v2 check —
+  `priorSessionEverVerified: false`): nothing was ever unlocked to
+  protect, so this is indistinguishable from an ordinary first launch
+  and falls straight through to the unmodified LEGACY/DUAL/V2_REQUIRED
+  truth table — requirement 4, "ordinary initial exam-start
+  compatibility remains unchanged", holds even for a same-submission
+  relaunch that happens before the student ever got in.
+- `TETHER_EXAM_ATTESTATION_MODE` (LEGACY/DUAL/V2_REQUIRED) itself is
+  **never** changed by this logic — an ordinary, non-recovery
+  (first-ever launch) session is governed entirely by the existing,
+  unmodified truth table. **Institutions that want automatic same-device
+  recovery to actually work should run DUAL or V2_REQUIRED** — under
+  pure LEGACY, every genuine crash/relaunch of a verified attempt will
+  require manual review, since no attempt ever established an
+  installation-bound reference to recover against.
+
+**Where the logic lives:** `resolveTrustedTetherVerification` and
+`resolveRecoveryState` in `src/lib/tetherRecovery.ts` (pure, fully unit
+tested); `resolvePriorSessionTrust` in `src/lib/secureClientRunner.ts`
+resolves the prior session's trust facts from
+`recoveryOfSessionId` — `clientInstallationId`, once set by a genuine v2
+attestation, is never cleared, so checking only the direct prior session
+(not the whole supersession chain) is sufficient.
+
+**Student-facing manual-review notice** (`src/components/ManualReviewNotice.tsx`,
+used by both `src/app/student/exams/[id]/page.tsx` and
+`src/app/student/exams/[id]/tether-launch/page.tsx`): title "Recovery
+requires support", message *"This examination was started without a
+verifiable match to this registered computer, or it was started on
+another registered computer. Contact your lecturer or exam support."*
+Both pages consult `GET /api/submissions/[id]/recovery-status` before
+taking their normal automatic action (relaunching, or redirecting to the
+launch page) and render this notice in place instead when the state is
+`MANUAL_REVIEW_REQUIRED` — breaking what would otherwise be a silent
+bounce loop between the two pages, each repeatedly creating a fresh
+`SecureClientSession` row. `role="status" aria-live="polite"`; never
+exposes installation ids, public keys, fingerprints, signatures, or
+internal error detail.
+
+**Audit logging — at most one entry per recovery attempt.** Rather than
+logging at read/poll time (which would duplicate on every status poll),
+logging happens once, at the deterministic write that actually causes
+the outcome: `TETHER_SECURE_RESUME_MANUAL_REVIEW_REQUIRED` when
+`getOrCreateSessionCore` (`secureClientRunner.ts`) supersedes a session
+that was never installation-bound; `TETHER_SECURE_RESUME_DENIED_DEVICE_CHANGE`
+on the first denied attestation attempt against a given session
+(deduplicated against that session's own last-recorded failure reason).
+`resolveSubmissionRecoveryState` (`tetherRecoveryRunner.ts`) is a pure
+read with no audit side effect of its own.
+
+**resumeCount idempotency.** `verifyExamSessionAttestation`'s DB
+transaction now does a *conditional* `updateMany({ where: { id:
+session.id, installationAttestationVerified: false }, ... })` instead of
+an unconditional `update` — Postgres serializes concurrent UPDATEs to
+the same row, so of any number of concurrent duplicate verify requests
+(double-click, React rerender, each with their own independently
+challenged/signed attestation), only the one that actually flips
+`installationAttestationVerified` counts as `isRecoveryCompletion`, and
+only that one triggers `recordSecureResumeCompleted` (which increments
+`Submission.resumeCount`). A failed or manual-review outcome never
+reaches this code path at all, so `resumeCount` never increments for
+either. This is an authoritative server-transaction boundary — never
+client-side debounce.
 
 ## Final submission idempotency
 
@@ -701,6 +794,14 @@ record" (never an error, never a security-relevant default):
   mechanism could be reused safely; none existed. A student who
   genuinely needs to switch computers mid-exam has no in-product path in
   this release — see the [runbook](#exam-day-support-runbook).
+- **Under pure `TETHER_EXAM_ATTESTATION_MODE=LEGACY`, a genuine
+  crash/relaunch always requires manual review** — see "Secure-recovery
+  hardening v1" above. This is intentional (LEGACY verification alone
+  cannot prove device identity), but it does mean an institution running
+  LEGACY-only should expect every real crash-recovery case to land on a
+  lecturer/exam-support desk rather than resolving automatically.
+  Institutions that want automatic same-device recovery to work should
+  run `DUAL` or `V2_REQUIRED`.
 - **`apps/lockdown` (the Electron Tether client) was not modified** — no
   packaged-behaviour change, so v1.6.0 is unchanged and no installer was
   rebuilt (see the implementation report's "Electron changes" section).

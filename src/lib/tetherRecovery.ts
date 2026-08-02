@@ -65,10 +65,87 @@ export type TrustedTetherVerificationInput = {
   nowMs: number;
   heartbeatPolicy: HeartbeatPolicy;
   offlineContinueMs: number;
+  /**
+   * Secure-recovery hardening v1, Part A — true when this session
+   * supersedes an earlier one for the same submission (DB row has
+   * recoveryOfSessionId set — see getOrCreateSessionCore in
+   * secureClientRunner.ts). False for a submission's ordinary first-ever
+   * launch, which is completely unaffected by everything below (Part A
+   * requirement 4: "ordinary initial exam-start compatibility must
+   * remain unchanged").
+   */
+  isRecoverySession: boolean;
+  /**
+   * Only meaningful when isRecoverySession is true — the PRIOR session's
+   * own trusted v2 installation-bound reference (its clientInstallationId
+   * — see resolvePriorSessionTrust in secureClientRunner.ts), or null
+   * when that prior attempt was never installation-bound (LEGACY-only,
+   * or never verified at all). A server-derived fact, never a
+   * renderer-supplied claim.
+   */
+  priorSessionTrustedInstallationId: string | null;
+  /**
+   * Only meaningful when isRecoverySession is true — true if the PRIOR
+   * session ever reached genuine VERIFIED state by any means (legacy or
+   * v2), i.e. content was actually unlocked on it at some point. See
+   * PriorSessionTrust's own doc comment in secureClientRunner.ts for why
+   * this must be checked separately from priorSessionTrustedInstallationId:
+   * a prior session that crashed before ever completing its OWN first
+   * attestation never unlocked anything to protect, so recovering it must
+   * behave exactly like an ordinary first launch, not a fail-closed
+   * unbound recovery.
+   */
+  priorSessionEverVerified: boolean;
 };
 
+/**
+ * Secure-recovery hardening v1, Part A — "fail-closed recovery for
+ * LEGACY-unbound attempts". Automatic same-device recovery is only ever
+ * trustworthy when there is a genuine, cryptographically-proven
+ * installation reference to check a NEW attestation against — LEGACY
+ * verification alone (an unsigned, unbound checks payload — see
+ * recordAttestation in secureClientRunner.ts) proves nothing about which
+ * physical device produced it, so it can never be treated as sufficient
+ * to resume an attempt, regardless of TETHER_EXAM_ATTESTATION_MODE. This
+ * function does NOT change LEGACY/DUAL/V2_REQUIRED itself (Part A
+ * requirement 3) — an ordinary, non-recovery (first-launch) session is
+ * still governed entirely by the existing resolveEffectiveTetherVerification
+ * truth table, unmodified. Only a RECOVERY session (isRecoverySession)
+ * gets the stricter treatment, and only once its PRIOR session ever
+ * actually reached a genuinely verified state
+ * (priorSessionEverVerified) — a prior session that crashed before
+ * completing even its OWN first attestation never unlocked any content
+ * to protect, so recovering it is indistinguishable from an ordinary
+ * first launch and must fall straight through to the unmodified truth
+ * table below (this is what keeps requirement 4, "ordinary initial
+ * exam-start compatibility must remain unchanged", true even for a
+ * same-submission relaunch that happens before the student ever got in):
+ *   - Prior session was verified, but has no trusted installation
+ *     reference at all (priorSessionTrustedInstallationId is null — the
+ *     original attempt was LEGACY-only): never trusted automatically,
+ *     full stop, no matter what this new session's own attestation
+ *     shows. The caller (resolveRecoveryState) surfaces this as
+ *     MANUAL_REVIEW_REQUIRED, not a plain "try again" state — see that
+ *     function's own doc comment.
+ *   - Prior session was verified AND has a trusted installation
+ *     reference: this session must itself have completed fresh, genuine
+ *     v2 installation-bound attestation (v2Verified) — legacyVerified
+ *     alone is never sufficient for a recovery, even under LEGACY mode
+ *     (LEGACY attestation still runs and is still recorded, since v2
+ *     attestation is attempted opportunistically regardless of mode —
+ *     see tether-launch/page.tsx's submitExamSessionAttestationV2 — but
+ *     its RESULT is what this function actually checks for a recovery,
+ *     never the unbound legacy result). Whether the ATTEMPTING
+ *     installation matches the one the original was bound to is
+ *     enforced separately and authoritatively inside
+ *     verifyExamSessionAttestation (tetherAttestationRunner.ts) — this
+ *     function only decides whether the RESULT of that check is ever
+ *     trusted at all.
+ */
 export function resolveTrustedTetherVerification(input: TrustedTetherVerificationInput): boolean {
-  const baseVerified = resolveEffectiveTetherVerification(input);
+  const baseVerified = input.isRecoverySession && input.priorSessionEverVerified
+    ? Boolean(input.priorSessionTrustedInstallationId) && input.v2Verified
+    : resolveEffectiveTetherVerification(input);
   if (!baseVerified) return false;
   const baseline = input.lastHeartbeatAtMs ?? input.sessionStartedAtMs;
   return isVerificationStillFresh(baseline, input.nowMs, { ...input.heartbeatPolicy, offlineContinueMs: input.offlineContinueMs });
@@ -87,6 +164,22 @@ export type RecoverySessionInput = {
   startedAtMs: number;
   /** The registered installation this session is v2-bound to, if any — see Part 8, "same device / device change". */
   clientInstallationId: string | null;
+  /** Secure-recovery hardening v1, Part A — true when this session supersedes an earlier one (recoveryOfSessionId set). See TrustedTetherVerificationInput's own doc comment. */
+  isRecoverySession: boolean;
+  /** Secure-recovery hardening v1, Part A — the PRIOR session's own trusted v2 installation reference, or null if that attempt was never installation-bound (or never verified at all). Only meaningful when isRecoverySession is true. */
+  priorSessionTrustedInstallationId: string | null;
+  /** Secure-recovery hardening v1, Part A — true if the PRIOR session ever reached genuine VERIFIED state by any means. See TrustedTetherVerificationInput's own doc comment. Only meaningful when isRecoverySession is true. */
+  priorSessionEverVerified: boolean;
+  /**
+   * Secure-recovery hardening v1, Part B — SecureClientSession.installationAttestationFailureReason
+   * as of the last recorded attestation attempt on THIS session, if any.
+   * Used only to detect "a DIFFERENT installation already attempted and
+   * was denied" (value === "DEVICE_CHANGE_DETECTED") without needing a
+   * renderer-supplied requestingInstallationId — see
+   * verifyExamSessionAttestation, the authoritative gate that actually
+   * sets this field.
+   */
+  installationAttestationFailureReason: string | null;
 };
 
 export type ResolveRecoveryStateInput = {
@@ -159,9 +252,31 @@ export function resolveRecoveryState(input: ResolveRecoveryStateInput): Recovery
     return { state: "RESUME_REQUIRES_TETHER" };
   }
 
-  // Part 8 — proactive, non-authoritative device-change hint only. See
-  // this field's own doc comment: the real enforcement happens inside
-  // verifyExamSessionAttestation.
+  // Part A — fail-closed recovery for a LEGACY-unbound original attempt:
+  // never inferred or claimed to be the same device, regardless of what
+  // THIS session's own attestation might otherwise show. Checked before
+  // every other recovery signal — an unbound original can never resolve
+  // to anything but manual review. Gated on priorSessionEverVerified: a
+  // prior session that crashed before completing even its OWN first
+  // attestation never unlocked any content, so this falls through to
+  // ordinary treatment instead (see resolveTrustedTetherVerification's
+  // own doc comment for why).
+  if (session.isRecoverySession && session.priorSessionEverVerified && !session.priorSessionTrustedInstallationId) {
+    return { state: "MANUAL_REVIEW_REQUIRED" };
+  }
+
+  // Part B — a DIFFERENT installation already attempted this recovery
+  // and was authoritatively denied (see verifyExamSessionAttestation's
+  // own device-change check, which sets this field) — server-derived,
+  // never dependent on the renderer supplying its own installation id.
+  if (session.installationAttestationFailureReason === "DEVICE_CHANGE_DETECTED") {
+    return { state: "MANUAL_REVIEW_REQUIRED" };
+  }
+
+  // Part 8 — proactive, non-authoritative device-change hint only (a
+  // client-claimed installation id, when the caller happens to supply
+  // one). See this field's own doc comment: the real enforcement happens
+  // inside verifyExamSessionAttestation.
   if (
     input.requestingInstallationId != null &&
     session.clientInstallationId != null &&
@@ -179,6 +294,9 @@ export function resolveRecoveryState(input: ResolveRecoveryStateInput): Recovery
     nowMs: input.nowMs,
     heartbeatPolicy: input.heartbeatPolicy,
     offlineContinueMs: input.offlineContinueMs,
+    isRecoverySession: session.isRecoverySession,
+    priorSessionTrustedInstallationId: session.priorSessionTrustedInstallationId,
+    priorSessionEverVerified: session.priorSessionEverVerified,
   });
 
   if (!trusted) return { state: "RESUME_REQUIRES_FRESH_ATTESTATION" };
@@ -234,7 +352,8 @@ export const RECOVERY_STATE_COPY: Record<RecoveryState, RecoveryStateCopy> = {
   },
   MANUAL_REVIEW_REQUIRED: {
     label: "Manual review required",
-    detail: "This examination was started on another registered computer. Contact your lecturer or exam support.",
+    detail:
+      "This examination was started without a verifiable match to this registered computer, or it was started on another registered computer. Contact your lecturer or exam support.",
   },
   SUBMITTED: { label: "Submitted", detail: "Submission received." },
   EXPIRED: { label: "Expired", detail: "The time for this examination has ended." },

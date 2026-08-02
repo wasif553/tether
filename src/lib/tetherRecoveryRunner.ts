@@ -12,7 +12,7 @@ import { prisma } from "@/lib/prisma";
 import { parseSecureSettings } from "@/lib/secureExam";
 import { resolveSubmissionTimingPolicy, submissionDeadline } from "@/lib/assessmentLifecycle";
 import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
-import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
+import { getCurrentSessionForSubmission, resolvePriorSessionTrust } from "@/lib/secureClientRunner";
 import { parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
 import { resolveOfflineContinueMs } from "@/lib/tetherRecoveryConfig";
 import { buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
@@ -59,6 +59,11 @@ export async function resolveSubmissionRecoveryState(params: {
   const policy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
 
   const currentSession = await getCurrentSessionForSubmission(submission.id);
+  // Part A — resolved unconditionally (not just when recoveryOfSessionId
+  // is set) since resolvePriorSessionTrust already returns { null, false }
+  // for a null recoveryOfSessionId, and RecoverySessionInput needs both
+  // fields either way.
+  const priorSessionTrust = currentSession ? await resolvePriorSessionTrust(currentSession.recoveryOfSessionId) : { trustedInstallationId: null, everVerified: false };
   const session: RecoverySessionInput | null = currentSession
     ? {
         status: currentSession.status as RecoverySessionInput["status"],
@@ -68,6 +73,10 @@ export async function resolveSubmissionRecoveryState(params: {
         lastHeartbeatAtMs: currentSession.lastHeartbeatAt?.getTime() ?? null,
         startedAtMs: currentSession.startedAt.getTime(),
         clientInstallationId: currentSession.clientInstallationId,
+        isRecoverySession: Boolean(currentSession.recoveryOfSessionId),
+        priorSessionTrustedInstallationId: priorSessionTrust.trustedInstallationId,
+        priorSessionEverVerified: priorSessionTrust.everVerified,
+        installationAttestationFailureReason: currentSession.installationAttestationFailureReason,
       }
     : null;
 
@@ -84,24 +93,19 @@ export async function resolveSubmissionRecoveryState(params: {
     requestingInstallationId: params.requestingInstallationId ?? null,
   });
 
-  if (result.state === "MANUAL_REVIEW_REQUIRED" && currentSession) {
-    // Part 13 — a blocked device-change *attempt* is recorded, never an
-    // IntegrityEvent (this is a technical/administrative fact, not a
-    // misconduct signal — see Part 8/13 of the spec).
-    await createPlatformAuditLog({
-      actorId: params.requestingUserId,
-      action: "TETHER_DEVICE_CHANGE_RECOVERY_BLOCKED",
-      targetType: "Submission",
-      targetId: submission.id,
-      institutionId: submission.exam.institutionId,
-      metadata: {
-        secureClientSessionId: currentSession.id,
-        boundInstallationId: currentSession.clientInstallationId,
-        requestingInstallationId: params.requestingInstallationId ?? null,
-      },
-    }).catch(() => {});
-  }
-
+  // Secure-recovery hardening v1, Part B — this is a pure status READ,
+  // called on every poll from the student page/tether-launch page. It
+  // must never itself write an audit log entry (that would duplicate on
+  // every poll, violating "repeated polling does not duplicate audit
+  // records"). The one-audit-entry-per-recovery-attempt requirements are
+  // instead satisfied at the deterministic WRITE-triggering events that
+  // actually cause a MANUAL_REVIEW_REQUIRED outcome: session creation for
+  // an unbound original attempt (getOrCreateSessionCore in
+  // secureClientRunner.ts, action TETHER_SECURE_RESUME_MANUAL_REVIEW_REQUIRED)
+  // and a device-mismatch verification attempt (verifyExamSessionAttestation
+  // in tetherAttestationRunner.ts, action TETHER_SECURE_RESUME_DENIED_DEVICE_CHANGE,
+  // itself deduplicated against the session's own last-recorded failure
+  // reason).
   return {
     state: result.state,
     redirectTo: result.state === "RESUME_REQUIRES_TETHER" || result.state === "RESUME_REQUIRES_FRESH_ATTESTATION" ? buildTetherLaunchPagePath(submission.examId) : null,
@@ -156,6 +160,19 @@ export async function resolveExamSubmissionsRecoveryStatuses(
   for (const s of sessions) {
     if (!sessionBySubmission.has(s.submissionId)) sessionBySubmission.set(s.submissionId, s);
   }
+  // Part A — batched prior-session lookup (never N+1): one query for
+  // every recoveryOfSessionId referenced by the current sessions above,
+  // mirroring resolvePriorSessionTrust's single-row lookup but for the
+  // whole page at once.
+  const priorSessionIds = [...new Set(sessions.map((s) => s.recoveryOfSessionId).filter((id): id is string => Boolean(id)))];
+  const priorSessions = priorSessionIds.length
+    ? await prisma.secureClientSession.findMany({
+        where: { id: { in: priorSessionIds } },
+        select: { id: true, clientInstallationId: true, verificationStatus: true, installationAttestationVerified: true },
+      })
+    : [];
+  const priorTrustedInstallationById = new Map(priorSessions.map((s) => [s.id, s.clientInstallationId]));
+  const priorEverVerifiedById = new Map(priorSessions.map((s) => [s.id, s.verificationStatus === "VERIFIED" || s.installationAttestationVerified === true]));
   const pendingCountEvents = await prisma.secureClientEvent.findMany({
     where: { submissionId: { in: submissionIds }, eventType: "AUTOSAVE_PENDING_COUNT_REPORTED" },
     orderBy: { serverReceivedAt: "desc" },
@@ -198,6 +215,10 @@ export async function resolveExamSubmissionsRecoveryStatuses(
             lastHeartbeatAtMs: currentSession.lastHeartbeatAt?.getTime() ?? null,
             startedAtMs: currentSession.startedAt.getTime(),
             clientInstallationId: currentSession.clientInstallationId,
+            isRecoverySession: Boolean(currentSession.recoveryOfSessionId),
+            priorSessionTrustedInstallationId: currentSession.recoveryOfSessionId ? (priorTrustedInstallationById.get(currentSession.recoveryOfSessionId) ?? null) : null,
+            priorSessionEverVerified: currentSession.recoveryOfSessionId ? (priorEverVerifiedById.get(currentSession.recoveryOfSessionId) ?? false) : false,
+            installationAttestationFailureReason: currentSession.installationAttestationFailureReason,
           }
         : null,
       heartbeatPolicy: { heartbeatIntervalSeconds: policy.heartbeatIntervalSeconds, heartbeatGraceSeconds: policy.heartbeatGraceSeconds },

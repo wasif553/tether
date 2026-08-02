@@ -28,7 +28,7 @@ import {
   type SecureClientAvailability,
 } from "@/lib/secureClientPolicy";
 import { secureClientAvailabilityForInstitution, isTetherSecureClientBypassAllowed } from "@/lib/secureClientAvailability";
-import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
+import { getCurrentSessionForSubmission, resolvePriorSessionTrust } from "@/lib/secureClientRunner";
 import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
 import { isFinalExaminationPolicyEstablished } from "@/lib/assessmentType";
 import { systemCheckMode } from "@/lib/systemCheckConfig";
@@ -73,6 +73,11 @@ async function resolveSecureClientLaunchField(params: {
   // policy) rather than the exact per-exam configured cadence — a
   // deliberately small, documented imprecision; TETHER_OFFLINE_CONTINUE_MINUTES
   // (minimum 2 minutes) dominates the total staleness window regardless.
+  // Secure-recovery hardening v1, Part A — resolved unconditionally; see
+  // the matching call site in src/app/api/submissions/[id]/route.ts for
+  // why this is always safe to compute (falls through to the existing,
+  // unmodified truth table for an ordinary non-recovery session).
+  const priorSessionTrust = await resolvePriorSessionTrust(currentSession?.recoveryOfSessionId ?? null);
   const hasVerifiedTetherSession = resolveTrustedTetherVerification({
     sessionRequirement: parseAttestationRequirement(currentSession?.attestationRequirement ?? null),
     legacyVerified: currentSession?.verificationStatus === "VERIFIED",
@@ -82,6 +87,9 @@ async function resolveSecureClientLaunchField(params: {
     nowMs: Date.now(),
     heartbeatPolicy: { heartbeatIntervalSeconds: DEFAULT_HEARTBEAT_INTERVAL_SECONDS, heartbeatGraceSeconds: DEFAULT_HEARTBEAT_GRACE_SECONDS },
     offlineContinueMs: resolveOfflineContinueMs(),
+    isRecoverySession: Boolean(currentSession?.recoveryOfSessionId),
+    priorSessionTrustedInstallationId: priorSessionTrust.trustedInstallationId,
+    priorSessionEverVerified: priorSessionTrust.everVerified,
   });
   const devBypassAllowed = isTetherSecureClientBypassAllowed(params.institutionSlug);
   const gate = resolveSecureClientStartGate({ effectiveDeliveryMode, hasVerifiedTetherSession, devBypassAllowed });

@@ -44,6 +44,7 @@ import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
 import { buildTetherDeepLink, shouldShowInstallerFallback, resolveTetherLaunchFailureMessage } from "@/lib/tetherLaunch";
 import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 import { ensureRegisteredInstallation } from "@/lib/secureClient/installationClient";
+import { ManualReviewNotice } from "@/components/ManualReviewNotice";
 
 // Exam Design Policy v1 — see docs/exam-design-policy-v1.md. Mirrors the
 // join page's own local type — this codebase does not share a central
@@ -209,21 +210,60 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   const [policyAcknowledged, setPolicyAcknowledged] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Secure-recovery hardening v1, Part B — true once the authoritative
+  // recovery-status endpoint has reported MANUAL_REVIEW_REQUIRED for the
+  // existing IN_PROGRESS submission this page would otherwise
+  // auto-relaunch. Checked ONCE, before ever calling runLaunchSequence,
+  // so an unbound-original/device-mismatch attempt never enters the
+  // relaunch sequence at all here — no SecureClientSession row is
+  // created by this page in that case, and the automatic retry loop
+  // (this effect re-running relaunch, silently, on every mount) never
+  // starts.
+  const [manualReview, setManualReview] = useState(false);
 
   useEffect(() => {
     fetch(`/api/exams/${examId}/access-check`)
       .then((res) => res.json())
-      .then((data: AccessCheckResult) => {
+      .then(async (data: AccessCheckResult) => {
         setResult(data);
         // Already has a submission — no need to show the acknowledgement
-        // screen again; go straight into the start/launch sequence.
+        // screen again; go straight into the start/launch sequence,
+        // unless the authoritative recovery state says this attempt
+        // requires manual review first.
         if (data.ok && data.existingSubmission?.status === "IN_PROGRESS") {
+          const requiresManualReview = await checkManualReviewRequired(data.existingSubmission.id);
+          if (requiresManualReview) {
+            setManualReview(true);
+            return;
+          }
           void runLaunchSequence(null);
         }
       })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [examId]);
+
+  /**
+   * Best-effort, read-only check against the authoritative
+   * GET /api/submissions/[id]/recovery-status endpoint (never a local
+   * guess) — see src/lib/tetherRecoveryRunner.ts. Fails OPEN (returns
+   * false) on any network/parse error: this is only a UI-layer decision
+   * about whether to show the manual-review notice instead of attempting
+   * a relaunch here; the real, authoritative content gate is always the
+   * server-side check inside POST /api/exams/[id]/start and
+   * GET /api/submissions/[id], which enforce this regardless of what this
+   * page decides to render.
+   */
+  async function checkManualReviewRequired(submissionId: string): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/submissions/${submissionId}/recovery-status`);
+      if (!res.ok) return false;
+      const body: { state?: string } = await res.json();
+      return body.state === "MANUAL_REVIEW_REQUIRED";
+    } catch {
+      return false;
+    }
+  }
 
   /**
    * Runs POST /start (idempotent — resumes an existing IN_PROGRESS
@@ -500,6 +540,15 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         <p className="mt-3 text-gray-700">{message}</p>
       </div>
     );
+  }
+
+  // Secure-recovery hardening v1, Part B — takes priority over the
+  // busy/auto-relaunch view below: no relaunch was ever attempted from
+  // this page for this submission (checkManualReviewRequired ran before
+  // runLaunchSequence could be called), so exam content stays blocked
+  // and no further automatic action happens here.
+  if (manualReview) {
+    return <ManualReviewNotice />;
   }
 
   if (result.existingSubmission?.status === "IN_PROGRESS" || busy) {
