@@ -40,7 +40,7 @@
 import { randomBytes, createHash } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
-import { getSigningPrivateKey, getSigningPublicKey, getSigningKeyId } from "@/lib/secureClientRunner";
+import { getSigningPrivateKey, getSigningPublicKey, getSigningKeyId, resolvePriorSessionTrust } from "@/lib/secureClientRunner";
 import {
   ATTESTATION_PROTOCOL_VERSION,
   ATTESTATION_ISSUER,
@@ -990,25 +990,36 @@ export async function verifyExamSessionAttestation(params: VerifyExamSessionAtte
   }
 
   // Tether Secure Exam Recovery and Resilient Autosave v1 — Part 8 (same
-  // device / device change). This IS the real, authoritative enforcement
-  // gate (the recovery-state resolver's own device-change check — see
-  // resolveRecoveryState in src/lib/tetherRecovery.ts — is a proactive,
-  // non-authoritative UI hint only). If this session supersedes an
-  // earlier one for the same submission (recoveryOfSessionId set — see
-  // getOrCreateSessionCore in secureClientRunner.ts) and that earlier
-  // session was already bound to a DIFFERENT, real installation, a
-  // different ACTIVE installation must never silently take over the
-  // attempt: refuse verification and audit the blocked attempt (never an
-  // IntegrityEvent — a device change is a technical/administrative fact,
-  // not a misconduct signal; see Part 8/13 of the spec).
-  const wasAlreadyVerified = session.installationAttestationVerified;
-  if (session.recoveryOfSessionId) {
-    const priorSession = await prisma.secureClientSession.findUnique({
-      where: { id: session.recoveryOfSessionId },
-      select: { clientInstallationId: true },
-    });
-    if (priorSession?.clientInstallationId && priorSession.clientInstallationId !== loaded.installation.id) {
-      await recordExamSessionFailure(session.id, "DEVICE_CHANGE_DETECTED");
+  // device / device change), hardened further by the secure-recovery
+  // hardening v1 pass (Part A/B/C). This IS the real, authoritative
+  // enforcement gate (the recovery-state resolver's own device-change
+  // check — see resolveRecoveryState in src/lib/tetherRecovery.ts — is a
+  // proactive, non-authoritative UI hint only). If this session
+  // supersedes an earlier one for the same submission (recoveryOfSessionId
+  // set — see getOrCreateSessionCore in secureClientRunner.ts), resolves
+  // whether that PRIOR session ever established a trusted installation
+  // reference (resolvePriorSessionTrust — walks back through the chain
+  // via the prior session's own clientInstallationId, never inferred,
+  // never a renderer claim). Reused below both to refuse a genuine
+  // device mismatch AND (Part C) to decide whether a successful
+  // verification is even ELIGIBLE to count as a completed recovery at
+  // all — an unbound-original recovery is never eligible, regardless of
+  // what this attestation shows (see resolveTrustedTetherVerification's
+  // own doc comment for why). trustedInstallationId non-null already
+  // implies the prior session was genuinely v2-verified, so no separate
+  // everVerified check is needed for either use below.
+  const { trustedInstallationId: priorSessionTrustedInstallationId } = await resolvePriorSessionTrust(session.recoveryOfSessionId);
+  if (session.recoveryOfSessionId && priorSessionTrustedInstallationId && priorSessionTrustedInstallationId !== loaded.installation.id) {
+    // Part B — audited AT MOST ONCE per session: a mismatched device
+    // retrying verification against this SAME session (a different
+    // challenge/nonce each time) would otherwise re-log on every
+    // attempt. installationAttestationFailureReason already reflects the
+    // outcome of the LAST attempt against this session, read once above
+    // (`session`) before this request's own write — a genuinely
+    // concurrent double-attempt could still log twice in the worst case,
+    // but a normal retry sequence (the actual "double-click/rerender"
+    // scenario this hardening pass targets) will not.
+    if (session.installationAttestationFailureReason !== "DEVICE_CHANGE_DETECTED") {
       await createPlatformAuditLog({
         actorId: params.userId,
         action: "TETHER_SECURE_RESUME_DENIED_DEVICE_CHANGE",
@@ -1017,12 +1028,13 @@ export async function verifyExamSessionAttestation(params: VerifyExamSessionAtte
         institutionId: session.institutionId,
         metadata: {
           secureClientSessionId: session.id,
-          boundInstallationId: priorSession.clientInstallationId,
+          boundInstallationId: priorSessionTrustedInstallationId,
           attemptingInstallationId: loaded.installation.id,
         },
       }).catch(() => {});
-      return { outcome: "DEVICE_CHANGE_DETECTED" };
     }
+    await recordExamSessionFailure(session.id, "DEVICE_CHANGE_DETECTED");
+    return { outcome: "DEVICE_CHANGE_DETECTED" };
   }
 
   // 6, 20: nonce not previously consumed — enforced by the unique index
@@ -1033,7 +1045,7 @@ export async function verifyExamSessionAttestation(params: VerifyExamSessionAtte
   const challengeHash = createHash("sha256").update(JSON.stringify(challenge), "utf8").digest("hex");
 
   try {
-    const sessionId = await prisma.$transaction(async (tx) => {
+    const { sessionId, transitioned } = await prisma.$transaction(async (tx) => {
       const verification = await tx.systemCheckSecureClientVerification.create({
         data: {
           userId: params.userId,
@@ -1053,8 +1065,24 @@ export async function verifyExamSessionAttestation(params: VerifyExamSessionAtte
           verifiedAt: new Date(),
         },
       });
-      await tx.secureClientSession.update({
-        where: { id: session.id },
+      // Secure-recovery hardening v1, Part C — resumeCount idempotency.
+      // Conditional on installationAttestationVerified STILL being false
+      // at the moment this UPDATE actually runs (not on the `session` row
+      // read at the top of this function, which can be stale under
+      // genuine concurrency — two duplicate verify requests, e.g. from a
+      // double-click or a React rerender, each with their own valid
+      // challenge/nonce, could otherwise both read
+      // installationAttestationVerified as false before either commits).
+      // Postgres serializes concurrent
+      // UPDATEs to the same row: the second transaction blocks until the
+      // first commits, then re-evaluates this WHERE clause against the
+      // NOW-committed row and matches zero rows — updateMany reports
+      // count 0 rather than throwing, so exactly one of any number of
+      // concurrent duplicate requests ever sees transitioned:true. This
+      // is the authoritative server-transaction boundary Part C asks
+      // for — never client debounce.
+      const updateResult = await tx.secureClientSession.updateMany({
+        where: { id: session.id, installationAttestationVerified: false },
         data: {
           clientInstallationId: loaded.installation.id,
           clientInstallationIdHash: loaded.installation.publicKeyFingerprint,
@@ -1065,13 +1093,21 @@ export async function verifyExamSessionAttestation(params: VerifyExamSessionAtte
         },
       });
       await tx.tetherClientInstallation.update({ where: { id: loaded.installation.id }, data: { lastAttestedAt: new Date() } });
-      return session.id;
+      return { sessionId: session.id, transitioned: updateResult.count === 1 };
     });
     return {
       outcome: "VERIFIED",
       sessionId,
       installationPublicKeyFingerprint: loaded.installation.publicKeyFingerprint,
-      isRecoveryCompletion: Boolean(session.recoveryOfSessionId) && !wasAlreadyVerified,
+      // Part A/C — only a genuine, bound-original recovery whose
+      // verification transition THIS request actually performed counts
+      // as a completed recovery. Never true for: an ordinary first
+      // launch (recoveryOfSessionId null), an unbound-original recovery
+      // (priorSessionTrustedInstallationId null — that's
+      // MANUAL_REVIEW_REQUIRED, never an automatic completion), or a
+      // duplicate/concurrent request that lost the race to actually
+      // transition the row (transitioned false).
+      isRecoveryCompletion: Boolean(session.recoveryOfSessionId) && Boolean(priorSessionTrustedInstallationId) && transitioned,
     };
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {

@@ -5,7 +5,7 @@ import { parseSecureSettings, questionPoolsActive } from "@/lib/secureExam";
 import { canStudentViewMarks, resolveSubmissionTimingPolicy, submissionDeadline } from "@/lib/assessmentLifecycle";
 import { resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
 import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
-import { getCurrentSessionForSubmission } from "@/lib/secureClientRunner";
+import { getCurrentSessionForSubmission, resolvePriorSessionTrust } from "@/lib/secureClientRunner";
 import { isTetherSecureClientBypassAllowed } from "@/lib/secureClientAvailability";
 import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
 import { parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
@@ -71,6 +71,13 @@ export async function GET(
       // has genuinely gone stale — see that function's own doc comment.
       // `policy` here is this attempt's own FROZEN heartbeat cadence, so
       // this uses the exact configured bounds, not a default.
+      // Secure-recovery hardening v1, Part A — resolved unconditionally;
+      // resolvePriorSessionTrust already returns { null, false } for a
+      // null recoveryOfSessionId (an ordinary, non-recovery session), in
+      // which case resolveTrustedTetherVerification below falls straight
+      // through to the existing, unmodified truth table (Part A
+      // requirement 4).
+      const priorSessionTrust = await resolvePriorSessionTrust(currentSession?.recoveryOfSessionId ?? null);
       const hasVerifiedTetherSession = resolveTrustedTetherVerification({
         sessionRequirement: parseAttestationRequirement(currentSession?.attestationRequirement ?? null),
         legacyVerified: currentSession?.verificationStatus === "VERIFIED",
@@ -80,6 +87,9 @@ export async function GET(
         nowMs: Date.now(),
         heartbeatPolicy: { heartbeatIntervalSeconds: policy.heartbeatIntervalSeconds, heartbeatGraceSeconds: policy.heartbeatGraceSeconds },
         offlineContinueMs: resolveOfflineContinueMs(),
+        isRecoverySession: Boolean(currentSession?.recoveryOfSessionId),
+        priorSessionTrustedInstallationId: priorSessionTrust.trustedInstallationId,
+        priorSessionEverVerified: priorSessionTrust.everVerified,
       });
       const devBypassAllowed = isTetherSecureClientBypassAllowed(submission.exam.institution?.slug ?? null);
       const gate = resolveSecureClientStartGate({ effectiveDeliveryMode: policy.deliveryMode, hasVerifiedTetherSession, devBypassAllowed });
