@@ -24,6 +24,11 @@ describe("Part 7 — webPreferences hardening", () => {
   it("never enables the removed/unsafe enableRemoteModule option", () => {
     expect(mainSource).not.toMatch(/enableRemoteModule/);
   });
+
+  it("pre-merge audit finding (C.6) — devTools is disabled in a packaged build, not merely closed reactively after opening", () => {
+    const createWindow = mainSource.slice(mainSource.indexOf("function createWindow"), mainSource.indexOf("mainWindow.setMenuBarVisibility"));
+    expect(createWindow).toMatch(/devTools:\s*!app\.isPackaged/);
+  });
 });
 
 describe("Part 7 — permission request allowlist", () => {
@@ -78,6 +83,17 @@ describe("Part 8 — keyboard shortcut blocking wiring (item 21)", () => {
 
   it("22. no Secure-Attention-Sequence handling exists anywhere — see keyboardHardeningLogic.test.ts for the same assertion against the actual shortcut-matching function", () => {
     expect(mainSource).not.toMatch(/SecureAttentionSequence|SAS_/);
+  });
+
+  it("pre-merge audit finding (D.1/D.2) — shortcut blocking is gated on lockdownLifecycle being ACTIVE, so it does not apply outside an active exam and self-corrects the moment restoration runs", () => {
+    const handler = mainSource.slice(mainSource.indexOf('"before-input-event"'), mainSource.indexOf('"before-input-event"') + 300);
+    const gateIdx = handler.indexOf('lockdownLifecycle.getState() !== "ACTIVE"');
+    const classifyIdx = handler.indexOf("classifyKeyboardShortcut(");
+    expect(gateIdx).toBeGreaterThan(-1);
+    expect(classifyIdx).toBeGreaterThan(-1);
+    // The gate must run BEFORE the classifier — never blocked based on
+    // state checked after the shortcut has already been classified.
+    expect(gateIdx).toBeLessThan(classifyIdx);
   });
 });
 

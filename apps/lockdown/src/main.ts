@@ -398,6 +398,18 @@ function createWindow(examId: string | null) {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      // Pre-merge audit finding (C.6) — the previous mechanism only
+      // reactively closed the DevTools window AFTER it had already
+      // opened (see the packaged-only listener further below), which is
+      // weaker than actually preventing it: Electron's own
+      // webPreferences.devTools:false guarantee makes
+      // webContents.openDevTools() (menu, shortcut, IPC, or a direct
+      // webContents-API call) a genuine no-op — that window is never
+      // created at all in a packaged build. The reactive listener below
+      // is kept as a defensive backstop regardless. Dev builds
+      // (`npm start`) keep devTools:true so the team can still debug
+      // Tether itself (C.7).
+      devTools: !app.isPackaged,
       preload: preloadPath,
     },
   });
@@ -451,7 +463,26 @@ function createWindow(examId: string | null) {
   // Part 8 — browser-chrome keyboard shortcuts. Ctrl+Alt+Delete is
   // deliberately absent — see keyboardHardeningLogic.ts's own doc
   // comment for why no application can intercept it at all.
+  //
+  // Pre-merge audit finding (D.1) — this previously blocked
+  // unconditionally for the whole lifetime of the Tether window
+  // (dashboard, login, tether-launch, and even after an exam had
+  // already been submitted and restored), not only while an exam's
+  // lockdown restrictions are actually ACTIVE. That over-broad scope
+  // violated the "detection plus controlled remediation over aggressive
+  // system modification" principle — e.g. Alt+F4 was unusable even
+  // outside any exam — and DID NOT self-correct after restoration.
+  // Gating on lockdownLifecycle's own ACTIVE state (set by
+  // lockdown:set-secure-client-enforcement-state when the page reports
+  // active:true, cleared the moment restoreLockdownControls runs) makes
+  // this exactly track the same window Part 4/10 already use for
+  // process-detection polling and the restoration lifecycle — D.2
+  // ("normal computer behaviour returns after restoration") now holds
+  // for keyboard shortcuts too, and D.4 (Ctrl+R/F5 cannot destroy
+  // unsaved drafts) is unaffected since ACTIVE is exactly the window
+  // during which unsaved drafts can exist.
   mainWindow.webContents.on("before-input-event", (event, input) => {
+    if (lockdownLifecycle.getState() !== "ACTIVE") return;
     const decision = classifyKeyboardShortcut({ key: input.key, control: input.control, alt: input.alt, shift: input.shift, meta: input.meta });
     if (decision.blocked) {
       event.preventDefault();

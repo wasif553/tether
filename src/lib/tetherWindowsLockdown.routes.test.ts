@@ -237,6 +237,41 @@ describe("POST /api/submissions/[id]/integrity-events — Part 4/11, new lockdow
     expect(rows).toBe(1);
   });
 
+  it("14/F.14 (pre-merge audit finding). concurrent duplicate detection requests for the same (submission, eventType) pair never create duplicate IntegrityEvent rows", async () => {
+    // Repeated across many iterations (a single race can get lucky) with
+    // genuinely concurrent Promise.all calls, each targeting a FRESH
+    // submission so no request ever benefits from a prior committed row
+    // acting as an accidental guard — mirrors the established pattern
+    // for this exact class of bug (see answers/route.ts's own "3b/4b"
+    // concurrent-revision regression test).
+    const ITERATIONS = 15;
+    for (let i = 0; i < ITERATIONS; i++) {
+      const iterExam = await createExam(`Lockdown Concurrent Dedup Iter ${i}`, { deliveryMode: "TETHER_CLIENT_REQUIRED" });
+      const iterSubmission = await startAsStudent(iterExam.id);
+      mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+      const payload = {
+        eventType: "REMOTE_CONTROL_SOFTWARE_DETECTED",
+        severity: "MEDIUM",
+        message: "TeamViewer was detected.",
+        metadata: { capabilityId: "TEAMVIEWER", category: "REMOTE_CONTROL", policyAction: "BLOCK_DURING_EXAM" },
+      };
+
+      const [a, b, c] = await Promise.all([
+        integrityEventsRoute.POST(jsonRequest("POST", payload), { params: Promise.resolve({ id: iterSubmission.id }) }),
+        integrityEventsRoute.POST(jsonRequest("POST", payload), { params: Promise.resolve({ id: iterSubmission.id }) }),
+        integrityEventsRoute.POST(jsonRequest("POST", payload), { params: Promise.resolve({ id: iterSubmission.id }) }),
+      ]);
+      expect([a.status, b.status, c.status].every((s) => s === 200 || s === 201)).toBe(true);
+      // Exactly one of the three genuinely created the row (201); the
+      // other two must observe it and dedupe (200) — never three 201s.
+      const createdCount = [a.status, b.status, c.status].filter((s) => s === 201).length;
+      expect(createdCount).toBe(1);
+
+      const rows = await prisma.integrityEvent.count({ where: { submissionId: iterSubmission.id, eventType: "REMOTE_CONTROL_SOFTWARE_DETECTED" } });
+      expect(rows).toBe(1);
+    }
+  });
+
   it("32. non-final / non-Tether assessment behaviour is completely unaffected by the new event types existing", async () => {
     const exam = await prisma.exam.create({
       data: { title: `Lockdown Regression Standard Web ${stamp}`, durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },

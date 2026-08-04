@@ -192,31 +192,47 @@ export async function POST(
   }
 
   const debounceWindowMs = DEBOUNCE_WINDOWS_MS[eventType];
-  if (debounceWindowMs) {
-    const recent = await prisma.integrityEvent.findFirst({
+  const eventData = {
+    submissionId: id,
+    examId: submission.examId,
+    studentId: submission.studentId,
+    eventType,
+    severity,
+    message,
+    metadataJson: (metadata as Prisma.InputJsonValue) ?? undefined,
+    occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
+  };
+
+  if (!debounceWindowMs) {
+    const event = await prisma.integrityEvent.create({ data: eventData });
+    return NextResponse.json(event, { status: 201 });
+  }
+
+  // Pre-merge audit finding (F.14) — the previous read-then-create here
+  // raced two concurrent requests for the same (submissionId, eventType)
+  // pair (e.g. two duplicate lockdown-detection polls, or a client
+  // retry racing the original) into each observing "no recent row"
+  // before either committed, producing two rows for what should be one
+  // logical, deduped event. An advisory transaction lock keyed on
+  // (submissionId, eventType) serializes the whole read-decide-write
+  // sequence for this exact pair — mirroring the same pattern already
+  // used for autosave revision safety (see answers/route.ts) — so this
+  // is now a real idempotency boundary, not just an application-level
+  // check.
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}), hashtext(${eventType}))`;
+    const recent = await tx.integrityEvent.findFirst({
       where: { submissionId: id, eventType },
       orderBy: { occurredAt: "desc" },
     });
-
     if (recent && Date.now() - recent.occurredAt.getTime() < debounceWindowMs) {
-      return NextResponse.json(recent, { status: 200 });
+      return { row: recent, deduped: true };
     }
-  }
-
-  const event = await prisma.integrityEvent.create({
-    data: {
-      submissionId: id,
-      examId: submission.examId,
-      studentId: submission.studentId,
-      eventType,
-      severity,
-      message,
-      metadataJson: (metadata as Prisma.InputJsonValue) ?? undefined,
-      occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
-    },
+    const created = await tx.integrityEvent.create({ data: eventData });
+    return { row: created, deduped: false };
   });
 
-  return NextResponse.json(event, { status: 201 });
+  return NextResponse.json(result.row, { status: result.deduped ? 200 : 201 });
 }
 
 export const dynamic = "force-dynamic";
