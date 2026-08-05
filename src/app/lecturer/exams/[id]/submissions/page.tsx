@@ -30,6 +30,20 @@ type SubmissionRow = {
     resumeCount: number;
     pendingSaveCount: number | null;
   } | null;
+  // Tether Windows Lockdown Hardening v1 (Part 14) — see
+  // docs/tether-windows-lockdown-hardening-v1.md. Compact status only:
+  // never a raw process list, executable path, or capability id list.
+  // Null for a non-Tether exam or a submission with no lockdown-relevant
+  // activity yet.
+  lockdown: {
+    state: "NONE" | "DETECTED" | "CLOSED" | "DETECTION_UNAVAILABLE";
+    label: string;
+    capabilityCategory: string | null;
+    detectedAt: string | null;
+    clearedAt: string | null;
+    durationMs: number | null;
+    needsReview: boolean;
+  } | null;
 };
 
 const SYSTEM_CHECK_LABELS: Record<"READY" | "READY_WITH_WARNINGS" | "NOT_READY", string> = {
@@ -113,6 +127,36 @@ function RecoveryBadge({ recovery }: { recovery: SubmissionRow["recovery"] }) {
   );
 }
 
+// Tether Windows Lockdown Hardening v1 (Part 14) — same badge
+// micro-pattern as RecoveryBadge/SystemCheckBadge above. "Needs review"
+// (a currently-DETECTED, not-yet-closed signal) is the only state that
+// warrants an eye-catching colour — a resolved/closed episode is calm
+// (informational), and "detection unavailable" is neutral (a technical
+// fact, not a signal about the student).
+const LOCKDOWN_BADGE_STYLES: Record<string, string> = {
+  DETECTED: "bg-red-100 text-red-700",
+  CLOSED: "bg-gray-100 text-gray-600",
+  DETECTION_UNAVAILABLE: "bg-amber-100 text-amber-800",
+};
+
+function LockdownBadge({ lockdown }: { lockdown: SubmissionRow["lockdown"] }) {
+  if (!lockdown || lockdown.state === "NONE") return null;
+  const title = [
+    lockdown.capabilityCategory ? `Category: ${lockdown.capabilityCategory}` : null,
+    lockdown.detectedAt ? `Detected ${new Date(lockdown.detectedAt).toLocaleString()}` : null,
+    lockdown.clearedAt ? `Closed ${new Date(lockdown.clearedAt).toLocaleString()}` : null,
+    lockdown.durationMs != null ? `Duration: ${Math.round(lockdown.durationMs / 1000)}s` : null,
+    lockdown.needsReview ? "Needs review" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <span className={`rounded px-2 py-0.5 text-xs ${LOCKDOWN_BADGE_STYLES[lockdown.state] ?? LOCKDOWN_BADGE_STYLES.CLOSED}`} title={title}>
+      {lockdown.label}
+    </span>
+  );
+}
+
 export default function SubmissionsListPage({
   params,
 }: {
@@ -155,6 +199,7 @@ export default function SubmissionsListPage({
               <CanvasBadge status={s.canvasStatus} />
               <SystemCheckBadge systemCheck={s.systemCheck} />
               <RecoveryBadge recovery={s.recovery} />
+              <LockdownBadge lockdown={s.lockdown} />
               <Link
                 href={`/lecturer/submissions/${s.id}/evidence`}
                 className="text-sm underline"

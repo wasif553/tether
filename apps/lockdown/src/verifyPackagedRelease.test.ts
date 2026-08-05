@@ -12,8 +12,10 @@ const VALID_INPUT = {
   expectedVersion: "1.2.1",
   packagedPackageJsonContent: JSON.stringify({ version: "1.2.1" }),
   packagedSharedJsContent: 'exports.LOCKDOWN_VERSION = "1.2.1";',
-  packagedMainJsContent: 'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...);',
+  packagedMainJsContent:
+    'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv);',
   packagedDisplayEnforcementJsContent: "setEnforcementState(state) { ... } resolveReadinessGatedDisplayEnforcementState(...)",
+  packagedProcessDetectionJsContent: "runPreflightScan() { ... } setExamActive(active) { ... }",
 };
 
 describe("verifyPackagedReleaseContents", () => {
@@ -59,6 +61,22 @@ describe("verifyPackagedReleaseContents", () => {
     expect(result.errors.some((e) => e.includes("displayEnforcement.js"))).toBe(true);
   });
 
+  it("fails when dist/processDetection.js is missing (a pre-v1.7.0 stale build, before Windows Lockdown Hardening v1)", () => {
+    const result = verifyPackagedReleaseContents({ ...VALID_INPUT, packagedProcessDetectionJsContent: null });
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("processDetection.js"))).toBe(true);
+  });
+
+  it("fails when dist/main.js does not contain the lockdown preflight-scan IPC channel or command-line-switch rejection (a pre-v1.7.0 stale build)", () => {
+    const result = verifyPackagedReleaseContents({
+      ...VALID_INPUT,
+      packagedMainJsContent: 'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...);',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("lockdown:run-preflight-scan"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("findUnsafeCommandLineSwitch"))).toBe(true);
+  });
+
   it("reports every distinct problem at once rather than stopping at the first", () => {
     const result = verifyPackagedReleaseContents({
       expectedVersion: "1.2.1",
@@ -66,7 +84,8 @@ describe("verifyPackagedReleaseContents", () => {
       packagedSharedJsContent: 'exports.LOCKDOWN_VERSION = "1.2.0";',
       packagedMainJsContent: null,
       packagedDisplayEnforcementJsContent: null,
+      packagedProcessDetectionJsContent: null,
     });
-    expect(result.errors.length).toBeGreaterThanOrEqual(4);
+    expect(result.errors.length).toBeGreaterThanOrEqual(5);
   });
 });

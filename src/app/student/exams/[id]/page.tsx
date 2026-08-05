@@ -104,6 +104,7 @@ import { useAnswerDevelopmentCapture } from "@/hooks/useAnswerDevelopmentCapture
 import { useResilientAutosave } from "@/hooks/useResilientAutosave";
 import { RecoveryStatusBanner } from "@/components/RecoveryStatusBanner";
 import { ManualReviewNotice } from "@/components/ManualReviewNotice";
+import { ensureLockdownBridgeInitialized, reportLockdownCapabilityTransition, reportLockdownScanUnavailable, type LockdownCapabilityInfo } from "@/lib/lockdownClient";
 
 /**
  * Strengthened phone detection (Part 3/4) — converts raw detector output
@@ -633,6 +634,15 @@ export default function TakeExamPage({
   const [navigatorAnnouncement, setNavigatorAnnouncement] = useState("");
   const [flaggingQuestionId, setFlaggingQuestionId] = useState<string | null>(null);
   const [showReviewModal, setShowReviewModal] = useState(false);
+  // Tether Windows Lockdown Hardening v1 — see
+  // docs/tether-windows-lockdown-hardening-v1.md. Populated once (best-
+  // effort) alongside the secure-client policy effect below; read inside
+  // the onLockdownCapabilityTransition listener closure registered in
+  // that same effect, which is why this must be a ref (a plain variable
+  // captured by that closure would go stale the moment the info
+  // actually arrives, since the listener itself is registered
+  // synchronously before the async fetch resolves).
+  const lockdownCapabilityInfoRef = useRef<Map<string, LockdownCapabilityInfo>>(new Map());
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const lastEventAt = useRef<Partial<Record<IntegrityEventType, number>>>({});
   const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1310,6 +1320,16 @@ export default function TakeExamPage({
         const nextEnforcementState = { active: gated, ready: !gated || verified, requireSingleDisplay: enforced };
         logClientTetherDiagnostic("ipc_enforcement_state_sent", nextEnforcementState);
         window.sesLockdown?.setSecureClientEnforcementState?.(nextEnforcementState);
+        // Tether Windows Lockdown Hardening v1, Part 4 — the during-exam
+        // process-detection poll only ever runs for a genuinely gated,
+        // verified attempt; a non-Tether (STANDARD_WEB) exam is
+        // completely unaffected (Part 16 item 32).
+        if (gated && verified) {
+          void ensureLockdownBridgeInitialized().then((info) => {
+            lockdownCapabilityInfoRef.current = info;
+          });
+        }
+        window.sesLockdown?.setLockdownExamActive?.(gated && verified);
         window.sesLockdown?.reportDiagnosticContext?.({
           submissionIdPresent: true,
           verifiedSecureClientSession: verified,
@@ -1329,6 +1349,7 @@ export default function TakeExamPage({
         const coveringState = { active: true, ready: false, requireSingleDisplay: false };
         logClientTetherDiagnostic("ipc_enforcement_state_sent", coveringState);
         window.sesLockdown?.setSecureClientEnforcementState?.(coveringState);
+        window.sesLockdown?.setLockdownExamActive?.(false);
         window.sesLockdown?.reportDiagnosticContext?.({
           submissionIdPresent: true,
           verifiedSecureClientSession: false,
@@ -1352,8 +1373,37 @@ export default function TakeExamPage({
       }).catch(() => {});
     });
 
+    // Tether Windows Lockdown Hardening v1, Part 4/11 — see
+    // lockdownClient.ts's own doc comments for exactly what each
+    // transition becomes (a reviewable IntegrityEvent, an informational
+    // one, or nothing at all for WARN_AND_REQUIRE_CLOSE). Registered
+    // once per submission, mirroring onDisplayEnforcementEvent's own
+    // "no remove-listener API" constraint immediately above.
+    window.sesLockdown?.onLockdownCapabilityTransition?.((payload) => {
+      if (cancelled) return;
+      void reportLockdownCapabilityTransition({
+        submissionId,
+        capabilityId: payload.capabilityId,
+        effectiveAction: payload.effectiveAction,
+        phase: payload.phase,
+        detectedAtMsForClear: payload.detectedAtMsForClear,
+        capabilityInfo: lockdownCapabilityInfoRef.current,
+      });
+    });
+    window.sesLockdown?.onLockdownScanUnavailable?.((payload) => {
+      if (cancelled) return;
+      reportLockdownScanUnavailable(payload.reason);
+    });
+
     return () => {
       cancelled = true;
+      // Part 10 — leaving this page (submission finalized, navigation
+      // away) is one of the explicit restoration triggers; safe to call
+      // even if lockdown enforcement never actually activated this
+      // attempt (STANDARD_WEB exams, or a status fetch that failed
+      // before ever activating it) — see lockdownLifecycle.ts.
+      window.sesLockdown?.setLockdownExamActive?.(false);
+      window.sesLockdown?.restoreLockdownControls?.("exam-page-unmount");
     };
   }, [data?.id, inLockdownBrowser]);
 
@@ -1614,6 +1664,14 @@ export default function TakeExamPage({
       // finalized the submission (a fresh submit or an idempotent
       // ALREADY_FINALIZED replay both return 200 — see the submit route).
       await resilientAutosave.clearAll();
+      // Tether Windows Lockdown Hardening v1, Part 10 — "normal exam
+      // submission" is an explicit restoration trigger; stop the
+      // during-exam poll and tear down any active overlay/state
+      // immediately, rather than waiting for this page to eventually
+      // unmount (the student may linger here reading the confirmation
+      // message).
+      window.sesLockdown?.setLockdownExamActive?.(false);
+      window.sesLockdown?.restoreLockdownControls?.("submission-completed");
       if (options.systemAutoSubmit) {
         setSubmitMessage("Time is up. Your exam has been submitted automatically.");
       } else {

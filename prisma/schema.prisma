@@ -117,6 +117,22 @@ enum IntegrityEventType {
   SCREEN_SHARE_RESTORED
   SCREEN_SHARE_EVIDENCE_CAPTURED
   SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED
+  // Tether Windows Lockdown Hardening v1 (additive) — see
+  // docs/tether-windows-lockdown-hardening-v1.md. Detection is always an
+  // integrity SIGNAL for lecturer review, never an automatic misconduct
+  // conclusion — see severityFor() in src/lib/secureExam.ts. Category-
+  // specific "detected" events (which capability category matched — see
+  // apps/lockdown/src/lockdownCapabilityRegistry.ts) plus one generic
+  // "cleared" event shared by every category (resolution is always good
+  // news, never risk-additive, so it needs no category granularity).
+  // Technical/administrative facts (preflight blocked, detection
+  // unavailable, restoration lifecycle, navigation/download denials) are
+  // PlatformAuditLog only and never appear in this enum at all.
+  REMOTE_CONTROL_SOFTWARE_DETECTED
+  SCREEN_CAPTURE_SOFTWARE_DETECTED
+  DEBUGGING_TOOL_DETECTED
+  PROHIBITED_APPLICATION_DETECTED
+  PROHIBITED_APPLICATION_CLOSED
 }
 
 enum IntegritySeverity {

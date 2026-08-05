@@ -82,6 +82,34 @@ type SesLockdownBridge = {
     capabilities: string;
     timestamp: string;
   } | null>;
+  // Tether Windows Lockdown Hardening v1 — see
+  // docs/tether-windows-lockdown-hardening-v1.md. Optional: only present
+  // in a v1.7.0+ packaged build; older installs simply don't expose
+  // these and every caller must feature-detect first, exactly like every
+  // other optional method above. No raw process lists, paths, or
+  // command-line arguments are ever exposed through any of these.
+  setLockdownPolicyToggles?(toggles: { blockRemoteControl: boolean; blockScreenCaptureTools: boolean; blockDebugTools: boolean; blockVirtualMachines: boolean }): void;
+  runLockdownPreflightScan?(): Promise<
+    | { state: "CLEAN" }
+    | { state: "BLOCKED"; matchedCapabilityIds: string[] }
+    | { state: "UNAVAILABLE"; reason: string }
+  >;
+  setLockdownExamActive?(active: boolean): void;
+  onLockdownCapabilityTransition?(
+    callback: (payload: { capabilityId: string; effectiveAction: string; phase: "DETECTED" | "CLEARED"; detectedAtMsForClear: number | null }) => void,
+  ): void;
+  onLockdownScanUnavailable?(callback: (payload: { reason: string }) => void): void;
+  onLockdownRestorationResult?(callback: (payload: { trigger: string; state: string; errors: string[] }) => void): void;
+  getRemoteSessionStatus?(): Promise<{
+    isRemoteSession: boolean;
+    remoteSessionSignalSource: string;
+    isLikelyVirtualMachine: boolean;
+    vmSignatureMatched: string | null;
+  }>;
+  restoreLockdownControls?(trigger: string): void;
+  getLockdownLifecycleState?(): Promise<string>;
+  getLockdownCapabilityInfo?(): Promise<Array<{ id: string; category: string; displayName: string }>>;
+  reportLockdownAuditFact?(action: string, metadata?: Record<string, unknown>): void;
 };
 
 declare global {

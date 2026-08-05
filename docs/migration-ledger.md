@@ -22,8 +22,8 @@ migrations in this ledger were written before this was confirmed
 explicitly — re-run the pre-check query for any of them before assuming
 a second apply is actually needed.
 
-**Confirmed applied — do not re-apply.** As of 2026-08-02, the following
-seven migration files have each been applied exactly once to the one
+**Confirmed applied — do not re-apply.** As of 2026-08-05, the following
+eight migration files have each been applied exactly once to the one
 shared Preview/Production Supabase database (project ref
 `ugckdvbjzauvcovcqebw`; confirmed via the read-only verification queries
 below returning the expected tables/columns/enum values):
@@ -35,11 +35,12 @@ below returning the expected tables/columns/enum values):
 - `docs/answer-development-provenance-v1-migration.sql` — applied 2026-07-25.
 - `docs/secure-client-foundation-seb-v1-migration.sql` — applied 2026-07-25.
 - `docs/sql/add-tether-secure-resume-recovery.sql` — applied 2026-08-02.
+- `docs/sql/add-tether-windows-lockdown-hardening.sql` — applied 2026-08-05.
 
 Because Preview and Production are the same database, there is no
 separate "now apply it to the other environment" step for any of these
-seven — that single application already covers both. **None of these
-seven files should be run again against this database.** Re-running any
+eight — that single application already covers both. **None of these
+eight files should be run again against this database.** Re-running any
 of them will error on `CREATE TABLE`/`ADD COLUMN` (see each file's own
 idempotency note) at best, or silently duplicate rows at worst if a
 statement happens to be re-runnable — always re-run the relevant
@@ -155,6 +156,7 @@ Interpretation:
 | 13 | `docs/answer-development-provenance-v1-migration.sql` | Answer-Development Provenance v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — answer-development provenance migration" below for the full read-only confirmation record. |
 | 14 | `docs/secure-client-foundation-seb-v1-migration.sql` | Tether Secure Client Foundation + Safe Exam Browser Compatibility v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — secure client foundation migration" below for the full read-only confirmation record. |
 | 15 | `docs/sql/add-tether-secure-resume-recovery.sql` | Tether Secure Exam Recovery and Resilient Autosave v1 | **APPLIED ONCE — 2026-08-02** | **APPLIED ONCE — 2026-08-02 (same shared database as Preview)** | Confirmed applied — do not re-apply. Additive only — three new nullable/defaulted columns on `SecureClientSession`, four on `Submission` (one unique), two on `Answer`, plus one index and one self-referencing foreign key. See docs/tether-secure-resume-recovery-v1.md and "Verification — secure recovery migration" below for the full read-only confirmation record. |
+| 16 | `docs/sql/add-tether-windows-lockdown-hardening.sql` | Tether Windows Lockdown Hardening v1 | **APPLIED ONCE — 2026-08-05** | **APPLIED ONCE — 2026-08-05 (same shared database as Preview)** | Confirmed applied — do not re-apply. Additive only — five new `IntegrityEventType` enum values (`REMOTE_CONTROL_SOFTWARE_DETECTED`, `SCREEN_CAPTURE_SOFTWARE_DETECTED`, `DEBUGGING_TOOL_DETECTED`, `PROHIBITED_APPLICATION_DETECTED`, `PROHIBITED_APPLICATION_CLOSED`) — no new table, no new column, no existing row modified. Every other lockdown fact is `PlatformAuditLog` only (its `action` column is a plain string, needing no schema change). See docs/tether-windows-lockdown-hardening-v1.md and "Verification — Windows lockdown hardening migration" below for the full read-only confirmation record. |
 
 Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -634,3 +636,92 @@ touches no existing row's data — the practical rollback for almost any
 issue is simply ensuring no exam relies on the new recovery behaviour
 (every code path already treats a missing value as "no recovery history
 on record"), rather than reverting the schema.
+
+## Deployment procedure — `docs/sql/add-tether-windows-lockdown-hardening.sql`
+
+**Already applied — 2026-08-05, to the one shared Preview/Production
+Supabase database (project ref `ugckdvbjzauvcovcqebw`). Do not run this
+file again.** The steps below are kept as a historical record of the
+procedure that was followed. See "Verification — Windows lockdown
+hardening migration" further below for the full read-only confirmation
+record.
+
+Preview and Production share ONE Supabase database — this file was
+applied **once**, not once per environment; there is no separate
+Production application still pending, and it must not be applied a
+second time to either environment.
+
+1. Took a current schema backup of the shared database (Supabase
+   project → Database → Backups) before applying anything.
+2. Attempted a fresh full data dump as an additional precaution — this
+   could not be completed: the Supabase connection pooler repeatedly
+   terminated the `pg_dump` process mid-run. The existing complete data
+   backup from 2026-08-02 (taken immediately before the secure-recovery
+   migration, row 15 above) was retained and treated as the operative
+   data backup for this change, since this migration is additive-only
+   (see "Verification" below) and never touches existing rows.
+3. Ran the pre-check query embedded at the top of
+   `docs/sql/add-tether-windows-lockdown-hardening.sql` — returned ZERO
+   matching rows, confirming the migration had not already been applied.
+4. Opened the (shared) Supabase project → SQL Editor.
+5. Pasted and ran the file's five `ALTER TYPE ... ADD VALUE IF NOT
+   EXISTS` statements once — order does not matter between them (each
+   is independent), but the file is already in a sensible order. No
+   `prisma db push`, `prisma migrate dev`, `prisma migrate deploy`, or
+   `prisma migrate resolve` command was used at any point — applied
+   manually through the Supabase SQL Editor only, per this project's
+   migration convention.
+6. Ran the file's own "Post-application verification" queries to
+   confirm all five new enum values landed and that no existing
+   `IntegrityEvent` row uses any of them yet.
+7. Recorded the date in the Ledger table above (row 16) — a single date
+   is sufficient given the shared database.
+8. Do not apply this file a second time — re-running it after a
+   successful apply is idempotent (`ADD VALUE IF NOT EXISTS`) but is not
+   expected to be necessary and should not be done deliberately.
+
+### Verification — Windows lockdown hardening migration
+
+Confirmed via read-only queries against the shared Supabase database
+(project ref `ugckdvbjzauvcovcqebw`) on 2026-08-05, immediately after
+this migration was applied. **Preview and Production point at this same
+shared Supabase database — this migration has now been applied to that
+one database and must not be applied again, in either environment.**
+
+- Pre-application check: the query embedded at the top of the SQL file
+  (matching `enumlabel` against all five new value names) returned ZERO
+  rows, confirming a clean, not-yet-applied state before proceeding.
+- The migration was applied exactly once, manually, through the
+  Supabase SQL Editor — the file's five `ALTER TYPE ... ADD VALUE IF NOT
+  EXISTS` statements. No `prisma migrate` command and no `prisma db
+  push` was run against this database at any point in this rollout.
+- All five new `IntegrityEventType` enum values were verified present
+  afterward (`pg_enum` query from the file's own "Post-application
+  verification" section): `REMOTE_CONTROL_SOFTWARE_DETECTED`,
+  `SCREEN_CAPTURE_SOFTWARE_DETECTED`, `DEBUGGING_TOOL_DETECTED`,
+  `PROHIBITED_APPLICATION_DETECTED`, `PROHIBITED_APPLICATION_CLOSED`.
+- No table, column, or row was modified — this migration only adds
+  enum values to an existing type. The file's own row-count check
+  (`count(*) FROM "IntegrityEvent" WHERE "eventType" IN (...)`)
+  confirmed 0 existing rows use any of the five new values.
+- A current schema backup was completed before applying anything. A
+  fresh full data dump could not be completed — the Supabase connection
+  pooler repeatedly terminated `pg_dump` mid-run — so the existing
+  complete 2026-08-02 data backup was retained as the operative backup
+  for this change; this is considered sufficient given the migration
+  touches no existing data.
+- The migration is additive and forward-only: Postgres has no operation
+  to remove an enum value once added, so there is no rollback path back
+  to a schema without these five values — only a forward fix (simply
+  not shipping application code that writes them). See "Rollback"
+  immediately below.
+
+**This migration must not be applied again.**
+
+### Rollback — `docs/sql/add-tether-windows-lockdown-hardening.sql`
+
+See the SQL file's own embedded "Rollback" section. Postgres cannot
+remove an enum value once added — leaving the five unused values in
+place is safe and is the recommended forward-fix; the practical rollback
+for almost any issue is simply not shipping the application code that
+writes them, rather than attempting an enum rebuild.

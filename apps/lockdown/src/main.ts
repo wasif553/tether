@@ -13,6 +13,7 @@ import {
   ipcMain,
   session as electronSession,
   safeStorage,
+  powerMonitor,
 } from "electron";
 import path from "node:path";
 import fs from "node:fs";
@@ -38,10 +39,31 @@ import {
   formatDiagnosticLogLine,
   type TetherDiagnosticsSnapshot,
 } from "./tetherDiagnosticsSnapshot";
+import { findUnsafeCommandLineSwitch } from "./commandLineSafety";
+import { classifyKeyboardShortcut } from "./keyboardHardeningLogic";
+import { ProcessDetection } from "./processDetection";
+import { getWindowsSessionClassification } from "./windowsSessionDetection";
+import { LockdownLifecycleManager } from "./lockdownLifecycle";
+import { LOCKDOWN_CAPABILITY_REGISTRY, type LockdownPolicyToggles } from "./lockdownCapabilityRegistry";
+import { consumeLockdownFault } from "./lockdownFaultInjection";
+import { diagnosticLog } from "./diagnosticLog";
 
 export const DIAGNOSTIC_LOG_FILE_NAME = "tether-secure-browser-diagnostics.log";
 
 const SES_BASE_URL = process.env.SES_BASE_URL ?? DEFAULT_SES_BASE_URL;
+
+// Tether Windows Lockdown Hardening v1, Part 7 — "disable insecure debug
+// ports" / "reject unsafe command-line switches". Checked before
+// anything else in this process (including the single-instance lock) —
+// refuses to continue at all rather than silently stripping the switch,
+// since Chromium may have already begun acting on some of these before
+// any of this process's own code runs.
+const unsafeSwitch = findUnsafeCommandLineSwitch(process.argv);
+if (unsafeSwitch) {
+  // eslint-disable-next-line no-console
+  console.error(`Tether Secure Browser refused to start: unsafe command-line switch "${unsafeSwitch}" was present.`);
+  app.exit(1);
+}
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -68,6 +90,47 @@ const displayEnforcement = new DisplayEnforcement({
   },
   onDiagnosticsChanged: () => maybeEmitDiagnostics(),
 });
+
+// Tether Windows Lockdown Hardening v1, Part 2/4 — capability transitions
+// are relayed to the hosted page (never uploaded directly by main — main
+// has no DB access and no authenticated session of its own), exactly
+// like display-enforcement events. The page looks up the transitioning
+// capability's category/display name from ITS OWN copy of the bounded,
+// public capability metadata it already received via
+// lockdown:get-lockdown-capability-info, and reports the outcome through
+// the existing integrity-events / new lockdown audit-event routes with
+// its own authenticated fetch.
+const processDetection = new ProcessDetection({
+  onCapabilityTransition: (capabilityId, effectiveAction, phase, detectedAtMsForClear) => {
+    mainWindow?.webContents.send("lockdown:capability-transition", { capabilityId, effectiveAction, phase, detectedAtMsForClear: detectedAtMsForClear ?? null });
+  },
+  onScanUnavailable: (reason) => {
+    mainWindow?.webContents.send("lockdown:scan-unavailable", { reason });
+    reportAuditFactBestEffort("TETHER_LOCKDOWN_DETECTION_SERVICE_FAILURE", { reason });
+  },
+});
+
+// Tether Windows Lockdown Hardening v1, Part 10 — the idempotent
+// restoration lifecycle. Tether never modifies any permanent OS-level
+// setting, so every registered action here is pure in-process teardown
+// (hide overlays, stop polling, clear enforcement flags) — see
+// lockdownLifecycle.ts's own doc comment for why that makes restore()
+// inherently safe to call any number of times, from any trigger.
+const lockdownLifecycle = new LockdownLifecycleManager(() => consumeLockdownFault("RESTORATION_FAILURE"));
+lockdownLifecycle.registerRestoreAction("processDetection.setExamActive(false)", () => processDetection.setExamActive(false));
+lockdownLifecycle.registerRestoreAction("displayEnforcement.setEnforcementState(inactive)", () =>
+  displayEnforcement.setEnforcementState({ active: false, ready: false, requireSingleDisplay: false }),
+);
+
+function restoreLockdownControls(trigger: string): void {
+  diagnosticLog("lockdownLifecycle: restore requested", { trigger, stateBefore: lockdownLifecycle.getState() });
+  reportAuditFactBestEffort("TETHER_LOCKDOWN_RESTORATION_STARTED", { trigger });
+  const result = lockdownLifecycle.restore();
+  const action = result.state === "RESTORED" ? "TETHER_LOCKDOWN_RESTORATION_COMPLETED" : "TETHER_LOCKDOWN_RESTORATION_FAILED";
+  reportAuditFactBestEffort(action, { trigger, errorCount: result.errors.length });
+  mainWindow?.webContents.send("lockdown:restoration-result", { trigger, state: result.state, errors: result.errors });
+  diagnosticLog("lockdownLifecycle: restore result", { trigger, result });
+}
 
 let mainWindow: BrowserWindow | null = null;
 let examContext: ExamContext = { examId: null, submissionId: null };
@@ -169,6 +232,17 @@ function isValidDiagnosticContext(value: unknown): value is PageReportedDiagnost
   );
 }
 
+function isValidPolicyToggles(value: unknown): value is LockdownPolicyToggles {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.blockRemoteControl === "boolean" &&
+    typeof v.blockScreenCaptureTools === "boolean" &&
+    typeof v.blockDebugTools === "boolean" &&
+    typeof v.blockVirtualMachines === "boolean"
+  );
+}
+
 function getQueue(): QueuedLockdownEvent[] {
   return store.get("queuedEvents", []);
 }
@@ -227,6 +301,34 @@ async function uploadEvent(submissionId: string, event: QueuedLockdownEvent): Pr
   } catch {
     return false;
   }
+}
+
+/**
+ * Tether Windows Lockdown Hardening v1, Part 11 — PlatformAuditLog-only
+ * facts (never IntegrityEvent). Reuses the exact same "run a fetch
+ * inside the page's own authenticated context" trick as uploadEvent
+ * above, POSTing straight to the new /api/tether/lockdown/audit-event
+ * route — never queued/retried (Part 11's facts are individually
+ * low-stakes technical/operational records; a lost one under a genuine
+ * network outage is acceptable and never blocks or delays anything the
+ * student is doing, unlike the queued IntegrityEvent path which exists
+ * specifically to survive an offline gap).
+ */
+function reportAuditFactBestEffort(action: string, metadata: Record<string, unknown>): void {
+  if (!mainWindow) return;
+  const body: Record<string, unknown> = { action, metadata };
+  if (examContext.submissionId) body.submissionId = examContext.submissionId;
+  else if (examContext.examId) body.examId = examContext.examId;
+  mainWindow.webContents
+    .executeJavaScript(
+      `fetch(${JSON.stringify(`${SES_BASE_URL}/api/tether/lockdown/audit-event`)}, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(${JSON.stringify(body)}),
+      }).catch(() => {})`,
+    )
+    .catch(() => {});
 }
 
 function emitWarning(text: string) {
@@ -295,10 +397,101 @@ function createWindow(examId: string | null) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      webSecurity: true,
+      // Pre-merge audit finding (C.6) — the previous mechanism only
+      // reactively closed the DevTools window AFTER it had already
+      // opened (see the packaged-only listener further below), which is
+      // weaker than actually preventing it: Electron's own
+      // webPreferences.devTools:false guarantee makes
+      // webContents.openDevTools() (menu, shortcut, IPC, or a direct
+      // webContents-API call) a genuine no-op — that window is never
+      // created at all in a packaged build. The reactive listener below
+      // is kept as a defensive backstop regardless. Dev builds
+      // (`npm start`) keep devTools:true so the team can still debug
+      // Tether itself (C.7).
+      devTools: !app.isPackaged,
       preload: preloadPath,
     },
   });
   mainWindow.setMenuBarVisibility(false);
+
+  // Tether Windows Lockdown Hardening v1, Part 7 — permission ALLOWLIST
+  // (never a blanket deny): camera is required by Camera Monitoring v1
+  // for camera-required exams, fullscreen is required by the exam's own
+  // fullscreen policy. Every other permission (geolocation, notifications,
+  // MIDI, HID, serial, USB, clipboard-read, display-capture outside the
+  // approved flow, ...) is denied.
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(permission === "media" || permission === "fullscreen");
+  });
+
+  // Part 7 — deny window.open() / target=_blank for every flow; this app
+  // has no legitimate use for a second window.
+  mainWindow.webContents.setWindowOpenHandler(() => {
+    reportAuditFactBestEffort("TETHER_LOCKDOWN_WINDOW_OPEN_DENIED", {});
+    return { action: "deny" };
+  });
+
+  // Part 7/8 — deny navigation to anything outside the configured SES
+  // origin (also the structural fix for drag/drop of external files/URLs
+  // and file:// escapes, both of which surface as a will-navigate
+  // attempt to a non-SES origin).
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    let denied = false;
+    try {
+      if (new URL(url).origin !== new URL(SES_BASE_URL).origin) denied = true;
+    } catch {
+      denied = true;
+    }
+    if (denied) {
+      event.preventDefault();
+      reportAuditFactBestEffort("TETHER_LOCKDOWN_NAVIGATION_DENIED", {});
+    }
+  });
+
+  // Part 7 — prevent DevTools in packaged production builds only (a
+  // development build run via `npm start` still needs it for the
+  // team's own debugging). Keyboard-shortcut blocking below is
+  // unconditional in both cases.
+  if (app.isPackaged) {
+    mainWindow.webContents.on("devtools-opened", () => {
+      mainWindow?.webContents.closeDevTools();
+      recordEvent("DEBUGGING_TOOL_DETECTED", "Developer tools were opened.", "devtools-opened");
+    });
+  }
+
+  // Part 8 — browser-chrome keyboard shortcuts. Ctrl+Alt+Delete is
+  // deliberately absent — see keyboardHardeningLogic.ts's own doc
+  // comment for why no application can intercept it at all.
+  //
+  // Pre-merge audit finding (D.1) — this previously blocked
+  // unconditionally for the whole lifetime of the Tether window
+  // (dashboard, login, tether-launch, and even after an exam had
+  // already been submitted and restored), not only while an exam's
+  // lockdown restrictions are actually ACTIVE. That over-broad scope
+  // violated the "detection plus controlled remediation over aggressive
+  // system modification" principle — e.g. Alt+F4 was unusable even
+  // outside any exam — and DID NOT self-correct after restoration.
+  // Gating on lockdownLifecycle's own ACTIVE state (set by
+  // lockdown:set-secure-client-enforcement-state when the page reports
+  // active:true, cleared the moment restoreLockdownControls runs) makes
+  // this exactly track the same window Part 4/10 already use for
+  // process-detection polling and the restoration lifecycle — D.2
+  // ("normal computer behaviour returns after restoration") now holds
+  // for keyboard shortcuts too, and D.4 (Ctrl+R/F5 cannot destroy
+  // unsaved drafts) is unaffected since ACTIVE is exactly the window
+  // during which unsaved drafts can exist.
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    if (lockdownLifecycle.getState() !== "ACTIVE") return;
+    const decision = classifyKeyboardShortcut({ key: input.key, control: input.control, alt: input.alt, shift: input.shift, meta: input.meta });
+    if (decision.blocked) {
+      event.preventDefault();
+      recordEvent("KEYBOARD_SHORTCUT_BLOCKED", "A blocked keyboard shortcut was pressed.", "keyboard-shortcut-blocked", { shortcutReason: decision.reason });
+    }
+  });
+
+  processDetection.attachTargetWindow(mainWindow);
+  lockdownLifecycle.prepare();
 
   // Best-effort only — does not guarantee screenshots/recordings are
   // blocked on every platform. Never claim otherwise in product copy.
@@ -360,9 +553,19 @@ function createWindow(examId: string | null) {
 
   mainWindow.loadURL(buildLoadUrl(examId));
 
+  // Part 10 — a renderer crash (distinct from the whole app quitting) is
+  // main-owned and must never depend on the page's own JS being
+  // responsive to clean up after itself.
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    diagnosticLog("renderer process gone", { reason: details.reason });
+    restoreLockdownControls(`render-process-gone:${details.reason}`);
+  });
+
   mainWindow.on("closed", () => {
+    restoreLockdownControls("window-closed");
     mainWindow = null;
     displayEnforcement.stop();
+    processDetection.stop();
   });
 }
 
@@ -389,6 +592,30 @@ function monitorNetworkRequests() {
     }
     callback({});
   });
+}
+
+/**
+ * Tether Windows Lockdown Hardening v1, Part 7/9 — deny every download by
+ * default (session-level, so it covers any window this app ever
+ * creates, including the overlay windows). File-upload question types
+ * are unaffected — they submit via fetch/XHR from inside the page, never
+ * through Electron's download mechanism at all.
+ */
+function blockDownloads() {
+  electronSession.defaultSession.on("will-download", (event, item) => {
+    event.preventDefault();
+    reportAuditFactBestEffort("TETHER_LOCKDOWN_DOWNLOAD_DENIED", { fileName: item.getFilename().slice(0, 100) });
+  });
+}
+
+/**
+ * Part 2 — "after Windows resume/unlock". powerMonitor is a
+ * process-global singleton (not tied to any one window), registered
+ * once at app start.
+ */
+function registerPowerMonitorRescan() {
+  powerMonitor.on("resume", () => processDetection.forceRescan());
+  powerMonitor.on("unlock-screen", () => processDetection.forceRescan());
 }
 
 function registerDeepLinkProtocol() {
@@ -456,6 +683,7 @@ ipcMain.handle("lockdown:get-session-info", async () => {
 ipcMain.on("lockdown:set-secure-client-enforcement-state", (_event, state: unknown) => {
   if (!isValidEnforcementState(state)) return;
   displayEnforcement.setEnforcementState(state);
+  if (state.active) lockdownLifecycle.activate();
   maybeEmitDiagnostics();
 });
 
@@ -643,9 +871,65 @@ ipcMain.on("lockdown:report-diagnostic-context", (_event, context: unknown) => {
 ipcMain.handle("lockdown:get-diagnostics-enabled", () => diagnosticsPanelEnabled);
 ipcMain.handle("lockdown:get-diagnostics-snapshot", () => buildCurrentDiagnosticsSnapshot());
 
+// ---------------------------------------------------------------------------
+// Tether Windows Lockdown Hardening v1 — process detection, remote-session
+// detection, and lifecycle IPC surface. Every handler below returns only
+// bounded, non-secret data (capability ids/categories/display names —
+// never raw process names, paths, or command-line arguments) — see
+// processDetection.ts / lockdownCapabilityRegistry.ts's own doc comments.
+// ---------------------------------------------------------------------------
+
+/** Part 12 — set by the hosted page, itself server-resolved via GET /api/tether/lockdown/policy. Never read from this process's own environment — see lockdownCapabilityRegistry.ts's LockdownPolicyToggles doc comment. */
+ipcMain.on("lockdown:set-lockdown-policy-toggles", (_event, toggles: unknown) => {
+  if (!isValidPolicyToggles(toggles)) return;
+  processDetection.setPolicyToggles(toggles);
+});
+
+/** Part 3 — one-shot preflight scan; the page calls this before allowing a final exam to start. */
+ipcMain.handle("lockdown:run-preflight-scan", async () => {
+  // Part 17 — dev/test-only fault injection: the externally observable
+  // effect of a genuine IPC timeout (the renderer's ipcRenderer.invoke
+  // call never resolving in time) is indistinguishable from "detection
+  // unavailable" from the caller's point of view — modeled the same way
+  // here, deterministically, rather than actually hanging this handler.
+  if (consumeLockdownFault("IPC_TIMEOUT")) return { state: "UNAVAILABLE", reason: "TIMEOUT" };
+  return processDetection.runPreflightScan();
+});
+
+/** Part 4 — starts/stops the background during-exam poll. */
+ipcMain.on("lockdown:set-lockdown-exam-active", (_event, active: unknown) => {
+  if (typeof active !== "boolean") return;
+  processDetection.setExamActive(active);
+});
+
+/** Part 5 — remote-session/VM classification, on demand. */
+ipcMain.handle("lockdown:get-remote-session-status", async () => getWindowsSessionClassification());
+
+/** Part 10 — the page calls this at every normal-exit/failure point (successful submission, lecturer-authorised exit, failed launch, failed attestation, blocked preflight) — see restoreLockdownControls's own doc comment; also fires automatically on window close / renderer crash / app quit regardless. */
+ipcMain.on("lockdown:restore-lockdown-controls", (_event, trigger: unknown) => {
+  restoreLockdownControls(typeof trigger === "string" ? trigger.slice(0, 100) : "page-requested");
+});
+
+ipcMain.handle("lockdown:get-lockdown-lifecycle-state", () => lockdownLifecycle.getState());
+
+/** Bounded, public capability metadata (id/category/displayName only — never executable names, detection methods, or internal notes) so the page can render a human-readable list from the capability ids main reports over lockdown:capability-transition. */
+ipcMain.handle("lockdown:get-lockdown-capability-info", () =>
+  LOCKDOWN_CAPABILITY_REGISTRY.map((c) => ({ id: c.id, category: c.category, displayName: c.displayName })),
+);
+
+/** Best-effort audit fact relay for facts the PAGE itself observes (preflight blocked shown to student, student closed an application before content opened) — see reportAuditFactBestEffort's own doc comment for why main uses the same mechanism for its own facts. Validated against the same fixed allow-list server-side by the audit-event route itself; this handler only bounds the shape before relaying. */
+ipcMain.on("lockdown:report-lockdown-audit-fact", (_event, payload: unknown) => {
+  if (typeof payload !== "object" || payload === null) return;
+  const { action, metadata } = payload as Record<string, unknown>;
+  if (typeof action !== "string" || action.length === 0 || action.length > 100) return;
+  reportAuditFactBestEffort(action, typeof metadata === "object" && metadata !== null ? (metadata as Record<string, unknown>) : {});
+});
+
 app.whenReady().then(() => {
   registerDeepLinkProtocol();
   monitorNetworkRequests();
+  blockDownloads();
+  registerPowerMonitorRescan();
 
   // Electron has no single cross-platform "online" event on app — track
   // it from the renderer's online/offline window events instead, relayed
@@ -675,4 +959,13 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   // v1 never traps the student — closing the window is always allowed.
   app.quit();
+});
+
+// Part 10 — covers a clean app exit and Windows shutdown/restart signals
+// alike (Electron fires before-quit for both) — idempotent with the
+// "closed" handler's own restoreLockdownControls call above (calling it
+// twice for the same exit is safe by construction — see
+// lockdownLifecycle.ts).
+app.on("before-quit", () => {
+  restoreLockdownControls("before-quit");
 });

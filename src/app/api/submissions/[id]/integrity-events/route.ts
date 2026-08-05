@@ -62,6 +62,19 @@ const INTEGRITY_EVENT_TYPES = [
   "SCREEN_SHARE_INTERRUPTED",
   "SCREEN_SHARE_RESTORED",
   "SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED",
+  // Tether Windows Lockdown Hardening v1 — see
+  // docs/tether-windows-lockdown-hardening-v1.md. Episode-based (the
+  // Electron client itself only reports a transition once per
+  // continuous detection episode — see
+  // apps/lockdown/src/processDetectionLogic.ts's diffDetectionEpisodes),
+  // so the debounce windows below are a defense-in-depth backstop
+  // against a renderer restart mid-episode re-announcing DETECTED, not
+  // the primary dedup mechanism.
+  "REMOTE_CONTROL_SOFTWARE_DETECTED",
+  "SCREEN_CAPTURE_SOFTWARE_DETECTED",
+  "DEBUGGING_TOOL_DETECTED",
+  "PROHIBITED_APPLICATION_DETECTED",
+  "PROHIBITED_APPLICATION_CLOSED",
 ] as const;
 
 const INTEGRITY_SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH"] as const;
@@ -128,6 +141,16 @@ const DEBOUNCE_WINDOWS_MS: Partial<Record<(typeof INTEGRITY_EVENT_TYPES)[number]
   SCREEN_SHARE_RESTORED: 5_000,
   SCREEN_SHARE_STARTED: 5_000,
   SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED: 10_000,
+  // Tether Windows Lockdown Hardening v1 — a defense-in-depth backstop
+  // (see the allow-list comment above); the client's own episode
+  // tracking is the primary dedup mechanism, so this window only needs
+  // to be long enough to absorb a renderer restart, not tuned to the
+  // process-scan cadence itself.
+  REMOTE_CONTROL_SOFTWARE_DETECTED: 60_000,
+  SCREEN_CAPTURE_SOFTWARE_DETECTED: 60_000,
+  DEBUGGING_TOOL_DETECTED: 60_000,
+  PROHIBITED_APPLICATION_DETECTED: 60_000,
+  PROHIBITED_APPLICATION_CLOSED: 10_000,
 };
 
 export async function POST(
@@ -169,31 +192,47 @@ export async function POST(
   }
 
   const debounceWindowMs = DEBOUNCE_WINDOWS_MS[eventType];
-  if (debounceWindowMs) {
-    const recent = await prisma.integrityEvent.findFirst({
+  const eventData = {
+    submissionId: id,
+    examId: submission.examId,
+    studentId: submission.studentId,
+    eventType,
+    severity,
+    message,
+    metadataJson: (metadata as Prisma.InputJsonValue) ?? undefined,
+    occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
+  };
+
+  if (!debounceWindowMs) {
+    const event = await prisma.integrityEvent.create({ data: eventData });
+    return NextResponse.json(event, { status: 201 });
+  }
+
+  // Pre-merge audit finding (F.14) — the previous read-then-create here
+  // raced two concurrent requests for the same (submissionId, eventType)
+  // pair (e.g. two duplicate lockdown-detection polls, or a client
+  // retry racing the original) into each observing "no recent row"
+  // before either committed, producing two rows for what should be one
+  // logical, deduped event. An advisory transaction lock keyed on
+  // (submissionId, eventType) serializes the whole read-decide-write
+  // sequence for this exact pair — mirroring the same pattern already
+  // used for autosave revision safety (see answers/route.ts) — so this
+  // is now a real idempotency boundary, not just an application-level
+  // check.
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}), hashtext(${eventType}))`;
+    const recent = await tx.integrityEvent.findFirst({
       where: { submissionId: id, eventType },
       orderBy: { occurredAt: "desc" },
     });
-
     if (recent && Date.now() - recent.occurredAt.getTime() < debounceWindowMs) {
-      return NextResponse.json(recent, { status: 200 });
+      return { row: recent, deduped: true };
     }
-  }
-
-  const event = await prisma.integrityEvent.create({
-    data: {
-      submissionId: id,
-      examId: submission.examId,
-      studentId: submission.studentId,
-      eventType,
-      severity,
-      message,
-      metadataJson: (metadata as Prisma.InputJsonValue) ?? undefined,
-      occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
-    },
+    const created = await tx.integrityEvent.create({ data: eventData });
+    return { row: created, deduped: false };
   });
 
-  return NextResponse.json(event, { status: 201 });
+  return NextResponse.json(result.row, { status: result.deduped ? 200 : 201 });
 }
 
 export const dynamic = "force-dynamic";

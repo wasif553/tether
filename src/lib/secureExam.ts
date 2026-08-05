@@ -402,7 +402,14 @@ export type IntegrityEventTypeName =
   | "SCREEN_SHARE_INTERRUPTED"
   | "SCREEN_SHARE_RESTORED"
   | "SCREEN_SHARE_EVIDENCE_CAPTURED"
-  | "SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED";
+  | "SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED"
+  // --- Tether Windows Lockdown Hardening v1 — see
+  // docs/tether-windows-lockdown-hardening-v1.md.
+  | "REMOTE_CONTROL_SOFTWARE_DETECTED"
+  | "SCREEN_CAPTURE_SOFTWARE_DETECTED"
+  | "DEBUGGING_TOOL_DETECTED"
+  | "PROHIBITED_APPLICATION_DETECTED"
+  | "PROHIBITED_APPLICATION_CLOSED";
 
 export function severityFor(
   eventType: IntegrityEventTypeName,
@@ -529,5 +536,19 @@ export function severityFor(
       return "LOW";
     case "SCREEN_SHARE_INTERRUPTED":
       return "MEDIUM";
+    // --- Tether Windows Lockdown Hardening v1 — see
+    // docs/tether-windows-lockdown-hardening-v1.md. A detected
+    // capability is always MEDIUM (a reviewable signal, never
+    // automatically HIGH/misconduct — a lecturer decides what it means).
+    // Resolution (the application was closed) is always INFO — good
+    // news is never risk-additive, mirroring CAMERA_VISIBILITY_RESTORED/
+    // SCREEN_SHARE_RESTORED above.
+    case "REMOTE_CONTROL_SOFTWARE_DETECTED":
+    case "SCREEN_CAPTURE_SOFTWARE_DETECTED":
+    case "DEBUGGING_TOOL_DETECTED":
+    case "PROHIBITED_APPLICATION_DETECTED":
+      return "MEDIUM";
+    case "PROHIBITED_APPLICATION_CLOSED":
+      return "INFO";
   }
 }
