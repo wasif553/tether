@@ -157,7 +157,7 @@ Interpretation:
 | 14 | `docs/secure-client-foundation-seb-v1-migration.sql` | Tether Secure Client Foundation + Safe Exam Browser Compatibility v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — secure client foundation migration" below for the full read-only confirmation record. |
 | 15 | `docs/sql/add-tether-secure-resume-recovery.sql` | Tether Secure Exam Recovery and Resilient Autosave v1 | **APPLIED ONCE — 2026-08-02** | **APPLIED ONCE — 2026-08-02 (same shared database as Preview)** | Confirmed applied — do not re-apply. Additive only — three new nullable/defaulted columns on `SecureClientSession`, four on `Submission` (one unique), two on `Answer`, plus one index and one self-referencing foreign key. See docs/tether-secure-resume-recovery-v1.md and "Verification — secure recovery migration" below for the full read-only confirmation record. |
 | 16 | `docs/sql/add-tether-windows-lockdown-hardening.sql` | Tether Windows Lockdown Hardening v1 | **APPLIED ONCE — 2026-08-05** | **APPLIED ONCE — 2026-08-05 (same shared database as Preview)** | Confirmed applied — do not re-apply. Additive only — five new `IntegrityEventType` enum values (`REMOTE_CONTROL_SOFTWARE_DETECTED`, `SCREEN_CAPTURE_SOFTWARE_DETECTED`, `DEBUGGING_TOOL_DETECTED`, `PROHIBITED_APPLICATION_DETECTED`, `PROHIBITED_APPLICATION_CLOSED`) — no new table, no new column, no existing row modified. Every other lockdown fact is `PlatformAuditLog` only (its `action` column is a plain string, needing no schema change). See docs/tether-windows-lockdown-hardening-v1.md and "Verification — Windows lockdown hardening migration" below for the full read-only confirmation record. |
-| 17 | `docs/sql/repair-secure-client-session-installation-fields.sql` | Production schema repair — SecureClientSession installation-attestation fields | **PENDING — NOT YET APPLIED** | **PENDING — NOT YET APPLIED (same shared database as Preview)** | Repairs a confirmed production gap: `SecureClientSession.clientInstallationId` (and five sibling columns) do not exist live, causing Prisma error P2022. Root cause: `docs/sql/add-secure-client-session-installation-attestation.sql` (added to the repo 2026-08-01) was never applied AND was never added to this ledger — it is unrelated to, and was not superseded by, row 15's 2026-08-02 migration, which never touched these columns. See "Deployment procedure — repair-secure-client-session-installation-fields.sql" below. **Do not apply as part of the same change that adds this row.** |
+| 17 | `docs/sql/repair-installation-attestation-foundation.sql` | Production schema repair — complete installation-attestation foundation (supersedes the earlier, narrower SecureClientSession-only repair) | **PENDING — NOT YET APPLIED** | **PENDING — NOT YET APPLIED (same shared database as Preview)** | Repairs a confirmed production gap spanning FIVE previously untracked files, none of which have ever been applied: `docs/sql/add-tether-client-installation.sql`, `docs/sql/add-tether-installation-registration-challenge.sql`, `docs/sql/add-system-check-secure-client-verification.sql`, `docs/sql/add-tether-system-check-readiness.sql`, and `docs/sql/add-secure-client-session-installation-attestation.sql` (all written 2026-07-30 through 2026-08-01, "Secure Client Attestation v2" / "Tether System Check and Exam Readiness v1"). Live inspection confirmed the whole rollout is missing: `SecureClientSession` lacks all six installation-attestation columns (causing Prisma error P2022), and `TetherClientInstallation`/`TetherInstallationRegistrationChallenge`/`SystemCheckSecureClientVerification`/`TetherSystemCheckRun` do not exist at all. Unrelated to, and not superseded by, row 15's 2026-08-02 migration, which never touched any of these objects. See "Deployment procedure — repair-installation-attestation-foundation.sql" below for the full dependency graph and audit. **Do not apply as part of the same change that adds this row.** |
 
 Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -727,93 +727,190 @@ place is safe and is the recommended forward-fix; the practical rollback
 for almost any issue is simply not shipping the application code that
 writes them, rather than attempting an enum rebuild.
 
-## Deployment procedure — `docs/sql/repair-secure-client-session-installation-fields.sql`
+## Deployment procedure — `docs/sql/repair-installation-attestation-foundation.sql`
 
 **PENDING — NOT YET APPLIED. Do not apply as part of the same change
 that adds this row to the ledger.** Preview and Production share ONE
 Supabase database — apply this file **once**, not once per environment,
-and only after independent review and after confirming the
-`TetherClientInstallation` dependency noted below.
+and only after independent review.
+
+**Supersedes the earlier, narrower
+`docs/sql/repair-secure-client-session-installation-fields.sql`, which
+has been deleted from the repository.** That file's entire scope (six
+`SecureClientSession` columns) is Block 5 of this file, byte-for-byte;
+it could not actually be applied on its own because its foreign key
+depends on `TetherClientInstallation`, a table which turned out to be
+missing too (see "Incident and root cause" below) — this file resolves
+that dependency instead of working around it.
 
 ### Incident and root cause
 
 Production began failing with Prisma error P2022
 (`SecureClientSession.clientInstallationId does not exist in the
-current database`). A read-only Supabase query confirmed that of the
-four columns `clientInstallationId`, `installationAttestationVerified`,
-`attestationRequirement`, and `verificationStatus`, only
-`verificationStatus` actually exists live. Cross-referencing
-`prisma/schema.prisma`'s `SecureClientSession` model against every
-`docs/sql/*.sql` file traced this to a **separate, six-column** column
-group — `clientInstallationId`, `installationAttestationVerified`,
-`installationAttestationVerifiedAt`,
-`installationAttestationFailureReason`, `installationVerificationId`,
-`attestationRequirement` — all defined by
-`docs/sql/add-secure-client-session-installation-attestation.sql`
-(first added to the repository 2026-08-01, as part of the "Secure
-Client Attestation v2" / installation-bound-attestation work — see
-docs/tether-system-check-v1.md).
+current database`). A first read-only check confirmed six
+`SecureClientSession` columns were missing (see row 15/16's own history
+— unrelated to either of those, confirmed by inspecting
+`docs/sql/add-tether-secure-resume-recovery.sql` line by line, which
+never touches any installation-attestation column). Follow-up live
+evidence then showed `SELECT to_regclass('public."TetherClientInstallation"')`
+returns NULL — the table that repair's foreign key depended on does not
+exist either — and that the six tables currently visible in production
+related to secure-client/Tether functionality are `SecureClientAttestation`,
+`SecureClientConfiguration`, `SecureClientEvent`,
+`SecureClientLaunchManifest`, `SecureClientRecoveryGrant`, and
+`SecureClientSession` — none of `TetherClientInstallation`,
+`TetherInstallationRegistrationChallenge`,
+`SystemCheckSecureClientVerification`, or `TetherSystemCheckRun` appear.
 
-That file was **never applied to any environment, and was never added
-to this ledger at all** — no row referenced it before this one. This is
-unrelated to row 15's 2026-08-02 migration
-(`docs/sql/add-tether-secure-resume-recovery.sql`, confirmed applied):
-that file only ever added `closedAt`/`closeReason`/`recoveryOfSessionId`
-to `SecureClientSession` and never touched any installation-attestation
-column — it did not fail to include these fields; it was never meant
-to include them. `verificationStatus` existing while these six do not
-is exactly the signature of row 14's baseline migration
-(`docs/secure-client-foundation-seb-v1-migration.sql`, confirmed
-applied 2026-07-25) having succeeded, while this later, sibling file
-simply fell through the ledger's tracking process and was never applied
-at all.
+Auditing every `docs/sql/*.sql` file against `prisma/schema.prisma`
+identified **five** files, all written 2026-07-30 through 2026-08-01 as
+part of "Tether System Check and Exam Readiness v1" / "Secure Client
+Attestation v2" (see docs/tether-system-check-v1.md), that were **never
+applied to any environment and were never added to this ledger at
+all** — no row referenced any of them before this one:
 
-**Out-of-scope finding, not repaired by this file:** the same gap
-appears to affect four sibling files from the same feature work, none
-of which have a ledger row either — `docs/sql/add-tether-client-installation.sql`,
-`docs/sql/add-tether-installation-registration-challenge.sql`,
-`docs/sql/add-system-check-secure-client-verification.sql`, and
-`docs/sql/add-tether-system-check-readiness.sql`. Whether each of those
-has actually been applied was NOT confirmed as part of this incident —
-this needs its own separate read-only check and, if needed, its own
-repair/ledger entry. In particular,
-`docs/sql/add-tether-client-installation.sql` creates the
-`TetherClientInstallation` table this repair's foreign key depends on
-(see below) — resolve that dependency first if it is also missing.
+- `docs/sql/add-tether-client-installation.sql` — creates
+  `TetherClientInstallation`.
+- `docs/sql/add-tether-installation-registration-challenge.sql` —
+  creates `TetherInstallationRegistrationChallenge`.
+- `docs/sql/add-system-check-secure-client-verification.sql` — creates
+  `SystemCheckSecureClientVerification`.
+- `docs/sql/add-tether-system-check-readiness.sql` — creates
+  `TetherSystemCheckRun`.
+- `docs/sql/add-secure-client-session-installation-attestation.sql` —
+  ALTERs the existing `SecureClientSession` table (the six columns from
+  the original incident).
+
+Individual per-object read-only verification (not just a table-level
+check) is required before applying — see "Exact Supabase pre-check
+procedure" below — because table absence alone does not prove every
+object from a given file is absent (e.g. a column could have been added
+by some other means without its table's other objects existing, or vice
+versa); the pre-check section embedded in the repair file itself checks
+every table, column, index, and foreign key individually.
+
+### Dependency graph and required application order
+
+Every one of the five files' own foreign keys targets either the
+baseline `User` table (already present) or, for exactly one file,
+`TetherClientInstallation` — there is no other cross-file dependency:
+
+- **`add-tether-client-installation.sql`** → depends only on `User`.
+- **`add-tether-installation-registration-challenge.sql`** → depends
+  only on `User`. (Its own header states "apply after
+  add-tether-client-installation.sql," but its actual foreign key
+  targets `User`, never `TetherClientInstallation` — a documentation
+  imprecision in the original file, not a functional dependency.)
+- **`add-system-check-secure-client-verification.sql`** → depends only
+  on `User`. Its `installationId` column is an advisory pointer with NO
+  foreign key (matching this schema's existing
+  `clientInstallationIdHash`-style convention).
+- **`add-tether-system-check-readiness.sql`** → depends only on `User`.
+  Its `secureClientSessionId` column is likewise advisory, no foreign
+  key.
+- **`add-secure-client-session-installation-attestation.sql`** →
+  depends on `User` (indirectly, `SecureClientSession` already existing)
+  **and genuinely, non-advisorily, on `TetherClientInstallation`** — its
+  `clientInstallationId` foreign key will fail if that table is absent.
+  This is the one real cross-file ordering constraint in the whole
+  rollout.
+
+Required order: `add-tether-client-installation.sql` **before**
+`add-secure-client-session-installation-attestation.sql`; the other
+three files have no ordering constraint relative to any other file. No
+Postgres enum types and no check constraints are introduced by any of
+the five files — every "enum-like" column (`status`,
+`keyProtectionLevel`, `purpose`, `verificationStatus`, `clientType`,
+`overallStatus`, `sourceClientType`) is a plain, application-validated
+`TEXT` column, matching this codebase's established "validated string,
+not a Prisma enum" convention. No data backfill is required or
+performed anywhere — every new table starts empty and every new column
+on the pre-existing `SecureClientSession` table is NULL or its
+documented safe default for every existing row.
+
+### Assessment of the five original files (additive / idempotent / safe / ordering / non-destructive)
+
+All five are additive-only (`CREATE TABLE IF NOT EXISTS` /
+`ADD COLUMN IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` / a
+guarded-`DO`-block pattern for every foreign key), idempotent, and
+contain no `DROP`, `RENAME`, `TRUNCATE`, or table-rewriting statement —
+each is safe to re-run after a successful apply (a no-op) and safe if
+some, but not all, of its own objects already exist. Four of the five
+(`add-tether-client-installation.sql`,
+`add-tether-installation-registration-challenge.sql`,
+`add-system-check-secure-client-verification.sql`,
+`add-tether-system-check-readiness.sql`) are also fully safe to apply
+**standalone**, in any order relative to each other, on the current
+production database. The fifth
+(`add-secure-client-session-installation-attestation.sql`) is **not**
+safe to apply standalone against the current production database — its
+own header correctly documents the `TetherClientInstallation`
+dependency, but attempting it alone (as the narrower repair this file
+supersedes would have) fails with a foreign-key error, since that table
+does not currently exist.
+
+`docs/sql/repair-installation-attestation-foundation.sql` reproduces
+all five files' statements unmodified in content, applied in the
+required dependency order (the four independent table-creation files,
+then the `SecureClientSession` alteration last), each in its own
+`BEGIN...COMMIT` block mirroring how each source file was already
+independently transactional — every statement used (`CREATE TABLE`,
+`ALTER TABLE ADD COLUMN`, `CREATE INDEX`) is transaction-safe in
+Postgres (never `CREATE INDEX CONCURRENTLY`, which Postgres disallows
+inside a transaction block).
+
+### Exact Supabase pre-check procedure
+
+Run every query in the "Pre-application verification" section at the
+top of `docs/sql/repair-installation-attestation-foundation.sql` and
+review every result before proceeding — do not assume any single query
+result implies another. In order:
+
+1. Four `to_regclass` table-existence checks (expect NULL for all four
+   new tables).
+2. The `SecureClientSession` installation-attestation column check
+   (expect zero rows).
+3. The `SecureClientSession` baseline-column sanity check (expect three
+   rows — confirms the table itself and row 14's migration are intact).
+4. The combined index-name check across all five files' seventeen
+   indexes (expect zero rows).
+5. The combined foreign-key-name check across all five files' five
+   foreign keys (expect zero rows).
+
+If any query returns an unexpected result (an object already present
+that this file would also try to create), **stop and investigate before
+applying** — `IF NOT EXISTS` guards mean this file will silently skip
+an existing object of the same name without checking whether its shape
+matches what is expected here.
 
 ### Procedure
 
-1. Confirm the `TetherClientInstallation` dependency: run
-   `SELECT to_regclass('public."TetherClientInstallation"');` — if this
-   returns NULL, `docs/sql/add-tether-client-installation.sql` has not
-   been applied either; resolve that first (out of scope for this file).
-2. Take a current schema backup of the shared database (Supabase
+1. Take a current schema backup of the shared database (Supabase
    project → Database → Backups) before applying anything.
-3. Run the pre-check queries embedded at the top of
-   `docs/sql/repair-secure-client-session-installation-fields.sql` — the
-   first should return zero rows (the six columns are genuinely absent);
-   the second should return exactly one row (`verificationStatus`).
-4. Open the (shared) Supabase project → SQL Editor.
-5. Paste and run the file's single `BEGIN` ... `COMMIT` block — column
-   additions, then the index, then the advisory foreign key.
-6. Run the file's own "Post-application verification" queries to
-   confirm all six columns, the index, and the foreign key landed, and
-   that every existing row's new columns are NULL/false (never
-   retroactively populated).
-7. Record the date in the Ledger table above (row 17) — a single date
+2. Run the full pre-check procedure above and review every result.
+3. Open the (shared) Supabase project → SQL Editor.
+4. Paste and run the file's five sequential `BEGIN...COMMIT` blocks, in
+   the order they appear in the file (Blocks 1-4 independently, then
+   Block 5 last).
+5. Run the file's own "Post-application verification" queries to
+   confirm all four tables, all six `SecureClientSession` columns, all
+   seventeen indexes, and all five foreign keys landed, and that every
+   existing row is untouched (every new table empty, every existing
+   `SecureClientSession` row's new columns NULL/false).
+6. Record the date in the Ledger table above (row 17) — a single date
    is sufficient given the shared database.
-8. Do not apply this file a second time — re-running it after a
-   successful apply is idempotent (`ADD COLUMN IF NOT EXISTS`) but is
-   not expected to be necessary.
+7. Do not apply this file a second time — re-running it after a
+   successful apply is idempotent but is not expected to be necessary.
 
-### Rollback — `docs/sql/repair-secure-client-session-installation-fields.sql`
+### Rollback — `docs/sql/repair-installation-attestation-foundation.sql`
 
-See the SQL file's own embedded "Rollback" section. Additive-only,
-touches no existing row's data — every application code path already
-treats a missing/null value on any of these six columns as "no v2
-attestation evidence on record" (resolveEffectiveTetherVerification in
-src/lib/tetherAttestationConfig.ts falls back to LEGACY when
-`attestationRequirement` is NULL), which is exactly the state the live
-database has been running in. Dropping the columns after applying them
+See the SQL file's own embedded "Rollback" section (reverse dependency
+order — Block 5's foreign key/columns before Block 1's table).
+Additive-only, touches no existing row's data — every application code
+path already treats a missing/null value on any of these objects as "no
+v2 attestation evidence on record yet" (resolveEffectiveTetherVerification
+in src/lib/tetherAttestationConfig.ts falls back to LEGACY when
+`attestationRequirement` is NULL), which is exactly the state
+production has been running in. Dropping anything after applying it
 would simply restore the P2022 failure this file exists to repair —
 there is no practical scenario where that is the right move.
