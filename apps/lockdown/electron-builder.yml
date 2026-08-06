@@ -72,7 +72,28 @@ win:
 
 nsis:
   oneClick: false
-  allowToChangeInstallationDirectory: true
+  # NSIS installer crash fix — `allowToChangeInstallationDirectory: true`
+  # pulls in MUI2's directory-selection page. On this build/target
+  # environment, that page's code path reliably crashes with an access
+  # violation deep inside NSIS's own System.dll plugin (0xC0000005) the
+  # instant the installer launches — proven independent of every packaging
+  # decision in this repo: it reproduces identically (same fault module,
+  # same exception code, same fault offset) on a rebuild of the genuine
+  # pre-v1.7.1 source, on a build with the destroyed-window fix only and
+  # no icon changes at all, and with rcedit/--prepackaged both removed
+  # from the pipeline. It stopped reproducing, with no other change,
+  # exactly when this one setting was removed. Two isolated minimal NSIS
+  # scripts individually replicating the other System.dll-based calls in
+  # electron-builder's templates (GetProcessInfo-style process
+  # enumeration, SHGetKnownFolderPath-style per-user path resolution) ran
+  # successfully on their own, narrowing this specifically to the
+  # directory-selection page's own code. The installer still shows its
+  # normal multi-page wizard (welcome, install progress, finish) and
+  # installs to a fixed, non-configurable location — only the "choose a
+  # different folder" step is gone. Do not re-enable this without first
+  # confirming (physically, on this same class of machine) that the
+  # crash is actually resolved — re-enabling it blind reintroduces a
+  # 100%-reproducible install failure.
   perMachine: false
   createDesktopShortcut: true
   createStartMenuShortcut: true
