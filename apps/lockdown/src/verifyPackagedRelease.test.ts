@@ -13,7 +13,7 @@ const VALID_INPUT = {
   packagedPackageJsonContent: JSON.stringify({ version: "1.2.1" }),
   packagedSharedJsContent: 'exports.LOCKDOWN_VERSION = "1.2.1";',
   packagedMainJsContent:
-    'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv);',
+    'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger);',
   packagedDisplayEnforcementJsContent: "setEnforcementState(state) { ... } resolveReadinessGatedDisplayEnforcementState(...)",
   packagedProcessDetectionJsContent: "runPreflightScan() { ... } setExamActive(active) { ... }",
 };
@@ -75,6 +75,16 @@ describe("verifyPackagedReleaseContents", () => {
     expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("lockdown:run-preflight-scan"))).toBe(true);
     expect(result.errors.some((e) => e.includes("findUnsafeCommandLineSwitch"))).toBe(true);
+  });
+
+  it("fails when dist/main.js does not contain performLockdownRestoration (a pre-v1.7.1 stale build predating the destroyed-window crash fix)", () => {
+    const result = verifyPackagedReleaseContents({
+      ...VALID_INPUT,
+      packagedMainJsContent:
+        'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv);',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("performLockdownRestoration"))).toBe(true);
   });
 
   it("reports every distinct problem at once rather than stopping at the first", () => {

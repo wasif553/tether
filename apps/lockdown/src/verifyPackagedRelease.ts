@@ -52,6 +52,11 @@ const REQUIRED_MAIN_JS_MARKERS = [
   // pre-v1.7.0 build that predates this pass's Electron hardening.
   "lockdown:run-preflight-scan",
   "findUnsafeCommandLineSwitch",
+  // Destroyed-window crash fix v1.7.1 — fails loudly on a stale pre-1.7.1
+  // build that still has the unguarded reportAuditFactBestEffort/
+  // restoreLockdownControls that could throw "Object has been destroyed"
+  // on the closed event.
+  "performLockdownRestoration",
 ];
 const REQUIRED_DISPLAY_ENFORCEMENT_JS_MARKERS = ["setEnforcementState", "resolveReadinessGatedDisplayEnforcementState"];
 const REQUIRED_PROCESS_DETECTION_JS_MARKERS = ["runPreflightScan", "setExamActive"];

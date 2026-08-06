@@ -47,6 +47,8 @@ import { LockdownLifecycleManager } from "./lockdownLifecycle";
 import { LOCKDOWN_CAPABILITY_REGISTRY, type LockdownPolicyToggles } from "./lockdownCapabilityRegistry";
 import { consumeLockdownFault } from "./lockdownFaultInjection";
 import { diagnosticLog } from "./diagnosticLog";
+import { isWindowUsable, runOnWindowBestEffort } from "./windowLifecycleGuard";
+import { performLockdownRestoration, type RestorationController, type RestorationOutcome } from "./lockdownRestorationController";
 
 export const DIAGNOSTIC_LOG_FILE_NAME = "tether-secure-browser-diagnostics.log";
 
@@ -86,7 +88,7 @@ const store = new Store<StoreSchema>({
 
 const displayEnforcement = new DisplayEnforcement({
   onEventType: (eventType: DisplayEnforcementEventType, displayCount: number) => {
-    mainWindow?.webContents.send("lockdown:display-enforcement-event", { eventType, displayCount });
+    runOnWindowBestEffort(mainWindow, (window) => window.webContents.send("lockdown:display-enforcement-event", { eventType, displayCount }));
   },
   onDiagnosticsChanged: () => maybeEmitDiagnostics(),
 });
@@ -102,10 +104,12 @@ const displayEnforcement = new DisplayEnforcement({
 // its own authenticated fetch.
 const processDetection = new ProcessDetection({
   onCapabilityTransition: (capabilityId, effectiveAction, phase, detectedAtMsForClear) => {
-    mainWindow?.webContents.send("lockdown:capability-transition", { capabilityId, effectiveAction, phase, detectedAtMsForClear: detectedAtMsForClear ?? null });
+    runOnWindowBestEffort(mainWindow, (window) =>
+      window.webContents.send("lockdown:capability-transition", { capabilityId, effectiveAction, phase, detectedAtMsForClear: detectedAtMsForClear ?? null }),
+    );
   },
   onScanUnavailable: (reason) => {
-    mainWindow?.webContents.send("lockdown:scan-unavailable", { reason });
+    runOnWindowBestEffort(mainWindow, (window) => window.webContents.send("lockdown:scan-unavailable", { reason }));
     reportAuditFactBestEffort("TETHER_LOCKDOWN_DETECTION_SERVICE_FAILURE", { reason });
   },
 });
@@ -122,14 +126,22 @@ lockdownLifecycle.registerRestoreAction("displayEnforcement.setEnforcementState(
   displayEnforcement.setEnforcementState({ active: false, ready: false, requireSingleDisplay: false }),
 );
 
+// Destroyed-window crash fix v1.7.1 — restoreLockdownControls delegates
+// the actual orchestration to performLockdownRestoration
+// (lockdownRestorationController.ts), which is Electron-decoupled and
+// directly unit tested. getWindow always re-reads the current mainWindow
+// reference (never a stale closure captured at registration time), so
+// this stays correct across the window being replaced/nulled between
+// calls.
+const restorationController: RestorationController<BrowserWindow> = {
+  getWindow: () => mainWindow,
+  reportAuditFact: (window, action, metadata) => reportAuditFactToWindow(window, action, metadata),
+  sendResult: (window, outcome: RestorationOutcome) => window.webContents.send("lockdown:restoration-result", outcome),
+  diagnosticLog: (message, data) => diagnosticLog(message, data),
+};
+
 function restoreLockdownControls(trigger: string): void {
-  diagnosticLog("lockdownLifecycle: restore requested", { trigger, stateBefore: lockdownLifecycle.getState() });
-  reportAuditFactBestEffort("TETHER_LOCKDOWN_RESTORATION_STARTED", { trigger });
-  const result = lockdownLifecycle.restore();
-  const action = result.state === "RESTORED" ? "TETHER_LOCKDOWN_RESTORATION_COMPLETED" : "TETHER_LOCKDOWN_RESTORATION_FAILED";
-  reportAuditFactBestEffort(action, { trigger, errorCount: result.errors.length });
-  mainWindow?.webContents.send("lockdown:restoration-result", { trigger, state: result.state, errors: result.errors });
-  diagnosticLog("lockdownLifecycle: restore result", { trigger, result });
+  performLockdownRestoration(lockdownLifecycle, restorationController, trigger);
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -204,7 +216,7 @@ function maybeEmitDiagnostics(): void {
   const snapshot = buildCurrentDiagnosticsSnapshot();
   if (lastEmittedDiagnosticsSnapshot && snapshotsEqualIgnoringTimestamp(lastEmittedDiagnosticsSnapshot, snapshot)) return;
   lastEmittedDiagnosticsSnapshot = snapshot;
-  mainWindow?.webContents.send("lockdown:diagnostics-snapshot", snapshot);
+  runOnWindowBestEffort(mainWindow, (window) => window.webContents.send("lockdown:diagnostics-snapshot", snapshot));
   try {
     fs.mkdirSync(app.getPath("userData"), { recursive: true });
     fs.appendFileSync(diagnosticLogFilePath(), `${formatDiagnosticLogLine(snapshot)}\n`, "utf8");
@@ -280,7 +292,7 @@ async function flushQueue() {
 }
 
 async function uploadEvent(submissionId: string, event: QueuedLockdownEvent): Promise<boolean> {
-  if (!mainWindow) return false;
+  if (!isWindowUsable(mainWindow)) return false;
   try {
     const severity = event.eventType === "FULLSCREEN_EXIT" ? "MEDIUM" : "INFO";
     const result = await mainWindow.webContents.executeJavaScript(
@@ -314,12 +326,19 @@ async function uploadEvent(submissionId: string, event: QueuedLockdownEvent): Pr
  * student is doing, unlike the queued IntegrityEvent path which exists
  * specifically to survive an offline gap).
  */
-function reportAuditFactBestEffort(action: string, metadata: Record<string, unknown>): void {
-  if (!mainWindow) return;
+/**
+ * Destroyed-window crash fix v1.7.1 — the actual send, extracted so both
+ * reportAuditFactBestEffort (below) and restorationController (used by
+ * performLockdownRestoration) can share it. Callers are responsible for
+ * only invoking this with a window that isWindowUsable() has just
+ * confirmed; runOnWindowBestEffort provides that guarantee plus a
+ * try/catch around the call itself for the narrow check-then-call race.
+ */
+function reportAuditFactToWindow(window: BrowserWindow, action: string, metadata: Record<string, unknown>): void {
   const body: Record<string, unknown> = { action, metadata };
   if (examContext.submissionId) body.submissionId = examContext.submissionId;
   else if (examContext.examId) body.examId = examContext.examId;
-  mainWindow.webContents
+  window.webContents
     .executeJavaScript(
       `fetch(${JSON.stringify(`${SES_BASE_URL}/api/tether/lockdown/audit-event`)}, {
         method: "POST",
@@ -331,9 +350,12 @@ function reportAuditFactBestEffort(action: string, metadata: Record<string, unkn
     .catch(() => {});
 }
 
+function reportAuditFactBestEffort(action: string, metadata: Record<string, unknown>): void {
+  runOnWindowBestEffort(mainWindow, (window) => reportAuditFactToWindow(window, action, metadata));
+}
+
 function emitWarning(text: string) {
-  if (!mainWindow) return;
-  mainWindow.webContents.send("lockdown:warning", text);
+  runOnWindowBestEffort(mainWindow, (window) => window.webContents.send("lockdown:warning", text));
 }
 
 function recordEvent(
@@ -356,9 +378,7 @@ function recordEvent(
     },
   };
   enqueueEvent(event);
-  if (mainWindow) {
-    mainWindow.webContents.send("lockdown:event-recorded", getQueue().length);
-  }
+  runOnWindowBestEffort(mainWindow, (window) => window.webContents.send("lockdown:event-recorded", getQueue().length));
 }
 
 function buildLoadUrl(examId: string | null): string {
@@ -454,6 +474,10 @@ function createWindow(examId: string | null) {
   // team's own debugging). Keyboard-shortcut blocking below is
   // unconditional in both cases.
   if (app.isPackaged) {
+    // Destroyed-window crash fix v1.7.1 audit — no isWindowUsable guard
+    // needed here: this listener runs synchronously in response to
+    // devtools-opened on this exact webContents, so it cannot have been
+    // destroyed by the time this callback executes.
     mainWindow.webContents.on("devtools-opened", () => {
       mainWindow?.webContents.closeDevTools();
       recordEvent("DEBUGGING_TOOL_DETECTED", "Developer tools were opened.", "devtools-opened");
@@ -506,7 +530,7 @@ function createWindow(examId: string | null) {
   mainWindow.webContents.setUserAgent(`${mainWindow.webContents.getUserAgent()} ${USER_AGENT_SUFFIX}`);
 
   mainWindow.webContents.once("did-finish-load", () => {
-    mainWindow?.webContents.send("lockdown:content-protection-status", contentProtectionEnabled);
+    runOnWindowBestEffort(mainWindow, (window) => window.webContents.send("lockdown:content-protection-status", contentProtectionEnabled));
   });
 
   // Tether launch/install flow v1 — live for the whole session (not
@@ -639,7 +663,7 @@ function parseExamIdFromDeepLink(url: string): string | null {
 
 function handleDeepLink(url: string) {
   const examId = parseExamIdFromDeepLink(url);
-  if (mainWindow) {
+  if (isWindowUsable(mainWindow)) {
     mainWindow.loadURL(buildLoadUrl(examId));
   } else {
     createWindow(examId);
@@ -667,6 +691,11 @@ ipcMain.on(
   },
 );
 
+// Destroyed-window crash fix v1.7.1 audit — no isWindowUsable guard
+// needed here: this handler is invoked synchronously by the renderer's
+// own IPC call, so mainWindow.webContents is necessarily alive at the
+// point this function starts running (the only await is after that
+// access completes).
 ipcMain.handle("lockdown:get-session-info", async () => {
   if (!mainWindow) return { authenticated: false };
   const cookies = await mainWindow.webContents.session.cookies.get({ url: SES_BASE_URL });
@@ -945,7 +974,7 @@ app.whenReady().then(() => {
   app.on("second-instance", (_event, argv) => {
     const deepLinkArg = argv.find((a) => isDeepLinkArg(a));
     if (deepLinkArg) handleDeepLink(deepLinkArg);
-    if (mainWindow) {
+    if (isWindowUsable(mainWindow)) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
