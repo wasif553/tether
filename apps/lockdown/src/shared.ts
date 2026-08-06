@@ -127,7 +127,7 @@
 // for lecturer review, never an automatic misconduct conclusion — see
 // that doc's "Core principles". No kernel driver, no TPM attestation, no
 // permanent Windows-setting change, no blanket process termination.
-export const LOCKDOWN_VERSION = "1.7.0";
+export const LOCKDOWN_VERSION = "1.7.1";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see
@@ -136,6 +136,16 @@ export const LOCKDOWN_VERSION = "1.7.0";
 export const USER_AGENT_SUFFIX = `TetherSecureBrowser/${LOCKDOWN_VERSION}`;
 
 export const DEFAULT_SES_BASE_URL = "https://tether-murex.vercel.app";
+
+/**
+ * Windows taskbar icon fix v1.7.1 — the Windows AppUserModelID, used for
+ * taskbar icon/grouping identity. Reuses electron-builder.yml's existing
+ * `appId` verbatim rather than inventing a second identifier — the two
+ * must stay in sync, since a mismatch is exactly the kind of thing that
+ * causes inconsistent taskbar grouping between a pinned shortcut and a
+ * running instance.
+ */
+export const TETHER_APP_USER_MODEL_ID = "com.tether.securebrowser";
 
 /**
  * Tether launch/install flow v1 — the branded `tether://` protocol is

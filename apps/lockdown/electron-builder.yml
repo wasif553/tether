@@ -19,6 +19,17 @@ directories:
 files:
   - dist/**/*
   - package.json
+  # Windows taskbar icon fix v1.7.1 — bundled at the same relative
+  # location it already has at dev time (apps/lockdown/assets/icon.ico,
+  # one level up from dist/) so main.ts's BrowserWindow can resolve a
+  # single packaged-safe runtime icon path
+  # (path.join(__dirname, "..", "assets", "icon.ico")) that works
+  # unchanged in both dev and packaged builds, without an absolute
+  # local-machine path. `buildResources: assets` above only tells
+  # electron-builder itself where to find build-time resources (win.icon,
+  # mac.icon, ...) — it does not, on its own, copy anything into
+  # resources/app, hence this explicit entry.
+  - assets/icon.ico
 
 # Disabled because electron-builder's Windows asar-integrity step requires
 # extracting a macOS cross-signing tool archive (winCodeSign) that contains
@@ -36,20 +47,53 @@ win:
     - target: nsis
       arch:
         - x64
+  # `win.icon` is still what the NSIS installer step reads directly for
+  # the setup .exe's own icon (packager.getIconPath(), independent of
+  # signAndEditExecutable below) — so the installer icon is already
+  # correctly branded from this alone.
   icon: assets/icon.ico
-  # Disabled because embedding the icon/version resources triggers
-  # electron-builder's Windows executable-signing step, which in turn
-  # requires the winCodeSign vendor archive. Extracting that archive
-  # needs Windows Developer Mode or an elevated shell (see comment on
-  # `asar: false` above for the same root cause). No signing identity is
-  # configured for this pilot build anyway, so this only means the .exe
-  # keeps Electron's default icon/version metadata instead of Tether
-  # branding — cosmetic only, not a functional or security change.
+  # Windows taskbar icon fix v1.7.1 — investigated re-enabling this (it
+  # was `false`, which is why the INSTALLED app .exe never got its icon
+  # embedded — see embedWindowsIcon.ts's doc comment for the full story).
+  # Re-enabling it turned out to still reach for the winCodeSign vendor
+  # archive on this build host (verified by invoking electron-builder's
+  # own `app-builder rcedit` helper standalone — it hits the identical
+  # winCodeSign download with signAndEditExecutable true OR false, so the
+  # dependency lives inside that helper binary itself, not in electron-
+  # builder's JS-level signing logic). That archive contains macOS files
+  # with symlinks 7-Zip cannot extract without Windows Developer Mode or
+  # an elevated shell — the same constraint `asar: false` above already
+  # documents for a different step. Left `false`: the installed app .exe
+  # instead gets its icon embedded by `npm run embed:icon`
+  # (embedWindowsIcon.ts, using the standalone `rcedit` package, which has
+  # no winCodeSign dependency), run between the `--dir` packaging step and
+  # the NSIS installer step in the `dist:win` script below.
   signAndEditExecutable: false
 
 nsis:
   oneClick: false
-  allowToChangeInstallationDirectory: true
+  # NSIS installer crash fix — `allowToChangeInstallationDirectory: true`
+  # pulls in MUI2's directory-selection page. On this build/target
+  # environment, that page's code path reliably crashes with an access
+  # violation deep inside NSIS's own System.dll plugin (0xC0000005) the
+  # instant the installer launches — proven independent of every packaging
+  # decision in this repo: it reproduces identically (same fault module,
+  # same exception code, same fault offset) on a rebuild of the genuine
+  # pre-v1.7.1 source, on a build with the destroyed-window fix only and
+  # no icon changes at all, and with rcedit/--prepackaged both removed
+  # from the pipeline. It stopped reproducing, with no other change,
+  # exactly when this one setting was removed. Two isolated minimal NSIS
+  # scripts individually replicating the other System.dll-based calls in
+  # electron-builder's templates (GetProcessInfo-style process
+  # enumeration, SHGetKnownFolderPath-style per-user path resolution) ran
+  # successfully on their own, narrowing this specifically to the
+  # directory-selection page's own code. The installer still shows its
+  # normal multi-page wizard (welcome, install progress, finish) and
+  # installs to a fixed, non-configurable location — only the "choose a
+  # different folder" step is gone. Do not re-enable this without first
+  # confirming (physically, on this same class of machine) that the
+  # crash is actually resolved — re-enabling it blind reintroduces a
+  # 100%-reproducible install failure.
   perMachine: false
   createDesktopShortcut: true
   createStartMenuShortcut: true

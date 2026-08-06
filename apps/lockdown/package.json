@@ -1,8 +1,8 @@
 {
   "name": "ses-lockdown",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "private": true,
-  "description": "Tether Secure Browser v1.7.0 (Tether Windows Lockdown Hardening v1 — adds a Windows-only process-detection service for known remote-control/debugging/virtualization/screen-capture applications, a remote-session/VM indicator, a main-owned preflight gate and during-exam blocking overlay, an idempotent restoration lifecycle, and materially strengthened Electron hardening: a permission allowlist, denied navigation/window.open/downloads, packaged-build DevTools prevention, rejected unsafe command-line switches, and blocked browser-chrome keyboard shortcuts. See docs/tether-windows-lockdown-hardening-v1.md. v1.4.0 and v1.5.0 were development-only, never distributed.)",
+  "description": "Tether Secure Browser v1.7.1 (destroyed-window crash fix: restoreLockdownControls/reportAuditFactBestEffort could throw 'Object has been destroyed' when the BrowserWindow's closed event fired, crashing the main process — restoration is now independent of any window and audit reporting is routed through a shared isWindowUsable/runOnWindowBestEffort guard. Built on v1.7.0's Tether Windows Lockdown Hardening v1 — adds a Windows-only process-detection service for known remote-control/debugging/virtualization/screen-capture applications, a remote-session/VM indicator, a main-owned preflight gate and during-exam blocking overlay, an idempotent restoration lifecycle, and materially strengthened Electron hardening: a permission allowlist, denied navigation/window.open/downloads, packaged-build DevTools prevention, rejected unsafe command-line switches, and blocked browser-chrome keyboard shortcuts. See docs/tether-windows-lockdown-hardening-v1.md. v1.4.0 and v1.5.0 were development-only, never distributed.)",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -11,9 +11,10 @@
     "start": "npm run build && electron .",
     "pack": "npm run build && electron-builder --dir && npm run verify:package",
     "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win && npm run verify:package -- release/win-unpacked",
+    "dist:win": "npm run build && electron-builder --win --dir && npm run embed:icon && electron-builder --win --prepackaged release/win-unpacked && npm run verify:package -- release/win-unpacked",
     "dist:mac": "npm run build && electron-builder --mac",
-    "verify:package": "node dist/verifyPackagedRelease.js"
+    "verify:package": "node dist/verifyPackagedRelease.js",
+    "embed:icon": "node dist/embedWindowsIcon.js"
   },
   "dependencies": {
     "electron-store": "^8.2.0"
@@ -22,6 +23,8 @@
     "@types/node": "^20",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8",
+    "rcedit": "^5.0.2",
+    "resedit": "^3.0.2",
     "typescript": "^5.7.0",
     "vitest": "^4.1.9"
   }
