@@ -11,9 +11,10 @@
     "start": "npm run build && electron .",
     "pack": "npm run build && electron-builder --dir && npm run verify:package",
     "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win && npm run verify:package -- release/win-unpacked",
+    "dist:win": "npm run build && electron-builder --win --dir && npm run embed:icon && electron-builder --win --prepackaged release/win-unpacked && npm run verify:package -- release/win-unpacked",
     "dist:mac": "npm run build && electron-builder --mac",
-    "verify:package": "node dist/verifyPackagedRelease.js"
+    "verify:package": "node dist/verifyPackagedRelease.js",
+    "embed:icon": "node dist/embedWindowsIcon.js"
   },
   "dependencies": {
     "electron-store": "^8.2.0"
@@ -22,6 +23,8 @@
     "@types/node": "^20",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8",
+    "rcedit": "^5.0.2",
+    "resedit": "^3.0.2",
     "typescript": "^5.7.0",
     "vitest": "^4.1.9"
   }

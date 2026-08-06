@@ -25,6 +25,7 @@ import {
   DEEP_LINK_PROTOCOLS,
   LOCKDOWN_VERSION,
   USER_AGENT_SUFFIX,
+  TETHER_APP_USER_MODEL_ID,
   isDeepLinkArg,
   buildTetherLaunchPath,
   type ExamContext,
@@ -71,6 +72,25 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 }
+
+// Windows taskbar icon fix v1.7.1 — must be set before the first
+// BrowserWindow is created for Windows to group/pin this app under its
+// own stable identity rather than falling back to a generic one derived
+// from the .exe path. Reuses electron-builder.yml's existing `appId`
+// (see TETHER_APP_USER_MODEL_ID's own doc comment in shared.ts) rather
+// than inventing a second identifier. No-op on non-Windows platforms.
+app.setAppUserModelId(TETHER_APP_USER_MODEL_ID);
+
+// Windows taskbar icon fix v1.7.1 — a single relative-to-__dirname path
+// that resolves correctly in both dev (`npm start`, __dirname is
+// apps/lockdown/dist) and packaged (__dirname is resources/app/dist)
+// builds, since electron-builder.yml's `files` now bundles
+// assets/icon.ico at the same relative location it already has at dev
+// time. Never an absolute local-machine path. Used as the BrowserWindow
+// icon below — on Windows this is what the taskbar/Alt-Tab UI shows
+// while running unpackaged (a packaged build gets its icon from the .exe
+// resource itself, embedded by electron-builder via `win.icon`).
+const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico");
 
 type StoreSchema = InstallationKeyStoreSchema & {
   queuedEvents: QueuedLockdownEvent[];
@@ -413,6 +433,7 @@ function createWindow(examId: string | null) {
     autoHideMenuBar: true,
     resizable: false,
     alwaysOnTop: false,
+    icon: LOCKDOWN_ICON_PATH,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

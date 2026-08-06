@@ -138,6 +138,16 @@ export const USER_AGENT_SUFFIX = `TetherSecureBrowser/${LOCKDOWN_VERSION}`;
 export const DEFAULT_SES_BASE_URL = "https://tether-murex.vercel.app";
 
 /**
+ * Windows taskbar icon fix v1.7.1 — the Windows AppUserModelID, used for
+ * taskbar icon/grouping identity. Reuses electron-builder.yml's existing
+ * `appId` verbatim rather than inventing a second identifier — the two
+ * must stay in sync, since a mismatch is exactly the kind of thing that
+ * causes inconsistent taskbar grouping between a pinned shortcut and a
+ * running instance.
+ */
+export const TETHER_APP_USER_MODEL_ID = "com.tether.securebrowser";
+
+/**
  * Tether launch/install flow v1 — the branded `tether://` protocol is
  * now primary; `ses://` is preserved for existing pilot installations
  * that haven't updated yet (Requirement 4). Both are registered and
