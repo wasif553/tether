@@ -22,8 +22,8 @@ migrations in this ledger were written before this was confirmed
 explicitly — re-run the pre-check query for any of them before assuming
 a second apply is actually needed.
 
-**Confirmed applied — do not re-apply.** As of 2026-08-05, the following
-eight migration files have each been applied exactly once to the one
+**Confirmed applied — do not re-apply.** As of 2026-08-06, the following
+nine migration files have each been applied exactly once to the one
 shared Preview/Production Supabase database (project ref
 `ugckdvbjzauvcovcqebw`; confirmed via the read-only verification queries
 below returning the expected tables/columns/enum values):
@@ -36,6 +36,7 @@ below returning the expected tables/columns/enum values):
 - `docs/secure-client-foundation-seb-v1-migration.sql` — applied 2026-07-25.
 - `docs/sql/add-tether-secure-resume-recovery.sql` — applied 2026-08-02.
 - `docs/sql/add-tether-windows-lockdown-hardening.sql` — applied 2026-08-05.
+- `docs/sql/repair-installation-attestation-foundation.sql` — applied 2026-08-06.
 
 Because Preview and Production are the same database, there is no
 separate "now apply it to the other environment" step for any of these
@@ -157,7 +158,7 @@ Interpretation:
 | 14 | `docs/secure-client-foundation-seb-v1-migration.sql` | Tether Secure Client Foundation + Safe Exam Browser Compatibility v1 | **APPLIED ONCE — 2026-07-25** | **APPLIED ONCE — 2026-07-25 (same shared database as Preview)** | Confirmed applied — do not re-apply. See "Verification — secure client foundation migration" below for the full read-only confirmation record. |
 | 15 | `docs/sql/add-tether-secure-resume-recovery.sql` | Tether Secure Exam Recovery and Resilient Autosave v1 | **APPLIED ONCE — 2026-08-02** | **APPLIED ONCE — 2026-08-02 (same shared database as Preview)** | Confirmed applied — do not re-apply. Additive only — three new nullable/defaulted columns on `SecureClientSession`, four on `Submission` (one unique), two on `Answer`, plus one index and one self-referencing foreign key. See docs/tether-secure-resume-recovery-v1.md and "Verification — secure recovery migration" below for the full read-only confirmation record. |
 | 16 | `docs/sql/add-tether-windows-lockdown-hardening.sql` | Tether Windows Lockdown Hardening v1 | **APPLIED ONCE — 2026-08-05** | **APPLIED ONCE — 2026-08-05 (same shared database as Preview)** | Confirmed applied — do not re-apply. Additive only — five new `IntegrityEventType` enum values (`REMOTE_CONTROL_SOFTWARE_DETECTED`, `SCREEN_CAPTURE_SOFTWARE_DETECTED`, `DEBUGGING_TOOL_DETECTED`, `PROHIBITED_APPLICATION_DETECTED`, `PROHIBITED_APPLICATION_CLOSED`) — no new table, no new column, no existing row modified. Every other lockdown fact is `PlatformAuditLog` only (its `action` column is a plain string, needing no schema change). See docs/tether-windows-lockdown-hardening-v1.md and "Verification — Windows lockdown hardening migration" below for the full read-only confirmation record. |
-| 17 | `docs/sql/repair-installation-attestation-foundation.sql` | Production schema repair — complete installation-attestation foundation (supersedes the earlier, narrower SecureClientSession-only repair) | **PENDING — NOT YET APPLIED** | **PENDING — NOT YET APPLIED (same shared database as Preview)** | Repairs a confirmed production gap spanning FIVE previously untracked files, none of which have ever been applied: `docs/sql/add-tether-client-installation.sql`, `docs/sql/add-tether-installation-registration-challenge.sql`, `docs/sql/add-system-check-secure-client-verification.sql`, `docs/sql/add-tether-system-check-readiness.sql`, and `docs/sql/add-secure-client-session-installation-attestation.sql` (all written 2026-07-30 through 2026-08-01, "Secure Client Attestation v2" / "Tether System Check and Exam Readiness v1"). Live inspection confirmed the whole rollout is missing: `SecureClientSession` lacks all six installation-attestation columns (causing Prisma error P2022), and `TetherClientInstallation`/`TetherInstallationRegistrationChallenge`/`SystemCheckSecureClientVerification`/`TetherSystemCheckRun` do not exist at all. Unrelated to, and not superseded by, row 15's 2026-08-02 migration, which never touched any of these objects. See "Deployment procedure — repair-installation-attestation-foundation.sql" below for the full dependency graph and audit. **Do not apply as part of the same change that adds this row.** |
+| 17 | `docs/sql/repair-installation-attestation-foundation.sql` | Production schema repair — complete installation-attestation foundation (supersedes the earlier, narrower SecureClientSession-only repair) | **APPLIED ONCE — 2026-08-06** | **APPLIED ONCE — 2026-08-06 (same shared database as Preview)** | Confirmed applied — do not re-apply. Repaired a confirmed production gap spanning FIVE previously untracked files, none of which had ever been applied: `docs/sql/add-tether-client-installation.sql`, `docs/sql/add-tether-installation-registration-challenge.sql`, `docs/sql/add-system-check-secure-client-verification.sql`, `docs/sql/add-tether-system-check-readiness.sql`, and `docs/sql/add-secure-client-session-installation-attestation.sql` (all written 2026-07-30 through 2026-08-01, "Secure Client Attestation v2" / "Tether System Check and Exam Readiness v1"). Live inspection had confirmed the whole rollout was missing: `SecureClientSession` lacked all six installation-attestation columns (causing Prisma error P2022), and `TetherClientInstallation`/`TetherInstallationRegistrationChallenge`/`SystemCheckSecureClientVerification`/`TetherSystemCheckRun` did not exist at all. Unrelated to, and not superseded by, row 15's 2026-08-02 migration, which never touched any of these objects. The production P2022 failure is resolved. See "Deployment procedure — repair-installation-attestation-foundation.sql" and "Verification — installation attestation foundation repair" below for the full dependency graph, audit, and read-only confirmation record. **This migration must not be applied again.** |
 
 Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -729,10 +730,17 @@ writes them, rather than attempting an enum rebuild.
 
 ## Deployment procedure — `docs/sql/repair-installation-attestation-foundation.sql`
 
-**PENDING — NOT YET APPLIED. Do not apply as part of the same change
-that adds this row to the ledger.** Preview and Production share ONE
-Supabase database — apply this file **once**, not once per environment,
-and only after independent review.
+**Already applied — 2026-08-06, to the one shared Preview/Production
+Supabase database (project ref `ugckdvbjzauvcovcqebw`). Do not run this
+file again.** The steps below are kept as a historical record of the
+procedure that was followed. See "Verification — installation
+attestation foundation repair" further below for the full read-only
+confirmation record.
+
+Preview and Production share ONE Supabase database — this file was
+applied **once**, not once per environment; there is no separate
+Production application still pending, and it must not be applied a
+second time to either environment.
 
 **Supersedes the earlier, narrower
 `docs/sql/repair-secure-client-session-installation-fields.sql`, which
@@ -885,22 +893,81 @@ matches what is expected here.
 
 ### Procedure
 
-1. Take a current schema backup of the shared database (Supabase
+1. Took a current schema backup of the shared database (Supabase
    project → Database → Backups) before applying anything.
-2. Run the full pre-check procedure above and review every result.
-3. Open the (shared) Supabase project → SQL Editor.
-4. Paste and run the file's five sequential `BEGIN...COMMIT` blocks, in
+2. Ran the full pre-check procedure above and reviewed every result.
+3. Opened the (shared) Supabase project → SQL Editor.
+4. Pasted and ran the file's five sequential `BEGIN...COMMIT` blocks, in
    the order they appear in the file (Blocks 1-4 independently, then
-   Block 5 last).
-5. Run the file's own "Post-application verification" queries to
-   confirm all four tables, all six `SecureClientSession` columns, all
+   Block 5 last) — through the Supabase SQL Editor only. No `prisma db
+   push`, `prisma migrate dev`, `prisma migrate deploy`, or `prisma
+   migrate resolve` command was used at any point.
+5. Ran the file's own "Post-application verification" queries and
+   confirmed all four tables, all six `SecureClientSession` columns, all
    seventeen indexes, and all five foreign keys landed, and that every
-   existing row is untouched (every new table empty, every existing
+   existing row was untouched (every new table empty, every existing
    `SecureClientSession` row's new columns NULL/false).
-6. Record the date in the Ledger table above (row 17) — a single date
+6. Recorded the date in the Ledger table above (row 17) — a single date
    is sufficient given the shared database.
 7. Do not apply this file a second time — re-running it after a
-   successful apply is idempotent but is not expected to be necessary.
+   successful apply is idempotent but is not expected to be necessary
+   and should not be done deliberately.
+
+### Verification — installation attestation foundation repair
+
+Confirmed via read-only queries against the shared Supabase database
+(project ref `ugckdvbjzauvcovcqebw`) on 2026-08-06, immediately after
+this repair was applied. **Preview and Production point at this same
+shared Supabase database — this repair has now been applied to that one
+database and must not be applied again, in either environment.**
+
+- The repair was applied exactly once, manually, through the Supabase
+  SQL Editor — the file's five sequential `BEGIN...COMMIT` blocks. No
+  `prisma migrate` command and no `prisma db push` (nor `migrate
+  deploy`, `migrate resolve`, or `migrate dev`) was run against this
+  database at any point in this rollout.
+- All four new tables were verified created (`to_regclass`):
+  `TetherClientInstallation`, `TetherInstallationRegistrationChallenge`,
+  `SystemCheckSecureClientVerification`, and `TetherSystemCheckRun`.
+- All six `SecureClientSession` installation-attestation columns were
+  verified present (`information_schema.columns`): `clientInstallationId`
+  (`text`), `installationAttestationVerified` (`boolean`, `NOT NULL`,
+  default `false`), `installationAttestationVerifiedAt`
+  (`timestamp(3)`), `installationAttestationFailureReason` (`text`),
+  `installationVerificationId` (`text`), and `attestationRequirement`
+  (`text`).
+- All seventeen repair-related indexes were verified present
+  (`pg_indexes`), spanning all four new tables plus
+  `SecureClientSession_clientInstallationId_idx` on the existing table.
+- All five repair-related foreign keys were verified present
+  (`pg_constraint`): `TetherClientInstallation_userId_fkey`,
+  `TetherInstallationRegistrationChallenge_userId_fkey`,
+  `SystemCheckSecureClientVerification_userId_fkey`,
+  `TetherSystemCheckRun_userId_fkey`, and
+  `SecureClientSession_clientInstallationId_fkey`.
+- `SecureClientSession.clientInstallationId` was confirmed to reference
+  `TetherClientInstallation.id`, with `ON DELETE SET NULL ON UPDATE
+  CASCADE` — verified via the exact clause on
+  `SecureClientSession_clientInstallationId_fkey`.
+- No existing `SecureClientSession` row required cleanup: the file's own
+  "no existing row retroactively verified or assigned a requirement"
+  queries both returned 0 (no row has `installationAttestationVerified
+  = true`, and no row has any of the six new columns non-NULL/non-default).
+- No existing data row was deleted or rewritten anywhere in this
+  rollout — every new table was confirmed empty immediately after
+  applying, and `SecureClientSession`/`User`/`Submission` row counts
+  were identical before and after.
+- The production Prisma P2022 failure
+  (`SecureClientSession.clientInstallationId does not exist`) is
+  resolved.
+- End-to-end confirmation after the repair: attempting to access a
+  Tether-required examination directly in Chrome (outside the Tether
+  Secure Browser) was correctly blocked, exactly as the existing
+  installation-attestation/lockdown enforcement is designed to behave —
+  confirming the repair restored the schema this enforcement depends on
+  without otherwise changing its behavior.
+
+**This repair must not be applied again.**
 
 ### Rollback — `docs/sql/repair-installation-attestation-foundation.sql`
 
