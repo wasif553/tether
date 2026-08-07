@@ -44,6 +44,26 @@ const SCREEN_SHARE_EVENT_TYPES = [
   "SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED",
 ] as const;
 
+// Tether Windows Lockdown Hardening v1 — see
+// docs/tether-windows-lockdown-hardening-v1.md, "Audit and evidence".
+// The only lockdown signals that ever become an IntegrityEvent; every
+// other lockdown fact (restoration lifecycle, preflight-blocked,
+// remote-session checks, display-topology changes) is recorded
+// elsewhere and never reaches this report.
+const LOCKDOWN_DETECTION_EVENT_TYPES = [
+  "REMOTE_CONTROL_SOFTWARE_DETECTED",
+  "SCREEN_CAPTURE_SOFTWARE_DETECTED",
+  "DEBUGGING_TOOL_DETECTED",
+  "PROHIBITED_APPLICATION_DETECTED",
+  "PROHIBITED_APPLICATION_CLOSED",
+] as const;
+
+export const LOCKDOWN_DETECTION_DISCLAIMER =
+  "Lockdown detection signals indicate that Tether observed a known remote-control, debugging, " +
+  "screen-capture, or virtualization application during this attempt. They are indicators for " +
+  "human review, not automatic misconduct decisions, and do not prove the application was " +
+  "actually used against the exam.";
+
 export class EvidenceNotFoundError extends Error {}
 export class EvidenceForbiddenError extends Error {}
 
@@ -133,6 +153,17 @@ export type EvidenceReport = {
       evidenceIntervalSeconds: number;
       maxEvidenceFrames: number;
     };
+    disclaimer: string;
+  } | null;
+  // Tether Windows Lockdown Hardening v1 — see
+  // docs/tether-windows-lockdown-hardening-v1.md. Null unless at least
+  // one lockdown detection signal was recorded for this attempt.
+  lockdownDetectionSummary: {
+    remoteControlCount: number;
+    screenCaptureCount: number;
+    debuggingToolCount: number;
+    prohibitedApplicationCount: number;
+    closedCount: number;
     disclaimer: string;
   } | null;
   canvasPassback: {
@@ -272,6 +303,20 @@ export async function buildEvidenceReport(
       }
     : null;
 
+  const lockdownDetectionEvents = submission.integrityEvents.filter((e) =>
+    (LOCKDOWN_DETECTION_EVENT_TYPES as readonly string[]).includes(e.eventType),
+  );
+  const lockdownDetectionSummary = lockdownDetectionEvents.length
+    ? {
+        remoteControlCount: lockdownDetectionEvents.filter((e) => e.eventType === "REMOTE_CONTROL_SOFTWARE_DETECTED").length,
+        screenCaptureCount: lockdownDetectionEvents.filter((e) => e.eventType === "SCREEN_CAPTURE_SOFTWARE_DETECTED").length,
+        debuggingToolCount: lockdownDetectionEvents.filter((e) => e.eventType === "DEBUGGING_TOOL_DETECTED").length,
+        prohibitedApplicationCount: lockdownDetectionEvents.filter((e) => e.eventType === "PROHIBITED_APPLICATION_DETECTED").length,
+        closedCount: lockdownDetectionEvents.filter((e) => e.eventType === "PROHIBITED_APPLICATION_CLOSED").length,
+        disclaimer: LOCKDOWN_DETECTION_DISCLAIMER,
+      }
+    : null;
+
   return {
     submissionId: submission.id,
     student: { name: submission.student.name, email: submission.student.email },
@@ -323,6 +368,7 @@ export async function buildEvidenceReport(
       })),
     aiCameraIntegritySummary,
     screenShareIntegritySummary,
+    lockdownDetectionSummary,
     canvasPassback: submission.gradePassback
       ? {
           status: submission.gradePassback.status,
@@ -421,6 +467,31 @@ export function evidenceReportToCsv(report: EvidenceReport): string {
     lines.push(`No person visible,${esc(String(ai.noPersonCount))}`);
     lines.push(`Camera blocked/dark,${esc(String(ai.cameraBlockedOrDarkCount))}`);
     lines.push(esc(ai.disclaimer));
+  }
+  if (report.screenShareIntegritySummary) {
+    lines.push("");
+    lines.push("Screen-share integrity signals");
+    const ss = report.screenShareIntegritySummary;
+    lines.push(`Sharing started,${esc(String(ss.startedCount))}`);
+    lines.push(`Interruptions,${esc(String(ss.interruptedCount))}`);
+    lines.push(`Restorations,${esc(String(ss.restoredCount))}`);
+    lines.push(`Non-monitor shares rejected,${esc(String(ss.surfaceRejectedCount))}`);
+    lines.push(`Permission denied,${esc(String(ss.permissionDeniedCount))}`);
+    lines.push(`Unavailable,${esc(String(ss.unavailableCount))}`);
+    lines.push(`Evidence frames captured,${esc(String(ss.evidenceFrameCount))}`);
+    lines.push(`Capture failures,${esc(String(ss.evidenceCaptureFailedCount))}`);
+    lines.push(esc(ss.disclaimer));
+  }
+  if (report.lockdownDetectionSummary) {
+    lines.push("");
+    lines.push("Lockdown detection signals");
+    const ld = report.lockdownDetectionSummary;
+    lines.push(`Remote-control software detected,${esc(String(ld.remoteControlCount))}`);
+    lines.push(`Screen-capture software detected,${esc(String(ld.screenCaptureCount))}`);
+    lines.push(`Debugging tool detected,${esc(String(ld.debuggingToolCount))}`);
+    lines.push(`Prohibited application detected,${esc(String(ld.prohibitedApplicationCount))}`);
+    lines.push(`Prohibited application closed,${esc(String(ld.closedCount))}`);
+    lines.push(esc(ld.disclaimer));
   }
   lines.push("");
   lines.push("Network Evidence");

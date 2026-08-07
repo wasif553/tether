@@ -40,12 +40,26 @@ describe("categoryForEventType", () => {
     expect(categoryForEventType("TIMER_EXPIRED")).toBe("info");
     expect(categoryForEventType("SOMETHING_UNKNOWN")).toBe("info");
   });
+
+  // Secure Exam Evidence Review audit v1 — these five event types are the
+  // only lockdown signals that ever reach IntegrityEvent (see
+  // docs/tether-windows-lockdown-hardening-v1.md). Before this fix they
+  // fell into the generic "info" bucket alongside truly informational
+  // signals, despite being MEDIUM-severity reviewable detections.
+  it("categorizes lockdown detection event types as 'lockdown', not 'info'", () => {
+    expect(categoryForEventType("REMOTE_CONTROL_SOFTWARE_DETECTED")).toBe("lockdown");
+    expect(categoryForEventType("SCREEN_CAPTURE_SOFTWARE_DETECTED")).toBe("lockdown");
+    expect(categoryForEventType("DEBUGGING_TOOL_DETECTED")).toBe("lockdown");
+    expect(categoryForEventType("PROHIBITED_APPLICATION_DETECTED")).toBe("lockdown");
+    expect(categoryForEventType("PROHIBITED_APPLICATION_CLOSED")).toBe("lockdown");
+  });
 });
 
 describe("INTEGRITY_EVENT_CATEGORY_LABELS", () => {
   it("has a label for every category", () => {
     expect(INTEGRITY_EVENT_CATEGORY_LABELS.evidence).toBe("Evidence events");
     expect(INTEGRITY_EVENT_CATEGORY_LABELS.camera).toBe("Camera events");
+    expect(INTEGRITY_EVENT_CATEGORY_LABELS.lockdown).toBe("Lockdown detection events");
     expect(INTEGRITY_EVENT_CATEGORY_LABELS.window).toBe("Window/focus events");
     expect(INTEGRITY_EVENT_CATEGORY_LABELS.info).toBe("Info events");
   });
@@ -61,5 +75,26 @@ describe("labelForEventType (unchanged)", () => {
 
   it("falls back to the raw event type for unknown types", () => {
     expect(labelForEventType("SOME_UNLISTED_TYPE")).toBe("SOME_UNLISTED_TYPE");
+  });
+
+  // Secure Exam Evidence Review audit v1 — a lecturer previously saw the
+  // raw enum string (e.g. "REMOTE_CONTROL_SOFTWARE_DETECTED") for these
+  // five types; now a calm, neutral label, and never a "confirmed"/
+  // "caught"/"proof"-style word (a detection is a signal, not a finding).
+  it("has a neutral, non-raw label for every lockdown detection event type", () => {
+    for (const eventType of [
+      "REMOTE_CONTROL_SOFTWARE_DETECTED",
+      "SCREEN_CAPTURE_SOFTWARE_DETECTED",
+      "DEBUGGING_TOOL_DETECTED",
+      "PROHIBITED_APPLICATION_DETECTED",
+      "PROHIBITED_APPLICATION_CLOSED",
+    ]) {
+      const label = labelForEventType(eventType);
+      expect(label).not.toBe(eventType);
+      expect(label.toLowerCase()).not.toContain("confirmed");
+      expect(label.toLowerCase()).not.toContain("caught");
+      expect(label.toLowerCase()).not.toContain("proof");
+      expect(label.toLowerCase()).not.toContain("cheating");
+    }
   });
 });

@@ -105,4 +105,22 @@ describe("calculateCombinedReviewRecommendation", () => {
     const result = calculateCombinedReviewRecommendation([], { examMode: "CLOSED_BOOK" });
     expect(result.reasonCodes).toContain("POLICY_CONTEXT:CLOSED_BOOK");
   });
+
+  // Secure Exam Evidence Review audit v1 — "evidence is not interpreted
+  // as automatic misconduct". Screen-share interruptions and lockdown
+  // detections both feed the lecturer evidence report as EVIDENCE-
+  // category signals (see src/lib/evidenceReport.ts); this proves the
+  // same "never oral verification/escalation alone" rule already proven
+  // above for POSSIBLE_PHONE_VISIBLE/COPY_ATTEMPT/WINDOW_BLUR also holds
+  // for these newer signal types, rather than assuming it by analogy.
+  it("Secure Exam Evidence Review audit v1: screen-share interruption and lockdown detection signals, alone or combined, never reach oral verification or escalation", () => {
+    const signals: CombinedSignalInput[] = [
+      { category: "EVIDENCE", signalType: "SCREEN_SHARE_INTERRUPTED", signalLevel: "HIGH" },
+      { category: "EVIDENCE", signalType: "REMOTE_CONTROL_SOFTWARE_DETECTED", signalLevel: "HIGH" },
+      { category: "EVIDENCE", signalType: "DEBUGGING_TOOL_DETECTED", signalLevel: "HIGH" },
+    ];
+    const result = calculateCombinedReviewRecommendation(signals);
+    expect(result.recommendation).not.toBe("ORAL_VERIFICATION_RECOMMENDED");
+    expect(result.recommendation).not.toBe("ESCALATION_RECOMMENDED");
+  });
 });

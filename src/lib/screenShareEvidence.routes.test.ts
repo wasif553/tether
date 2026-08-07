@@ -11,16 +11,57 @@
  * screenSharePolicy.test.ts, screenShareLifecycle.test.ts, and
  * screenShareEvidence.test.ts.
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import bcrypt from "bcryptjs";
 
 const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
 
+// Audit-fix test — "failed evidence upload does not expose exam content or
+// crash Tether". Wraps the REAL storage adapter's `put` behind a mock that
+// delegates to it by default, so every other test in this file is
+// unaffected; only a test that explicitly arms `mockStoragePut` with a
+// rejection sees a failure.
+const { mockStoragePut, realAdapterRef } = vi.hoisted(() => ({
+  mockStoragePut: vi.fn(),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  realAdapterRef: { current: null as any },
+}));
+vi.mock("@/lib/evidenceStorage", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./evidenceStorage")>();
+  return {
+    ...actual,
+    resolveEvidenceStorageAdapter: (...args: Parameters<typeof actual.resolveEvidenceStorageAdapter>) => {
+      const real = actual.resolveEvidenceStorageAdapter(...args);
+      realAdapterRef.current = real;
+      // `real` is a class instance — get/put/delete live on its
+      // prototype, so `{ ...real }` would silently drop them (only the
+      // `provider` field, an own instance property, would survive).
+      // Bind the real methods explicitly instead of spreading.
+      return {
+        provider: real.provider,
+        put: mockStoragePut,
+        get: real.get.bind(real),
+        delete: real.delete.bind(real),
+      };
+    },
+  };
+});
+
 const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
 const uploadRoute = await import("../app/api/submissions/[id]/screen-evidence/route");
 const viewRoute = await import("../app/api/integrity-evidence/[evidenceAssetId]/route");
+const integrityEventsRoute = await import("../app/api/submissions/[id]/integrity-events/route");
+const integrityReviewRoute = await import("../app/api/lecturer/submissions/[id]/integrity-review/route");
+
+beforeEach(() => {
+  mockStoragePut.mockReset();
+  mockStoragePut.mockImplementation((...args: unknown[]) => {
+    if (!realAdapterRef.current) throw new Error("real adapter not resolved yet");
+    return realAdapterRef.current.put(...args);
+  });
+});
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT" | "PLATFORM_ADMIN", institutionId: string) {
   return {
@@ -46,16 +87,26 @@ const stamp = Date.now();
 const cleanup = { users: [] as string[], exams: [] as string[] };
 
 let instA: string;
+let instB: string;
 let lecturerA: { id: string };
+let lecturerB: { id: string };
 let studentA: { id: string };
 let studentB: { id: string };
 
 beforeAll(async () => {
   const a = await getOrCreateTestInstitution(`screen-evidence-a-${stamp}`);
   instA = a.id;
+  const b = await getOrCreateTestInstitution(`screen-evidence-b-${stamp}`);
+  instB = b.id;
   const passwordHash = await bcrypt.hash("test-password", 4);
   lecturerA = await prisma.user.create({
     data: { name: "SS Lecturer A", email: `ss-lect-a-${stamp}@test.local`, passwordHash, role: "LECTURER", institutionId: instA },
+  });
+  // Audit-fix test fixture — "lecturers can access evidence only for
+  // authorised exams" — a lecturer at a DIFFERENT institution, never the
+  // owner of any exam created below.
+  lecturerB = await prisma.user.create({
+    data: { name: "SS Lecturer B", email: `ss-lect-b-${stamp}@test.local`, passwordHash, role: "LECTURER", institutionId: instB },
   });
   studentA = await prisma.user.create({
     data: { name: "SS Student A", email: `ss-stud-a-${stamp}@test.local`, passwordHash, role: "STUDENT", institutionId: instA },
@@ -63,7 +114,7 @@ beforeAll(async () => {
   studentB = await prisma.user.create({
     data: { name: "SS Student B", email: `ss-stud-b-${stamp}@test.local`, passwordHash, role: "STUDENT", institutionId: instA },
   });
-  cleanup.users.push(lecturerA.id, studentA.id, studentB.id);
+  cleanup.users.push(lecturerA.id, lecturerB.id, studentA.id, studentB.id);
 });
 
 afterAll(async () => {
@@ -263,5 +314,106 @@ describe("lecturer-only evidence access", () => {
       params: Promise.resolve({ evidenceAssetId }),
     });
     expect(viewRes.status).toBe(401);
+  });
+
+  // Secure Exam Evidence Review audit v1 — "lecturers can access evidence
+  // only for authorised exams". The exam-owner/same-institution checks
+  // live in buildEvidenceReport() (used by both the JSON and CSV evidence
+  // routes) and are already exercised for a DIFFERENT INSTITUTION in
+  // multiTenant.routes.test.ts for camera evidence; this proves the same
+  // guard for the signed-view route specifically, with screen-share
+  // evidence, end to end.
+  it("a lecturer at a different institution cannot view the evidence frame, even with a valid asset id", async () => {
+    const { submission } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const uploadRes = await uploadRoute.POST(uploadRequest({}), { params: Promise.resolve({ id: submission.id }) });
+    const { evidenceAssetId } = await uploadRes.json();
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerB.id, "LECTURER", instB));
+    const viewRes = await viewRoute.GET(new Request("http://test.local/route"), {
+      params: Promise.resolve({ evidenceAssetId }),
+    });
+    expect(viewRes.status).toBe(403);
+  });
+});
+
+describe("Secure Exam Evidence Review audit v1 — screen-share interruptions create reviewable events", () => {
+  it("a SCREEN_SHARE_INTERRUPTED event defaults to NEEDS_REVIEW and appears in the lecturer integrity-review response", async () => {
+    const { submission } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    const eventRes = await integrityEventsRoute.POST(
+      new Request("http://test.local/route", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eventType: "SCREEN_SHARE_INTERRUPTED",
+          severity: "MEDIUM",
+          message: "Screen sharing was interrupted.",
+        }),
+      }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(eventRes.status).toBe(201);
+    const created = await eventRes.json();
+    expect(created.reviewStatus).toBe("NEEDS_REVIEW");
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const reviewRes = await integrityReviewRoute.GET(new Request("http://test.local/route"), {
+      params: Promise.resolve({ id: submission.id }),
+    });
+    expect(reviewRes.status).toBe(200);
+    const review = await reviewRes.json();
+    const reviewEvent = review.events.find((e: { id: string }) => e.id === created.id);
+    expect(reviewEvent).toBeDefined();
+    expect(reviewEvent.reviewStatus).toBe("NEEDS_REVIEW");
+    expect(review.summary.needsReviewCount).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("Secure Exam Evidence Review audit v1 — failed evidence upload does not expose exam content or crash Tether", () => {
+  it("a storage-adapter failure returns 503, creates no orphaned event or asset, and never echoes internal error details", async () => {
+    const { submission } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    mockStoragePut.mockRejectedValueOnce(new Error("simulated storage backend outage — internal detail that must never reach the client"));
+
+    const res = await uploadRoute.POST(uploadRequest({}), { params: Promise.resolve({ id: submission.id }) });
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    // The response must be a calm, generic message — never the raw
+    // Error#message (which could describe internal infrastructure), and
+    // never any exam content (question/answer text is never touched by
+    // this route at all, but the response body is still checked to be
+    // exactly the bounded shape the route documents).
+    expect(JSON.stringify(body)).not.toContain("simulated storage backend outage");
+    expect(Object.keys(body)).toEqual(["error"]);
+
+    const eventCount = await prisma.integrityEvent.count({
+      where: { submissionId: submission.id, eventType: "SCREEN_SHARE_EVIDENCE_CAPTURED" },
+    });
+    expect(eventCount).toBe(0);
+    const assetCount = await prisma.integrityEvidenceAsset.count({ where: { submissionId: submission.id } });
+    expect(assetCount).toBe(0);
+
+    // The submission itself is untouched — a failed capture never fails
+    // the attempt.
+    const stillInProgress = await prisma.submission.findUnique({ where: { id: submission.id }, select: { status: true } });
+    expect(stillInProgress?.status).toBe("IN_PROGRESS");
+  });
+
+  it("a subsequent upload after the storage backend recovers succeeds normally (the failure was not sticky)", async () => {
+    const { submission } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    mockStoragePut.mockRejectedValueOnce(new Error("transient outage"));
+    const failed = await uploadRoute.POST(uploadRequest({}), { params: Promise.resolve({ id: submission.id }) });
+    expect(failed.status).toBe(503);
+
+    // beforeEach already re-arms mockStoragePut to delegate to the real
+    // adapter for the NEXT call, but mockRejectedValueOnce above already
+    // consumed itself — this call uses the real adapter directly.
+    const succeeded = await uploadRoute.POST(uploadRequest({}), { params: Promise.resolve({ id: submission.id }) });
+    expect(succeeded.status).toBe(201);
   });
 });
