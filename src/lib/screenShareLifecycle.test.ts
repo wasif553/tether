@@ -9,6 +9,8 @@ import {
   integrityEventTypeForState,
   isRestorationTransition,
   classifyGetDisplayMediaError,
+  classifyGetDisplayMediaErrorForDiagnostics,
+  studentMessageForGetDisplayMediaFailure,
   evaluateDisplaySurface,
   isScreenShareApiSupported,
   isScreenShareSatisfied,
@@ -52,6 +54,49 @@ describe("getDisplayMedia() error classification", () => {
   it("API support check", () => {
     expect(isScreenShareApiSupported(true)).toBe(true);
     expect(isScreenShareApiSupported(false)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// URGENT screen-sharing fix, Part A2/D — the finer diagnostic
+// classification (used only for the student message and the safe audit
+// fact, never the state machine — classifyGetDisplayMediaError above stays
+// unchanged, its 2-way UNAVAILABLE/PERMISSION_DENIED contract is pinned by
+// the existing tests above).
+// ---------------------------------------------------------------------------
+
+describe("classifyGetDisplayMediaErrorForDiagnostics", () => {
+  it("[9] distinguishes PERMISSION_DENIED, NO_SOURCE, and CANCELLED as separate reasons", () => {
+    expect(classifyGetDisplayMediaErrorForDiagnostics("NotAllowedError")).toBe("PERMISSION_DENIED");
+    expect(classifyGetDisplayMediaErrorForDiagnostics("SecurityError")).toBe("PERMISSION_DENIED");
+    expect(classifyGetDisplayMediaErrorForDiagnostics("NotFoundError")).toBe("NO_SOURCE");
+    expect(classifyGetDisplayMediaErrorForDiagnostics("AbortError")).toBe("CANCELLED");
+  });
+
+  it("distinguishes InvalidStateError and NotReadableError from a generic internal failure", () => {
+    expect(classifyGetDisplayMediaErrorForDiagnostics("InvalidStateError")).toBe("INVALID_STATE");
+    expect(classifyGetDisplayMediaErrorForDiagnostics("NotReadableError")).toBe("NOT_READABLE");
+  });
+
+  it("an unrecognised/undefined error name fails safe to INTERNAL, never PERMISSION_DENIED", () => {
+    expect(classifyGetDisplayMediaErrorForDiagnostics("SomeUnknownError")).toBe("INTERNAL");
+    expect(classifyGetDisplayMediaErrorForDiagnostics(undefined)).toBe("INTERNAL");
+  });
+});
+
+describe("studentMessageForGetDisplayMediaFailure — Part D concise, cause-specific messaging", () => {
+  it("[8] permission denied produces the permission-specific message and a retry-eligible state upstream", () => {
+    expect(studentMessageForGetDisplayMediaFailure("NotAllowedError")).toMatch(/permission was not granted/i);
+  });
+
+  it("no display source produces the source-specific message", () => {
+    expect(studentMessageForGetDisplayMediaFailure("NotFoundError")).toMatch(/could not access a display/i);
+  });
+
+  it("an internal/unrecognised failure produces the generic support-pointing message, never exposing the raw exception name", () => {
+    const message = studentMessageForGetDisplayMediaFailure("InvalidStateError");
+    expect(message).toMatch(/try again/i);
+    expect(message).not.toContain("InvalidStateError");
   });
 });
 

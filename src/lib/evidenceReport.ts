@@ -108,6 +108,22 @@ export type EvidenceReport = {
     resolvedByName: string | null;
     resolutionNote: string | null;
     confidenceBand: string | null;
+    // Mid-exam remote-session monitoring v1 — the richer, lecturer-
+    // reviewable metadata reportRemoteSessionMonitorTransition attaches
+    // (src/lib/lockdownClient.ts) for a REMOTE_DESKTOP_SESSION
+    // BECAME_ACTIVE/BECAME_INACTIVE transition. Null for every other
+    // event, including every OTHER lockdown detection (a plain
+    // process-name-match capability transition has no equivalent
+    // detection-source/session-type/check-confidence detail to show).
+    remoteSessionDetail: {
+      detectionSource: string | null;
+      sessionType: string | null;
+      checkConfidence: string | null;
+      previousState: string | null;
+      currentState: string | null;
+      tetherVersion: string | null;
+      secureClientSessionId: string | null;
+    } | null;
     // On-Device AI Camera Integrity Detection v1 — Evidence Frames
     // (additive, opt-in) — see docs/on-device-ai-integrity-detection-v1.md.
     // Present only for POSSIBLE_PHONE_VISIBLE/POSSIBLE_SECOND_PERSON_VISIBLE
@@ -332,10 +348,22 @@ export async function buildEvidenceReport(
       const metadata = e.metadataJson as Record<string, unknown> | null;
       const confidenceBand =
         metadata && typeof metadata.confidenceBand === "string" ? metadata.confidenceBand : null;
+      const remoteSessionDetail =
+        metadata && metadata.capabilityId === "REMOTE_DESKTOP_SESSION"
+          ? {
+              detectionSource: typeof metadata.detectionSource === "string" ? metadata.detectionSource : null,
+              sessionType: typeof metadata.sessionType === "string" ? metadata.sessionType : null,
+              checkConfidence: typeof metadata.checkConfidence === "string" ? metadata.checkConfidence : null,
+              previousState: typeof metadata.previousState === "string" ? metadata.previousState : null,
+              currentState: typeof metadata.currentState === "string" ? metadata.currentState : null,
+              tetherVersion: typeof metadata.tetherVersion === "string" ? metadata.tetherVersion : null,
+              secureClientSessionId: typeof metadata.secureClientSessionId === "string" ? metadata.secureClientSessionId : null,
+            }
+          : null;
       return {
         id: e.id,
         eventType: e.eventType,
-        eventLabel: labelForEventType(e.eventType),
+        eventLabel: labelForEventType(e.eventType, metadata),
         severity: e.severity,
         message: e.message,
         occurredAt: e.occurredAt.toISOString(),
@@ -343,6 +371,7 @@ export async function buildEvidenceReport(
         resolvedByName: e.resolvedBy?.name ?? null,
         resolutionNote: e.resolutionNote,
         confidenceBand,
+        remoteSessionDetail,
         evidenceFrame: e.evidenceAsset
           ? {
               id: e.evidenceAsset.id,

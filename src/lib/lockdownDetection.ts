@@ -100,6 +100,22 @@ type SesLockdownBridge = {
   ): void;
   onLockdownScanUnavailable?(callback: (payload: { reason: string }) => void): void;
   onLockdownRestorationResult?(callback: (payload: { trigger: string; state: string; errors: string[] }) => void): void;
+  /** Mid-exam remote-session monitoring v1 — one call per de-duplicated transition (see apps/lockdown/src/remoteSessionMonitor.ts). */
+  onRemoteSessionMonitorEvent?(
+    callback: (payload: {
+      kind: "BECAME_ACTIVE" | "BECAME_INACTIVE" | "CHECK_UNAVAILABLE" | "CHECK_RECOVERED";
+      effectiveAction: string;
+      previousState: string | null;
+      currentState: string | null;
+      detectedAtMsForClear: number | null;
+      classification: {
+        isRemoteSession: boolean;
+        remoteSessionSignalSource: string;
+        isLikelyVirtualMachine: boolean;
+        vmSignatureMatched: string | null;
+      };
+    }) => void,
+  ): void;
   getRemoteSessionStatus?(): Promise<{
     isRemoteSession: boolean;
     remoteSessionSignalSource: string;

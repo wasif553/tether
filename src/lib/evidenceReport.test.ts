@@ -129,6 +129,101 @@ describe("lockdownDetectionSummary", () => {
   });
 });
 
+describe("remoteSessionDetail — mid-exam remote-session monitoring v1", () => {
+  it("is null for an event without REMOTE_DESKTOP_SESSION metadata (including other lockdown detections)", async () => {
+    const { exam, submission } = await createExamAndSubmission();
+    await prisma.integrityEvent.create({
+      data: {
+        submissionId: submission.id,
+        examId: exam.id,
+        studentId: studentA.id,
+        eventType: "SCREEN_CAPTURE_SOFTWARE_DETECTED",
+        severity: "MEDIUM",
+        message: "OBS Studio was detected.",
+        occurredAt: new Date(),
+        metadataJson: { capabilityId: "OBS", category: "CAPTURE_OVERLAY", policyAction: "BLOCK_DURING_EXAM" },
+      },
+    });
+    const report = await buildEvidenceReport(submission.id, sessionFor(lecturerA.id, "LECTURER", instA));
+    expect(report.events).toHaveLength(1);
+    expect(report.events[0].remoteSessionDetail).toBeNull();
+  });
+
+  it("surfaces the full remote-session metadata for a BECAME_ACTIVE (REMOTE_CONTROL_SOFTWARE_DETECTED) event", async () => {
+    const { exam, submission } = await createExamAndSubmission();
+    await prisma.integrityEvent.create({
+      data: {
+        submissionId: submission.id,
+        examId: exam.id,
+        studentId: studentA.id,
+        eventType: "REMOTE_CONTROL_SOFTWARE_DETECTED",
+        severity: "MEDIUM",
+        message: "A Remote Desktop session was detected — needs review.",
+        occurredAt: new Date(),
+        metadataJson: {
+          capabilityId: "REMOTE_DESKTOP_SESSION",
+          category: "REMOTE_CONTROL",
+          policyAction: "BLOCK_DURING_EXAM",
+          detectionSource: "WINDOWS_SESSION_API",
+          previousState: "INACTIVE",
+          currentState: "ACTIVE",
+          sessionType: "REMOTE_DESKTOP_SESSION",
+          checkConfidence: "BOTH_AGREE",
+          tetherVersion: "1.8.0",
+          secureClientSessionId: "session-xyz",
+          detectedAtMs: Date.now(),
+        },
+      },
+    });
+    const report = await buildEvidenceReport(submission.id, sessionFor(lecturerA.id, "LECTURER", instA));
+    expect(report.events).toHaveLength(1);
+    expect(report.events[0].remoteSessionDetail).toEqual({
+      detectionSource: "WINDOWS_SESSION_API",
+      sessionType: "REMOTE_DESKTOP_SESSION",
+      checkConfidence: "BOTH_AGREE",
+      previousState: "INACTIVE",
+      currentState: "ACTIVE",
+      tetherVersion: "1.8.0",
+      secureClientSessionId: "session-xyz",
+    });
+    // Also counted in the existing lockdown detection summary — reuse, not a new signal type.
+    expect(report.lockdownDetectionSummary).toMatchObject({ remoteControlCount: 1 });
+  });
+
+  it("surfaces remote-session metadata for a BECAME_INACTIVE (PROHIBITED_APPLICATION_CLOSED) event too", async () => {
+    const { exam, submission } = await createExamAndSubmission();
+    await prisma.integrityEvent.create({
+      data: {
+        submissionId: submission.id,
+        examId: exam.id,
+        studentId: studentA.id,
+        eventType: "PROHIBITED_APPLICATION_CLOSED",
+        severity: "INFO",
+        message: "The Remote Desktop session ended.",
+        occurredAt: new Date(),
+        metadataJson: {
+          capabilityId: "REMOTE_DESKTOP_SESSION",
+          category: "REMOTE_CONTROL",
+          detectionSource: "WINDOWS_SESSION_API",
+          previousState: "ACTIVE",
+          currentState: "INACTIVE",
+          sessionType: null,
+          checkConfidence: "BOTH_AGREE",
+          tetherVersion: "1.8.0",
+          secureClientSessionId: "session-xyz",
+          durationMs: 5000,
+        },
+      },
+    });
+    const report = await buildEvidenceReport(submission.id, sessionFor(lecturerA.id, "LECTURER", instA));
+    expect(report.events[0].remoteSessionDetail).toMatchObject({ previousState: "ACTIVE", currentState: "INACTIVE" });
+    // Lecturer language fix — never the misleading generic
+    // "Prohibited application closed" for a remote session ending.
+    expect(report.events[0].eventLabel).toBe("Remote session ended");
+    expect(report.events[0].eventLabel).not.toBe("Prohibited application closed");
+  });
+});
+
 describe("evidenceReportToCsv — audit-fix: previously-missing summary blocks", () => {
   it("includes the screen-share integrity summary block (was silently omitted before this fix)", async () => {
     const exam = await prisma.exam.create({

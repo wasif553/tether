@@ -10,6 +10,7 @@
  * always the server-side route each of these eventually calls).
  */
 import { integrityEventTypeForCapabilityCategory, severityForLockdownDetection, type LockdownCapabilityCategoryName, type LockdownCapabilityActionName } from "@/lib/lockdownEventClassification";
+import { classifyGetDisplayMediaErrorForDiagnostics } from "@/lib/screenShareLifecycle";
 
 export type LockdownCapabilityInfo = { category: LockdownCapabilityCategoryName; displayName: string };
 
@@ -104,4 +105,115 @@ async function postIntegrityEvent(submissionId: string, body: { eventType: strin
  */
 export function reportLockdownScanUnavailable(reason: string): void {
   window.sesLockdown?.reportLockdownAuditFact?.("TETHER_LOCKDOWN_DETECTION_SERVICE_FAILURE", { reason });
+}
+
+/**
+ * Mid-exam remote-session monitoring v1 — records exactly one
+ * de-duplicated transition from RemoteSessionMonitor (Electron main; see
+ * apps/lockdown/src/remoteSessionMonitor.ts), relayed over the dedicated
+ * lockdown:remote-session-monitor-event channel rather than the generic
+ * capability-transition one, since the metadata this needs to record for
+ * lecturer review (detection source, session type where available, check
+ * confidence, Tether version, secure-client session id) is qualitatively
+ * richer than a plain process-name-match detection.
+ *
+ * Reuses the SAME event-type/severity rules as
+ * reportLockdownCapabilityTransition: BECAME_ACTIVE ->
+ * REMOTE_CONTROL_SOFTWARE_DETECTED (never a new event type — the current
+ * model already represents an active Remote Desktop session accurately),
+ * BECAME_INACTIVE -> the existing generic PROHIBITED_APPLICATION_CLOSED.
+ * CHECK_UNAVAILABLE/CHECK_RECOVERED are PlatformAuditLog-only technical
+ * facts, exactly like reportLockdownScanUnavailable above — never an
+ * IntegrityEvent, and never a misconduct determination on their own.
+ */
+const REMOTE_SESSION_CAPABILITY_ID = "REMOTE_DESKTOP_SESSION";
+const REMOTE_SESSION_CATEGORY: LockdownCapabilityCategoryName = "REMOTE_CONTROL";
+
+export type RemoteSessionMonitorTransitionKind = "BECAME_ACTIVE" | "BECAME_INACTIVE" | "CHECK_UNAVAILABLE" | "CHECK_RECOVERED";
+
+export type RemoteSessionMonitorClassification = {
+  isRemoteSession: boolean;
+  remoteSessionSignalSource: string;
+  isLikelyVirtualMachine: boolean;
+  vmSignatureMatched: string | null;
+};
+
+export async function reportRemoteSessionMonitorTransition(params: {
+  submissionId: string;
+  kind: RemoteSessionMonitorTransitionKind;
+  effectiveAction: string;
+  previousState: string | null;
+  currentState: string | null;
+  detectedAtMsForClear: number | null;
+  classification: RemoteSessionMonitorClassification;
+  tetherVersion: string;
+  secureClientSessionId: string | null;
+}): Promise<void> {
+  const action = params.effectiveAction as LockdownCapabilityActionName;
+  // The current detection mechanism (Win32 SM_REMOTESESSION + SESSIONNAME
+  // corroboration — see windowsSessionDetectionLogic.ts) cannot reliably
+  // distinguish RDP from Remote Assistance/Quick Assist; this is the most
+  // specific "session type" value the check actually supports, never a
+  // fabricated finer-grained one.
+  const sessionType = params.classification.isRemoteSession ? "REMOTE_DESKTOP_SESSION" : null;
+  const baseMetadata: Record<string, unknown> = {
+    capabilityId: REMOTE_SESSION_CAPABILITY_ID,
+    category: REMOTE_SESSION_CATEGORY,
+    detectionSource: "WINDOWS_SESSION_API",
+    previousState: params.previousState,
+    currentState: params.currentState,
+    sessionType,
+    checkConfidence: params.classification.remoteSessionSignalSource,
+    tetherVersion: params.tetherVersion,
+    secureClientSessionId: params.secureClientSessionId,
+    detectedAtMs: Date.now(),
+  };
+
+  if (params.kind === "BECAME_ACTIVE") {
+    if (action !== "BLOCK_DURING_EXAM" && action !== "DETECT_AND_RECORD") return;
+    await postIntegrityEvent(params.submissionId, {
+      eventType: integrityEventTypeForCapabilityCategory(REMOTE_SESSION_CATEGORY),
+      severity: severityForLockdownDetection(action),
+      message: "A Remote Desktop session was detected — needs review.",
+      metadata: { ...baseMetadata, policyAction: action },
+    });
+    return;
+  }
+
+  if (params.kind === "BECAME_INACTIVE") {
+    const durationMs = params.detectedAtMsForClear != null ? Math.max(0, Date.now() - params.detectedAtMsForClear) : null;
+    await postIntegrityEvent(params.submissionId, {
+      eventType: "PROHIBITED_APPLICATION_CLOSED",
+      severity: "INFO",
+      message: "The Remote Desktop session ended.",
+      metadata: { ...baseMetadata, ...(durationMs != null ? { durationMs } : {}) },
+    });
+    return;
+  }
+
+  // CHECK_UNAVAILABLE / CHECK_RECOVERED — PlatformAuditLog-only, never an IntegrityEvent.
+  const auditAction = params.kind === "CHECK_UNAVAILABLE" ? "TETHER_LOCKDOWN_REMOTE_SESSION_MONITOR_CHECK_UNAVAILABLE" : "TETHER_LOCKDOWN_REMOTE_SESSION_MONITOR_CHECK_RECOVERED";
+  window.sesLockdown?.reportLockdownAuditFact?.(auditAction, baseMetadata);
+}
+
+/**
+ * URGENT screen-sharing fix, Part A2 — a safe, bounded, PlatformAuditLog-only
+ * diagnostic fact for a getDisplayMedia() failure. Best-effort and
+ * feature-detected like every other call in this file: a silent no-op
+ * outside Tether (no window.sesLockdown bridge to report through), which
+ * is itself the "whether the app is Tether" signal — this fact can only
+ * ever be recorded from inside Tether. Never includes captured screen
+ * pixels, tokens, cookies, credentials, launch manifests, signatures, or
+ * exam content — only the DOMException name, the derived diagnostic
+ * reason, the exam's screenShareMode, and the Tether client version, all
+ * of which are already-bounded strings/booleans the audit-event route's
+ * own zod schema accepts.
+ */
+export function reportScreenShareRequestFailed(params: { errorName: string | undefined; screenShareMode: string }): void {
+  window.sesLockdown?.reportLockdownAuditFact?.("TETHER_SCREEN_SHARE_REQUEST_FAILED", {
+    errorName: params.errorName ?? "unknown",
+    diagnosticReason: classifyGetDisplayMediaErrorForDiagnostics(params.errorName),
+    screenShareMode: params.screenShareMode,
+    tetherVersion: window.sesLockdown?.version ?? "unknown",
+  });
 }

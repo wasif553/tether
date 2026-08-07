@@ -54,9 +54,15 @@ const VALID_INPUT = {
   packagedPackageJsonContent: JSON.stringify({ version: "1.2.1" }),
   packagedSharedJsContent: 'exports.LOCKDOWN_VERSION = "1.2.1"; exports.TETHER_APP_USER_MODEL_ID = "com.tether.securebrowser";',
   packagedMainJsContent:
-    'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger); app.setAppUserModelId(shared_1.TETHER_APP_USER_MODEL_ID); const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico");',
-  packagedDisplayEnforcementJsContent: "setEnforcementState(state) { ... } resolveReadinessGatedDisplayEnforcementState(...)",
-  packagedProcessDetectionJsContent: "runPreflightScan() { ... } setExamActive(active) { ... }",
+    'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger); app.setAppUserModelId(shared_1.TETHER_APP_USER_MODEL_ID); const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico"); const remoteSessionMonitor = new remoteSessionMonitor_1.RemoteSessionMonitor({...}); ipcMain.on("lockdown:set-lockdown-exam-active", (_e, active) => { processDetection.setExamActive(active); remoteSessionMonitor.setExamActive(active); }); mainWindow.on("closed", () => { processDetection.stop(); remoteSessionMonitor.stop(); }); mainWindow.webContents.session.setDisplayMediaRequestHandler((_request, callback) => { void (0, screenShareRequestHandler_1.handleDisplayMediaRequest)(() => electron_1.desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 } }), ...); }); const initialExamId = (0, lockdownStartupRouting_1.resolveInitialExamIdFromArgv)(process.argv);',
+  packagedDisplayEnforcementJsContent:
+    "setEnforcementState(state) { ... } resolveReadinessGatedDisplayEnforcementState(...) evaluate() { ... const run = this.evaluateNow(); this.evaluateInFlight = run; ... }",
+  packagedProcessDetectionJsContent: "runPreflightScan() { ... } setExamActive(active) { ... } pollOnce() { ... this.scanInFlight = this.pollOnceNow(); ... }",
+  packagedRemoteSessionMonitorJsContent:
+    "class RemoteSessionMonitor { setExamActive(active) { ... resolveRemoteSessionMonitorIntervalSeconds() ... } stop() { ... } pollOnceNow() { ... computeRemoteSessionMonitorTransitions(this.state, classification) ... } }",
+  packagedLockdownStartupRoutingJsContent:
+    'function resolveStartupLoadUrl(examId, sesBaseUrl) { ... } exports.TETHER_HOME_PATH = "/student"; function parseExamIdFromDeepLinkUrl(url) { ... }',
+  packagedScreenShareRequestHandlerJsContent: "function selectEntireScreenSource(sources, primaryDisplayId) { ... } async function handleDisplayMediaRequest(...) { ... }",
   sourceIconIcoBuffer: buildIcoBuffer(FULL_ICON_RESOLUTIONS),
   electronBuilderYmlContent: VALID_ELECTRON_BUILDER_YML,
   packagedIconIcoBuffer: buildIcoBuffer(FULL_ICON_RESOLUTIONS),
@@ -130,6 +136,148 @@ describe("verifyPackagedReleaseContents", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("performLockdownRestoration"))).toBe(true);
+  });
+
+  // Mid-exam remote-session monitoring v1 (v1.7.2).
+  describe("mid-exam remote-session monitoring v1", () => {
+    it("fails when dist/main.js does not wire RemoteSessionMonitor into the ACTIVE-lifecycle handler or shutdown cleanup (a pre-v1.7.2 stale build)", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedMainJsContent:
+          'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger); app.setAppUserModelId(shared_1.TETHER_APP_USER_MODEL_ID); const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico");',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes(".RemoteSessionMonitor("))).toBe(true);
+      expect(result.errors.some((e) => e.includes("remoteSessionMonitor.setExamActive(active)"))).toBe(true);
+      expect(result.errors.some((e) => e.includes("remoteSessionMonitor.stop()"))).toBe(true);
+    });
+
+    it("fails when dist/remoteSessionMonitor.js is missing entirely (a pre-v1.7.2 stale build)", () => {
+      const result = verifyPackagedReleaseContents({ ...VALID_INPUT, packagedRemoteSessionMonitorJsContent: null });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("dist/remoteSessionMonitor.js was not found"))).toBe(true);
+    });
+
+    it("fails when dist/remoteSessionMonitor.js is missing the interval-configuration or transition-dedup logic (a shell class with no real behaviour)", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedRemoteSessionMonitorJsContent: "class RemoteSessionMonitor { setExamActive(active) { ... } stop() { ... } }",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("resolveRemoteSessionMonitorIntervalSeconds"))).toBe(true);
+      expect(result.errors.some((e) => e.includes("computeRemoteSessionMonitorTransitions"))).toBe(true);
+    });
+
+    it("fails when dist/processDetection.js still contains the fixed .finally()-identity poll-serialization bug", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedProcessDetectionJsContent:
+          "runPreflightScan() { ... } setExamActive(active) { ... } pollOnce() { ... const run = this.pollOnceNow(); this.scanInFlight = run.finally(() => { if (this.scanInFlight === run) this.scanInFlight = null; }); await run; }",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("v1.7.2-fixed poll-serialization bug"))).toBe(true);
+    });
+
+    it("fails when dist/processDetection.js is missing the corrected in-flight assignment", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedProcessDetectionJsContent: "runPreflightScan() { ... } setExamActive(active) { ... }",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("this.scanInFlight = this.pollOnceNow();"))).toBe(true);
+    });
+
+    it("fails when dist/displayEnforcement.js still contains the fixed .finally()-identity poll-serialization bug", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedDisplayEnforcementJsContent:
+          "setEnforcementState(state) { ... } resolveReadinessGatedDisplayEnforcementState(...) evaluate() { ... const run = this.evaluateNow(); this.evaluateInFlight = run.finally(() => { if (this.evaluateInFlight === run) this.evaluateInFlight = null; }); await run; }",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("v1.7.2-fixed poll-serialization bug"))).toBe(true);
+    });
+
+    it("fails when dist/displayEnforcement.js is missing the corrected in-flight assignment", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedDisplayEnforcementJsContent: "setEnforcementState(state) { ... } resolveReadinessGatedDisplayEnforcementState(...)",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("this.evaluateInFlight = run;"))).toBe(true);
+    });
+
+    it("fails when the packaged version is still 1.7.1 (a stale pre-version-bump build)", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        expectedVersion: "1.7.2",
+        packagedPackageJsonContent: JSON.stringify({ version: "1.7.1" }),
+        packagedSharedJsContent: 'exports.LOCKDOWN_VERSION = "1.7.1"; exports.TETHER_APP_USER_MODEL_ID = "com.tether.securebrowser";',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes('does not match the expected source version "1.7.2"'))).toBe(true);
+    });
+  });
+
+  describe("URGENT fix — screen sharing + startup routing", () => {
+    it("fails when dist/main.js does not register setDisplayMediaRequestHandler or restrict desktopCapturer to screen sources (a pre-fix build where getDisplayMedia() always rejects)", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedMainJsContent: VALID_INPUT.packagedMainJsContent.replace('mainWindow.webContents.session.setDisplayMediaRequestHandler((_request, callback) => { void (0, screenShareRequestHandler_1.handleDisplayMediaRequest)(() => electron_1.desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 } }), ...); });', ""),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("setDisplayMediaRequestHandler("))).toBe(true);
+      expect(result.errors.some((e) => e.includes('types: ["screen"]'))).toBe(true);
+    });
+
+    it("fails when dist/main.js does not resolve the initial launch route via resolveInitialExamIdFromArgv (a pre-fix build)", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedMainJsContent: VALID_INPUT.packagedMainJsContent.replace("const initialExamId = (0, lockdownStartupRouting_1.resolveInitialExamIdFromArgv)(process.argv);", ""),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("resolveInitialExamIdFromArgv"))).toBe(true);
+    });
+
+    it("fails when dist/main.js still contains the URGENT-fixed persisted-lastExamId startup-routing bug", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedMainJsContent: `${VALID_INPUT.packagedMainJsContent} store.set("lastExamId", examId);`,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("URGENT-fixed startup-routing bug"))).toBe(true);
+    });
+
+    it("fails when dist/lockdownStartupRouting.js is missing entirely (a pre-fix build)", () => {
+      const result = verifyPackagedReleaseContents({ ...VALID_INPUT, packagedLockdownStartupRoutingJsContent: null });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("dist/lockdownStartupRouting.js was not found"))).toBe(true);
+    });
+
+    it("fails when dist/lockdownStartupRouting.js does not resolve to the canonical /student Home route", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedLockdownStartupRoutingJsContent: "function resolveStartupLoadUrl(examId, sesBaseUrl) { ... }",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes('TETHER_HOME_PATH = "/student"'))).toBe(true);
+    });
+
+    it("fails when dist/screenShareRequestHandler.js is missing entirely (a pre-fix build)", () => {
+      const result = verifyPackagedReleaseContents({ ...VALID_INPUT, packagedScreenShareRequestHandlerJsContent: null });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("dist/screenShareRequestHandler.js was not found"))).toBe(true);
+    });
+
+    it("fails when dist/screenShareRequestHandler.js is missing the Entire-Screen source-selection logic (a shell with no real behaviour)", () => {
+      const result = verifyPackagedReleaseContents({ ...VALID_INPUT, packagedScreenShareRequestHandlerJsContent: "async function handleDisplayMediaRequest() { ... }" });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("selectEntireScreenSource"))).toBe(true);
+    });
+
+    it("passes when every screen-sharing and startup-routing marker is present and current", () => {
+      const result = verifyPackagedReleaseContents(VALID_INPUT);
+      expect(result.ok).toBe(true);
+    });
   });
 
   it("fails when dist/main.js does not contain setAppUserModelId or the runtime icon path (a pre-v1.7.1 stale build predating the taskbar icon fix)", () => {

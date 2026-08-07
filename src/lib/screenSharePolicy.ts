@@ -198,12 +198,23 @@ export function isWithinScreenEvidenceRateLimit(
 // around meaningful screen-share interruptions")
 // ---------------------------------------------------------------------------
 
-export type ScreenShareCaptureTrigger = "PERIODIC" | "INTERRUPTION" | "RESTORATION";
+/**
+ * "INTEGRITY_EVENT" — mid-exam remote-session monitoring v1: a capture
+ * triggered by another integrity signal becoming active (currently only
+ * a Remote Desktop session — see remoteSessionMonitor.ts /
+ * useScreenShareLifecycle.ts's captureIntegrityEvidence), not by the
+ * screen share's OWN lifecycle the way PERIODIC/INTERRUPTION/RESTORATION
+ * are. Kept as its own trigger value rather than reusing INTERRUPTION —
+ * reusing it would misleadingly read as "the screen share itself was
+ * interrupted" to anyone reviewing the evidence trigger later.
+ */
+export type ScreenShareCaptureTrigger = "PERIODIC" | "INTERRUPTION" | "RESTORATION" | "INTEGRITY_EVENT";
 
 export const SCREEN_SHARE_CAPTURE_TRIGGERS: readonly ScreenShareCaptureTrigger[] = [
   "PERIODIC",
   "INTERRUPTION",
   "RESTORATION",
+  "INTEGRITY_EVENT",
 ];
 
 export function isValidScreenShareCaptureTrigger(value: string): value is ScreenShareCaptureTrigger {

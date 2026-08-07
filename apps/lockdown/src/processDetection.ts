@@ -187,17 +187,55 @@ export class ProcessDetection {
 
   private async pollOnce(): Promise<void> {
     // Serialize — a slow scan must never overlap with the next timer
-    // tick's own scan (mirrors displayEnforcement's evaluateInFlight
-    // guard).
+    // tick's own scan. Assigns scanInFlight to pollOnceNow()'s own
+    // promise directly (never a `.finally()`-wrapped one) and clears it
+    // unconditionally once that promise settles, success or failure.
+    // `.finally()` always returns a NEW promise object — a self-clearing
+    // check comparing `this.scanInFlight === run` against a
+    // `.finally()`-wrapped value would never be true (verified: `const
+    // run = Promise.resolve(); run.finally(() => {}) !== run`), leaving
+    // scanInFlight permanently non-null after the very first scan and
+    // silently freezing detection at that scan's result for the rest of
+    // the exam — every later timer tick would just re-await the same,
+    // long-since-resolved promise and return without ever calling
+    // pollOnceNow() again. See remoteSessionMonitor.ts's pollOnce for the
+    // same fix applied there first. No race is possible here despite the
+    // lack of an identity check: this method only ever yields control at
+    // its own `await`, by which point scanInFlight is already assigned,
+    // so a concurrent call always observes it set.
     if (this.scanInFlight) {
-      await this.scanInFlight;
+      // A merely-waiting concurrent caller must never re-throw a failure
+      // the owning caller below already logs — otherwise the SAME
+      // underlying rejection would surface as an unhandled promise
+      // rejection at whichever `void this.pollOnce()` call site (the
+      // timer callback, forceRescan()) happened to lose the race to
+      // start the scan.
+      try {
+        await this.scanInFlight;
+      } catch {
+        // Already logged by the owning caller below.
+      }
       return;
     }
-    const run = this.pollOnceNow();
-    this.scanInFlight = run.finally(() => {
-      if (this.scanInFlight === run) this.scanInFlight = null;
-    });
-    await run;
+    this.scanInFlight = this.pollOnceNow();
+    try {
+      await this.scanInFlight;
+    } catch (err) {
+      // scanOnce() itself never throws for any EXPECTED failure mode
+      // (not_windows/timeout/spawn_failed/non_zero_exit all come back as
+      // a discriminated { ok: false } result) — a rejection here is
+      // genuinely unexpected (e.g. a caller-supplied callback throwing).
+      // Every call site of pollOnce() is `void this.pollOnce()`
+      // (fire-and-forget, never awaited or .catch()'d by its caller), so
+      // letting this propagate would become an unhandled promise
+      // rejection — never let one bad poll destabilize Tether; log and
+      // continue, exactly like a failed scan already does.
+      diagnosticLog("processDetection: pollOnce failed unexpectedly", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      this.scanInFlight = null;
+    }
   }
 
   private async pollOnceNow(): Promise<void> {

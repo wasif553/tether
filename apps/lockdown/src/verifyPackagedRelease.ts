@@ -32,6 +32,12 @@ export type PackagedReleaseVerificationInput = {
   packagedDisplayEnforcementJsContent: string | null;
   /** Tether Windows Lockdown Hardening v1 — the PACKAGED app's compiled dist/processDetection.js contents. */
   packagedProcessDetectionJsContent: string | null;
+  /** Mid-exam remote-session monitoring v1 — the PACKAGED app's compiled dist/remoteSessionMonitor.js contents. */
+  packagedRemoteSessionMonitorJsContent: string | null;
+  /** URGENT startup-routing fix — the PACKAGED app's compiled dist/lockdownStartupRouting.js contents. */
+  packagedLockdownStartupRoutingJsContent: string | null;
+  /** URGENT screen-sharing fix — the PACKAGED app's compiled dist/screenShareRequestHandler.js contents. */
+  packagedScreenShareRequestHandlerJsContent: string | null;
   /** Windows taskbar icon fix v1.7.1 — the SOURCE assets/icon.ico bytes (before packaging). */
   sourceIconIcoBuffer: Buffer | null;
   /** Windows taskbar icon fix v1.7.1 — the SOURCE electron-builder.yml contents. */
@@ -78,9 +84,106 @@ const REQUIRED_MAIN_JS_MARKERS = [
   // icon path being set.
   "setAppUserModelId(",
   "LOCKDOWN_ICON_PATH",
+  // Mid-exam remote-session monitoring v1 — fails loudly on a stale
+  // pre-1.7.2 build that predates RemoteSessionMonitor's ACTIVE-lifecycle
+  // wiring and shutdown cleanup integration (see main.ts: the same
+  // lockdown:set-lockdown-exam-active handler that starts/stops
+  // ProcessDetection now also starts/stops RemoteSessionMonitor, and the
+  // window "closed" handler calls remoteSessionMonitor.stop() alongside
+  // processDetection.stop()). Anchored on `.RemoteSessionMonitor(` rather
+  // than `new RemoteSessionMonitor(` — tsc's CommonJS output prefixes an
+  // imported class with a generated module alias (e.g.
+  // `remoteSessionMonitor_1.RemoteSessionMonitor(`), so a literal `new
+  // RemoteSessionMonitor(` never appears in the compiled bundle even
+  // though the current source is present.
+  ".RemoteSessionMonitor(",
+  "remoteSessionMonitor.setExamActive(active)",
+  "remoteSessionMonitor.stop()",
+  // URGENT fix — screen-sharing: fails loudly on a stale build that
+  // predates the setDisplayMediaRequestHandler registration (without it,
+  // getDisplayMedia() always rejects — see screenShareRequestHandler.ts).
+  // Anchored on the literal `types: ["screen"]` desktopCapturer query too
+  // — proves the packaged build structurally excludes window sources, not
+  // just that SOME handler is registered.
+  "setDisplayMediaRequestHandler(",
+  'types: ["screen"]',
+  // URGENT fix — startup routing: fails loudly on a stale build that
+  // predates the deep-link-driven initial route resolution (a build
+  // without this still uses the old, always-null-safe argv.find(...)
+  // inline call, never resolveInitialExamIdFromArgv).
+  "resolveInitialExamIdFromArgv",
 ];
-const REQUIRED_DISPLAY_ENFORCEMENT_JS_MARKERS = ["setEnforcementState", "resolveReadinessGatedDisplayEnforcementState"];
-const REQUIRED_PROCESS_DETECTION_JS_MARKERS = ["runPreflightScan", "setExamActive"];
+/**
+ * URGENT startup-routing fix — this EXACT fragment only ever appears in
+ * the OLD buggy `buildLoadUrl`, which persisted every deep-linked examId
+ * to electron-store and silently reused it as the fallback for every
+ * later launch with no examId of its own — the confirmed physical bug
+ * where a normal Start Menu/shortcut launch reopened a previous exam
+ * instead of Home/Dashboard. A packaged build that still contains it has
+ * regressed back to that bug.
+ */
+const FORBIDDEN_MAIN_JS_MARKER = 'store.set("lastExamId"';
+const REQUIRED_DISPLAY_ENFORCEMENT_JS_MARKERS = [
+  "setEnforcementState",
+  "resolveReadinessGatedDisplayEnforcementState",
+  // v1.7.2 poll-serialization fix — the corrected in-flight assignment
+  // (evaluateNow()'s own promise, never a `.finally()`-wrapped one).
+  "this.evaluateInFlight = run;",
+];
+const REQUIRED_PROCESS_DETECTION_JS_MARKERS = [
+  "runPreflightScan",
+  "setExamActive",
+  // v1.7.2 poll-serialization fix — the corrected in-flight assignment
+  // (pollOnceNow()'s own promise, never a `.finally()`-wrapped one).
+  "this.scanInFlight = this.pollOnceNow();",
+];
+/**
+ * v1.7.2 poll-serialization fix — this EXACT fragment only ever appears
+ * in the OLD buggy assignment (`this.scanInFlight = run.finally(...)`),
+ * never in prose (comments describing the fix quote `.finally()` and
+ * `this.scanInFlight === run` separately, never this exact assignment
+ * statement together) — a packaged build that still contains it has the
+ * stale, silently-self-freezing poll loop.
+ */
+const FORBIDDEN_PROCESS_DETECTION_JS_MARKER = "this.scanInFlight = run.finally(";
+/**
+ * v1.7.2 poll-serialization fix — the identical bug and fix, applied to
+ * DisplayEnforcement's evaluate()/evaluateInFlight. This EXACT fragment
+ * only ever appears in the OLD buggy assignment
+ * (`this.evaluateInFlight = run.finally(...)`) — a packaged build that
+ * still contains it has the stale, silently-self-freezing display-topology
+ * poll loop (the overlay never re-evaluates after the first check).
+ */
+const FORBIDDEN_DISPLAY_ENFORCEMENT_JS_MARKER = "this.evaluateInFlight = run.finally(";
+
+// Mid-exam remote-session monitoring v1 — RemoteSessionMonitor itself:
+// the class, its ACTIVE-lifecycle entrypoint, its configurable interval
+// (proves interval configuration is actually wired, not hardcoded),
+// its transition-deduplication logic (imported from the pure
+// remoteSessionMonitorLogic module — proves dedup ships, not just the
+// class shell), and its cleanup method.
+const REQUIRED_REMOTE_SESSION_MONITOR_JS_MARKERS = [
+  "class RemoteSessionMonitor",
+  "setExamActive(active)",
+  "resolveRemoteSessionMonitorIntervalSeconds",
+  "computeRemoteSessionMonitorTransitions",
+  "stop() {",
+];
+
+// URGENT startup-routing fix — proves the packaged build resolves a
+// launch with no examId to the canonical Home/Dashboard route (never a
+// hardcoded/stale default), and that deep-link examId parsing is present.
+const REQUIRED_LOCKDOWN_STARTUP_ROUTING_JS_MARKERS = [
+  "resolveStartupLoadUrl",
+  'TETHER_HOME_PATH = "/student"',
+  "parseExamIdFromDeepLinkUrl",
+];
+
+// URGENT screen-sharing fix — proves the Entire-Screen source-selection
+// logic (never a window source — see selectEntireScreenSource's own doc
+// comment) is actually present, not just the handler registration in
+// main.js checked above.
+const REQUIRED_SCREEN_SHARE_REQUEST_HANDLER_JS_MARKERS = ["handleDisplayMediaRequest", "selectEntireScreenSource"];
 
 /**
  * Windows taskbar icon fix v1.7.1 — every resolution Windows expects a
@@ -175,6 +278,33 @@ export function verifyPackagedReleaseContents(input: PackagedReleaseVerification
         errors.push(`Packaged dist/main.js is missing "${marker}" — the packaged build does not contain the current display-enforcement IPC implementation.`);
       }
     }
+    if (input.packagedMainJsContent.includes(FORBIDDEN_MAIN_JS_MARKER)) {
+      errors.push(
+        'Packaged dist/main.js still contains the URGENT-fixed startup-routing bug (\'store.set("lastExamId"\') — ' +
+          "a normal Start Menu/shortcut/exe launch with no deep link will silently reopen whatever exam was " +
+          "last deep-linked to, instead of the Tether Home/Dashboard.",
+      );
+    }
+  }
+
+  if (!input.packagedLockdownStartupRoutingJsContent) {
+    errors.push("Packaged dist/lockdownStartupRouting.js was not found — has the app been packaged since the startup-routing fix was added?");
+  } else {
+    for (const marker of REQUIRED_LOCKDOWN_STARTUP_ROUTING_JS_MARKERS) {
+      if (!input.packagedLockdownStartupRoutingJsContent.includes(marker)) {
+        errors.push(`Packaged dist/lockdownStartupRouting.js is missing "${marker}" — the packaged build does not contain the current startup-routing logic.`);
+      }
+    }
+  }
+
+  if (!input.packagedScreenShareRequestHandlerJsContent) {
+    errors.push("Packaged dist/screenShareRequestHandler.js was not found — has the app been packaged since the screen-sharing fix was added?");
+  } else {
+    for (const marker of REQUIRED_SCREEN_SHARE_REQUEST_HANDLER_JS_MARKERS) {
+      if (!input.packagedScreenShareRequestHandlerJsContent.includes(marker)) {
+        errors.push(`Packaged dist/screenShareRequestHandler.js is missing "${marker}" — the packaged build does not contain the current screen-sharing source-selection logic.`);
+      }
+    }
   }
 
   if (!input.packagedDisplayEnforcementJsContent) {
@@ -185,6 +315,14 @@ export function verifyPackagedReleaseContents(input: PackagedReleaseVerification
         errors.push(`Packaged dist/displayEnforcement.js is missing "${marker}" — the packaged build does not contain the current fail-closed enforcement logic.`);
       }
     }
+    if (input.packagedDisplayEnforcementJsContent.includes(FORBIDDEN_DISPLAY_ENFORCEMENT_JS_MARKER)) {
+      errors.push(
+        "Packaged dist/displayEnforcement.js still contains the v1.7.2-fixed poll-serialization bug " +
+          '("this.evaluateInFlight = run.finally(...)") — a `.finally()`-wrapped promise never equals the ' +
+          "promise it was called on, so the in-flight guard never clears and display-topology enforcement " +
+          "silently freezes at its first evaluation result for the rest of the exam.",
+      );
+    }
   }
 
   if (!input.packagedProcessDetectionJsContent) {
@@ -193,6 +331,24 @@ export function verifyPackagedReleaseContents(input: PackagedReleaseVerification
     for (const marker of REQUIRED_PROCESS_DETECTION_JS_MARKERS) {
       if (!input.packagedProcessDetectionJsContent.includes(marker)) {
         errors.push(`Packaged dist/processDetection.js is missing "${marker}" — the packaged build does not contain the current Windows lockdown hardening logic.`);
+      }
+    }
+    if (input.packagedProcessDetectionJsContent.includes(FORBIDDEN_PROCESS_DETECTION_JS_MARKER)) {
+      errors.push(
+        "Packaged dist/processDetection.js still contains the v1.7.2-fixed poll-serialization bug " +
+          '("this.scanInFlight = run.finally(...)") — a `.finally()`-wrapped promise never equals the ' +
+          "promise it was called on, so the in-flight guard never clears and during-exam process " +
+          "detection silently freezes at its first scan result for the rest of the exam.",
+      );
+    }
+  }
+
+  if (!input.packagedRemoteSessionMonitorJsContent) {
+    errors.push("Packaged dist/remoteSessionMonitor.js was not found — has the app been packaged since the mid-exam remote-session monitoring feature was added?");
+  } else {
+    for (const marker of REQUIRED_REMOTE_SESSION_MONITOR_JS_MARKERS) {
+      if (!input.packagedRemoteSessionMonitorJsContent.includes(marker)) {
+        errors.push(`Packaged dist/remoteSessionMonitor.js is missing "${marker}" — the packaged build does not contain the current mid-exam remote-session monitoring logic.`);
       }
     }
   }
@@ -301,6 +457,9 @@ if (require.main === module) {
     packagedMainJsContent: readIfExists(path.join(appDir, "dist", "main.js")),
     packagedDisplayEnforcementJsContent: readIfExists(path.join(appDir, "dist", "displayEnforcement.js")),
     packagedProcessDetectionJsContent: readIfExists(path.join(appDir, "dist", "processDetection.js")),
+    packagedRemoteSessionMonitorJsContent: readIfExists(path.join(appDir, "dist", "remoteSessionMonitor.js")),
+    packagedLockdownStartupRoutingJsContent: readIfExists(path.join(appDir, "dist", "lockdownStartupRouting.js")),
+    packagedScreenShareRequestHandlerJsContent: readIfExists(path.join(appDir, "dist", "screenShareRequestHandler.js")),
     sourceIconIcoBuffer: readBufferIfExists(path.join(__dirname, "..", "assets", "icon.ico")),
     electronBuilderYmlContent: readIfExists(path.join(__dirname, "..", "electron-builder.yml")),
     packagedIconIcoBuffer: readBufferIfExists(path.join(appDir, "assets", "icon.ico")),

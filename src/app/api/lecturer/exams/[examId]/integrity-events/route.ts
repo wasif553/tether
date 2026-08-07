@@ -87,7 +87,7 @@ export async function GET(
       id: e.id,
       submissionId: e.submissionId,
       eventType: e.eventType,
-      eventLabel: labelForEventType(e.eventType),
+      eventLabel: labelForEventType(e.eventType, e.metadataJson as Record<string, unknown> | null),
       severity: e.severity,
       message: e.message,
       occurredAt: e.occurredAt.toISOString(),

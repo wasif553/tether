@@ -450,6 +450,29 @@ shipped default for every packaged install):
 | `TETHER_PROCESS_SCAN_INTERVAL_SECONDS` | 20 | 10–120 |
 | `TETHER_PROCESS_SCAN_TIMEOUT_SECONDS` | 5 | 2–15 |
 | `TETHER_LOCKDOWN_RECHECK_SECONDS` | 5 | 2–30 |
+| `TETHER_REMOTE_SESSION_MONITOR_INTERVAL_SECONDS` | 30 | 15–300 |
+
+`TETHER_REMOTE_SESSION_MONITOR_INTERVAL_SECONDS` — mid-exam remote-session
+monitoring v1 (`apps/lockdown/src/remoteSessionMonitor.ts` /
+`remoteSessionMonitorLogic.ts`). How often the same deterministic Win32
+session check the preflight gate already uses
+(`getWindowsSessionClassification()` — `GetSystemMetrics(SM_REMOTESESSION)`
+plus `SESSIONNAME` corroboration, see "Remote session and virtual machine
+detection" above) is re-run **only while the exam lifecycle is ACTIVE** —
+never before an attempt starts, never after it ends, submits, or the
+secure-client session/Tether closes (the monitor is started/stopped by
+the exact same `lockdown:set-lockdown-exam-active` signal and
+`lockdownLifecycle` restoration hook as `ProcessDetection`). This is a
+periodic re-run of an existing deterministic Windows API check — it does
+**not** enable any camera/screen AI analysis or add any new detection
+mechanism; it only extends how often the *existing* check runs. Slower
+than `TETHER_PROCESS_SCAN_INTERVAL_SECONDS`'s 20s default because each
+check spawns a heavier PowerShell + `Add-Type` process than a plain
+`Get-Process` enumeration. Like every variable in this table, it is
+**Electron-local**: read directly from the packaged desktop app's own
+process environment at runtime, never from the hosted web server/Vercel
+— it has no equivalent in `.env.example` or any Vercel project
+configuration, exactly like the three interval variables above it.
 
 Server-resolved security toggles
 (`src/lib/tetherLockdownConfig.ts` — served via `GET

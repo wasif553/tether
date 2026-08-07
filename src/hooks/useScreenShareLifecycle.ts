@@ -36,6 +36,7 @@ import {
   integrityEventTypeForState,
   isRestorationTransition,
   classifyGetDisplayMediaError,
+  studentMessageForGetDisplayMediaFailure,
   evaluateDisplaySurface,
   isScreenShareApiSupported,
   type ScreenShareLifecycleState,
@@ -43,6 +44,7 @@ import {
 } from "@/lib/screenShareLifecycle";
 import { isEvidenceCaptureDue, type ScreenSharePolicy } from "@/lib/screenSharePolicy";
 import { buildScreenEvidenceUploadPath } from "@/lib/screenShareEvidence";
+import { reportScreenShareRequestFailed } from "@/lib/lockdownClient";
 
 export type UseScreenShareLifecycleParams = {
   submissionId: string;
@@ -62,6 +64,18 @@ export type UseScreenShareLifecycleResult = {
   start: () => Promise<void>;
   resume: () => Promise<void>;
   stop: () => void;
+  /**
+   * Mid-exam remote-session monitoring v1 — best-effort, event-triggered
+   * evidence frame for an integrity signal becoming active (currently
+   * only a detected Remote Desktop session). A no-op whenever a frame
+   * cannot be captured right now (screen sharing not ACTIVE, evidence
+   * capture disabled by policy, per-attempt frame cap already reached, or
+   * still within the minimum capture interval) — never throws, never
+   * blocks the caller, and never exposes exam content on failure (the
+   * same upload path as PERIODIC/RESTORATION captures, which already
+   * fails closed — see captureEvidenceFrame below).
+   */
+  captureIntegrityEvidence: () => void;
 };
 
 const EVIDENCE_CAPTURE_MAX_WIDTH = 960;
@@ -157,7 +171,7 @@ export function useScreenShareLifecycle(params: UseScreenShareLifecycleParams): 
   }, [stopAllTracks]);
 
   const captureEvidenceFrame = useCallback(
-    async (trigger: "PERIODIC" | "RESTORATION") => {
+    async (trigger: "PERIODIC" | "RESTORATION" | "INTEGRITY_EVENT") => {
       const video = videoRef.current;
       if (!video || video.readyState < 2 || video.videoWidth === 0) return;
       if (!policy.captureEvidence) return;
@@ -281,21 +295,24 @@ export function useScreenShareLifecycle(params: UseScreenShareLifecycleParams): 
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
       attachStream(stream);
     } catch (err) {
-      const reason = classifyGetDisplayMediaError((err as DOMException)?.name);
+      const errorName = (err as DOMException)?.name;
+      const reason = classifyGetDisplayMediaError(errorName);
       transition({ type: "REQUEST_FAILED", reason });
-      setErrorMessage(
-        reason === "PERMISSION_DENIED"
-          ? "Screen-share permission was not granted. Please allow screen sharing to continue."
-          : "Screen sharing could not be started. Please try again.",
-      );
+      setErrorMessage(studentMessageForGetDisplayMediaFailure(errorName));
+      reportScreenShareRequestFailed({ errorName, screenShareMode: policy.mode });
     }
-  }, [transition, attachStream]);
+  }, [transition, attachStream, policy.mode]);
 
   // Public start()/resume() are the same underlying action — both must
   // only ever be invoked from a real user gesture (a button onClick);
   // this hook never calls getDisplayMedia() on its own.
   const start = requestShare;
   const resume = requestShare;
+
+  const captureIntegrityEvidence = useCallback(() => {
+    if (stateRef.current !== "ACTIVE") return;
+    void captureEvidenceFrame("INTEGRITY_EVENT");
+  }, [captureEvidenceFrame]);
 
   // Stop all tracks whenever monitoring is disabled (submission
   // finalized, attempt invalid/expired, authenticated user changed) —
@@ -324,5 +341,6 @@ export function useScreenShareLifecycle(params: UseScreenShareLifecycleParams): 
     start,
     resume,
     stop,
+    captureIntegrityEvidence,
   };
 }

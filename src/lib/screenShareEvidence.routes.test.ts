@@ -371,6 +371,47 @@ describe("Secure Exam Evidence Review audit v1 — screen-share interruptions cr
   });
 });
 
+describe("mid-exam remote-session monitoring v1 — INTEGRITY_EVENT-triggered capture", () => {
+  it("is accepted and stored with trigger INTEGRITY_EVENT when screen evidence capture is enabled", async () => {
+    const { submission } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await uploadRoute.POST(uploadRequest({ trigger: "INTEGRITY_EVENT" }), { params: Promise.resolve({ id: submission.id }) });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    const asset = await prisma.integrityEvidenceAsset.findUnique({ where: { id: body.evidenceAssetId } });
+    expect(asset).not.toBeNull();
+    const event = await prisma.integrityEvent.findUnique({ where: { id: asset!.integrityEventId } });
+    expect((event?.metadataJson as { trigger?: string } | null)?.trigger).toBe("INTEGRITY_EVENT");
+  });
+
+  it("respects exam policy exactly like every other trigger — rejected when captureEvidence is disabled", async () => {
+    const { submission } = await createExamAndSubmission({ screenShareMode: "REQUIRED", captureEvidence: false });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await uploadRoute.POST(uploadRequest({ trigger: "INTEGRITY_EVENT" }), { params: Promise.resolve({ id: submission.id }) });
+    expect(res.status).toBe(403);
+  });
+
+  it("respects exam policy exactly like every other trigger — rejected when screen-share mode is OFF", async () => {
+    const { submission } = await createExamAndSubmission({ screenShareMode: "OFF" });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await uploadRoute.POST(uploadRequest({ trigger: "INTEGRITY_EVENT" }), { params: Promise.resolve({ id: submission.id }) });
+    expect(res.status).toBe(403);
+  });
+
+  it("a storage failure on an INTEGRITY_EVENT-triggered capture is non-fatal — 503, no orphaned state, submission untouched", async () => {
+    const { submission } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    mockStoragePut.mockRejectedValueOnce(new Error("simulated storage backend outage"));
+
+    const res = await uploadRoute.POST(uploadRequest({ trigger: "INTEGRITY_EVENT" }), { params: Promise.resolve({ id: submission.id }) });
+    expect(res.status).toBe(503);
+    const assetCount = await prisma.integrityEvidenceAsset.count({ where: { submissionId: submission.id } });
+    expect(assetCount).toBe(0);
+    const stillInProgress = await prisma.submission.findUnique({ where: { id: submission.id }, select: { status: true } });
+    expect(stillInProgress?.status).toBe("IN_PROGRESS");
+  });
+});
+
 describe("Secure Exam Evidence Review audit v1 — failed evidence upload does not expose exam content or crash Tether", () => {
   it("a storage-adapter failure returns 503, creates no orphaned event or asset, and never echoes internal error details", async () => {
     const { submission } = await createExamAndSubmission();

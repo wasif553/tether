@@ -205,25 +205,60 @@ export class DisplayEnforcement {
    * every other caller (start, setRequireSingleDisplay, the periodic
    * recheck) always bypasses — see the corrective-pass doc comment above
    * for why conflating these was the actual Extend-mode bug.
+   *
+   * v1.7.2 poll-serialization fix — a native topology query can be in
+   * flight when another evaluate() call arrives (e.g. the periodic timer
+   * firing while a raw event's async check is still resolving). Assigns
+   * evaluateInFlight to evaluateNow()'s own promise directly (never a
+   * `.finally()`-wrapped one) and clears it unconditionally once that
+   * promise settles — see processDetection.ts's pollOnce()/
+   * remoteSessionMonitor.ts's pollOnce() for the identical fix applied
+   * there first. `.finally()` always returns a NEW promise object — the
+   * previous self-clearing check here compared `this.evaluateInFlight ===
+   * run` against a `.finally()`-wrapped value, which could never be true,
+   * leaving evaluateInFlight permanently non-null after the very first
+   * evaluation and silently freezing display-topology enforcement at that
+   * evaluation's result for the rest of the exam. A concurrent caller
+   * never starts its own second evaluation — it only awaits the one
+   * already running, and never re-throws its failure (the owning caller
+   * below already logs it), so the SAME underlying rejection can never
+   * surface as an unhandled promise rejection at more than one `void
+   * this.evaluate(...)` call site.
    */
   private async evaluate(options: { bypassDebounce: boolean }): Promise<void> {
     const now = Date.now();
     if (!options.bypassDebounce && !debounceDisplayEvent(this.lastHandledAtMs, now, DEFAULT_DISPLAY_EVENT_DEBOUNCE_MS)) return;
     this.lastHandledAtMs = now;
 
-    // A native topology query can be in flight when another evaluate()
-    // call arrives (e.g. the periodic timer firing while a raw event's
-    // async check is still resolving) — serialise rather than overlap,
-    // so two concurrent PowerShell spawns never race each other's
-    // overlay show/hide decisions.
     if (this.evaluateInFlight) {
-      await this.evaluateInFlight;
+      try {
+        await this.evaluateInFlight;
+      } catch {
+        // Already logged by the owning caller below.
+      }
+      return;
     }
     const run = this.evaluateNow();
-    this.evaluateInFlight = run.finally(() => {
+    this.evaluateInFlight = run;
+    try {
+      await run;
+    } catch (err) {
+      // evaluateNow() itself never throws for any EXPECTED failure mode —
+      // a failed topology query is caught internally and reported as an
+      // ERROR classification, which fails closed. A rejection here is
+      // genuinely unexpected (e.g. a destroyed-window overlay call, or a
+      // caller-supplied callback throwing). Every call site of evaluate()
+      // is `void this.evaluate(...)` (fire-and-forget, never awaited or
+      // .catch()'d by its caller), so letting this propagate would become
+      // an unhandled promise rejection — never let one bad evaluation
+      // destabilize Tether; log and continue, exactly like a failed scan
+      // already does in processDetection.ts.
+      diagnosticLog("displayEnforcement: evaluate failed unexpectedly", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
       if (this.evaluateInFlight === run) this.evaluateInFlight = null;
-    });
-    await run;
+    }
   }
 
   private async evaluateNow(): Promise<void> {

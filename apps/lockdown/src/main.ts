@@ -14,6 +14,8 @@ import {
   session as electronSession,
   safeStorage,
   powerMonitor,
+  desktopCapturer,
+  screen,
 } from "electron";
 import path from "node:path";
 import fs from "node:fs";
@@ -26,12 +28,12 @@ import {
   LOCKDOWN_VERSION,
   USER_AGENT_SUFFIX,
   TETHER_APP_USER_MODEL_ID,
-  isDeepLinkArg,
-  buildTetherLaunchPath,
   type ExamContext,
   type QueuedLockdownEvent,
 } from "./shared";
 import { DisplayEnforcement } from "./displayEnforcement";
+import { resolveStartupLoadUrl, parseExamIdFromDeepLinkUrl, findDeepLinkArg, resolveInitialExamIdFromArgv } from "./lockdownStartupRouting";
+import { handleDisplayMediaRequest, type ScreenShareSource } from "./screenShareRequestHandler";
 import { ensureInstallationKey, getInstallationInfo, signWithInstallationKey, type InstallationKeyStoreSchema } from "./installationKey";
 import type { DisplayEnforcementEventType, SecureClientEnforcementState } from "./displayEnforcementLogic";
 import {
@@ -43,6 +45,7 @@ import {
 import { findUnsafeCommandLineSwitch } from "./commandLineSafety";
 import { classifyKeyboardShortcut } from "./keyboardHardeningLogic";
 import { ProcessDetection } from "./processDetection";
+import { RemoteSessionMonitor } from "./remoteSessionMonitor";
 import { getWindowsSessionClassification } from "./windowsSessionDetection";
 import { LockdownLifecycleManager } from "./lockdownLifecycle";
 import { LOCKDOWN_CAPABILITY_REGISTRY, type LockdownPolicyToggles } from "./lockdownCapabilityRegistry";
@@ -94,16 +97,10 @@ const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico");
 
 type StoreSchema = InstallationKeyStoreSchema & {
   queuedEvents: QueuedLockdownEvent[];
-  // Cold-start convenience only (Tether launch/install flow v1): if the
-  // OS launches the app via protocol before any window exists yet, and
-  // the process is later killed/relaunched mid-login, this lets a fresh
-  // launch still resolve back to the exam the student was headed to —
-  // never used for authorization, only for choosing which page to load.
-  lastExamId: string | null;
 };
 
 const store = new Store<StoreSchema>({
-  defaults: { queuedEvents: [], lastExamId: null, installationKey: null },
+  defaults: { queuedEvents: [], installationKey: null },
 });
 
 const displayEnforcement = new DisplayEnforcement({
@@ -134,6 +131,35 @@ const processDetection = new ProcessDetection({
   },
 });
 
+// Tether mid-exam remote-session monitoring v1 — extends the
+// REMOTE_DESKTOP_SESSION capability from a preflight-only, one-shot check
+// (lockdown:get-remote-session-status below) to continuous polling while
+// an exam is ACTIVE. Relayed to the page over its own dedicated channel
+// (not the generic capability-transition one above) so the richer,
+// remote-session-specific metadata the page needs to record (session
+// classification, previous/current state, check confidence) doesn't have
+// to be squeezed into the generic payload shape. See
+// remoteSessionMonitor.ts / remoteSessionMonitorLogic.ts.
+const remoteSessionMonitor = new RemoteSessionMonitor({
+  onTransition: (transition, effectiveAction, detectedAtMsForClear) => {
+    runOnWindowBestEffort(mainWindow, (window) =>
+      window.webContents.send("lockdown:remote-session-monitor-event", {
+        kind: transition.kind,
+        effectiveAction,
+        previousState: "previousState" in transition ? transition.previousState : null,
+        currentState: "currentState" in transition ? transition.currentState : null,
+        detectedAtMsForClear: detectedAtMsForClear ?? null,
+        classification: {
+          isRemoteSession: transition.classification.isRemoteSession,
+          remoteSessionSignalSource: transition.classification.remoteSessionSignalSource,
+          isLikelyVirtualMachine: transition.classification.isLikelyVirtualMachine,
+          vmSignatureMatched: transition.classification.vmSignatureMatched,
+        },
+      }),
+    );
+  },
+});
+
 // Tether Windows Lockdown Hardening v1, Part 10 — the idempotent
 // restoration lifecycle. Tether never modifies any permanent OS-level
 // setting, so every registered action here is pure in-process teardown
@@ -142,6 +168,7 @@ const processDetection = new ProcessDetection({
 // inherently safe to call any number of times, from any trigger.
 const lockdownLifecycle = new LockdownLifecycleManager(() => consumeLockdownFault("RESTORATION_FAILURE"));
 lockdownLifecycle.registerRestoreAction("processDetection.setExamActive(false)", () => processDetection.setExamActive(false));
+lockdownLifecycle.registerRestoreAction("remoteSessionMonitor.setExamActive(false)", () => remoteSessionMonitor.setExamActive(false));
 lockdownLifecycle.registerRestoreAction("displayEnforcement.setEnforcementState(inactive)", () =>
   displayEnforcement.setEnforcementState({ active: false, ready: false, requireSingleDisplay: false }),
 );
@@ -401,27 +428,20 @@ function recordEvent(
   runOnWindowBestEffort(mainWindow, (window) => window.webContents.send("lockdown:event-recorded", getQueue().length));
 }
 
+/**
+ * Startup/deep-link routing fix — see lockdownStartupRouting.ts's own doc
+ * comment for the confirmed bug this replaces (a normal launch used to
+ * silently reopen whatever exam a previous deep link had visited, via a
+ * persisted `lastExamId` store fallback that is now removed entirely).
+ * The web app still keys the exam-taking page by submissionId, not
+ * examId (there is no /student/exams/[examId] route) — but the Tether
+ * launch page (buildTetherLaunchPath) resolves examId -> the correct
+ * submission and exam content automatically, once inside Tether and
+ * authenticated (see src/app/student/exams/[id]/tether-launch/page.tsx in
+ * the main repo), so the student never has to find it themselves.
+ */
 function buildLoadUrl(examId: string | null): string {
-  // Tether launch/install flow v1 — fixes the confirmed bug where this
-  // always returned the dashboard regardless of examId. The web app
-  // still keys the exam-taking page by submissionId, not examId (there
-  // is no /student/exams/[examId] route) — but the Tether launch page
-  // (buildTetherLaunchPath) resolves examId -> the correct submission
-  // and exam content automatically, once inside Tether and
-  // authenticated (see src/app/student/exams/[id]/tether-launch/page.tsx
-  // in the main repo), so the student never has to find it themselves.
-  if (examId) {
-    store.set("lastExamId", examId);
-    return `${SES_BASE_URL}${buildTetherLaunchPath(examId)}`;
-  }
-  // No examId on this launch — fall back to the last one we know about
-  // (cold-start convenience only, e.g. the app was killed and relaunched
-  // mid-login), then finally the plain dashboard.
-  const lastExamId = store.get("lastExamId", null);
-  if (lastExamId) {
-    return `${SES_BASE_URL}${buildTetherLaunchPath(lastExamId)}`;
-  }
-  return `${SES_BASE_URL}/student`;
+  return resolveStartupLoadUrl(examId, SES_BASE_URL);
 }
 
 function createWindow(examId: string | null) {
@@ -464,6 +484,29 @@ function createWindow(examId: string | null) {
   // approved flow, ...) is denied.
   mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === "media" || permission === "fullscreen");
+  });
+
+  // URGENT screen-sharing fix — Chromium requires this handler to be
+  // registered before navigator.mediaDevices.getDisplayMedia() can ever
+  // succeed in this (or any) BrowserWindow's session; setPermissionRequestHandler
+  // above governs getUserMedia() (camera/mic) only, a separate contract.
+  // Registered on THIS window's own session (this app never uses a custom
+  // partition, so this is always the default session) every time
+  // createWindow() runs, so it is present for every window this app ever
+  // creates and survives in-window navigation (Home -> tether-launch ->
+  // secure exam all share the same webContents/session — Electron's
+  // display-media handler is a session-level registration, not tied to
+  // any one loaded page). See screenShareRequestHandler.ts for the actual
+  // (independently unit-tested) source-selection logic and A1's
+  // investigation notes for why this was missing in every prior version,
+  // not only this branch.
+  mainWindow.webContents.session.setDisplayMediaRequestHandler((_request, callback) => {
+    void handleDisplayMediaRequest(
+      () => desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 } }),
+      () => String(screen.getPrimaryDisplay().id),
+      (streams) => callback(streams.video ? { video: streams.video } : {}),
+      diagnosticLog,
+    );
   });
 
   // Part 7 — deny window.open() / target=_blank for every flow; this app
@@ -536,6 +579,7 @@ function createWindow(examId: string | null) {
   });
 
   processDetection.attachTargetWindow(mainWindow);
+  remoteSessionMonitor.attachTargetWindow(mainWindow);
   lockdownLifecycle.prepare();
 
   // Best-effort only — does not guarantee screenshots/recordings are
@@ -611,6 +655,7 @@ function createWindow(examId: string | null) {
     mainWindow = null;
     displayEnforcement.stop();
     processDetection.stop();
+    remoteSessionMonitor.stop();
   });
 }
 
@@ -671,19 +716,10 @@ function registerDeepLinkProtocol() {
   }
 }
 
-function parseExamIdFromDeepLink(url: string): string | null {
-  try {
-    const parsed = new URL(url);
-    // Never log the full deep link — it could carry sensitive query
-    // params in future versions even though v1 only sends examId.
-    return parsed.searchParams.get("examId");
-  } catch {
-    return null;
-  }
-}
-
 function handleDeepLink(url: string) {
-  const examId = parseExamIdFromDeepLink(url);
+  // Never log the full deep link — it could carry sensitive query params
+  // in future versions even though v1 only sends examId.
+  const examId = parseExamIdFromDeepLinkUrl(url);
   if (isWindowUsable(mainWindow)) {
     mainWindow.loadURL(buildLoadUrl(examId));
   } else {
@@ -933,6 +969,7 @@ ipcMain.handle("lockdown:get-diagnostics-snapshot", () => buildCurrentDiagnostic
 ipcMain.on("lockdown:set-lockdown-policy-toggles", (_event, toggles: unknown) => {
   if (!isValidPolicyToggles(toggles)) return;
   processDetection.setPolicyToggles(toggles);
+  remoteSessionMonitor.setPolicyToggles(toggles);
 });
 
 /** Part 3 — one-shot preflight scan; the page calls this before allowing a final exam to start. */
@@ -946,10 +983,11 @@ ipcMain.handle("lockdown:run-preflight-scan", async () => {
   return processDetection.runPreflightScan();
 });
 
-/** Part 4 — starts/stops the background during-exam poll. */
+/** Part 4 — starts/stops the background during-exam poll. Also starts/stops the mid-exam remote-session monitor (see remoteSessionMonitor.ts) — the same ACTIVE-lifecycle signal now drives both. */
 ipcMain.on("lockdown:set-lockdown-exam-active", (_event, active: unknown) => {
   if (typeof active !== "boolean") return;
   processDetection.setExamActive(active);
+  remoteSessionMonitor.setExamActive(active);
 });
 
 /** Part 5 — remote-session/VM classification, on demand. */
@@ -989,11 +1027,19 @@ app.whenReady().then(() => {
     if (isOnline) void flushQueue();
   });
 
-  const initialExamId = parseExamIdFromDeepLink(process.argv.find((a) => isDeepLinkArg(a)) ?? "");
+  // No deep-link argv on this launch (normal Start Menu/desktop
+  // shortcut/exe launch) -> initialExamId is null -> createWindow loads
+  // Home/Dashboard (see buildLoadUrl/resolveStartupLoadUrl) — never a
+  // previous exam, since no persisted fallback is consulted.
+  const initialExamId = resolveInitialExamIdFromArgv(process.argv);
   createWindow(initialExamId);
 
   app.on("second-instance", (_event, argv) => {
-    const deepLinkArg = argv.find((a) => isDeepLinkArg(a));
+    // A second-instance activation with NO deep link (e.g. the student
+    // double-clicks the desktop shortcut again while Tether is already
+    // running) must only focus the existing window, never navigate it —
+    // it must not reopen or reuse whatever exam was previously open.
+    const deepLinkArg = findDeepLinkArg(argv);
     if (deepLinkArg) handleDeepLink(deepLinkArg);
     if (isWindowUsable(mainWindow)) {
       if (mainWindow.isMinimized()) mainWindow.restore();

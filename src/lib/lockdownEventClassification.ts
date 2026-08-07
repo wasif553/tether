@@ -87,6 +87,20 @@ export const LOCKDOWN_AUDIT_ACTIONS = [
   "TETHER_LOCKDOWN_WINDOW_OPEN_DENIED",
   "TETHER_LOCKDOWN_REMOTE_SESSION_CHECK_FAILED_CLOSED",
   "TETHER_LOCKDOWN_VIRTUAL_MACHINE_INDICATOR",
+  // Mid-exam remote-session monitoring v1 — the CONTINUOUS during-exam
+  // check (remoteSessionMonitor.ts) becoming unavailable/recovering is a
+  // technical/operational fact, not an integrity signal on its own —
+  // deliberately separate from the preflight-specific
+  // TETHER_LOCKDOWN_REMOTE_SESSION_CHECK_FAILED_CLOSED above, whose name
+  // and semantics imply the preflight fail-closed/blocking behaviour,
+  // which would be misleading for this non-blocking mid-exam fact.
+  "TETHER_LOCKDOWN_REMOTE_SESSION_MONITOR_CHECK_UNAVAILABLE",
+  "TETHER_LOCKDOWN_REMOTE_SESSION_MONITOR_CHECK_RECOVERED",
+  // URGENT screen-sharing fix — a getDisplayMedia() request that failed
+  // (student-facing message already shown separately; this is the
+  // engineering-diagnosable technical fact — bounded error-name/reason
+  // only, never captured pixels or exam content).
+  "TETHER_SCREEN_SHARE_REQUEST_FAILED",
 ] as const;
 export type LockdownAuditAction = (typeof LOCKDOWN_AUDIT_ACTIONS)[number];
 

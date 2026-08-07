@@ -105,7 +105,7 @@ export async function buildIntegrityReview(submissionId: string) {
     return {
       id: e.id,
       eventType: e.eventType,
-      eventLabel: labelForEventType(e.eventType),
+      eventLabel: labelForEventType(e.eventType, e.metadataJson as Record<string, unknown> | null),
       severity: e.severity,
       message: e.message,
       occurredAt: e.occurredAt.toISOString(),

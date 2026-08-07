@@ -127,7 +127,7 @@
 // for lecturer review, never an automatic misconduct conclusion — see
 // that doc's "Core principles". No kernel driver, no TPM attestation, no
 // permanent Windows-setting change, no blanket process termination.
-export const LOCKDOWN_VERSION = "1.7.1";
+export const LOCKDOWN_VERSION = "1.7.2";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

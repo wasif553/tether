@@ -62,11 +62,18 @@ export async function resolveExamSubmissionsLockdownStatuses(submissionIds: stri
     const unavailableAt = latestUnavailableBySubmission.get(submissionId);
 
     if (latestEvent && (!unavailableAt || latestEvent.occurredAt >= unavailableAt)) {
-      const metadata = latestEvent.metadataJson as { category?: string; durationMs?: number } | null;
+      const metadata = latestEvent.metadataJson as { category?: string; durationMs?: number; capabilityId?: string } | null;
       const stillDetected = latestEvent.eventType !== "PROHIBITED_APPLICATION_CLOSED";
+      // Mid-exam remote-session monitoring v1 — PROHIBITED_APPLICATION_CLOSED
+      // is the generic "cleared" event reused across every lockdown
+      // capability; a REMOTE_DESKTOP_SESSION-tagged one gets its own
+      // accurate wording here too, exactly like labelForEventType's own
+      // override (integrityEventLabels.ts) — nothing was "closed" by the
+      // student, an inbound Remote Desktop connection simply ended.
+      const closedLabel = metadata?.capabilityId === "REMOTE_DESKTOP_SESSION" ? "Remote session ended" : "Application closed";
       result.set(submissionId, {
         state: stillDetected ? "DETECTED" : "CLOSED",
-        label: stillDetected ? "Application detected" : "Application closed",
+        label: stillDetected ? "Application detected" : closedLabel,
         capabilityCategory: metadata?.category ?? null,
         detectedAt: stillDetected ? latestEvent.occurredAt : null,
         clearedAt: stillDetected ? null : latestEvent.occurredAt,

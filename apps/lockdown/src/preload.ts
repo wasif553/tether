@@ -26,11 +26,25 @@ type LockdownCapabilityTransitionPayload = {
 };
 type LockdownScanUnavailablePayload = { reason: string };
 type LockdownRestorationResultPayload = { trigger: string; state: string; errors: string[] };
+type RemoteSessionMonitorEventPayload = {
+  kind: "BECAME_ACTIVE" | "BECAME_INACTIVE" | "CHECK_UNAVAILABLE" | "CHECK_RECOVERED";
+  effectiveAction: string;
+  previousState: string | null;
+  currentState: string | null;
+  detectedAtMsForClear: number | null;
+  classification: {
+    isRemoteSession: boolean;
+    remoteSessionSignalSource: string;
+    isLikelyVirtualMachine: boolean;
+    vmSignatureMatched: string | null;
+  };
+};
 
 const warningListeners: Array<(message: string) => void> = [];
 const capabilityTransitionListeners: Array<(payload: LockdownCapabilityTransitionPayload) => void> = [];
 const scanUnavailableListeners: Array<(payload: LockdownScanUnavailablePayload) => void> = [];
 const restorationResultListeners: Array<(payload: LockdownRestorationResultPayload) => void> = [];
+const remoteSessionMonitorEventListeners: Array<(payload: RemoteSessionMonitorEventPayload) => void> = [];
 // Tether launch/install flow v1 — fed by main's debounced, policy-aware
 // display-count evaluation (displayEnforcement.ts). The blocking overlay
 // itself is entirely main-owned; this only lets the hosted page report
@@ -70,6 +84,10 @@ ipcRenderer.on("lockdown:scan-unavailable", (_event, payload: LockdownScanUnavai
 
 ipcRenderer.on("lockdown:restoration-result", (_event, payload: LockdownRestorationResultPayload) => {
   for (const listener of restorationResultListeners) listener(payload);
+});
+
+ipcRenderer.on("lockdown:remote-session-monitor-event", (_event, payload: RemoteSessionMonitorEventPayload) => {
+  for (const listener of remoteSessionMonitorEventListeners) listener(payload);
 });
 
 contextBridge.exposeInMainWorld("sesLockdown", {
@@ -295,6 +313,11 @@ contextBridge.exposeInMainWorld("sesLockdown", {
 
   onLockdownRestorationResult(callback: (payload: { trigger: string; state: string; errors: string[] }) => void): void {
     if (typeof callback === "function") restorationResultListeners.push(callback);
+  },
+
+  /** Mid-exam remote-session monitoring v1 — one call per de-duplicated state transition (see remoteSessionMonitor.ts); never fired on every poll. */
+  onRemoteSessionMonitorEvent(callback: (payload: RemoteSessionMonitorEventPayload) => void): void {
+    if (typeof callback === "function") remoteSessionMonitorEventListeners.push(callback);
   },
 
   /** Part 5 — remote-session/VM classification, on demand. */
