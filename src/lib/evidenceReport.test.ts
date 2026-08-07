@@ -217,6 +217,10 @@ describe("remoteSessionDetail — mid-exam remote-session monitoring v1", () => 
     });
     const report = await buildEvidenceReport(submission.id, sessionFor(lecturerA.id, "LECTURER", instA));
     expect(report.events[0].remoteSessionDetail).toMatchObject({ previousState: "ACTIVE", currentState: "INACTIVE" });
+    // Lecturer language fix — never the misleading generic
+    // "Prohibited application closed" for a remote session ending.
+    expect(report.events[0].eventLabel).toBe("Remote session ended");
+    expect(report.events[0].eventLabel).not.toBe("Prohibited application closed");
   });
 });
 

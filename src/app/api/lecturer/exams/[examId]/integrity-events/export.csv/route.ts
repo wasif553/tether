@@ -69,7 +69,7 @@ export async function GET(
         e.occurredAt.toISOString(),
         e.student.name,
         e.student.email,
-        labelForEventType(e.eventType),
+        labelForEventType(e.eventType, e.metadataJson as Record<string, unknown> | null),
         e.severity,
         e.message,
         e.resolvedAt?.toISOString() ?? null,

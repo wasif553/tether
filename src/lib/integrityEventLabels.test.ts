@@ -98,3 +98,32 @@ describe("labelForEventType (unchanged)", () => {
     }
   });
 });
+
+describe("labelForEventType — mid-exam remote-session monitoring v1 metadata-specific wording", () => {
+  it('shows "Remote session ended" for PROHIBITED_APPLICATION_CLOSED when metadata identifies REMOTE_DESKTOP_SESSION', () => {
+    expect(labelForEventType("PROHIBITED_APPLICATION_CLOSED", { capabilityId: "REMOTE_DESKTOP_SESSION" })).toBe(
+      "Remote session ended",
+    );
+  });
+
+  it("still shows the generic label for PROHIBITED_APPLICATION_CLOSED from any other capability", () => {
+    expect(labelForEventType("PROHIBITED_APPLICATION_CLOSED", { capabilityId: "TEAMVIEWER" })).toBe(
+      "Prohibited application closed",
+    );
+    expect(labelForEventType("PROHIBITED_APPLICATION_CLOSED", null)).toBe("Prohibited application closed");
+    expect(labelForEventType("PROHIBITED_APPLICATION_CLOSED")).toBe("Prohibited application closed");
+  });
+
+  it("never overrides any OTHER event type, even one that happens to carry a REMOTE_DESKTOP_SESSION capabilityId (e.g. the DETECTED phase)", () => {
+    expect(labelForEventType("REMOTE_CONTROL_SOFTWARE_DETECTED", { capabilityId: "REMOTE_DESKTOP_SESSION" })).toBe(
+      "Remote-control software detected — needs review",
+    );
+  });
+
+  it("the override wording is calm and never implies misconduct", () => {
+    const label = labelForEventType("PROHIBITED_APPLICATION_CLOSED", { capabilityId: "REMOTE_DESKTOP_SESSION" });
+    expect(label.toLowerCase()).not.toContain("confirmed");
+    expect(label.toLowerCase()).not.toContain("caught");
+    expect(label.toLowerCase()).not.toContain("cheating");
+  });
+});

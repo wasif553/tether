@@ -32,6 +32,8 @@ export type PackagedReleaseVerificationInput = {
   packagedDisplayEnforcementJsContent: string | null;
   /** Tether Windows Lockdown Hardening v1 — the PACKAGED app's compiled dist/processDetection.js contents. */
   packagedProcessDetectionJsContent: string | null;
+  /** Mid-exam remote-session monitoring v1 — the PACKAGED app's compiled dist/remoteSessionMonitor.js contents. */
+  packagedRemoteSessionMonitorJsContent: string | null;
   /** Windows taskbar icon fix v1.7.1 — the SOURCE assets/icon.ico bytes (before packaging). */
   sourceIconIcoBuffer: Buffer | null;
   /** Windows taskbar icon fix v1.7.1 — the SOURCE electron-builder.yml contents. */
@@ -78,9 +80,53 @@ const REQUIRED_MAIN_JS_MARKERS = [
   // icon path being set.
   "setAppUserModelId(",
   "LOCKDOWN_ICON_PATH",
+  // Mid-exam remote-session monitoring v1 — fails loudly on a stale
+  // pre-1.7.2 build that predates RemoteSessionMonitor's ACTIVE-lifecycle
+  // wiring and shutdown cleanup integration (see main.ts: the same
+  // lockdown:set-lockdown-exam-active handler that starts/stops
+  // ProcessDetection now also starts/stops RemoteSessionMonitor, and the
+  // window "closed" handler calls remoteSessionMonitor.stop() alongside
+  // processDetection.stop()). Anchored on `.RemoteSessionMonitor(` rather
+  // than `new RemoteSessionMonitor(` — tsc's CommonJS output prefixes an
+  // imported class with a generated module alias (e.g.
+  // `remoteSessionMonitor_1.RemoteSessionMonitor(`), so a literal `new
+  // RemoteSessionMonitor(` never appears in the compiled bundle even
+  // though the current source is present.
+  ".RemoteSessionMonitor(",
+  "remoteSessionMonitor.setExamActive(active)",
+  "remoteSessionMonitor.stop()",
 ];
 const REQUIRED_DISPLAY_ENFORCEMENT_JS_MARKERS = ["setEnforcementState", "resolveReadinessGatedDisplayEnforcementState"];
-const REQUIRED_PROCESS_DETECTION_JS_MARKERS = ["runPreflightScan", "setExamActive"];
+const REQUIRED_PROCESS_DETECTION_JS_MARKERS = [
+  "runPreflightScan",
+  "setExamActive",
+  // v1.7.2 poll-serialization fix — the corrected in-flight assignment
+  // (pollOnceNow()'s own promise, never a `.finally()`-wrapped one).
+  "this.scanInFlight = this.pollOnceNow();",
+];
+/**
+ * v1.7.2 poll-serialization fix — this EXACT fragment only ever appears
+ * in the OLD buggy assignment (`this.scanInFlight = run.finally(...)`),
+ * never in prose (comments describing the fix quote `.finally()` and
+ * `this.scanInFlight === run` separately, never this exact assignment
+ * statement together) — a packaged build that still contains it has the
+ * stale, silently-self-freezing poll loop.
+ */
+const FORBIDDEN_PROCESS_DETECTION_JS_MARKER = "this.scanInFlight = run.finally(";
+
+// Mid-exam remote-session monitoring v1 — RemoteSessionMonitor itself:
+// the class, its ACTIVE-lifecycle entrypoint, its configurable interval
+// (proves interval configuration is actually wired, not hardcoded),
+// its transition-deduplication logic (imported from the pure
+// remoteSessionMonitorLogic module — proves dedup ships, not just the
+// class shell), and its cleanup method.
+const REQUIRED_REMOTE_SESSION_MONITOR_JS_MARKERS = [
+  "class RemoteSessionMonitor",
+  "setExamActive(active)",
+  "resolveRemoteSessionMonitorIntervalSeconds",
+  "computeRemoteSessionMonitorTransitions",
+  "stop() {",
+];
 
 /**
  * Windows taskbar icon fix v1.7.1 — every resolution Windows expects a
@@ -195,6 +241,24 @@ export function verifyPackagedReleaseContents(input: PackagedReleaseVerification
         errors.push(`Packaged dist/processDetection.js is missing "${marker}" — the packaged build does not contain the current Windows lockdown hardening logic.`);
       }
     }
+    if (input.packagedProcessDetectionJsContent.includes(FORBIDDEN_PROCESS_DETECTION_JS_MARKER)) {
+      errors.push(
+        "Packaged dist/processDetection.js still contains the v1.7.2-fixed poll-serialization bug " +
+          '("this.scanInFlight = run.finally(...)") — a `.finally()`-wrapped promise never equals the ' +
+          "promise it was called on, so the in-flight guard never clears and during-exam process " +
+          "detection silently freezes at its first scan result for the rest of the exam.",
+      );
+    }
+  }
+
+  if (!input.packagedRemoteSessionMonitorJsContent) {
+    errors.push("Packaged dist/remoteSessionMonitor.js was not found — has the app been packaged since the mid-exam remote-session monitoring feature was added?");
+  } else {
+    for (const marker of REQUIRED_REMOTE_SESSION_MONITOR_JS_MARKERS) {
+      if (!input.packagedRemoteSessionMonitorJsContent.includes(marker)) {
+        errors.push(`Packaged dist/remoteSessionMonitor.js is missing "${marker}" — the packaged build does not contain the current mid-exam remote-session monitoring logic.`);
+      }
+    }
   }
 
   // Windows taskbar icon fix v1.7.1 — the source icon asset exists and is
@@ -301,6 +365,7 @@ if (require.main === module) {
     packagedMainJsContent: readIfExists(path.join(appDir, "dist", "main.js")),
     packagedDisplayEnforcementJsContent: readIfExists(path.join(appDir, "dist", "displayEnforcement.js")),
     packagedProcessDetectionJsContent: readIfExists(path.join(appDir, "dist", "processDetection.js")),
+    packagedRemoteSessionMonitorJsContent: readIfExists(path.join(appDir, "dist", "remoteSessionMonitor.js")),
     sourceIconIcoBuffer: readBufferIfExists(path.join(__dirname, "..", "assets", "icon.ico")),
     electronBuilderYmlContent: readIfExists(path.join(__dirname, "..", "electron-builder.yml")),
     packagedIconIcoBuffer: readBufferIfExists(path.join(appDir, "assets", "icon.ico")),

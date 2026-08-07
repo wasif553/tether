@@ -56,7 +56,26 @@ const EVENT_TYPE_LABELS: Partial<Record<string, string>> = {
   PROHIBITED_APPLICATION_CLOSED: "Prohibited application closed",
 };
 
-export function labelForEventType(eventType: string): string {
+/**
+ * Mid-exam remote-session monitoring v1 — PROHIBITED_APPLICATION_CLOSED
+ * is the generic "cleared" event, reused across every lockdown
+ * capability (see lockdownEventClassification.ts), so its default label
+ * ("Prohibited application closed") is accurate for a closed
+ * TeamViewer/OBS/etc. but misleading for a Remote Desktop session
+ * ending — nothing was "closed" by the student, the inbound connection
+ * simply stopped. `metadata` is optional and additive: every existing
+ * call site keeps its current behaviour unless it passes the event's
+ * own metadataJson, in which case a REMOTE_DESKTOP_SESSION-tagged
+ * PROHIBITED_APPLICATION_CLOSED gets this specific wording instead. The
+ * underlying event TYPE is unchanged — this only overrides the
+ * lecturer-facing presentation.
+ */
+const REMOTE_SESSION_ENDED_LABEL = "Remote session ended";
+
+export function labelForEventType(eventType: string, metadata?: Record<string, unknown> | null): string {
+  if (eventType === "PROHIBITED_APPLICATION_CLOSED" && metadata?.capabilityId === "REMOTE_DESKTOP_SESSION") {
+    return REMOTE_SESSION_ENDED_LABEL;
+  }
   return EVENT_TYPE_LABELS[eventType] ?? eventType;
 }
 

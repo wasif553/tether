@@ -363,7 +363,7 @@ export async function buildEvidenceReport(
       return {
         id: e.id,
         eventType: e.eventType,
-        eventLabel: labelForEventType(e.eventType),
+        eventLabel: labelForEventType(e.eventType, metadata),
         severity: e.severity,
         message: e.message,
         occurredAt: e.occurredAt.toISOString(),
