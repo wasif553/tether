@@ -46,7 +46,7 @@ describe("shouldShowInstallerFallback", () => {
 
 describe("resolveTetherLaunchFailureMessage", () => {
   it("gives a distinct, neutral, non-accusatory message for every known failure code", () => {
-    const codes = ["REPLAY", "EXPIRED", "REVOKED", "NOT_FOUND", "INVALID_SIGNATURE", "INVALID_NONCE"];
+    const codes = ["REPLAY", "EXPIRED", "REVOKED", "NOT_FOUND", "INVALID_SIGNATURE", "INVALID_NONCE", "TRANSIENT_FAILURE"];
     for (const code of codes) {
       const message = resolveTetherLaunchFailureMessage(code);
       expect(message.length).toBeGreaterThan(0);
@@ -56,5 +56,12 @@ describe("resolveTetherLaunchFailureMessage", () => {
 
   it("falls back to a generic retry message for an unrecognised code", () => {
     expect(resolveTetherLaunchFailureMessage("SOMETHING_UNKNOWN")).toMatch(/went wrong/i);
+  });
+
+  // URGENT fix — secure-client launch consume transaction latency.
+  it("TRANSIENT_FAILURE (a server-side transaction failure) uses the exact controlled student-facing message, never mentioning reinstalling Tether", () => {
+    const message = resolveTetherLaunchFailureMessage("TRANSIENT_FAILURE");
+    expect(message).toBe("Your secure exam could not be opened. Please try again. If the problem continues, contact support.");
+    expect(message).not.toMatch(/reinstall|install tether|check tether/i);
   });
 });
