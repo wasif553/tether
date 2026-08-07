@@ -1,6 +1,7 @@
 "use client";
 
 import { use as usePromise, useEffect, useState } from "react";
+import Link from "next/link";
 
 type SessionDetail = {
   id: string;
@@ -122,7 +123,13 @@ export default function SecureClientSessionDetailPage({ params }: { params: Prom
 
   return (
     <div className="mx-auto max-w-3xl">
-      <h1 className="text-2xl font-semibold">Secure-client session</h1>
+      {/* Pilot UI release readiness v1 — this page previously had no way
+          back to the submission it belongs to except the browser Back
+          button. */}
+      <Link href={`/lecturer/submissions/${detail.submissionId}/evidence`} className="text-sm underline">
+        ← Back to submission
+      </Link>
+      <h1 className="mt-2 text-2xl font-semibold">Secure-client session</h1>
       <p className="mt-1 text-sm text-gray-600">
         Review client verification, device preflight and session continuity. These signals support lecturer review and do
         not by themselves establish misconduct.
@@ -139,11 +146,11 @@ export default function SecureClientSessionDetailPage({ params }: { params: Prom
         </div>
         <div>
           <p className="text-xs text-gray-500">Status</p>
-          <p className="font-medium">{detail.status}</p>
+          <p className="font-medium">{detail.status.replaceAll("_", " ").toLowerCase()}</p>
         </div>
         <div>
           <p className="text-xs text-gray-500">Verification</p>
-          <p className="font-medium">{detail.verificationStatus}</p>
+          <p className="font-medium">{detail.verificationStatus.replaceAll("_", " ").toLowerCase()}</p>
         </div>
         <div>
           <p className="text-xs text-gray-500">Client version</p>

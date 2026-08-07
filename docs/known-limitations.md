@@ -14,8 +14,9 @@ SES Secure Exam Mode runs inside a normal web browser. This means:
 - SES cannot prevent a student from opening a new window before the exam
   starts
 - SES cannot block OS-level application switching
-- Full lockdown requires a dedicated lockdown browser (planned as a
-  future optional mode)
+- Fuller enforcement is available via Tether Secure Browser, a dedicated
+  Electron lockdown client — see the "Tether Secure Browser" section
+  below (current controlled-pilot release candidate: 1.7.2)
 
 ## Camera monitoring
 
@@ -201,7 +202,27 @@ docs/assessment-operations-v1.md):
 ## Tether Secure Browser (Electron lockdown client)
 
 Electron Packaging v1 produces pilot installers (Windows NSIS, macOS
-DMG) from `apps/lockdown` — see `apps/lockdown/PILOT-INSTALL.md`:
+DMG) from `apps/lockdown` — see `apps/lockdown/PILOT-INSTALL.md`.
+**Current controlled-pilot release candidate: 1.7.2** (Windows x64). Not
+yet published as a GitHub Release or generally available — distributed
+directly by the operator for controlled pilots only.
+
+As of 1.7.2 this includes, on top of the original detection/soft
+enforcement baseline below:
+
+- Entire Screen sharing (where an exam requires it) and screen evidence
+  frame capture
+- Camera monitoring (where an exam requires it)
+- Continuous prohibited-application detection through the whole exam
+  (not just at launch)
+- Continuous display-configuration monitoring through the whole exam
+  (not just at launch)
+- Mid-exam remote-session (Remote Desktop) detection
+
+All of the above are integrity SIGNALS recorded for lecturer human
+review — none of them is an automatic misconduct determination.
+
+Remaining limitations:
 
 - Unsigned, unnotarized — Windows SmartScreen and macOS Gatekeeper will
   warn on install. Suitable for controlled pilot distribution only, not
@@ -211,7 +232,9 @@ DMG) from `apps/lockdown` — see `apps/lockdown/PILOT-INSTALL.md`:
   cheating. See `docs/lockdown-browser-known-limitations.md`.
 - No auto-update — every pilot requires a freshly built installer.
 - No MDM/managed deployment path.
-- Placeholder app icons — production branding assets not yet created.
+- A real Windows taskbar icon is embedded as of 1.7.1 (see
+  `apps/lockdown/PILOT-INSTALL.md`); macOS branding assets are not yet
+  finalized.
 
 ## Controlled pilot
 

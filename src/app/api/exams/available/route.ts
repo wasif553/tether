@@ -4,8 +4,20 @@ import { prisma } from "@/lib/prisma";
 import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 import { attemptsRemaining } from "@/lib/assessmentLifecycle";
 import { parseSecureSettings } from "@/lib/secureExam";
+import { isStudentHistoryItem } from "@/lib/studentDashboardGrouping";
 
-export async function GET() {
+// Pilot UI release readiness v1 — see docs/tether-v1.7.2-pilot-release-readiness.md.
+// A finalized (SUBMITTED/GRADED) exam the student cannot act on further
+// stays useful only as recent history; without a cap this response grows
+// forever as an institution accumulates completed exams. Bounded here
+// (same 2 queries as before — this only trims the already-fetched,
+// already-computed result array before it's serialized) rather than in
+// CSS, so payload size stops growing with historical volume. `?all=true`
+// (used by the dashboard's "Show all completed examinations" expansion)
+// returns the full set for a student who deliberately asks for it.
+const DEFAULT_COMPLETED_HISTORY_LIMIT = 20;
+
+export async function GET(req?: Request) {
   const session = await auth();
   if (!session || session.user.role !== "STUDENT") {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -69,6 +81,7 @@ export async function GET() {
           maxAttempts: settings.maxAttempts,
         });
         const activeSubmission = inProgressSubmission ?? latestSubmission;
+        const canStartAttempt = !inProgressSubmission && remainingAttempts > 0;
 
         return {
           id: exam.id,
@@ -82,15 +95,16 @@ export async function GET() {
           questionCount: exam._count.questions,
           accessCodeRequired: exam.accessCodeRequired,
           course: exam.course,
-          availability: isClosed ? "closed" : isUpcoming ? "upcoming" : "open",
+          availability: (isClosed ? "closed" : isUpcoming ? "upcoming" : "open") as "open" | "upcoming" | "closed",
           maxAttempts: settings.maxAttempts,
           remainingAttempts,
-          canStartAttempt: !inProgressSubmission && remainingAttempts > 0,
+          canStartAttempt,
           submission: activeSubmission
             ? {
                 id: activeSubmission.id,
                 status: activeSubmission.status,
                 attemptNumber: activeSubmission.attemptNumber,
+                submittedAt: activeSubmission.submittedAt,
               }
             : null,
         };
@@ -101,7 +115,30 @@ export async function GET() {
       // for remains visible so they can see their result.
       .filter((exam) => exam.availability !== "closed" || exam.submission !== null);
 
-    return NextResponse.json(result);
+    // Pilot UI release readiness v1 — an exam with nothing further the
+    // student can do (not in progress, no attempts left / no longer
+    // open) is "history": useful for a "recently completed" list, but
+    // must not grow this response forever. Actionable exams (in
+    // progress, startable, or upcoming) are never capped — only the
+    // no-further-action tail is, newest-first, so nothing actionable is
+    // ever silently dropped. Response stays a plain array (unchanged
+    // shape — several existing tests call GET() with no Request and
+    // parse the body as an array directly), so this is purely additive:
+    // `?all=true` (used by the dashboard's "Show all completed
+    // examinations" expansion) returns the full history tail instead of
+    // just the most recent DEFAULT_COMPLETED_HISTORY_LIMIT.
+    const includeAllHistory = req != null && new URL(req.url).searchParams.get("all") === "true";
+    const actionable = result.filter((exam) => !isStudentHistoryItem(exam));
+    const history = result
+      .filter(isStudentHistoryItem)
+      .sort((a, b) => {
+        const aTime = a.submission?.submittedAt ? new Date(a.submission.submittedAt).getTime() : 0;
+        const bTime = b.submission?.submittedAt ? new Date(b.submission.submittedAt).getTime() : 0;
+        return bTime - aTime;
+      });
+    const boundedHistory = includeAllHistory ? history : history.slice(0, DEFAULT_COMPLETED_HISTORY_LIMIT);
+
+    return NextResponse.json([...actionable, ...boundedHistory]);
   } catch (err) {
     const res = institutionErrorResponse(err);
     if (res) return res;
