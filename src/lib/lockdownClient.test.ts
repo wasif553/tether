@@ -11,7 +11,7 @@
  * best-effort).
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { reportRemoteSessionMonitorTransition } from "./lockdownClient";
+import { reportRemoteSessionMonitorTransition, reportScreenShareRequestFailed } from "./lockdownClient";
 
 const CLASSIFICATION_ACTIVE = { isRemoteSession: true, remoteSessionSignalSource: "BOTH_AGREE", isLikelyVirtualMachine: false, vmSignatureMatched: null };
 const CLASSIFICATION_INACTIVE = { isRemoteSession: false, remoteSessionSignalSource: "BOTH_AGREE", isLikelyVirtualMachine: false, vmSignatureMatched: null };
@@ -122,6 +122,39 @@ describe("reportRemoteSessionMonitorTransition — CHECK_UNAVAILABLE / CHECK_REC
     expect(fetchMock).not.toHaveBeenCalled();
     const auditFact = (window as unknown as { sesLockdown: { reportLockdownAuditFact: ReturnType<typeof vi.fn> } }).sesLockdown.reportLockdownAuditFact;
     expect(auditFact).toHaveBeenCalledWith("TETHER_LOCKDOWN_REMOTE_SESSION_MONITOR_CHECK_RECOVERED", expect.any(Object));
+  });
+});
+
+describe("reportScreenShareRequestFailed — URGENT screen-sharing fix, Part A2 diagnostics", () => {
+  it("[9] reports a PlatformAuditLog-only fact distinguishing the DOMException name and diagnostic reason, never an IntegrityEvent", () => {
+    reportScreenShareRequestFailed({ errorName: "NotFoundError", screenShareMode: "REQUIRED" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    const auditFact = (window as unknown as { sesLockdown: { reportLockdownAuditFact: ReturnType<typeof vi.fn> } }).sesLockdown.reportLockdownAuditFact;
+    expect(auditFact).toHaveBeenCalledWith(
+      "TETHER_SCREEN_SHARE_REQUEST_FAILED",
+      expect.objectContaining({ errorName: "NotFoundError", diagnosticReason: "NO_SOURCE", screenShareMode: "REQUIRED" }),
+    );
+  });
+
+  it("[9] distinguishes user cancellation (AbortError) from an internal failure", () => {
+    reportScreenShareRequestFailed({ errorName: "AbortError", screenShareMode: "REQUIRED" });
+    const auditFact = (window as unknown as { sesLockdown: { reportLockdownAuditFact: ReturnType<typeof vi.fn> } }).sesLockdown.reportLockdownAuditFact;
+    expect(auditFact).toHaveBeenCalledWith("TETHER_SCREEN_SHARE_REQUEST_FAILED", expect.objectContaining({ diagnosticReason: "CANCELLED" }));
+  });
+
+  it("never includes captured pixels, tokens, cookies, or credentials — only bounded string/boolean fields", () => {
+    reportScreenShareRequestFailed({ errorName: "NotAllowedError", screenShareMode: "REQUIRED" });
+    const auditFact = (window as unknown as { sesLockdown: { reportLockdownAuditFact: ReturnType<typeof vi.fn> } }).sesLockdown.reportLockdownAuditFact;
+    const metadata = auditFact.mock.calls[0][1] as Record<string, unknown>;
+    for (const value of Object.values(metadata)) {
+      expect(["string", "boolean"].includes(typeof value)).toBe(true);
+    }
+    expect(Object.keys(metadata).join(",")).not.toMatch(/token|cookie|credential|signature|manifest/i);
+  });
+
+  it("is a silent no-op outside Tether (no window.sesLockdown bridge) — never throws", () => {
+    vi.stubGlobal("window", {});
+    expect(() => reportScreenShareRequestFailed({ errorName: "NotAllowedError", screenShareMode: "REQUIRED" })).not.toThrow();
   });
 });
 

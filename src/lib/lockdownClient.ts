@@ -10,6 +10,7 @@
  * always the server-side route each of these eventually calls).
  */
 import { integrityEventTypeForCapabilityCategory, severityForLockdownDetection, type LockdownCapabilityCategoryName, type LockdownCapabilityActionName } from "@/lib/lockdownEventClassification";
+import { classifyGetDisplayMediaErrorForDiagnostics } from "@/lib/screenShareLifecycle";
 
 export type LockdownCapabilityInfo = { category: LockdownCapabilityCategoryName; displayName: string };
 
@@ -193,4 +194,26 @@ export async function reportRemoteSessionMonitorTransition(params: {
   // CHECK_UNAVAILABLE / CHECK_RECOVERED — PlatformAuditLog-only, never an IntegrityEvent.
   const auditAction = params.kind === "CHECK_UNAVAILABLE" ? "TETHER_LOCKDOWN_REMOTE_SESSION_MONITOR_CHECK_UNAVAILABLE" : "TETHER_LOCKDOWN_REMOTE_SESSION_MONITOR_CHECK_RECOVERED";
   window.sesLockdown?.reportLockdownAuditFact?.(auditAction, baseMetadata);
+}
+
+/**
+ * URGENT screen-sharing fix, Part A2 — a safe, bounded, PlatformAuditLog-only
+ * diagnostic fact for a getDisplayMedia() failure. Best-effort and
+ * feature-detected like every other call in this file: a silent no-op
+ * outside Tether (no window.sesLockdown bridge to report through), which
+ * is itself the "whether the app is Tether" signal — this fact can only
+ * ever be recorded from inside Tether. Never includes captured screen
+ * pixels, tokens, cookies, credentials, launch manifests, signatures, or
+ * exam content — only the DOMException name, the derived diagnostic
+ * reason, the exam's screenShareMode, and the Tether client version, all
+ * of which are already-bounded strings/booleans the audit-event route's
+ * own zod schema accepts.
+ */
+export function reportScreenShareRequestFailed(params: { errorName: string | undefined; screenShareMode: string }): void {
+  window.sesLockdown?.reportLockdownAuditFact?.("TETHER_SCREEN_SHARE_REQUEST_FAILED", {
+    errorName: params.errorName ?? "unknown",
+    diagnosticReason: classifyGetDisplayMediaErrorForDiagnostics(params.errorName),
+    screenShareMode: params.screenShareMode,
+    tetherVersion: window.sesLockdown?.version ?? "unknown",
+  });
 }

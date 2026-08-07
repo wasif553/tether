@@ -34,6 +34,10 @@ export type PackagedReleaseVerificationInput = {
   packagedProcessDetectionJsContent: string | null;
   /** Mid-exam remote-session monitoring v1 — the PACKAGED app's compiled dist/remoteSessionMonitor.js contents. */
   packagedRemoteSessionMonitorJsContent: string | null;
+  /** URGENT startup-routing fix — the PACKAGED app's compiled dist/lockdownStartupRouting.js contents. */
+  packagedLockdownStartupRoutingJsContent: string | null;
+  /** URGENT screen-sharing fix — the PACKAGED app's compiled dist/screenShareRequestHandler.js contents. */
+  packagedScreenShareRequestHandlerJsContent: string | null;
   /** Windows taskbar icon fix v1.7.1 — the SOURCE assets/icon.ico bytes (before packaging). */
   sourceIconIcoBuffer: Buffer | null;
   /** Windows taskbar icon fix v1.7.1 — the SOURCE electron-builder.yml contents. */
@@ -95,7 +99,30 @@ const REQUIRED_MAIN_JS_MARKERS = [
   ".RemoteSessionMonitor(",
   "remoteSessionMonitor.setExamActive(active)",
   "remoteSessionMonitor.stop()",
+  // URGENT fix — screen-sharing: fails loudly on a stale build that
+  // predates the setDisplayMediaRequestHandler registration (without it,
+  // getDisplayMedia() always rejects — see screenShareRequestHandler.ts).
+  // Anchored on the literal `types: ["screen"]` desktopCapturer query too
+  // — proves the packaged build structurally excludes window sources, not
+  // just that SOME handler is registered.
+  "setDisplayMediaRequestHandler(",
+  'types: ["screen"]',
+  // URGENT fix — startup routing: fails loudly on a stale build that
+  // predates the deep-link-driven initial route resolution (a build
+  // without this still uses the old, always-null-safe argv.find(...)
+  // inline call, never resolveInitialExamIdFromArgv).
+  "resolveInitialExamIdFromArgv",
 ];
+/**
+ * URGENT startup-routing fix — this EXACT fragment only ever appears in
+ * the OLD buggy `buildLoadUrl`, which persisted every deep-linked examId
+ * to electron-store and silently reused it as the fallback for every
+ * later launch with no examId of its own — the confirmed physical bug
+ * where a normal Start Menu/shortcut launch reopened a previous exam
+ * instead of Home/Dashboard. A packaged build that still contains it has
+ * regressed back to that bug.
+ */
+const FORBIDDEN_MAIN_JS_MARKER = 'store.set("lastExamId"';
 const REQUIRED_DISPLAY_ENFORCEMENT_JS_MARKERS = [
   "setEnforcementState",
   "resolveReadinessGatedDisplayEnforcementState",
@@ -142,6 +169,21 @@ const REQUIRED_REMOTE_SESSION_MONITOR_JS_MARKERS = [
   "computeRemoteSessionMonitorTransitions",
   "stop() {",
 ];
+
+// URGENT startup-routing fix — proves the packaged build resolves a
+// launch with no examId to the canonical Home/Dashboard route (never a
+// hardcoded/stale default), and that deep-link examId parsing is present.
+const REQUIRED_LOCKDOWN_STARTUP_ROUTING_JS_MARKERS = [
+  "resolveStartupLoadUrl",
+  'TETHER_HOME_PATH = "/student"',
+  "parseExamIdFromDeepLinkUrl",
+];
+
+// URGENT screen-sharing fix — proves the Entire-Screen source-selection
+// logic (never a window source — see selectEntireScreenSource's own doc
+// comment) is actually present, not just the handler registration in
+// main.js checked above.
+const REQUIRED_SCREEN_SHARE_REQUEST_HANDLER_JS_MARKERS = ["handleDisplayMediaRequest", "selectEntireScreenSource"];
 
 /**
  * Windows taskbar icon fix v1.7.1 — every resolution Windows expects a
@@ -234,6 +276,33 @@ export function verifyPackagedReleaseContents(input: PackagedReleaseVerification
     for (const marker of REQUIRED_MAIN_JS_MARKERS) {
       if (!input.packagedMainJsContent.includes(marker)) {
         errors.push(`Packaged dist/main.js is missing "${marker}" — the packaged build does not contain the current display-enforcement IPC implementation.`);
+      }
+    }
+    if (input.packagedMainJsContent.includes(FORBIDDEN_MAIN_JS_MARKER)) {
+      errors.push(
+        'Packaged dist/main.js still contains the URGENT-fixed startup-routing bug (\'store.set("lastExamId"\') — ' +
+          "a normal Start Menu/shortcut/exe launch with no deep link will silently reopen whatever exam was " +
+          "last deep-linked to, instead of the Tether Home/Dashboard.",
+      );
+    }
+  }
+
+  if (!input.packagedLockdownStartupRoutingJsContent) {
+    errors.push("Packaged dist/lockdownStartupRouting.js was not found — has the app been packaged since the startup-routing fix was added?");
+  } else {
+    for (const marker of REQUIRED_LOCKDOWN_STARTUP_ROUTING_JS_MARKERS) {
+      if (!input.packagedLockdownStartupRoutingJsContent.includes(marker)) {
+        errors.push(`Packaged dist/lockdownStartupRouting.js is missing "${marker}" — the packaged build does not contain the current startup-routing logic.`);
+      }
+    }
+  }
+
+  if (!input.packagedScreenShareRequestHandlerJsContent) {
+    errors.push("Packaged dist/screenShareRequestHandler.js was not found — has the app been packaged since the screen-sharing fix was added?");
+  } else {
+    for (const marker of REQUIRED_SCREEN_SHARE_REQUEST_HANDLER_JS_MARKERS) {
+      if (!input.packagedScreenShareRequestHandlerJsContent.includes(marker)) {
+        errors.push(`Packaged dist/screenShareRequestHandler.js is missing "${marker}" — the packaged build does not contain the current screen-sharing source-selection logic.`);
       }
     }
   }
@@ -389,6 +458,8 @@ if (require.main === module) {
     packagedDisplayEnforcementJsContent: readIfExists(path.join(appDir, "dist", "displayEnforcement.js")),
     packagedProcessDetectionJsContent: readIfExists(path.join(appDir, "dist", "processDetection.js")),
     packagedRemoteSessionMonitorJsContent: readIfExists(path.join(appDir, "dist", "remoteSessionMonitor.js")),
+    packagedLockdownStartupRoutingJsContent: readIfExists(path.join(appDir, "dist", "lockdownStartupRouting.js")),
+    packagedScreenShareRequestHandlerJsContent: readIfExists(path.join(appDir, "dist", "screenShareRequestHandler.js")),
     sourceIconIcoBuffer: readBufferIfExists(path.join(__dirname, "..", "assets", "icon.ico")),
     electronBuilderYmlContent: readIfExists(path.join(__dirname, "..", "electron-builder.yml")),
     packagedIconIcoBuffer: readBufferIfExists(path.join(appDir, "assets", "icon.ico")),

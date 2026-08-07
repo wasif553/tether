@@ -36,6 +36,7 @@ import {
   integrityEventTypeForState,
   isRestorationTransition,
   classifyGetDisplayMediaError,
+  studentMessageForGetDisplayMediaFailure,
   evaluateDisplaySurface,
   isScreenShareApiSupported,
   type ScreenShareLifecycleState,
@@ -43,6 +44,7 @@ import {
 } from "@/lib/screenShareLifecycle";
 import { isEvidenceCaptureDue, type ScreenSharePolicy } from "@/lib/screenSharePolicy";
 import { buildScreenEvidenceUploadPath } from "@/lib/screenShareEvidence";
+import { reportScreenShareRequestFailed } from "@/lib/lockdownClient";
 
 export type UseScreenShareLifecycleParams = {
   submissionId: string;
@@ -293,15 +295,13 @@ export function useScreenShareLifecycle(params: UseScreenShareLifecycleParams): 
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
       attachStream(stream);
     } catch (err) {
-      const reason = classifyGetDisplayMediaError((err as DOMException)?.name);
+      const errorName = (err as DOMException)?.name;
+      const reason = classifyGetDisplayMediaError(errorName);
       transition({ type: "REQUEST_FAILED", reason });
-      setErrorMessage(
-        reason === "PERMISSION_DENIED"
-          ? "Screen-share permission was not granted. Please allow screen sharing to continue."
-          : "Screen sharing could not be started. Please try again.",
-      );
+      setErrorMessage(studentMessageForGetDisplayMediaFailure(errorName));
+      reportScreenShareRequestFailed({ errorName, screenShareMode: policy.mode });
     }
-  }, [transition, attachStream]);
+  }, [transition, attachStream, policy.mode]);
 
   // Public start()/resume() are the same underlying action — both must
   // only ever be invoked from a real user gesture (a button onClick);

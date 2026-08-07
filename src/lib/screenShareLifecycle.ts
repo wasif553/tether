@@ -57,6 +57,63 @@ export function isScreenShareApiSupported(hasGetDisplayMedia: boolean): boolean 
 }
 
 // ---------------------------------------------------------------------------
+// URGENT screen-sharing fix — finer-grained diagnosis of a getDisplayMedia()
+// failure, kept STRICTLY SEPARATE from classifyGetDisplayMediaError/
+// GetDisplayMediaFailureReason above: those two feed the state machine and
+// the reported IntegrityEventType (SCREEN_SHARE_PERMISSION_DENIED /
+// SCREEN_SHARE_UNAVAILABLE — fixed values on the Prisma IntegrityEventType
+// enum), and stay untouched here so no new event type / schema change is
+// needed. This finer classification is used ONLY for (a) which
+// student-facing message to show (Part D) and (b) the safe, bounded
+// diagnostic fact reported via reportLockdownAuditFact — never for a
+// lifecycle-state or server-reported-event decision.
+// ---------------------------------------------------------------------------
+
+export type GetDisplayMediaDiagnosticReason =
+  | "PERMISSION_DENIED"
+  | "NO_SOURCE"
+  | "CANCELLED"
+  | "INVALID_STATE"
+  | "NOT_READABLE"
+  | "INTERNAL";
+
+/** Distinguishes the standard getDisplayMedia() DOMException names for diagnostics/messaging only — an unrecognised name fails safe to INTERNAL, never to PERMISSION_DENIED (which implies a different remedy). */
+export function classifyGetDisplayMediaErrorForDiagnostics(errorName: string | undefined): GetDisplayMediaDiagnosticReason {
+  switch (errorName) {
+    case "NotAllowedError":
+    case "SecurityError":
+      return "PERMISSION_DENIED";
+    case "NotFoundError":
+      return "NO_SOURCE";
+    case "AbortError":
+      return "CANCELLED";
+    case "InvalidStateError":
+      return "INVALID_STATE";
+    case "NotReadableError":
+      return "NOT_READABLE";
+    default:
+      return "INTERNAL";
+  }
+}
+
+/**
+ * Part D — the concise, cause-specific student-facing message. Never
+ * exposes the raw DOMException name/message to the student; distinguishes
+ * only the causes the task explicitly calls out (permission denied, no
+ * display source) and falls back to a generic, support-pointing message
+ * for everything else (including CANCELLED — a user-initiated dismissal
+ * isn't a "failure" needing a distinct message of its own here, and
+ * INVALID_STATE/NOT_READABLE are genuinely internal conditions a student
+ * cannot self-diagnose).
+ */
+export function studentMessageForGetDisplayMediaFailure(errorName: string | undefined): string {
+  const reason = classifyGetDisplayMediaErrorForDiagnostics(errorName);
+  if (reason === "PERMISSION_DENIED") return "Screen sharing permission was not granted. Share your entire screen to continue.";
+  if (reason === "NO_SOURCE") return "Tether could not access a display to share. Check your display settings and try again.";
+  return "Screen sharing could not be started. Try again. If the problem continues, contact support.";
+}
+
+// ---------------------------------------------------------------------------
 // Display-surface validation (Part — "prefer or require displaySurface
 // === 'monitor'"). MediaStreamTrack.getSettings().displaySurface is
 // widely but not universally implemented — undefined means the browser

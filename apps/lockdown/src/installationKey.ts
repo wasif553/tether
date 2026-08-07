@@ -56,8 +56,8 @@ export type InstallationKeyStoreSchema = {
  * the get/set operations this module actually needs for the
  * "installationKey" entry. Deliberately NOT `Store<InstallationKeyStoreSchema>`:
  * electron-store's type parameter is invariant, so main.ts's real
- * `Store<StoreSchema>` (a superset schema with queuedEvents/lastExamId
- * too) would not otherwise be structurally assignable here.
+ * `Store<StoreSchema>` (a superset schema with queuedEvents too) would
+ * not otherwise be structurally assignable here.
  */
 export type InstallationKeyStore = {
   get(key: "installationKey", defaultValue: InstallationKeyStoreSchema["installationKey"]): InstallationKeyStoreSchema["installationKey"];
