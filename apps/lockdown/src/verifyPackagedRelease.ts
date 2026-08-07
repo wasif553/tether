@@ -96,7 +96,13 @@ const REQUIRED_MAIN_JS_MARKERS = [
   "remoteSessionMonitor.setExamActive(active)",
   "remoteSessionMonitor.stop()",
 ];
-const REQUIRED_DISPLAY_ENFORCEMENT_JS_MARKERS = ["setEnforcementState", "resolveReadinessGatedDisplayEnforcementState"];
+const REQUIRED_DISPLAY_ENFORCEMENT_JS_MARKERS = [
+  "setEnforcementState",
+  "resolveReadinessGatedDisplayEnforcementState",
+  // v1.7.2 poll-serialization fix — the corrected in-flight assignment
+  // (evaluateNow()'s own promise, never a `.finally()`-wrapped one).
+  "this.evaluateInFlight = run;",
+];
 const REQUIRED_PROCESS_DETECTION_JS_MARKERS = [
   "runPreflightScan",
   "setExamActive",
@@ -113,6 +119,15 @@ const REQUIRED_PROCESS_DETECTION_JS_MARKERS = [
  * stale, silently-self-freezing poll loop.
  */
 const FORBIDDEN_PROCESS_DETECTION_JS_MARKER = "this.scanInFlight = run.finally(";
+/**
+ * v1.7.2 poll-serialization fix — the identical bug and fix, applied to
+ * DisplayEnforcement's evaluate()/evaluateInFlight. This EXACT fragment
+ * only ever appears in the OLD buggy assignment
+ * (`this.evaluateInFlight = run.finally(...)`) — a packaged build that
+ * still contains it has the stale, silently-self-freezing display-topology
+ * poll loop (the overlay never re-evaluates after the first check).
+ */
+const FORBIDDEN_DISPLAY_ENFORCEMENT_JS_MARKER = "this.evaluateInFlight = run.finally(";
 
 // Mid-exam remote-session monitoring v1 — RemoteSessionMonitor itself:
 // the class, its ACTIVE-lifecycle entrypoint, its configurable interval
@@ -230,6 +245,14 @@ export function verifyPackagedReleaseContents(input: PackagedReleaseVerification
       if (!input.packagedDisplayEnforcementJsContent.includes(marker)) {
         errors.push(`Packaged dist/displayEnforcement.js is missing "${marker}" — the packaged build does not contain the current fail-closed enforcement logic.`);
       }
+    }
+    if (input.packagedDisplayEnforcementJsContent.includes(FORBIDDEN_DISPLAY_ENFORCEMENT_JS_MARKER)) {
+      errors.push(
+        "Packaged dist/displayEnforcement.js still contains the v1.7.2-fixed poll-serialization bug " +
+          '("this.evaluateInFlight = run.finally(...)") — a `.finally()`-wrapped promise never equals the ' +
+          "promise it was called on, so the in-flight guard never clears and display-topology enforcement " +
+          "silently freezes at its first evaluation result for the rest of the exam.",
+      );
     }
   }
 

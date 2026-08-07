@@ -55,7 +55,8 @@ const VALID_INPUT = {
   packagedSharedJsContent: 'exports.LOCKDOWN_VERSION = "1.2.1"; exports.TETHER_APP_USER_MODEL_ID = "com.tether.securebrowser";',
   packagedMainJsContent:
     'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger); app.setAppUserModelId(shared_1.TETHER_APP_USER_MODEL_ID); const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico"); const remoteSessionMonitor = new remoteSessionMonitor_1.RemoteSessionMonitor({...}); ipcMain.on("lockdown:set-lockdown-exam-active", (_e, active) => { processDetection.setExamActive(active); remoteSessionMonitor.setExamActive(active); }); mainWindow.on("closed", () => { processDetection.stop(); remoteSessionMonitor.stop(); });',
-  packagedDisplayEnforcementJsContent: "setEnforcementState(state) { ... } resolveReadinessGatedDisplayEnforcementState(...)",
+  packagedDisplayEnforcementJsContent:
+    "setEnforcementState(state) { ... } resolveReadinessGatedDisplayEnforcementState(...) evaluate() { ... const run = this.evaluateNow(); this.evaluateInFlight = run; ... }",
   packagedProcessDetectionJsContent: "runPreflightScan() { ... } setExamActive(active) { ... } pollOnce() { ... this.scanInFlight = this.pollOnceNow(); ... }",
   packagedRemoteSessionMonitorJsContent:
     "class RemoteSessionMonitor { setExamActive(active) { ... resolveRemoteSessionMonitorIntervalSeconds() ... } stop() { ... } pollOnceNow() { ... computeRemoteSessionMonitorTransitions(this.state, classification) ... } }",
@@ -181,6 +182,25 @@ describe("verifyPackagedReleaseContents", () => {
       });
       expect(result.ok).toBe(false);
       expect(result.errors.some((e) => e.includes("this.scanInFlight = this.pollOnceNow();"))).toBe(true);
+    });
+
+    it("fails when dist/displayEnforcement.js still contains the fixed .finally()-identity poll-serialization bug", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedDisplayEnforcementJsContent:
+          "setEnforcementState(state) { ... } resolveReadinessGatedDisplayEnforcementState(...) evaluate() { ... const run = this.evaluateNow(); this.evaluateInFlight = run.finally(() => { if (this.evaluateInFlight === run) this.evaluateInFlight = null; }); await run; }",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("v1.7.2-fixed poll-serialization bug"))).toBe(true);
+    });
+
+    it("fails when dist/displayEnforcement.js is missing the corrected in-flight assignment", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedDisplayEnforcementJsContent: "setEnforcementState(state) { ... } resolveReadinessGatedDisplayEnforcementState(...)",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("this.evaluateInFlight = run;"))).toBe(true);
     });
 
     it("fails when the packaged version is still 1.7.1 (a stale pre-version-bump build)", () => {
