@@ -90,6 +90,7 @@ async function resolveSecureClientLaunchField(params: {
     isRecoverySession: Boolean(currentSession?.recoveryOfSessionId),
     priorSessionTrustedInstallationId: priorSessionTrust.trustedInstallationId,
     priorSessionEverVerified: priorSessionTrust.everVerified,
+    priorSessionAttestationRequirement: priorSessionTrust.attestationRequirement,
   });
   const devBypassAllowed = isTetherSecureClientBypassAllowed(params.institutionSlug);
   const gate = resolveSecureClientStartGate({ effectiveDeliveryMode, hasVerifiedTetherSession, devBypassAllowed });

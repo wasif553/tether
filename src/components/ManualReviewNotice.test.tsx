@@ -25,6 +25,24 @@ function collectText(node: ReactNode): string {
   return "";
 }
 
+/** URGENT fix — broken dashboard route. Finds the first `<a>` element's `href` anywhere in the tree, since collectText only walks text content, never attributes. */
+function findAnchorHref(node: ReactNode): string | null {
+  if (node == null || typeof node === "boolean" || typeof node === "string" || typeof node === "number") return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findAnchorHref(child);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof node === "object" && "type" in node && "props" in node) {
+    const el = node as { type: unknown; props?: { href?: string; children?: ReactNode } };
+    if (el.type === "a" && typeof el.props?.href === "string") return el.props.href;
+    return findAnchorHref(el.props?.children);
+  }
+  return null;
+}
+
 describe("ManualReviewNotice — secure-recovery hardening v1, Part B", () => {
   it("8. shows exactly the required title and message, matching RECOVERY_STATE_COPY.MANUAL_REVIEW_REQUIRED verbatim", () => {
     const text = collectText(ManualReviewNotice({}));
@@ -52,6 +70,15 @@ describe("ManualReviewNotice — secure-recovery hardening v1, Part B", () => {
     expect(withoutPending).not.toContain("Changes waiting to save");
     const withoutProp = collectText(ManualReviewNotice({}));
     expect(withoutProp).not.toContain("Changes waiting to save");
+  });
+
+  // URGENT fix — confirmed physical bug: "Return to dashboard" linked to
+  // /student/dashboard, which 404s. The canonical student landing route
+  // is /student (see src/app/student/page.tsx).
+  it("URGENT fix: 'Return to dashboard' links to the canonical /student route, never the stale /student/dashboard 404", () => {
+    const href = findAnchorHref(ManualReviewNotice({}));
+    expect(href).toBe("/student");
+    expect(href).not.toBe("/student/dashboard");
   });
 
   it("is a pure, side-effect-free render: it never imports anything that could clear the local pending-save queue", () => {

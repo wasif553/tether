@@ -27,7 +27,7 @@ import {
   signManifest,
   validateManifestContext,
 } from "@/lib/secureClient/secureLaunchManifest";
-import { resolveExamAttestationMode } from "@/lib/tetherAttestationConfig";
+import { resolveExamAttestationMode, parseAttestationRequirement, type ExamAttestationMode } from "@/lib/tetherAttestationConfig";
 import {
   overallStatusFromChecks,
   normaliseChecksForClientType,
@@ -549,7 +549,9 @@ export async function consumeLaunchManifest(
   if (validation === "INVALID_SIGNATURE") return { outcome: "INVALID_SIGNATURE" };
   if (validation !== "VALID") return { outcome: "EXPIRED" };
 
-  type TxResult = { outcome: "CONSUMED"; sessionId: string; superseded: { id: string; clientInstallationId: string | null } | null } | { outcome: "NOT_FOUND" | "REVOKED" | "REPLAY" | "EXPIRED" };
+  type TxResult =
+    | { outcome: "CONSUMED"; sessionId: string; superseded: { id: string; clientInstallationId: string | null; attestationRequirement: ExamAttestationMode } | null }
+    | { outcome: "NOT_FOUND" | "REVOKED" | "REPLAY" | "EXPIRED" };
 
   let result: TxResult;
   try {
@@ -611,14 +613,25 @@ export async function consumeLaunchManifest(
     }).catch(() => {});
 
     // Secure-recovery hardening v1, Part A/B — the superseded session
-    // never had a trusted (v2 installation-bound) reference at all
-    // (LEGACY-only original attempt): automatic recovery can never be
-    // granted for this new session, regardless of what attestation it
-    // later presents (see resolveTrustedTetherVerification's own doc
-    // comment). Audited exactly once, here, at the moment this is first
-    // known to be true — never re-logged by later status polling or by
-    // repeated relaunch attempts against this SAME new session.
-    if (!result.superseded.clientInstallationId) {
+    // never had a trusted (v2 installation-bound) reference at all:
+    // automatic recovery can never be granted for this new session,
+    // regardless of what attestation it later presents (see
+    // resolveTrustedTetherVerification's own doc comment). Audited
+    // exactly once, here, at the moment this is first known to be true —
+    // never re-logged by later status polling or by repeated relaunch
+    // attempts against this SAME new session.
+    //
+    // URGENT fix — gated on attestationRequirement !== "LEGACY" too: an
+    // unbound superseded session under plain LEGACY is the EXPECTED,
+    // TOLERATED outcome for a perfectly legitimate retry (v2 attestation
+    // is best-effort/non-blocking under LEGACY — see
+    // resolveTrustedTetherVerification's own doc comment) and does NOT
+    // actually put this new session into MANUAL_REVIEW_REQUIRED (see
+    // resolveRecoveryState's own matching gate) — logging this action for
+    // it would be a misleading audit trail entry implying support
+    // intervention is needed when the student's retry will simply proceed
+    // normally.
+    if (!result.superseded.clientInstallationId && result.superseded.attestationRequirement !== "LEGACY") {
       await createPlatformAuditLog({
         actorId: preRecord.studentId,
         action: "TETHER_SECURE_RESUME_MANUAL_REVIEW_REQUIRED",
@@ -685,7 +698,10 @@ type GetOrCreateSessionParams = {
 async function getOrCreateSessionCore(
   tx: DbClient,
   params: GetOrCreateSessionParams,
-): Promise<{ session: Awaited<ReturnType<typeof tx.secureClientSession.create>>; superseded: { id: string; clientInstallationId: string | null } | null }> {
+): Promise<{
+  session: Awaited<ReturnType<typeof tx.secureClientSession.create>>;
+  superseded: { id: string; clientInstallationId: string | null; attestationRequirement: ExamAttestationMode } | null;
+}> {
   const existing = await tx.secureClientSession.findFirst({
     where: { submissionId: params.submissionId, status: { in: ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] } },
   });
@@ -727,7 +743,12 @@ async function getOrCreateSessionCore(
     },
   });
 
-  return { session: created, superseded: existing ? { id: existing.id, clientInstallationId: existing.clientInstallationId } : null };
+  return {
+    session: created,
+    superseded: existing
+      ? { id: existing.id, clientInstallationId: existing.clientInstallationId, attestationRequirement: parseAttestationRequirement(existing.attestationRequirement) }
+      : null,
+  };
 }
 
 export async function getCurrentSessionForSubmission(submissionId: string) {
@@ -755,6 +776,28 @@ export type PriorSessionTrust = {
    * this distinction was added to keep green).
    */
   everVerified: boolean;
+  /**
+   * URGENT fix — preflight-recovery-trap. The prior session's OWN
+   * snapshotted attestation requirement (SecureClientSession.attestationRequirement,
+   * parsed — NULL/unparseable already defaults to "LEGACY", never
+   * re-derived from the current environment). Under plain LEGACY mode,
+   * `trustedInstallationId` being null is the EXPECTED, TOLERATED default
+   * outcome for a perfectly legitimate attempt — v2 installation
+   * attestation is deliberately best-effort and "never blocks or delays
+   * entry into the exam on failure" under LEGACY (see
+   * tether-launch/page.tsx's submitExamSessionAttestationV2 call site),
+   * so a student who never got that far (e.g. because a later,
+   * INDEPENDENT pre-exam readiness gate like required screen sharing
+   * failed first) has an unbound-but-verified prior session through no
+   * fault or suspicious behaviour of their own. Part A's fail-closed
+   * "unbound original attempt -> MANUAL_REVIEW_REQUIRED" treatment is
+   * only warranted when installation binding was actually EXPECTED for
+   * this session (DUAL/V2_REQUIRED) — see resolveTrustedTetherVerification
+   * and resolveRecoveryState in tetherRecovery.ts, both of which now gate
+   * their strict recovery-only branch on this field, never on
+   * everVerified alone.
+   */
+  attestationRequirement: ExamAttestationMode;
 };
 
 /**
@@ -773,15 +816,16 @@ export type PriorSessionTrust = {
  * link before this one already carries that binding forward.
  */
 export async function resolvePriorSessionTrust(recoveryOfSessionId: string | null): Promise<PriorSessionTrust> {
-  if (!recoveryOfSessionId) return { trustedInstallationId: null, everVerified: false };
+  if (!recoveryOfSessionId) return { trustedInstallationId: null, everVerified: false, attestationRequirement: "LEGACY" };
   const prior = await prisma.secureClientSession.findUnique({
     where: { id: recoveryOfSessionId },
-    select: { clientInstallationId: true, verificationStatus: true, installationAttestationVerified: true },
+    select: { clientInstallationId: true, verificationStatus: true, installationAttestationVerified: true, attestationRequirement: true },
   });
-  if (!prior) return { trustedInstallationId: null, everVerified: false };
+  if (!prior) return { trustedInstallationId: null, everVerified: false, attestationRequirement: "LEGACY" };
   return {
     trustedInstallationId: prior.clientInstallationId,
     everVerified: prior.verificationStatus === "VERIFIED" || prior.installationAttestationVerified === true,
+    attestationRequirement: parseAttestationRequirement(prior.attestationRequirement),
   };
 }
 

@@ -96,6 +96,21 @@ export type TrustedTetherVerificationInput = {
    * unbound recovery.
    */
   priorSessionEverVerified: boolean;
+  /**
+   * URGENT fix — preflight-recovery-trap. Only meaningful when
+   * isRecoverySession is true — the PRIOR session's own snapshotted
+   * attestation requirement (already parsed; NULL defaults to "LEGACY").
+   * Under plain LEGACY, `priorSessionTrustedInstallationId` being null is
+   * the EXPECTED, TOLERATED outcome for a perfectly legitimate first
+   * attempt that simply never got as far as (best-effort, non-blocking)
+   * v2 attestation — e.g. because a later, independent pre-exam readiness
+   * gate like required screen sharing failed first. The strict "unbound
+   * prior attempt can never be trusted" treatment below is only warranted
+   * when installation binding was actually EXPECTED for that prior
+   * session (DUAL/V2_REQUIRED) — never for plain LEGACY, where it was
+   * always optional and non-gating by design.
+   */
+  priorSessionAttestationRequirement: ExamAttestationMode;
 };
 
 /**
@@ -143,7 +158,30 @@ export type TrustedTetherVerificationInput = {
  *     trusted at all.
  */
 export function resolveTrustedTetherVerification(input: TrustedTetherVerificationInput): boolean {
-  const baseVerified = input.isRecoverySession && input.priorSessionEverVerified
+  // URGENT fix — the strict "this recovery must present fresh v2
+  // verification" branch applies whenever there is something real to
+  // check it against: EITHER the prior session actually had a trusted
+  // installation reference (a genuine binding — regardless of mode, v2
+  // attestation is attempted opportunistically even under LEGACY, so a
+  // LEGACY-mode prior session CAN still be genuinely bound), OR the prior
+  // session's own attestation requirement expected binding to exist
+  // (DUAL/V2_REQUIRED) even though it doesn't. In BOTH cases the strict
+  // check below (`Boolean(priorSessionTrustedInstallationId) &&
+  // v2Verified`) is the right, unweakened test — for the first case it
+  // requires this recovery to reprove itself against the SAME real
+  // installation; for the second it correctly can never pass (no
+  // installation to prove against).
+  //
+  // The ONE case that must fall through to the unmodified, ordinary truth
+  // table instead: a prior session with NO trusted installation reference
+  // AND a requirement that never expected one (plain LEGACY) — the
+  // confirmed physical bug, e.g. a student who was LEGACY-verified but
+  // never reached (best-effort, non-blocking) v2 attestation because a
+  // later, independent pre-exam readiness gate like required screen
+  // sharing failed first. That case is indistinguishable from an ordinary
+  // first launch and must resolve exactly like one.
+  const priorHasSomethingToVerifyAgainst = Boolean(input.priorSessionTrustedInstallationId) || input.priorSessionAttestationRequirement !== "LEGACY";
+  const baseVerified = input.isRecoverySession && input.priorSessionEverVerified && priorHasSomethingToVerifyAgainst
     ? Boolean(input.priorSessionTrustedInstallationId) && input.v2Verified
     : resolveEffectiveTetherVerification(input);
   if (!baseVerified) return false;
@@ -170,6 +208,8 @@ export type RecoverySessionInput = {
   priorSessionTrustedInstallationId: string | null;
   /** Secure-recovery hardening v1, Part A — true if the PRIOR session ever reached genuine VERIFIED state by any means. See TrustedTetherVerificationInput's own doc comment. Only meaningful when isRecoverySession is true. */
   priorSessionEverVerified: boolean;
+  /** URGENT fix — the PRIOR session's own snapshotted attestation requirement (already parsed; NULL defaults to "LEGACY"). See TrustedTetherVerificationInput's own doc comment. Only meaningful when isRecoverySession is true. */
+  priorSessionAttestationRequirement: ExamAttestationMode;
   /**
    * Secure-recovery hardening v1, Part B — SecureClientSession.installationAttestationFailureReason
    * as of the last recorded attestation attempt on THIS session, if any.
@@ -207,10 +247,21 @@ export type ResolveRecoveryStateInput = {
   requestingInstallationId: string | null;
 };
 
+/**
+ * URGENT fix, Part C — deterministic, bounded reason codes for
+ * MANUAL_REVIEW_REQUIRED, so production diagnostics (see
+ * tetherRecoveryRunner.ts) can distinguish which of the three fail-closed
+ * conditions actually fired without exposing installation ids, tokens, or
+ * signatures — this is a safe enum value, nothing else.
+ */
+export type ManualReviewReasonCode = "PRIOR_SESSION_UNBOUND_UNDER_REQUIRED_ATTESTATION" | "DEVICE_CHANGE_DETECTED" | "REQUESTING_INSTALLATION_MISMATCH";
+
 export type RecoveryStateResult = {
   state: RecoveryState;
   /** Only set for RESUME_REQUIRES_TETHER — where the client should be sent to begin (or resume) the launch/attestation sequence. */
   redirectTo?: string;
+  /** Only set for MANUAL_REVIEW_REQUIRED — which condition produced it. Never shown to the student (ManualReviewNotice never reads this); server-diagnostic only. */
+  manualReviewReasonCode?: ManualReviewReasonCode;
 };
 
 /**
@@ -252,25 +303,42 @@ export function resolveRecoveryState(input: ResolveRecoveryStateInput): Recovery
     return { state: "RESUME_REQUIRES_TETHER" };
   }
 
-  // Part A — fail-closed recovery for a LEGACY-unbound original attempt:
-  // never inferred or claimed to be the same device, regardless of what
-  // THIS session's own attestation might otherwise show. Checked before
-  // every other recovery signal — an unbound original can never resolve
-  // to anything but manual review. Gated on priorSessionEverVerified: a
-  // prior session that crashed before completing even its OWN first
-  // attestation never unlocked any content, so this falls through to
-  // ordinary treatment instead (see resolveTrustedTetherVerification's
-  // own doc comment for why).
-  if (session.isRecoverySession && session.priorSessionEverVerified && !session.priorSessionTrustedInstallationId) {
-    return { state: "MANUAL_REVIEW_REQUIRED" };
+  // Part A — fail-closed recovery for an UNBOUND original attempt whose
+  // OWN attestation requirement actually expected installation binding
+  // (DUAL/V2_REQUIRED): never inferred or claimed to be the same device,
+  // regardless of what THIS session's own attestation might otherwise
+  // show. Checked before every other recovery signal.
+  //
+  // URGENT fix, preflight-recovery-trap — gated on
+  // priorSessionAttestationRequirement !== "LEGACY" as well as
+  // priorSessionEverVerified: under plain LEGACY, an unbound-but-verified
+  // prior session is the EXPECTED, TOLERATED outcome for a perfectly
+  // legitimate attempt that simply never reached (best-effort,
+  // non-blocking) v2 attestation — e.g. because a later, independent
+  // pre-exam readiness gate like required screen sharing failed first,
+  // BEFORE the examination was ever genuinely entered. That must resolve
+  // exactly like an ordinary first launch (see
+  // resolveTrustedTetherVerification's own doc comment for why), never a
+  // permanent support-required trap. Gated on priorSessionEverVerified
+  // too: a prior session that crashed before completing even its OWN
+  // first attestation never unlocked any content either way.
+  if (
+    session.isRecoverySession &&
+    session.priorSessionEverVerified &&
+    !session.priorSessionTrustedInstallationId &&
+    session.priorSessionAttestationRequirement !== "LEGACY"
+  ) {
+    return { state: "MANUAL_REVIEW_REQUIRED", manualReviewReasonCode: "PRIOR_SESSION_UNBOUND_UNDER_REQUIRED_ATTESTATION" };
   }
 
   // Part B — a DIFFERENT installation already attempted this recovery
   // and was authoritatively denied (see verifyExamSessionAttestation's
   // own device-change check, which sets this field) — server-derived,
   // never dependent on the renderer supplying its own installation id.
+  // Unconditional on attestation mode — a genuine detected device change
+  // is never tolerated, LEGACY or not.
   if (session.installationAttestationFailureReason === "DEVICE_CHANGE_DETECTED") {
-    return { state: "MANUAL_REVIEW_REQUIRED" };
+    return { state: "MANUAL_REVIEW_REQUIRED", manualReviewReasonCode: "DEVICE_CHANGE_DETECTED" };
   }
 
   // Part 8 — proactive, non-authoritative device-change hint only (a
@@ -282,7 +350,7 @@ export function resolveRecoveryState(input: ResolveRecoveryStateInput): Recovery
     session.clientInstallationId != null &&
     input.requestingInstallationId !== session.clientInstallationId
   ) {
-    return { state: "MANUAL_REVIEW_REQUIRED" };
+    return { state: "MANUAL_REVIEW_REQUIRED", manualReviewReasonCode: "REQUESTING_INSTALLATION_MISMATCH" };
   }
 
   const trusted = resolveTrustedTetherVerification({
@@ -297,6 +365,7 @@ export function resolveRecoveryState(input: ResolveRecoveryStateInput): Recovery
     isRecoverySession: session.isRecoverySession,
     priorSessionTrustedInstallationId: session.priorSessionTrustedInstallationId,
     priorSessionEverVerified: session.priorSessionEverVerified,
+    priorSessionAttestationRequirement: session.priorSessionAttestationRequirement,
   });
 
   if (!trusted) return { state: "RESUME_REQUIRES_FRESH_ATTESTATION" };
