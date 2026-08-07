@@ -451,56 +451,186 @@ export type ConsumeLaunchManifestResult =
   | { outcome: "REVOKED" }
   | { outcome: "REPLAY" }
   | { outcome: "INVALID_NONCE" }
-  | { outcome: "INVALID_SIGNATURE" };
+  | { outcome: "INVALID_SIGNATURE" }
+  | { outcome: "TRANSIENT_FAILURE" };
+
+/**
+ * URGENT fix — production P2028 ("query cannot be executed on an expired
+ * transaction", 5623ms against Prisma's 5000ms default) against a
+ * Vercel iad1 -> Supabase AP-Northeast/Tokyo deployment, where every DB
+ * round trip pays full cross-Pacific latency. Not a code bug in the
+ * strict sense — the transaction was simply doing more sequential round
+ * trips (and, via the best-effort audit-log writes below, more DB
+ * CONNECTIONS) than a single interactive transaction should ever hold
+ * open. Bounded, clamped, and overridable for ops tuning without a
+ * redeploy — mirrors resolveExamAttestationMode's own env-driven
+ * pattern. Default chosen with margin over the worst-case ~6-round-trip
+ * critical section (see consumeLaunchManifest below) at realistic
+ * cross-region per-query latency, while staying far short of
+ * "indefinitely held" — see docs comment on consumeLaunchManifest for
+ * the full round-trip accounting.
+ */
+const DEFAULT_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS = 10_000;
+const MIN_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS = 2_000;
+const MAX_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS = 30_000;
+
+export function resolveSecureLaunchConsumeTransactionTimeoutMs(): number {
+  const raw = Number(process.env.TETHER_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS;
+  return Math.min(MAX_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS, Math.max(MIN_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS, Math.round(raw)));
+}
 
 /**
  * Consumes a launch manifest exactly once — a second consumption attempt
- * (replay) is recorded and rejected, never silently succeeds. Runs
- * inside the submission's advisory lock so two near-simultaneous consume
- * attempts can never both win.
+ * (replay) is recorded and rejected, never silently succeeds.
+ *
+ * Restructured (URGENT latency fix) into three phases:
+ *
+ * BEFORE the transaction — an optimistic, non-locking pre-check (one
+ * plain read) plus ALL cryptographic signature verification (pure
+ * CPU, no DB). `policyHash`/`expiresAt`/institution/exam/submission/
+ * student/configuration/clientType are immutable on this row after
+ * `issueLaunchManifest` creates it (see schema.prisma — only
+ * `consumedAt`, `revokedAt`, `clientSessionId` are ever mutated), so
+ * reading them here without a lock is safe and lets the overwhelming
+ * majority of invalid/expired/replayed/tampered requests fail fast
+ * without ever opening a transaction or contending for the
+ * per-submission advisory lock.
+ *
+ * INSIDE the transaction — only the minimum race-sensitive work:
+ * acquire the per-submission advisory lock, RE-CHECK the mutable
+ * consumedAt/revokedAt/expiresAt state (the pre-check above is
+ * optimistic only — a concurrent request could have consumed or revoked
+ * it in the gap before this lock), then atomically supersede any prior
+ * session, create the new one, and mark the manifest consumed. Worst
+ * case (a prior non-terminal session exists and must be superseded):
+ * lock + findUnique + findFirst + update(existing) + create + update
+ * (manifest) = 6 round trips, down from up to 8 before (which also
+ * included up to two best-effort PlatformAuditLog writes made through
+ * the global, non-transactional `prisma` client — see
+ * getOrCreateSessionCore below).
+ *
+ * AFTER the transaction — best-effort audit-trail writes for a
+ * superseded session, fired only once the transaction has genuinely
+ * committed (`outcome === "CONSUMED"`). This is a correctness fix as
+ * well as a latency one: those audit writes always used the global
+ * `prisma` client, never `tx` — they were never actually part of the
+ * transaction's atomicity even when nested inside its callback, so a
+ * transaction that failed AFTER an audit write had already committed
+ * independently could previously leave a "resume initiated" audit
+ * record for a resume that never actually happened. Moving them here,
+ * gated on the committed outcome, removes that possibility.
+ *
+ * Any unexpected transaction failure (P2028 timeout, a dropped
+ * connection, ...) is caught and reported as TRANSIENT_FAILURE rather
+ * than propagating a raw Prisma exception up through the route — see
+ * POST /api/secure-client/launch/[manifestId]/consume/route.ts for the
+ * safe, student-facing mapping.
  */
 export async function consumeLaunchManifest(
   manifest: SecureLaunchManifest,
   signature: string,
   rawNonce: string,
 ): Promise<ConsumeLaunchManifestResult> {
-  return prisma.$transaction(async (tx) => {
-    await acquireSubmissionLock(tx, manifest.submissionId);
+  const nonceHash = hashNonce(rawNonce);
+  const preRecord = await prisma.secureClientLaunchManifest.findUnique({ where: { nonceHash } });
+  if (!preRecord) return { outcome: "NOT_FOUND" };
+  if (preRecord.id !== manifest.manifestId) return { outcome: "NOT_FOUND" };
+  if (preRecord.revokedAt) return { outcome: "REVOKED" };
+  if (preRecord.consumedAt) return { outcome: "REPLAY" };
+  if (Date.now() > preRecord.expiresAt.getTime()) return { outcome: "EXPIRED" };
 
-    const record = await tx.secureClientLaunchManifest.findUnique({ where: { nonceHash: hashNonce(rawNonce) } });
-    if (!record) return { outcome: "NOT_FOUND" };
-    if (record.id !== manifest.manifestId) return { outcome: "NOT_FOUND" };
-    if (record.revokedAt) return { outcome: "REVOKED" };
-    if (record.consumedAt) return { outcome: "REPLAY" };
-    if (Date.now() > record.expiresAt.getTime()) return { outcome: "EXPIRED" };
-
-    const validation = validateManifestContext(manifest, signature, getSigningPublicKey(), {
-      expectedAudience: manifest.audience,
-      expectedOrigin: manifest.canonicalExamOrigin,
-      expectedPolicyHash: record.policyHash,
-      nowMs: Date.now(),
-    });
-    if (validation === "INVALID_SIGNATURE") return { outcome: "INVALID_SIGNATURE" };
-    if (validation !== "VALID") return { outcome: "EXPIRED" };
-
-    const session = await getOrCreateSessionCore(tx, {
-      institutionId: record.institutionId,
-      examId: record.examId,
-      submissionId: record.submissionId,
-      studentId: record.studentId,
-      configurationId: record.configurationId,
-      clientType: record.clientType,
-      manifestId: record.id,
-      policyHash: record.policyHash,
-    });
-
-    await tx.secureClientLaunchManifest.update({
-      where: { id: record.id },
-      data: { consumedAt: new Date(), clientSessionId: session.id },
-    });
-
-    return { outcome: "CONSUMED", sessionId: session.id };
+  const validation = validateManifestContext(manifest, signature, getSigningPublicKey(), {
+    expectedAudience: manifest.audience,
+    expectedOrigin: manifest.canonicalExamOrigin,
+    expectedPolicyHash: preRecord.policyHash,
+    nowMs: Date.now(),
   });
+  if (validation === "INVALID_SIGNATURE") return { outcome: "INVALID_SIGNATURE" };
+  if (validation !== "VALID") return { outcome: "EXPIRED" };
+
+  type TxResult = { outcome: "CONSUMED"; sessionId: string; superseded: { id: string; clientInstallationId: string | null } | null } | { outcome: "NOT_FOUND" | "REVOKED" | "REPLAY" | "EXPIRED" };
+
+  let result: TxResult;
+  try {
+    result = await prisma.$transaction(
+      async (tx) => {
+        await acquireSubmissionLock(tx, manifest.submissionId);
+
+        const record = await tx.secureClientLaunchManifest.findUnique({ where: { id: preRecord.id } });
+        if (!record) return { outcome: "NOT_FOUND" };
+        if (record.revokedAt) return { outcome: "REVOKED" };
+        if (record.consumedAt) return { outcome: "REPLAY" };
+        if (Date.now() > record.expiresAt.getTime()) return { outcome: "EXPIRED" };
+
+        const { session, superseded } = await getOrCreateSessionCore(tx, {
+          institutionId: record.institutionId,
+          examId: record.examId,
+          submissionId: record.submissionId,
+          studentId: record.studentId,
+          configurationId: record.configurationId,
+          clientType: record.clientType,
+          manifestId: record.id,
+          policyHash: record.policyHash,
+        });
+
+        await tx.secureClientLaunchManifest.update({
+          where: { id: record.id },
+          data: { consumedAt: new Date(), clientSessionId: session.id },
+        });
+
+        return { outcome: "CONSUMED", sessionId: session.id, superseded };
+      },
+      { timeout: resolveSecureLaunchConsumeTransactionTimeoutMs() },
+    );
+  } catch (err) {
+    // Fail closed — never let a raw Prisma exception (P2028 or otherwise)
+    // propagate up through the route as an opaque 500. Logged with only
+    // bounded, non-sensitive fields (never the full error/stack, which
+    // can carry connection details) — this still lands in Vercel's own
+    // function logs regardless of environment, matching this codebase's
+    // existing console.error convention for unexpected server errors.
+    console.error("consumeLaunchManifest: transaction failed", {
+      manifestId: preRecord.id,
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorCode: (err as { code?: string })?.code ?? null,
+    });
+    return { outcome: "TRANSIENT_FAILURE" };
+  }
+
+  if (result.outcome !== "CONSUMED") return result;
+
+  if (result.superseded) {
+    await createPlatformAuditLog({
+      actorId: preRecord.studentId,
+      action: "TETHER_SECURE_RESUME_INITIATED",
+      targetType: "Submission",
+      targetId: preRecord.submissionId,
+      institutionId: preRecord.institutionId,
+      metadata: { supersededSessionId: result.superseded.id, newSessionId: result.sessionId },
+    }).catch(() => {});
+
+    // Secure-recovery hardening v1, Part A/B — the superseded session
+    // never had a trusted (v2 installation-bound) reference at all
+    // (LEGACY-only original attempt): automatic recovery can never be
+    // granted for this new session, regardless of what attestation it
+    // later presents (see resolveTrustedTetherVerification's own doc
+    // comment). Audited exactly once, here, at the moment this is first
+    // known to be true — never re-logged by later status polling or by
+    // repeated relaunch attempts against this SAME new session.
+    if (!result.superseded.clientInstallationId) {
+      await createPlatformAuditLog({
+        actorId: preRecord.studentId,
+        action: "TETHER_SECURE_RESUME_MANUAL_REVIEW_REQUIRED",
+        targetType: "Submission",
+        targetId: preRecord.submissionId,
+        institutionId: preRecord.institutionId,
+        metadata: { newSessionId: result.sessionId, reason: "UNBOUND_ORIGINAL_ATTEMPT" },
+      }).catch(() => {});
+    }
+  }
+
+  return { outcome: "CONSUMED", sessionId: result.sessionId };
 }
 
 // ---------------------------------------------------------------------------
@@ -539,7 +669,23 @@ type GetOrCreateSessionParams = {
  * fresh session as already verified. Best-effort audit trail: never
  * allowed to fail the actual manifest consumption.
  */
-async function getOrCreateSessionCore(tx: DbClient, params: GetOrCreateSessionParams) {
+/**
+ * URGENT latency fix — no longer writes the "resume initiated"/"manual
+ * review required" audit facts itself. Both calls always went through
+ * the global `prisma` client (never `tx`), so they were never actually
+ * part of this transaction's atomicity to begin with — nesting them
+ * inside the transaction's callback only added wall-clock time (and a
+ * second DB connection's worth of round trips) to the critical section
+ * without any atomicity benefit, and could even audit-log a "resume"
+ * that the outer transaction then rolled back. Returns `superseded`
+ * (the bounded fields the caller needs) so consumeLaunchManifest can
+ * fire those writes AFTER the transaction has genuinely committed — see
+ * its own doc comment.
+ */
+async function getOrCreateSessionCore(
+  tx: DbClient,
+  params: GetOrCreateSessionParams,
+): Promise<{ session: Awaited<ReturnType<typeof tx.secureClientSession.create>>; superseded: { id: string; clientInstallationId: string | null } | null }> {
   const existing = await tx.secureClientSession.findFirst({
     where: { submissionId: params.submissionId, status: { in: ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] } },
   });
@@ -581,39 +727,7 @@ async function getOrCreateSessionCore(tx: DbClient, params: GetOrCreateSessionPa
     },
   });
 
-  if (existing) {
-    await createPlatformAuditLog({
-      actorId: params.studentId,
-      action: "TETHER_SECURE_RESUME_INITIATED",
-      targetType: "Submission",
-      targetId: params.submissionId,
-      institutionId: params.institutionId,
-      metadata: { supersededSessionId: existing.id, newSessionId: created.id },
-    }).catch(() => {});
-
-    // Secure-recovery hardening v1, Part A/B — the superseded session
-    // never had a trusted (v2 installation-bound) reference at all
-    // (LEGACY-only original attempt): automatic recovery can never be
-    // granted for this new session, regardless of what attestation it
-    // later presents (see resolveTrustedTetherVerification's own doc
-    // comment). Audited exactly ONCE, here, at the moment this is first
-    // known to be true — never re-logged by later status polling (see
-    // resolveSubmissionRecoveryState in tetherRecoveryRunner.ts, which is
-    // a pure read with no audit side effect of its own) or by repeated
-    // relaunch attempts against this SAME new session.
-    if (!existing.clientInstallationId) {
-      await createPlatformAuditLog({
-        actorId: params.studentId,
-        action: "TETHER_SECURE_RESUME_MANUAL_REVIEW_REQUIRED",
-        targetType: "Submission",
-        targetId: params.submissionId,
-        institutionId: params.institutionId,
-        metadata: { newSessionId: created.id, reason: "UNBOUND_ORIGINAL_ATTEMPT" },
-      }).catch(() => {});
-    }
-  }
-
-  return created;
+  return { session: created, superseded: existing ? { id: existing.id, clientInstallationId: existing.clientInstallationId } : null };
 }
 
 export async function getCurrentSessionForSubmission(submissionId: string) {

@@ -54,7 +54,7 @@ export function shouldShowInstallerFallback(msSinceAttempt: number, thresholdMs:
   return msSinceAttempt >= thresholdMs;
 }
 
-export type TetherLaunchFailureCode = "REPLAY" | "EXPIRED" | "REVOKED" | "NOT_FOUND" | "INVALID_SIGNATURE" | "INVALID_NONCE";
+export type TetherLaunchFailureCode = "REPLAY" | "EXPIRED" | "REVOKED" | "NOT_FOUND" | "INVALID_SIGNATURE" | "INVALID_NONCE" | "TRANSIENT_FAILURE";
 
 /**
  * Neutral, non-accusatory retry copy for every way manifest issuance or
@@ -76,6 +76,12 @@ export function resolveTetherLaunchFailureMessage(code: string): string {
       return "This exam attempt could not be found. Return to your dashboard and try again.";
     case "INVALID_SIGNATURE":
       return "This launch link could not be verified. Select \"I have installed it — open examination\" to try again.";
+    case "TRANSIENT_FAILURE":
+      // URGENT fix — a server-side transaction failure (never a Tether
+      // client problem), so this deliberately never mentions
+      // reinstalling/checking Tether — that would misdirect the student
+      // toward a fix that cannot help.
+      return "Your secure exam could not be opened. Please try again. If the problem continues, contact support.";
     default:
       return "Something went wrong opening this exam. Select \"I have installed it — open examination\" to try again.";
   }

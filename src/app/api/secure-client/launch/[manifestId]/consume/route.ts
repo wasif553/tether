@@ -104,6 +104,21 @@ export async function POST(req: Request, { params }: { params: Promise<{ manifes
     return NextResponse.json({ error: "This launch has already been used", code: "REPLAY" }, { status: 409 });
   }
 
+  if (outcome.outcome === "TRANSIENT_FAILURE") {
+    // URGENT fix — a failed transaction (P2028 timeout or similar) must
+    // fail closed with a controlled, generic response — never an opaque
+    // Next.js 500 exposing internal Prisma error details to the student.
+    // The actual diagnostic (error name/code) was already recorded
+    // server-side inside consumeLaunchManifest. 503 (not 500) — this is a
+    // transient infrastructure condition the student can reasonably
+    // retry, not a defect in their request.
+    logServerTetherDiagnostic("launch_manifest_consume_transient_failure", { manifestId });
+    return NextResponse.json(
+      { error: "Your secure exam could not be opened. Please try again. If the problem continues, contact support.", code: "TRANSIENT_FAILURE" },
+      { status: 503 },
+    );
+  }
+
   const statusByOutcome: Record<string, number> = {
     NOT_FOUND: 404,
     EXPIRED: 410,

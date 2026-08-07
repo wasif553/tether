@@ -67,6 +67,7 @@ const {
   recordSecureClientEvent,
   recordAttestation,
   getCurrentSessionForSubmission,
+  resolveSecureLaunchConsumeTransactionTimeoutMs,
 } = await import("./secureClientRunner");
 const { computeExpectedRequestHash } = await import("./secureClient/sebBrowserExamKey");
 const { computeStudentSubjectHash } = await import("./secureClient/secureLaunchManifest");
@@ -254,6 +255,40 @@ describe("terminal sessions do not block a new active session", () => {
   });
 });
 
+describe("resolveSecureLaunchConsumeTransactionTimeoutMs — URGENT fix, Part E timeout policy", () => {
+  // Deliberately never vi.unstubAllEnvs() here — that resets EVERY
+  // stubbed env var process-wide (not just this describe block's own),
+  // which would wipe the signing-key/SEB-key stubs every other test in
+  // this file depends on (they're stubbed once, at module top-level,
+  // before any dynamic import). Each test below simply overwrites the
+  // same TETHER_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS key, which
+  // is safe and self-contained.
+  it("defaults to 10 seconds — a conservative, explicit margin over the ~6-round-trip worst case, never Prisma's bare 5s default", () => {
+    vi.stubEnv("TETHER_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS", "");
+    expect(resolveSecureLaunchConsumeTransactionTimeoutMs()).toBe(10_000);
+  });
+
+  it("respects a valid explicit override", () => {
+    vi.stubEnv("TETHER_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS", "7000");
+    expect(resolveSecureLaunchConsumeTransactionTimeoutMs()).toBe(7000);
+  });
+
+  it("clamps an absurdly low override to a conservative floor — never lets ops accidentally configure a near-zero timeout", () => {
+    vi.stubEnv("TETHER_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS", "1");
+    expect(resolveSecureLaunchConsumeTransactionTimeoutMs()).toBeGreaterThanOrEqual(2000);
+  });
+
+  it("clamps a very large override — never the 'blanket increase to a huge number' this fix explicitly avoids", () => {
+    vi.stubEnv("TETHER_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS", "999999");
+    expect(resolveSecureLaunchConsumeTransactionTimeoutMs()).toBeLessThanOrEqual(30_000);
+  });
+
+  it("falls back to the default for a non-numeric value", () => {
+    vi.stubEnv("TETHER_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS", "not-a-number");
+    expect(resolveSecureLaunchConsumeTransactionTimeoutMs()).toBe(10_000);
+  });
+});
+
 describe("launch manifest consumption", () => {
   async function issueForFreshSubmission(tag: string) {
     const inst = await makeInstitution(`launch-${tag}-${stamp}`);
@@ -276,7 +311,26 @@ describe("launch manifest consumption", () => {
     return { manifest, signature, submission };
   }
 
-  it("replay is rejected: consuming the same manifest twice sequentially yields CONSUMED then REPLAY", async () => {
+  // URGENT fix — secure launch consume transaction latency. Every test
+  // below exercises the restructured consumeLaunchManifest (pre-check +
+  // signature verification BEFORE the transaction, minimum race-sensitive
+  // work inside it, best-effort audit logging after it) against the real
+  // disposable database — the concurrency/atomicity guarantees this
+  // module depends on (the per-submission pg_advisory_xact_lock, the
+  // partial unique index on non-terminal sessions) cannot be faked with a
+  // mocked Prisma client.
+
+  it("[1] one valid consume succeeds and returns a real session id", async () => {
+    const { manifest, signature, submission } = await issueForFreshSubmission("valid");
+    const result = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    expect(result.outcome).toBe("CONSUMED");
+    if (result.outcome !== "CONSUMED") throw new Error("unreachable");
+    const session = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: result.sessionId } });
+    expect(session.submissionId).toBe(submission.id);
+    expect(session.status).toBe("CREATED");
+  });
+
+  it("[2] replay is rejected: consuming the same manifest twice sequentially yields CONSUMED then REPLAY", async () => {
     const { manifest, signature } = await issueForFreshSubmission("replay");
     const first = await consumeLaunchManifest(manifest, signature, manifest.nonce);
     expect(first.outcome).toBe("CONSUMED");
@@ -284,13 +338,75 @@ describe("launch manifest consumption", () => {
     expect(second.outcome).toBe("REPLAY");
   });
 
-  it("two concurrent consumption attempts for the same manifest allow exactly one winner", async () => {
+  it("[3, 4] two concurrent consumption attempts for the same manifest allow exactly one winner, and no duplicate SecureClientSession is created", async () => {
     const { manifest, signature } = await issueForFreshSubmission("race");
     const [a, b] = await Promise.all([consumeLaunchManifest(manifest, signature, manifest.nonce), consumeLaunchManifest(manifest, signature, manifest.nonce)]);
     const outcomes = [a.outcome, b.outcome].sort();
     expect(outcomes).toEqual(["CONSUMED", "REPLAY"]);
 
     const sessionCount = await prisma.secureClientSession.count({ where: { submissionId: (await prisma.secureClientLaunchManifest.findUniqueOrThrow({ where: { id: manifest.manifestId } })).submissionId } });
+    expect(sessionCount).toBe(1);
+  });
+
+  it("[5] an expired manifest (past its DB-row expiresAt) is rejected as EXPIRED by the pre-transaction check, before any session is created", async () => {
+    const { manifest, signature, submission } = await issueForFreshSubmission("expired");
+    await prisma.secureClientLaunchManifest.update({ where: { id: manifest.manifestId }, data: { expiresAt: new Date(Date.now() - 60_000) } });
+
+    const result = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    expect(result.outcome).toBe("EXPIRED");
+
+    const sessionCount = await prisma.secureClientSession.count({ where: { submissionId: submission.id } });
+    expect(sessionCount).toBe(0);
+  });
+
+  it("[6] an already-consumed manifest is rejected on a fresh call (not just the immediately-following one)", async () => {
+    const { manifest, signature } = await issueForFreshSubmission("already-consumed");
+    await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    const secondCallLater = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    expect(secondCallLater.outcome).toBe("REPLAY");
+  });
+
+  it("[8] an invalid signature is rejected before any transactional mutation — no session created, manifest remains unconsumed", async () => {
+    const { manifest, submission } = await issueForFreshSubmission("badsig");
+    const tamperedSignature = Buffer.from("this is not a real ed25519 signature").toString("base64");
+
+    const result = await consumeLaunchManifest(manifest, tamperedSignature, manifest.nonce);
+    expect(result.outcome).toBe("INVALID_SIGNATURE");
+
+    const record = await prisma.secureClientLaunchManifest.findUniqueOrThrow({ where: { id: manifest.manifestId } });
+    expect(record.consumedAt).toBeNull();
+    const sessionCount = await prisma.secureClientSession.count({ where: { submissionId: submission.id } });
+    expect(sessionCount).toBe(0);
+  });
+
+  it("[9] a transaction failure (e.g. the production P2028) is caught, translated to TRANSIENT_FAILURE, and leaves no partial state", async () => {
+    const { manifest, signature, submission } = await issueForFreshSubmission("txfail");
+    const p2028 = Object.assign(new Error('Transaction API error: A query cannot be executed on an expired transaction.\ntimeout: 5000 ms\ntimeTaken: 5623 ms'), { code: "P2028" });
+    const spy = vi.spyOn(prisma, "$transaction").mockRejectedValueOnce(p2028);
+
+    const result = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    spy.mockRestore();
+
+    expect(result.outcome).toBe("TRANSIENT_FAILURE");
+    const record = await prisma.secureClientLaunchManifest.findUniqueOrThrow({ where: { id: manifest.manifestId } });
+    expect(record.consumedAt).toBeNull();
+    expect(record.clientSessionId).toBeNull();
+    const sessionCount = await prisma.secureClientSession.count({ where: { submissionId: submission.id } });
+    expect(sessionCount).toBe(0);
+  });
+
+  it("[10] retry after a transient pre-commit failure behaves safely — the manifest is still consumable and produces exactly one session", async () => {
+    const { manifest, signature, submission } = await issueForFreshSubmission("txretry");
+    const spy = vi.spyOn(prisma, "$transaction").mockRejectedValueOnce(Object.assign(new Error("simulated transient failure"), { code: "P2028" }));
+
+    const failedAttempt = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    spy.mockRestore();
+    expect(failedAttempt.outcome).toBe("TRANSIENT_FAILURE");
+
+    const retriedAttempt = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    expect(retriedAttempt.outcome).toBe("CONSUMED");
+
+    const sessionCount = await prisma.secureClientSession.count({ where: { submissionId: submission.id } });
     expect(sessionCount).toBe(1);
   });
 
