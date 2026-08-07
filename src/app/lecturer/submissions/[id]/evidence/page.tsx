@@ -75,6 +75,14 @@ type EvidenceReport = {
     };
     disclaimer: string;
   } | null;
+  lockdownDetectionSummary: {
+    remoteControlCount: number;
+    screenCaptureCount: number;
+    debuggingToolCount: number;
+    prohibitedApplicationCount: number;
+    closedCount: number;
+    disclaimer: string;
+  } | null;
   canvasPassback: {
     status: string;
     scoreGiven: number | null;
@@ -238,7 +246,7 @@ function formatByteSize(byteSize: number): string {
   return `${(byteSize / 1024).toFixed(1)} KB`;
 }
 
-const CATEGORY_FILTER_ORDER: IntegrityEventCategory[] = ["evidence", "camera", "screen", "window", "info"];
+const CATEGORY_FILTER_ORDER: IntegrityEventCategory[] = ["evidence", "camera", "screen", "lockdown", "window", "info"];
 
 function severityBadge(severity: string) {
   const styles: Record<string, string> = {
@@ -388,7 +396,7 @@ export default function EvidenceReportPage({
   // returns below) so hook order stays stable across renders.
   const events = useMemo(() => data?.events ?? [], [data]);
   const categoryCounts = useMemo(() => {
-    const counts: Record<IntegrityEventCategory, number> = { evidence: 0, camera: 0, screen: 0, window: 0, info: 0 };
+    const counts: Record<IntegrityEventCategory, number> = { evidence: 0, camera: 0, screen: 0, lockdown: 0, window: 0, info: 0 };
     for (const e of events) counts[categoryForEventType(e.eventType)]++;
     return counts;
   }, [events]);
@@ -876,6 +884,44 @@ export default function EvidenceReportPage({
           </div>
           <p className="mt-3 rounded border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">
             {data.screenShareIntegritySummary.disclaimer}
+          </p>
+        </div>
+      )}
+
+      {/* Tether Windows Lockdown Hardening v1 — see
+          docs/tether-windows-lockdown-hardening-v1.md. Only the process-
+          detection signals that actually reach IntegrityEvent (a
+          prohibited application observed during an active exam) — every
+          other lockdown fact (restoration lifecycle, preflight-blocked,
+          remote-session checks, display-topology changes) is recorded
+          elsewhere and is not shown here. */}
+      {data.lockdownDetectionSummary && (
+        <div className="mt-8">
+          <h2 className="text-lg font-medium">Lockdown detection signals</h2>
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.lockdownDetectionSummary.remoteControlCount}</p>
+              <p className="text-xs text-gray-500">Remote-control software</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.lockdownDetectionSummary.screenCaptureCount}</p>
+              <p className="text-xs text-gray-500">Screen-capture software</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.lockdownDetectionSummary.debuggingToolCount}</p>
+              <p className="text-xs text-gray-500">Debugging tools</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.lockdownDetectionSummary.prohibitedApplicationCount}</p>
+              <p className="text-xs text-gray-500">Other prohibited applications</p>
+            </div>
+            <div className="rounded border border-gray-200 p-3 text-center">
+              <p className="text-2xl font-semibold">{data.lockdownDetectionSummary.closedCount}</p>
+              <p className="text-xs text-gray-500">Closed by student</p>
+            </div>
+          </div>
+          <p className="mt-3 rounded border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">
+            {data.lockdownDetectionSummary.disclaimer}
           </p>
         </div>
       )}

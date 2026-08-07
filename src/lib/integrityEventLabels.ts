@@ -45,6 +45,15 @@ const EVENT_TYPE_LABELS: Partial<Record<string, string>> = {
   SCREEN_SHARE_RESTORED: "Screen sharing restored",
   SCREEN_SHARE_EVIDENCE_CAPTURED: "Screen evidence frame captured",
   SCREEN_SHARE_EVIDENCE_CAPTURE_FAILED: "Screen evidence capture failed",
+  // Tether Windows Lockdown Hardening v1 — neutral wording throughout;
+  // "detected" never implies confirmed misconduct, only that Tether
+  // observed a known application running — see
+  // docs/tether-windows-lockdown-hardening-v1.md.
+  REMOTE_CONTROL_SOFTWARE_DETECTED: "Remote-control software detected — needs review",
+  SCREEN_CAPTURE_SOFTWARE_DETECTED: "Screen-capture software detected — needs review",
+  DEBUGGING_TOOL_DETECTED: "Debugging tool detected — needs review",
+  PROHIBITED_APPLICATION_DETECTED: "Prohibited application detected — needs review",
+  PROHIBITED_APPLICATION_CLOSED: "Prohibited application closed",
 };
 
 export function labelForEventType(eventType: string): string {
@@ -61,7 +70,7 @@ export function labelForEventType(eventType: string): string {
  * camera-related but never evidence-eligible (no-person/blocked/dark/
  * unavailable/heartbeat/etc.) is "camera".
  */
-export type IntegrityEventCategory = "evidence" | "camera" | "screen" | "window" | "info";
+export type IntegrityEventCategory = "evidence" | "camera" | "screen" | "lockdown" | "window" | "info";
 
 const EVIDENCE_EVENT_TYPES = new Set([
   "POSSIBLE_PHONE_VISIBLE",
@@ -102,10 +111,26 @@ const WINDOW_FOCUS_EVENT_TYPES = new Set([
   "WINDOW_FOCUS_RETURN",
 ]);
 
+// Tether Windows Lockdown Hardening v1 — the only lockdown signals that
+// ever become an IntegrityEvent (see
+// docs/tether-windows-lockdown-hardening-v1.md, "Audit and evidence", and
+// src/lib/lockdownEventClassification.ts). Everything else the Electron
+// client reports (restoration lifecycle, preflight-blocked, remote-
+// session checks, display-topology changes) is a technical/operational
+// fact recorded elsewhere and never reaches this timeline at all.
+const LOCKDOWN_DETECTION_EVENT_TYPES = new Set([
+  "REMOTE_CONTROL_SOFTWARE_DETECTED",
+  "SCREEN_CAPTURE_SOFTWARE_DETECTED",
+  "DEBUGGING_TOOL_DETECTED",
+  "PROHIBITED_APPLICATION_DETECTED",
+  "PROHIBITED_APPLICATION_CLOSED",
+]);
+
 export function categoryForEventType(eventType: string): IntegrityEventCategory {
   if (EVIDENCE_EVENT_TYPES.has(eventType)) return "evidence";
   if (CAMERA_EVENT_TYPES.has(eventType)) return "camera";
   if (SCREEN_SHARE_EVENT_TYPES.has(eventType)) return "screen";
+  if (LOCKDOWN_DETECTION_EVENT_TYPES.has(eventType)) return "lockdown";
   if (WINDOW_FOCUS_EVENT_TYPES.has(eventType)) return "window";
   return "info";
 }
@@ -114,6 +139,7 @@ export const INTEGRITY_EVENT_CATEGORY_LABELS: Record<IntegrityEventCategory, str
   evidence: "Evidence events",
   camera: "Camera events",
   screen: "Screen-share events",
+  lockdown: "Lockdown detection events",
   window: "Window/focus events",
   info: "Info events",
 };

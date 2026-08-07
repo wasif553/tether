@@ -423,7 +423,7 @@ export const LOCKDOWN_CAPABILITY_REGISTRY: LockdownCapability[] = [
   {
     id: "REMOTE_DESKTOP_SESSION",
     displayName: "Remote Desktop session",
-    category: "VIRTUALIZATION",
+    category: "REMOTE_CONTROL",
     executableNames: [],
     detectionMethod: "WINDOWS_SESSION_API",
     detectionNotes: "Whether TETHER ITSELF is currently running inside an inbound Remote Desktop / Remote Assistance / Quick Assist session (distinct from the MS_REMOTE_DESKTOP capability above, which detects the CLIENT reaching OUT). See Part 5 / windowsSessionDetection.ts.",

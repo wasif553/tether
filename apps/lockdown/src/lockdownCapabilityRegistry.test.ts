@@ -12,6 +12,8 @@ import {
   resolveEffectiveAction,
   isPreflightBlockingAction,
   isDuringExamBlockingAction,
+  type LockdownCapabilityCategory,
+  type LockdownConfigToggle,
 } from "./lockdownCapabilityRegistry";
 
 describe("lockdownCapabilityRegistry — every entry is well-formed", () => {
@@ -195,5 +197,49 @@ describe("isPreflightBlockingAction / isDuringExamBlockingAction", () => {
       expect(isPreflightBlockingAction(action)).toBe(false);
       expect(isDuringExamBlockingAction(action)).toBe(false);
     }
+  });
+});
+
+// Secure Exam Evidence Review audit v1 — regression coverage for the
+// confirmed defect this pass fixed: REMOTE_DESKTOP_SESSION's `category`
+// (VIRTUALIZATION) contradicted its own `configToggle`
+// (TETHER_BLOCK_REMOTE_CONTROL) and its own `auditEvidenceBehavior` doc
+// string (which claims REMOTE_CONTROL_SOFTWARE_DETECTED — only produced
+// for category REMOTE_CONTROL, per the web app's
+// integrityEventTypeForCapabilityCategory()). Every OTHER entry in the
+// registry already had a consistent category<->configToggle pairing —
+// this test generalises that observation into a standing invariant so a
+// future entry can't silently drift the same way.
+describe("category <-> configToggle consistency (Secure Exam Evidence Review audit v1)", () => {
+  const EXPECTED_TOGGLE_FOR_CATEGORY: Partial<Record<LockdownCapabilityCategory, LockdownConfigToggle>> = {
+    REMOTE_CONTROL: "TETHER_BLOCK_REMOTE_CONTROL",
+    DEBUGGING: "TETHER_BLOCK_DEBUG_TOOLS",
+    VIRTUALIZATION: "TETHER_BLOCK_VIRTUAL_MACHINES",
+    CAPTURE_OVERLAY: "TETHER_BLOCK_SCREEN_CAPTURE_TOOLS",
+  };
+
+  it("every capability with a non-null configToggle uses the toggle that governs its own category", () => {
+    for (const capability of LOCKDOWN_CAPABILITY_REGISTRY) {
+      if (capability.configToggle === null) continue;
+      const expected = EXPECTED_TOGGLE_FOR_CATEGORY[capability.category];
+      expect(
+        capability.configToggle,
+        `${capability.id}: category "${capability.category}" expects configToggle "${expected}", found "${capability.configToggle}"`,
+      ).toBe(expected);
+    }
+  });
+
+  it("NAVIGATION_ESCAPE capabilities are never gated by a category toggle (Part 11 — these are PlatformAuditLog-only facts, never blocked by a policy toggle)", () => {
+    for (const capability of LOCKDOWN_CAPABILITY_REGISTRY) {
+      if (capability.category === "NAVIGATION_ESCAPE") {
+        expect(capability.configToggle).toBeNull();
+      }
+    }
+  });
+
+  it("REMOTE_DESKTOP_SESSION is classified REMOTE_CONTROL, matching its documented REMOTE_CONTROL_SOFTWARE_DETECTED audit behaviour", () => {
+    const capability = getCapabilityById("REMOTE_DESKTOP_SESSION");
+    expect(capability?.category).toBe("REMOTE_CONTROL");
+    expect(capability?.configToggle).toBe("TETHER_BLOCK_REMOTE_CONTROL");
   });
 });
