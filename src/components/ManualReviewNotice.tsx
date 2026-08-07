@@ -33,7 +33,7 @@ export function ManualReviewNotice({ pendingCount }: { pendingCount?: number }) 
         )}
       </div>
       <a
-        href="/student/dashboard"
+        href="/student"
         className="mt-5 inline-block rounded border border-amber-400 px-4 py-2 text-sm font-medium text-amber-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
       >
         Return to dashboard

@@ -761,7 +761,19 @@ describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", ()
     expect(after.resumeCount).toBe(0);
   });
 
-  it("3/4/10/14. an unbound LEGACY-only original attempt can never automatically resume — content stays blocked, resumeCount never increments, and no fresh LEGACY re-attestation can restore it", async () => {
+  // URGENT fix — preflight-recovery-trap. This test previously encoded the
+  // CONFIRMED PRODUCTION BUG as expected behaviour: a student whose
+  // installation genuinely LEGACY-verified but never reached (best-effort,
+  // non-blocking) v2 attestation — e.g. because a later, independent
+  // pre-exam readiness gate like required screen sharing failed first,
+  // BEFORE the examination was ever genuinely entered — was permanently
+  // trapped behind MANUAL_REVIEW_REQUIRED on relaunch, with no fresh
+  // LEGACY re-attestation ever able to restore content. Under plain
+  // LEGACY, installation binding was never expected in the first place
+  // (see resolveTrustedTetherVerification's own doc comment) — a
+  // relaunch here must resolve exactly like an ordinary first launch:
+  // retryable, and restored once the retry itself re-verifies.
+  it("URGENT fix (was 3/4/10/14): an unbound LEGACY-only original attempt can retry normally — a fresh LEGACY re-attestation on the relaunch restores content, never MANUAL_REVIEW_REQUIRED", async () => {
     const testStudent = await makeStudent("matrix-3");
     const exam = await createTetherExam("Matrix 3 Legacy Unbound");
     const submission = await startAsStudent(exam.id, testStudent);
@@ -781,35 +793,47 @@ describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", ()
     const originalGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect(originalGet.status).toBe(200);
 
-    // Simulated crash/relaunch — session1 is superseded, and it was never installation-bound.
+    // Simulated crash/relaunch (or, the confirmed production scenario, a
+    // retry after a failed mandatory pre-exam readiness gate) — session1
+    // is superseded, and it was never installation-bound.
     const session2Id = await launchAndConsume(testStudent, submission.id);
     const session2 = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: session2Id } });
     expect(session2.recoveryOfSessionId).toBe(session1Id);
 
+    // Not yet MANUAL_REVIEW_REQUIRED, and not yet ACTIVE either — the
+    // retry session hasn't presented ITS OWN fresh attestation yet, so it
+    // correctly needs one, exactly like an ordinary first launch would.
     mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
     const statusRes = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
-    expect((await statusRes.json()).state).toBe("MANUAL_REVIEW_REQUIRED");
+    expect((await statusRes.json()).state).toBe("RESUME_REQUIRES_FRESH_ATTESTATION");
 
     const blockedGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect(blockedGet.status).toBe(403);
 
-    // 4 — a fresh LEGACY attestation on the RECOVERY session (the only
-    // thing this device can offer, absent v2) still never restores
-    // content, even though the legacy verification itself still succeeds.
+    // A fresh LEGACY attestation on the RECOVERY session — the same real
+    // device simply re-verifying — now DOES restore content, matching
+    // ordinary first-launch behaviour under LEGACY mode.
     const legacyAttest2 = await attestationRoute.POST(jsonRequest("POST", { clientType: "TETHER_SECURE_CLIENT", checks: {}, required: {} }), {
       params: Promise.resolve({ sessionId: session2Id }),
     });
     expect(legacyAttest2.status).toBe(201);
     const session2After = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: session2Id } });
     expect(session2After.verificationStatus).toBe("VERIFIED");
-    const stillBlockedGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
-    expect(stillBlockedGet.status).toBe(403);
+    const restoredGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect(restoredGet.status).toBe(200);
 
-    // 14 — resumeCount never increments for a manual-review outcome.
+    const statusAfter = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect((await statusAfter.json()).state).toBe("ACTIVE");
+
+    // resumeCount is only ever incremented by a genuine V2 recovery
+    // completion (recordSecureResumeCompleted, wired to the exam-session
+    // attestation verify route) — unrelated to this fix, and unaffected:
+    // a plain LEGACY re-attestation was never the trigger for it, before
+    // or after this fix.
     const finalSubmission = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
     expect(finalSubmission.resumeCount).toBe(0);
 
-    // 10 — no IntegrityEvent from any of this (a device-binding gap is a
+    // No IntegrityEvent from any of this (a device-binding gap is a
     // technical/administrative fact, never a misconduct signal).
     const integrityEvents = await prisma.integrityEvent.count({ where: { submissionId: submission.id } });
     expect(integrityEvents).toBe(0);
@@ -864,31 +888,46 @@ describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", ()
   });
 
   it("11. repeated recovery-status polling while MANUAL_REVIEW_REQUIRED never duplicates the audit record", async () => {
-    const testStudent = await makeStudent("matrix-11");
-    const exam = await createTetherExam("Matrix 11 Poll Dedup");
-    const submission = await startAsStudent(exam.id, testStudent);
-    const session1Id = await launchAndConsume(testStudent, submission.id);
-    // LEGACY-verify the original session (so it genuinely unlocked
-    // content once) WITHOUT ever v2/installation-binding it — the actual
-    // Part A scenario, not merely "never verified at all".
-    mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
-    const attestationRoute = await import("../app/api/secure-client/sessions/[sessionId]/attestation/route");
-    await attestationRoute.POST(jsonRequest("POST", { clientType: "TETHER_SECURE_CLIENT", checks: {}, required: {} }), {
-      params: Promise.resolve({ sessionId: session1Id }),
-    });
+    // URGENT fix — a plain LEGACY-verified-but-unbound relaunch is no
+    // longer a MANUAL_REVIEW_REQUIRED case (see the "Matrix 3" test above)
+    // — that was the confirmed production bug. This test's actual point
+    // (repeated polling never duplicates the audit record) needs a
+    // scenario that GENUINELY still produces MANUAL_REVIEW_REQUIRED under
+    // the fix: an attestation requirement that actually expects
+    // installation binding (DUAL/V2_REQUIRED), unbound. Never
+    // vi.unstubAllEnvs() — that would wipe this file's own module-level
+    // signing-key stubs; just re-stub this one key back to unset after.
+    vi.stubEnv("TETHER_EXAM_ATTESTATION_MODE", "DUAL");
+    try {
+      const testStudent = await makeStudent("matrix-11");
+      const exam = await createTetherExam("Matrix 11 Poll Dedup");
+      const submission = await startAsStudent(exam.id, testStudent);
+      const session1Id = await launchAndConsume(testStudent, submission.id);
+      // LEGACY-verify the original session (so it genuinely unlocked
+      // content once) WITHOUT ever v2/installation-binding it, under a
+      // DUAL requirement that actually expected that binding — the
+      // genuine Part A scenario, not merely "never verified at all".
+      mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
+      const attestationRoute = await import("../app/api/secure-client/sessions/[sessionId]/attestation/route");
+      await attestationRoute.POST(jsonRequest("POST", { clientType: "TETHER_SECURE_CLIENT", checks: {}, required: {} }), {
+        params: Promise.resolve({ sessionId: session1Id }),
+      });
 
-    await launchAndConsume(testStudent, submission.id); // relaunch of a never-installation-bound original -> MANUAL_REVIEW_REQUIRED
+      await launchAndConsume(testStudent, submission.id); // relaunch of a never-installation-bound original under DUAL -> MANUAL_REVIEW_REQUIRED
 
-    mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
-    for (let i = 0; i < 5; i++) {
-      const res = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
-      expect((await res.json()).state).toBe("MANUAL_REVIEW_REQUIRED");
+      mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
+      for (let i = 0; i < 5; i++) {
+        const res = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+        expect((await res.json()).state).toBe("MANUAL_REVIEW_REQUIRED");
+      }
+
+      const auditCount = await prisma.platformAuditLog.count({
+        where: { action: "TETHER_SECURE_RESUME_MANUAL_REVIEW_REQUIRED", targetId: submission.id },
+      });
+      expect(auditCount).toBe(1);
+    } finally {
+      vi.stubEnv("TETHER_EXAM_ATTESTATION_MODE", "");
     }
-
-    const auditCount = await prisma.platformAuditLog.count({
-      where: { action: "TETHER_SECURE_RESUME_MANUAL_REVIEW_REQUIRED", targetId: submission.id },
-    });
-    expect(auditCount).toBe(1);
   });
 
   it("12. two concurrent duplicate verify requests for the same recovery session (double-click) increment resumeCount at most once", async () => {

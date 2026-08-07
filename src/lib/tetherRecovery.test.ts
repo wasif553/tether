@@ -18,6 +18,7 @@ function baseSession(overrides: Partial<RecoverySessionInput> = {}): RecoverySes
     isRecoverySession: false,
     priorSessionTrustedInstallationId: null,
     priorSessionEverVerified: false,
+    priorSessionAttestationRequirement: "LEGACY",
     installationAttestationFailureReason: null,
     ...overrides,
   };
@@ -38,6 +39,7 @@ describe("resolveTrustedTetherVerification — freshness-gated verification (Par
         isRecoverySession: false,
         priorSessionTrustedInstallationId: null,
         priorSessionEverVerified: false,
+        priorSessionAttestationRequirement: "LEGACY",
       }),
     ).toBe(true);
   });
@@ -56,6 +58,7 @@ describe("resolveTrustedTetherVerification — freshness-gated verification (Par
         isRecoverySession: false,
         priorSessionTrustedInstallationId: null,
         priorSessionEverVerified: false,
+        priorSessionAttestationRequirement: "LEGACY",
       }),
     ).toBe(false);
   });
@@ -79,6 +82,7 @@ describe("resolveTrustedTetherVerification — freshness-gated verification (Par
         isRecoverySession: false,
         priorSessionTrustedInstallationId: null,
         priorSessionEverVerified: false,
+        priorSessionAttestationRequirement: "LEGACY",
       }),
     ).toBe(false);
   });
@@ -98,6 +102,7 @@ describe("resolveTrustedTetherVerification — freshness-gated verification (Par
         isRecoverySession: false,
         priorSessionTrustedInstallationId: null,
         priorSessionEverVerified: false,
+        priorSessionAttestationRequirement: "LEGACY",
       }),
     ).toBe(true);
   });
@@ -122,6 +127,13 @@ describe("resolveTrustedTetherVerification — secure-recovery hardening v1, Par
     // core Part A scenario. The dedicated test further down overrides
     // this to false to cover the OTHER case (never verified at all).
     priorSessionEverVerified: true,
+    // URGENT fix — the strict fail-closed branch below only ever applies
+    // when the PRIOR session's own attestation requirement actually
+    // expected installation binding. DUAL here preserves every existing
+    // test's original strict-case intent; the dedicated LEGACY tests
+    // further down explicitly override this to prove the corrected,
+    // lenient behaviour.
+    priorSessionAttestationRequirement: "DUAL" as const,
   };
 
   // Item 3 — the exact defect this hardening pass closes: a LEGACY-only
@@ -181,6 +193,7 @@ describe("resolveTrustedTetherVerification — secure-recovery hardening v1, Par
         isRecoverySession: false,
         priorSessionTrustedInstallationId: null,
         priorSessionEverVerified: false,
+        priorSessionAttestationRequirement: "LEGACY",
       }),
     ).toBe(true);
   });
@@ -203,6 +216,56 @@ describe("resolveTrustedTetherVerification — secure-recovery hardening v1, Par
         priorSessionEverVerified: false,
       }),
     ).toBe(true);
+  });
+
+  // URGENT fix — preflight-recovery-trap. Under plain LEGACY, v2
+  // attestation is deliberately best-effort/non-blocking (see
+  // tether-launch/page.tsx's submitExamSessionAttestationV2 call site) —
+  // an unbound-but-verified prior session is the EXPECTED, TOLERATED
+  // outcome for a perfectly legitimate attempt that simply never reached
+  // it (e.g. because a later, independent pre-exam readiness gate like
+  // required screen sharing failed first, before the exam was ever
+  // genuinely entered). This must fall straight through to the ordinary
+  // truth table exactly like an ordinary first launch — never fail
+  // closed merely because LEGACY never promised installation binding in
+  // the first place.
+  it("URGENT fix: a recovery session whose PRIOR attempt was LEGACY-only (never installation-bound) is NOT fail-closed — LEGACY never expected binding", () => {
+    expect(
+      resolveTrustedTetherVerification({
+        ...RECOVERY_BASE,
+        legacyVerified: true,
+        v2Verified: false,
+        isRecoverySession: true,
+        priorSessionTrustedInstallationId: null,
+        priorSessionAttestationRequirement: "LEGACY",
+      }),
+    ).toBe(true);
+  });
+
+  it("URGENT fix: the strict fail-closed treatment is retained when the PRIOR session's requirement was DUAL — an unbound prior under a mode that DID expect binding still can never be trusted automatically", () => {
+    expect(
+      resolveTrustedTetherVerification({
+        ...RECOVERY_BASE,
+        legacyVerified: true,
+        v2Verified: true,
+        isRecoverySession: true,
+        priorSessionTrustedInstallationId: null,
+        priorSessionAttestationRequirement: "DUAL",
+      }),
+    ).toBe(false);
+  });
+
+  it("URGENT fix: the strict fail-closed treatment is retained when the PRIOR session's requirement was V2_REQUIRED", () => {
+    expect(
+      resolveTrustedTetherVerification({
+        ...RECOVERY_BASE,
+        legacyVerified: true,
+        v2Verified: true,
+        isRecoverySession: true,
+        priorSessionTrustedInstallationId: null,
+        priorSessionAttestationRequirement: "V2_REQUIRED",
+      }),
+    ).toBe(false);
   });
 });
 
@@ -376,9 +439,10 @@ describe("resolveRecoveryState — central deterministic resolver (Part 1)", () 
 
   // Secure-recovery hardening v1, Part A — checked before every other
   // recovery signal (see resolveRecoveryState's own doc comment): an
-  // unbound original attempt can never resolve to anything but manual
+  // unbound original attempt whose OWN requirement expected installation
+  // binding (DUAL/V2_REQUIRED) can never resolve to anything but manual
   // review, regardless of what this new session's own fields show.
-  it("3. MANUAL_REVIEW_REQUIRED for a recovery session whose original attempt was never installation-bound (LEGACY-only)", () => {
+  it("3. MANUAL_REVIEW_REQUIRED for a recovery session whose original attempt required DUAL attestation but was never installation-bound", () => {
     expect(
       resolveRecoveryState({
         authenticated: true,
@@ -390,6 +454,7 @@ describe("resolveRecoveryState — central deterministic resolver (Part 1)", () 
           isRecoverySession: true,
           priorSessionTrustedInstallationId: null,
           priorSessionEverVerified: true,
+          priorSessionAttestationRequirement: "DUAL",
           // Even a fully fresh v2 attestation on THIS session must not matter.
           installationAttestationVerified: true,
           verificationStatus: "VERIFIED",
@@ -399,6 +464,94 @@ describe("resolveRecoveryState — central deterministic resolver (Part 1)", () 
         requestingInstallationId: null,
       }).state,
     ).toBe("MANUAL_REVIEW_REQUIRED");
+  });
+
+  // URGENT fix — the exact confirmed production bug: a student whose
+  // Tether installation genuinely verified (LEGACY checks passed) but who
+  // then failed a LATER, INDEPENDENT mandatory pre-exam readiness gate
+  // (e.g. required screen sharing) before the examination was ever
+  // genuinely entered must be able to retry — closing and reopening
+  // Tether (which supersedes the prior session and creates this recovery
+  // session) must NOT trap them behind "Recovery requires support". Under
+  // plain LEGACY, installation binding was never expected in the first
+  // place, so this resolves exactly like an ordinary first launch.
+  it("URGENT fix: does NOT require manual review for a recovery session whose prior LEGACY attempt was verified but never installation-bound (the failed-screen-share-before-entry scenario)", () => {
+    const result = resolveRecoveryState({
+      authenticated: true,
+      submissionStatus: "IN_PROGRESS",
+      nowMs: NOW,
+      deadlineMs: NOW + 100_000,
+      deliveryMode: "TETHER_CLIENT_REQUIRED",
+      session: baseSession({
+        isRecoverySession: true,
+        priorSessionTrustedInstallationId: null,
+        priorSessionEverVerified: true,
+        priorSessionAttestationRequirement: "LEGACY",
+        // The retry's OWN fresh attestation succeeding, exactly like an
+        // ordinary first launch would.
+        installationAttestationVerified: false,
+        verificationStatus: "VERIFIED",
+      }),
+      heartbeatPolicy: HEARTBEAT_POLICY,
+      offlineContinueMs: OFFLINE_CONTINUE_MS,
+      requestingInstallationId: null,
+    });
+    expect(result.state).not.toBe("MANUAL_REVIEW_REQUIRED");
+    expect(result.state).toBe("ACTIVE");
+    expect(result.manualReviewReasonCode).toBeUndefined();
+  });
+
+  // URGENT fix, Part C — deterministic reason codes: each MANUAL_REVIEW_REQUIRED
+  // outcome carries a distinct, bounded code identifying which condition
+  // fired, for safe production diagnostics (see tetherRecoveryRunner.ts).
+  it("URGENT fix: MANUAL_REVIEW_REQUIRED carries a deterministic reason code distinguishing each fail-closed condition", () => {
+    const unboundUnderDual = resolveRecoveryState({
+      authenticated: true,
+      submissionStatus: "IN_PROGRESS",
+      nowMs: NOW,
+      deadlineMs: NOW + 100_000,
+      deliveryMode: "TETHER_CLIENT_REQUIRED",
+      session: baseSession({
+        isRecoverySession: true,
+        priorSessionTrustedInstallationId: null,
+        priorSessionEverVerified: true,
+        priorSessionAttestationRequirement: "DUAL",
+      }),
+      heartbeatPolicy: HEARTBEAT_POLICY,
+      offlineContinueMs: OFFLINE_CONTINUE_MS,
+      requestingInstallationId: null,
+    });
+    expect(unboundUnderDual.manualReviewReasonCode).toBe("PRIOR_SESSION_UNBOUND_UNDER_REQUIRED_ATTESTATION");
+
+    const deviceChange = resolveRecoveryState({
+      authenticated: true,
+      submissionStatus: "IN_PROGRESS",
+      nowMs: NOW,
+      deadlineMs: NOW + 100_000,
+      deliveryMode: "TETHER_CLIENT_REQUIRED",
+      session: baseSession({
+        isRecoverySession: true,
+        priorSessionTrustedInstallationId: "installation-A",
+        installationAttestationFailureReason: "DEVICE_CHANGE_DETECTED",
+      }),
+      heartbeatPolicy: HEARTBEAT_POLICY,
+      offlineContinueMs: OFFLINE_CONTINUE_MS,
+      requestingInstallationId: null,
+    });
+    expect(deviceChange.manualReviewReasonCode).toBe("DEVICE_CHANGE_DETECTED");
+
+    const requestingMismatch = resolveRecoveryState({
+      authenticated: true,
+      submissionStatus: "IN_PROGRESS",
+      nowMs: NOW,
+      deadlineMs: NOW + 100_000,
+      deliveryMode: "TETHER_CLIENT_REQUIRED",
+      session: baseSession({ clientInstallationId: "installation-A" }),
+      heartbeatPolicy: HEARTBEAT_POLICY,
+      offlineContinueMs: OFFLINE_CONTINUE_MS,
+      requestingInstallationId: "installation-B",
+    });
+    expect(requestingMismatch.manualReviewReasonCode).toBe("REQUESTING_INSTALLATION_MISMATCH");
   });
 
   // The regression this distinction protects: a session that crashed
@@ -438,6 +591,7 @@ describe("resolveRecoveryState — central deterministic resolver (Part 1)", () 
           isRecoverySession: true,
           priorSessionTrustedInstallationId: "installation-A",
           priorSessionEverVerified: true,
+          priorSessionAttestationRequirement: "DUAL",
           installationAttestationVerified: true,
           verificationStatus: "NOT_CHECKED",
         }),

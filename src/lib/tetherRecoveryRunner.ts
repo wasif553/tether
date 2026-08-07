@@ -18,6 +18,7 @@ import { resolveOfflineContinueMs } from "@/lib/tetherRecoveryConfig";
 import { buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
 import { resolveRecoveryState, RECOVERY_STATE_COPY, type RecoveryState, type RecoverySessionInput } from "@/lib/tetherRecovery";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
+import { logServerTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 
 export type SubmissionRecoveryStatus = {
   state: RecoveryState;
@@ -63,7 +64,7 @@ export async function resolveSubmissionRecoveryState(params: {
   // is set) since resolvePriorSessionTrust already returns { null, false }
   // for a null recoveryOfSessionId, and RecoverySessionInput needs both
   // fields either way.
-  const priorSessionTrust = currentSession ? await resolvePriorSessionTrust(currentSession.recoveryOfSessionId) : { trustedInstallationId: null, everVerified: false };
+  const priorSessionTrust = currentSession ? await resolvePriorSessionTrust(currentSession.recoveryOfSessionId) : { trustedInstallationId: null, everVerified: false, attestationRequirement: "LEGACY" as const };
   const session: RecoverySessionInput | null = currentSession
     ? {
         status: currentSession.status as RecoverySessionInput["status"],
@@ -76,6 +77,7 @@ export async function resolveSubmissionRecoveryState(params: {
         isRecoverySession: Boolean(currentSession.recoveryOfSessionId),
         priorSessionTrustedInstallationId: priorSessionTrust.trustedInstallationId,
         priorSessionEverVerified: priorSessionTrust.everVerified,
+        priorSessionAttestationRequirement: priorSessionTrust.attestationRequirement,
         installationAttestationFailureReason: currentSession.installationAttestationFailureReason,
       }
     : null;
@@ -92,6 +94,22 @@ export async function resolveSubmissionRecoveryState(params: {
     offlineContinueMs: resolveOfflineContinueMs(),
     requestingInstallationId: params.requestingInstallationId ?? null,
   });
+
+  // URGENT fix, Part C — safe, bounded diagnostic (opt-in, never an audit
+  // log — see the no-audit-on-every-poll comment below) so production can
+  // distinguish WHY a submission landed in MANUAL_REVIEW_REQUIRED without
+  // exposing installation ids, keys, tokens, manifests, or signatures.
+  if (result.state === "MANUAL_REVIEW_REQUIRED") {
+    logServerTetherDiagnostic("recovery_manual_review_required", {
+      submissionId: submission.id,
+      sessionId: currentSession?.id ?? null,
+      reasonCode: result.manualReviewReasonCode ?? "UNKNOWN",
+      sessionStatus: currentSession?.status ?? null,
+      submissionStartedAtExists: Boolean(submission.startedAt),
+      installationAttestationVerified: currentSession?.installationAttestationVerified ?? false,
+      isRecoverySession: Boolean(currentSession?.recoveryOfSessionId),
+    });
+  }
 
   // Secure-recovery hardening v1, Part B — this is a pure status READ,
   // called on every poll from the student page/tether-launch page. It
@@ -168,11 +186,15 @@ export async function resolveExamSubmissionsRecoveryStatuses(
   const priorSessions = priorSessionIds.length
     ? await prisma.secureClientSession.findMany({
         where: { id: { in: priorSessionIds } },
-        select: { id: true, clientInstallationId: true, verificationStatus: true, installationAttestationVerified: true },
+        select: { id: true, clientInstallationId: true, verificationStatus: true, installationAttestationVerified: true, attestationRequirement: true },
       })
     : [];
   const priorTrustedInstallationById = new Map(priorSessions.map((s) => [s.id, s.clientInstallationId]));
   const priorEverVerifiedById = new Map(priorSessions.map((s) => [s.id, s.verificationStatus === "VERIFIED" || s.installationAttestationVerified === true]));
+  // URGENT fix — see resolvePriorSessionTrust's own doc comment in
+  // secureClientRunner.ts for why this must be checked alongside
+  // priorEverVerifiedById, never in place of it.
+  const priorAttestationRequirementById = new Map(priorSessions.map((s) => [s.id, parseAttestationRequirement(s.attestationRequirement)]));
   const pendingCountEvents = await prisma.secureClientEvent.findMany({
     where: { submissionId: { in: submissionIds }, eventType: "AUTOSAVE_PENDING_COUNT_REPORTED" },
     orderBy: { serverReceivedAt: "desc" },
@@ -218,6 +240,7 @@ export async function resolveExamSubmissionsRecoveryStatuses(
             isRecoverySession: Boolean(currentSession.recoveryOfSessionId),
             priorSessionTrustedInstallationId: currentSession.recoveryOfSessionId ? (priorTrustedInstallationById.get(currentSession.recoveryOfSessionId) ?? null) : null,
             priorSessionEverVerified: currentSession.recoveryOfSessionId ? (priorEverVerifiedById.get(currentSession.recoveryOfSessionId) ?? false) : false,
+            priorSessionAttestationRequirement: currentSession.recoveryOfSessionId ? (priorAttestationRequirementById.get(currentSession.recoveryOfSessionId) ?? "LEGACY") : "LEGACY",
             installationAttestationFailureReason: currentSession.installationAttestationFailureReason,
           }
         : null,

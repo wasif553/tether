@@ -90,6 +90,7 @@ export async function GET(
         isRecoverySession: Boolean(currentSession?.recoveryOfSessionId),
         priorSessionTrustedInstallationId: priorSessionTrust.trustedInstallationId,
         priorSessionEverVerified: priorSessionTrust.everVerified,
+        priorSessionAttestationRequirement: priorSessionTrust.attestationRequirement,
       });
       const devBypassAllowed = isTetherSecureClientBypassAllowed(submission.exam.institution?.slug ?? null);
       const gate = resolveSecureClientStartGate({ effectiveDeliveryMode: policy.deliveryMode, hasVerifiedTetherSession, devBypassAllowed });

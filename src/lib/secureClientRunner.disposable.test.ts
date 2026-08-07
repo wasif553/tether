@@ -68,9 +68,11 @@ const {
   recordAttestation,
   getCurrentSessionForSubmission,
   resolveSecureLaunchConsumeTransactionTimeoutMs,
+  resolvePriorSessionTrust,
 } = await import("./secureClientRunner");
 const { computeExpectedRequestHash } = await import("./secureClient/sebBrowserExamKey");
 const { computeStudentSubjectHash } = await import("./secureClient/secureLaunchManifest");
+const { resolveTrustedTetherVerification, resolveRecoveryState } = await import("./tetherRecovery");
 
 const stamp = Date.now();
 const cleanup = { institutions: [] as string[], users: [] as string[], exams: [] as string[] };
@@ -443,6 +445,265 @@ describe("launch manifest consumption", () => {
     // test ran in.
     expect(issuedAtMs).toBeGreaterThanOrEqual(before);
     expect(issuedAtMs).toBeLessThanOrEqual(after);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// URGENT fix — failed-preflight recovery trap. The confirmed physical bug:
+// a student whose Tether installation genuinely verified (LEGACY checks
+// passed) but who then failed a LATER, INDEPENDENT mandatory pre-exam
+// readiness gate (e.g. required screen sharing) BEFORE the examination was
+// genuinely entered was permanently trapped behind "Recovery requires
+// support" on retry. These tests exercise the REAL consumeLaunchManifest +
+// recordAttestation + resolvePriorSessionTrust pipeline against the real
+// disposable database, then feed the resulting real data through the pure
+// resolveRecoveryState/resolveTrustedTetherVerification decision functions
+// — proving the fix holds end-to-end, not just at the pure-function level
+// (already covered exhaustively in tetherRecovery.test.ts).
+// ---------------------------------------------------------------------------
+describe("preflight recovery lifecycle fix", () => {
+  async function issueAndConsume(submissionId: string, examId: string, institutionId: string, studentId: string, configurationId: string | null) {
+    const { DISABLED_SECURE_CLIENT_POLICY } = await import("./secureClientPolicy");
+    const { manifest, signature } = await issueLaunchManifest({
+      institutionId,
+      examId,
+      submissionId,
+      studentId,
+      configurationId,
+      clientType: "TETHER_SECURE_CLIENT",
+      policy: { ...DISABLED_SECURE_CLIENT_POLICY, secureLaunchTokenTtlSeconds: 300 },
+      canonicalExamOrigin: "https://example.test",
+      launchPath: `/student/exams/${examId}/tether-launch`,
+      audience: "tether-secure-client",
+    });
+    const result = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    if (result.outcome !== "CONSUMED") throw new Error(`expected CONSUMED, got ${result.outcome}`);
+    return result.sessionId;
+  }
+
+  it("[1] a launch manifest may be consumed without treating the exam as fully started — the fresh session is CREATED/NOT_CHECKED, never ACTIVE/VERIFIED on its own", async () => {
+    const inst = await makeInstitution(`preflight-${stamp}`);
+    const lecturer = await makeLecturer(inst.id, `preflight-${stamp}`);
+    const student = await makeStudent(inst.id, `preflight-${stamp}`);
+    const exam = await makeExam(inst.id, lecturer.id, "preflight");
+    const submission = await makeSubmission(exam.id, student.id);
+
+    const sessionId = await issueAndConsume(submission.id, exam.id, inst.id, student.id, null);
+    const session = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: sessionId } });
+    expect(session.status).toBe("CREATED");
+    expect(session.verificationStatus).toBe("NOT_CHECKED");
+  });
+
+  it("[6] a pre-start (not yet attested) session cannot resolve as trusted/ACTIVE — the real content-access gate stays closed", async () => {
+    const inst = await makeInstitution(`preflight-gate-${stamp}`);
+    const lecturer = await makeLecturer(inst.id, `preflight-gate-${stamp}`);
+    const student = await makeStudent(inst.id, `preflight-gate-${stamp}`);
+    const exam = await makeExam(inst.id, lecturer.id, "preflight-gate");
+    const submission = await makeSubmission(exam.id, student.id);
+
+    const sessionId = await issueAndConsume(submission.id, exam.id, inst.id, student.id, null);
+    const session = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: sessionId } });
+    const trusted = resolveTrustedTetherVerification({
+      sessionRequirement: "LEGACY",
+      legacyVerified: session.verificationStatus === "VERIFIED",
+      v2Verified: session.installationAttestationVerified,
+      lastHeartbeatAtMs: session.lastHeartbeatAt?.getTime() ?? null,
+      sessionStartedAtMs: session.startedAt.getTime(),
+      nowMs: Date.now(),
+      heartbeatPolicy: { heartbeatIntervalSeconds: 30, heartbeatGraceSeconds: 90 },
+      offlineContinueMs: 10 * 60_000,
+      isRecoverySession: false,
+      priorSessionTrustedInstallationId: null,
+      priorSessionEverVerified: false,
+      priorSessionAttestationRequirement: "LEGACY",
+    });
+    expect(trusted).toBe(false);
+  });
+
+  it("[5, 7] URGENT fix: retrying on the same verified installation after a legacy-verified-but-unbound attempt succeeds, does not require manual review, and creates exactly one active session", async () => {
+    const inst = await makeInstitution(`preflight-retry-${stamp}`);
+    const lecturer = await makeLecturer(inst.id, `preflight-retry-${stamp}`);
+    const student = await makeStudent(inst.id, `preflight-retry-${stamp}`);
+    const exam = await makeExam(inst.id, lecturer.id, "preflight-retry");
+    const submission = await makeSubmission(exam.id, student.id);
+
+    // First attempt: reaches LEGACY verification (system-check attestation
+    // passes — the real recordAttestation call), but is superseded before
+    // ever getting v2 installation-bound — exactly the "screen sharing
+    // failed before exam entry" production scenario.
+    const firstSessionId = await issueAndConsume(submission.id, exam.id, inst.id, student.id, null);
+    await recordAttestation({
+      sessionId: firstSessionId,
+      clientType: "TETHER_SECURE_CLIENT",
+      checks: { displayCheck: "PASS" },
+      required: { displayCheck: true },
+      clientVerificationFailed: false,
+      configurationInvalid: false,
+      versionUnsupported: false,
+      technicalFailure: false,
+      displayCount: 1,
+      displayTopology: "SINGLE",
+    });
+    const firstSession = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: firstSessionId } });
+    expect(firstSession.verificationStatus).toBe("VERIFIED");
+    expect(firstSession.clientInstallationId).toBeNull();
+
+    // Retry: a fresh manifest consume supersedes the first session.
+    const secondSessionId = await issueAndConsume(submission.id, exam.id, inst.id, student.id, null);
+    const secondSession = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: secondSessionId } });
+    expect(secondSession.recoveryOfSessionId).toBe(firstSessionId);
+
+    // The real resolvePriorSessionTrust output for this retry.
+    const priorTrust = await resolvePriorSessionTrust(secondSession.recoveryOfSessionId);
+    expect(priorTrust.everVerified).toBe(true);
+    expect(priorTrust.trustedInstallationId).toBeNull();
+    expect(priorTrust.attestationRequirement).toBe("LEGACY");
+
+    // Fed into the real decision function: must NOT be fail-closed.
+    const result = resolveRecoveryState({
+      authenticated: true,
+      submissionStatus: "IN_PROGRESS",
+      nowMs: Date.now(),
+      deadlineMs: Date.now() + 3_600_000,
+      deliveryMode: "TETHER_CLIENT_REQUIRED",
+      session: {
+        status: secondSession.status as "CREATED",
+        verificationStatus: secondSession.verificationStatus,
+        installationAttestationVerified: secondSession.installationAttestationVerified,
+        attestationRequirement: "LEGACY",
+        lastHeartbeatAtMs: secondSession.lastHeartbeatAt?.getTime() ?? null,
+        startedAtMs: secondSession.startedAt.getTime(),
+        clientInstallationId: secondSession.clientInstallationId,
+        isRecoverySession: true,
+        priorSessionTrustedInstallationId: priorTrust.trustedInstallationId,
+        priorSessionEverVerified: priorTrust.everVerified,
+        priorSessionAttestationRequirement: priorTrust.attestationRequirement,
+        installationAttestationFailureReason: secondSession.installationAttestationFailureReason,
+      },
+      heartbeatPolicy: { heartbeatIntervalSeconds: 30, heartbeatGraceSeconds: 90 },
+      offlineContinueMs: 10 * 60_000,
+      requestingInstallationId: null,
+    });
+    expect(result.state).not.toBe("MANUAL_REVIEW_REQUIRED");
+
+    // The retry then genuinely re-attests (fresh LEGACY checks pass again
+    // on the same installation) and reaches ACTIVE normally.
+    await recordAttestation({
+      sessionId: secondSessionId,
+      clientType: "TETHER_SECURE_CLIENT",
+      checks: { displayCheck: "PASS" },
+      required: { displayCheck: true },
+      clientVerificationFailed: false,
+      configurationInvalid: false,
+      versionUnsupported: false,
+      technicalFailure: false,
+      displayCount: 1,
+      displayTopology: "SINGLE",
+    });
+    const reAttested = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: secondSessionId } });
+    expect(reAttested.status).toBe("ACTIVE");
+    expect(reAttested.verificationStatus).toBe("VERIFIED");
+
+    // Exactly one non-terminal session for the submission — no duplicate.
+    const nonTerminalCount = await prisma.secureClientSession.count({
+      where: { submissionId: submission.id, status: { in: ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] } },
+    });
+    expect(nonTerminalCount).toBe(1);
+  });
+
+  it("[8, 9, 10] URGENT fix: the strict policy is retained — under DUAL/V2_REQUIRED, an unbound prior attempt still requires manual review even on retry", async () => {
+    vi.stubEnv("TETHER_EXAM_ATTESTATION_MODE", "DUAL");
+    try {
+      const inst = await makeInstitution(`preflight-strict-${stamp}`);
+      const lecturer = await makeLecturer(inst.id, `preflight-strict-${stamp}`);
+      const student = await makeStudent(inst.id, `preflight-strict-${stamp}`);
+      const exam = await makeExam(inst.id, lecturer.id, "preflight-strict");
+      const submission = await makeSubmission(exam.id, student.id);
+
+      const firstSessionId = await issueAndConsume(submission.id, exam.id, inst.id, student.id, null);
+      await recordAttestation({
+        sessionId: firstSessionId,
+        clientType: "TETHER_SECURE_CLIENT",
+        checks: { displayCheck: "PASS" },
+        required: { displayCheck: true },
+        clientVerificationFailed: false,
+        configurationInvalid: false,
+        versionUnsupported: false,
+        technicalFailure: false,
+        displayCount: 1,
+        displayTopology: "SINGLE",
+      });
+      const firstSession = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: firstSessionId } });
+      expect(firstSession.attestationRequirement).toBe("DUAL");
+      expect(firstSession.clientInstallationId).toBeNull();
+
+      const secondSessionId = await issueAndConsume(submission.id, exam.id, inst.id, student.id, null);
+      const secondSession = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: secondSessionId } });
+
+      const priorTrust = await resolvePriorSessionTrust(secondSession.recoveryOfSessionId);
+      expect(priorTrust.attestationRequirement).toBe("DUAL");
+
+      const result = resolveRecoveryState({
+        authenticated: true,
+        submissionStatus: "IN_PROGRESS",
+        nowMs: Date.now(),
+        deadlineMs: Date.now() + 3_600_000,
+        deliveryMode: "TETHER_CLIENT_REQUIRED",
+        session: {
+          status: secondSession.status as "CREATED",
+          verificationStatus: secondSession.verificationStatus,
+          installationAttestationVerified: secondSession.installationAttestationVerified,
+          attestationRequirement: "DUAL",
+          lastHeartbeatAtMs: secondSession.lastHeartbeatAt?.getTime() ?? null,
+          startedAtMs: secondSession.startedAt.getTime(),
+          clientInstallationId: secondSession.clientInstallationId,
+          isRecoverySession: true,
+          priorSessionTrustedInstallationId: priorTrust.trustedInstallationId,
+          priorSessionEverVerified: priorTrust.everVerified,
+          priorSessionAttestationRequirement: priorTrust.attestationRequirement,
+          installationAttestationFailureReason: secondSession.installationAttestationFailureReason,
+        },
+        heartbeatPolicy: { heartbeatIntervalSeconds: 30, heartbeatGraceSeconds: 90 },
+        offlineContinueMs: 10 * 60_000,
+        requestingInstallationId: null,
+      });
+      expect(result.state).toBe("MANUAL_REVIEW_REQUIRED");
+      expect(result.manualReviewReasonCode).toBe("PRIOR_SESSION_UNBOUND_UNDER_REQUIRED_ATTESTATION");
+    } finally {
+      // Never vi.unstubAllEnvs() here — that would wipe the signing-key/SEB
+      // -key stubs every other test in this file depends on. Re-stub the
+      // SAME key back to empty (parseAttestationRequirement/resolveExamAttestationMode
+      // both treat that as LEGACY, the safe default).
+      vi.stubEnv("TETHER_EXAM_ATTESTATION_MODE", "");
+    }
+  });
+
+  it("[11] concurrent launches remain safe — two simultaneous consumes for the same submission still allow exactly one winner after the fix", async () => {
+    const inst = await makeInstitution(`preflight-concurrent-${stamp}`);
+    const lecturer = await makeLecturer(inst.id, `preflight-concurrent-${stamp}`);
+    const student = await makeStudent(inst.id, `preflight-concurrent-${stamp}`);
+    const exam = await makeExam(inst.id, lecturer.id, "preflight-concurrent");
+    const submission = await makeSubmission(exam.id, student.id);
+    const { DISABLED_SECURE_CLIENT_POLICY } = await import("./secureClientPolicy");
+    const { manifest, signature } = await issueLaunchManifest({
+      institutionId: inst.id,
+      examId: exam.id,
+      submissionId: submission.id,
+      studentId: student.id,
+      configurationId: null,
+      clientType: "TETHER_SECURE_CLIENT",
+      policy: { ...DISABLED_SECURE_CLIENT_POLICY, secureLaunchTokenTtlSeconds: 300 },
+      canonicalExamOrigin: "https://example.test",
+      launchPath: `/student/exams/${exam.id}/tether-launch`,
+      audience: "tether-secure-client",
+    });
+    const [a, b] = await Promise.all([consumeLaunchManifest(manifest, signature, manifest.nonce), consumeLaunchManifest(manifest, signature, manifest.nonce)]);
+    const outcomes = [a.outcome, b.outcome].sort();
+    expect(outcomes).toEqual(["CONSUMED", "REPLAY"]);
+    const nonTerminalCount = await prisma.secureClientSession.count({
+      where: { submissionId: submission.id, status: { in: ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] } },
+    });
+    expect(nonTerminalCount).toBe(1);
   });
 });
 
