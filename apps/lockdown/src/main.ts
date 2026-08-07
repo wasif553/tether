@@ -43,6 +43,7 @@ import {
 import { findUnsafeCommandLineSwitch } from "./commandLineSafety";
 import { classifyKeyboardShortcut } from "./keyboardHardeningLogic";
 import { ProcessDetection } from "./processDetection";
+import { RemoteSessionMonitor } from "./remoteSessionMonitor";
 import { getWindowsSessionClassification } from "./windowsSessionDetection";
 import { LockdownLifecycleManager } from "./lockdownLifecycle";
 import { LOCKDOWN_CAPABILITY_REGISTRY, type LockdownPolicyToggles } from "./lockdownCapabilityRegistry";
@@ -134,6 +135,35 @@ const processDetection = new ProcessDetection({
   },
 });
 
+// Tether mid-exam remote-session monitoring v1 — extends the
+// REMOTE_DESKTOP_SESSION capability from a preflight-only, one-shot check
+// (lockdown:get-remote-session-status below) to continuous polling while
+// an exam is ACTIVE. Relayed to the page over its own dedicated channel
+// (not the generic capability-transition one above) so the richer,
+// remote-session-specific metadata the page needs to record (session
+// classification, previous/current state, check confidence) doesn't have
+// to be squeezed into the generic payload shape. See
+// remoteSessionMonitor.ts / remoteSessionMonitorLogic.ts.
+const remoteSessionMonitor = new RemoteSessionMonitor({
+  onTransition: (transition, effectiveAction, detectedAtMsForClear) => {
+    runOnWindowBestEffort(mainWindow, (window) =>
+      window.webContents.send("lockdown:remote-session-monitor-event", {
+        kind: transition.kind,
+        effectiveAction,
+        previousState: "previousState" in transition ? transition.previousState : null,
+        currentState: "currentState" in transition ? transition.currentState : null,
+        detectedAtMsForClear: detectedAtMsForClear ?? null,
+        classification: {
+          isRemoteSession: transition.classification.isRemoteSession,
+          remoteSessionSignalSource: transition.classification.remoteSessionSignalSource,
+          isLikelyVirtualMachine: transition.classification.isLikelyVirtualMachine,
+          vmSignatureMatched: transition.classification.vmSignatureMatched,
+        },
+      }),
+    );
+  },
+});
+
 // Tether Windows Lockdown Hardening v1, Part 10 — the idempotent
 // restoration lifecycle. Tether never modifies any permanent OS-level
 // setting, so every registered action here is pure in-process teardown
@@ -142,6 +172,7 @@ const processDetection = new ProcessDetection({
 // inherently safe to call any number of times, from any trigger.
 const lockdownLifecycle = new LockdownLifecycleManager(() => consumeLockdownFault("RESTORATION_FAILURE"));
 lockdownLifecycle.registerRestoreAction("processDetection.setExamActive(false)", () => processDetection.setExamActive(false));
+lockdownLifecycle.registerRestoreAction("remoteSessionMonitor.setExamActive(false)", () => remoteSessionMonitor.setExamActive(false));
 lockdownLifecycle.registerRestoreAction("displayEnforcement.setEnforcementState(inactive)", () =>
   displayEnforcement.setEnforcementState({ active: false, ready: false, requireSingleDisplay: false }),
 );
@@ -536,6 +567,7 @@ function createWindow(examId: string | null) {
   });
 
   processDetection.attachTargetWindow(mainWindow);
+  remoteSessionMonitor.attachTargetWindow(mainWindow);
   lockdownLifecycle.prepare();
 
   // Best-effort only — does not guarantee screenshots/recordings are
@@ -611,6 +643,7 @@ function createWindow(examId: string | null) {
     mainWindow = null;
     displayEnforcement.stop();
     processDetection.stop();
+    remoteSessionMonitor.stop();
   });
 }
 
@@ -933,6 +966,7 @@ ipcMain.handle("lockdown:get-diagnostics-snapshot", () => buildCurrentDiagnostic
 ipcMain.on("lockdown:set-lockdown-policy-toggles", (_event, toggles: unknown) => {
   if (!isValidPolicyToggles(toggles)) return;
   processDetection.setPolicyToggles(toggles);
+  remoteSessionMonitor.setPolicyToggles(toggles);
 });
 
 /** Part 3 — one-shot preflight scan; the page calls this before allowing a final exam to start. */
@@ -946,10 +980,11 @@ ipcMain.handle("lockdown:run-preflight-scan", async () => {
   return processDetection.runPreflightScan();
 });
 
-/** Part 4 — starts/stops the background during-exam poll. */
+/** Part 4 — starts/stops the background during-exam poll. Also starts/stops the mid-exam remote-session monitor (see remoteSessionMonitor.ts) — the same ACTIVE-lifecycle signal now drives both. */
 ipcMain.on("lockdown:set-lockdown-exam-active", (_event, active: unknown) => {
   if (typeof active !== "boolean") return;
   processDetection.setExamActive(active);
+  remoteSessionMonitor.setExamActive(active);
 });
 
 /** Part 5 — remote-session/VM classification, on demand. */

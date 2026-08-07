@@ -33,6 +33,15 @@ type EvidenceReport = {
     resolvedByName: string | null;
     resolutionNote: string | null;
     confidenceBand: string | null;
+    remoteSessionDetail: {
+      detectionSource: string | null;
+      sessionType: string | null;
+      checkConfidence: string | null;
+      previousState: string | null;
+      currentState: string | null;
+      tetherVersion: string | null;
+      secureClientSessionId: string | null;
+    } | null;
     evidenceFrame: {
       id: string;
       kind: string;
@@ -1029,6 +1038,19 @@ export default function EvidenceReportPage({
                     <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600">
                       {e.confidenceBand} confidence
                     </span>
+                  )}
+                  {e.remoteSessionDetail && (
+                    <div className="mt-1 text-xs text-gray-500">
+                      {e.remoteSessionDetail.previousState && e.remoteSessionDetail.currentState && (
+                        <span className="mr-2">
+                          {e.remoteSessionDetail.previousState} → {e.remoteSessionDetail.currentState}
+                        </span>
+                      )}
+                      {e.remoteSessionDetail.detectionSource && <span className="mr-2">Source: {e.remoteSessionDetail.detectionSource}</span>}
+                      {e.remoteSessionDetail.checkConfidence && <span className="mr-2">Confidence: {e.remoteSessionDetail.checkConfidence}</span>}
+                      {e.remoteSessionDetail.tetherVersion && <span className="mr-2">Tether v{e.remoteSessionDetail.tetherVersion}</span>}
+                      {e.remoteSessionDetail.secureClientSessionId && <span>Session: {e.remoteSessionDetail.secureClientSessionId.slice(0, 8)}…</span>}
+                    </div>
                   )}
                   {hasEvidenceFrame(e) && (
                     <div className="mt-1">

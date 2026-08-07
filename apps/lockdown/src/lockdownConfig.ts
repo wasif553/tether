@@ -80,3 +80,31 @@ const MAX_LOCKDOWN_RECHECK_SECONDS = 30;
 export function resolveLockdownRecheckSeconds(): number {
   return clampIntEnv(process.env.TETHER_LOCKDOWN_RECHECK_SECONDS, MIN_LOCKDOWN_RECHECK_SECONDS, MAX_LOCKDOWN_RECHECK_SECONDS, DEFAULT_LOCKDOWN_RECHECK_SECONDS);
 }
+
+// ---------------------------------------------------------------------------
+// TETHER_REMOTE_SESSION_MONITOR_INTERVAL_SECONDS — mid-exam remote-session
+// monitoring v1. How often the Windows-session classification check
+// (windowsSessionDetection.ts) is re-run while an exam is ACTIVE, extending
+// what was previously a preflight-only check into continuous monitoring.
+// Deliberately slower than TETHER_PROCESS_SCAN_INTERVAL_SECONDS's 20s
+// default: each poll spawns a PowerShell process running an inline C#
+// Add-Type block (heavier per-poll cost than a plain Get-Process
+// enumeration), and a remote-session state change is not something that
+// needs sub-20-second responsiveness the way a newly-launched blocking
+// application does. Conservative default (30s), clamped to [15, 300]
+// seconds so an institution can tighten or relax cadence without either
+// starving the exam session of CPU or leaving a real transition
+// undetected for many minutes.
+// ---------------------------------------------------------------------------
+const DEFAULT_REMOTE_SESSION_MONITOR_INTERVAL_SECONDS = 30;
+const MIN_REMOTE_SESSION_MONITOR_INTERVAL_SECONDS = 15;
+const MAX_REMOTE_SESSION_MONITOR_INTERVAL_SECONDS = 300;
+
+export function resolveRemoteSessionMonitorIntervalSeconds(): number {
+  return clampIntEnv(
+    process.env.TETHER_REMOTE_SESSION_MONITOR_INTERVAL_SECONDS,
+    MIN_REMOTE_SESSION_MONITOR_INTERVAL_SECONDS,
+    MAX_REMOTE_SESSION_MONITOR_INTERVAL_SECONDS,
+    DEFAULT_REMOTE_SESSION_MONITOR_INTERVAL_SECONDS,
+  );
+}

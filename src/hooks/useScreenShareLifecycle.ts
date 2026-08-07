@@ -62,6 +62,18 @@ export type UseScreenShareLifecycleResult = {
   start: () => Promise<void>;
   resume: () => Promise<void>;
   stop: () => void;
+  /**
+   * Mid-exam remote-session monitoring v1 — best-effort, event-triggered
+   * evidence frame for an integrity signal becoming active (currently
+   * only a detected Remote Desktop session). A no-op whenever a frame
+   * cannot be captured right now (screen sharing not ACTIVE, evidence
+   * capture disabled by policy, per-attempt frame cap already reached, or
+   * still within the minimum capture interval) — never throws, never
+   * blocks the caller, and never exposes exam content on failure (the
+   * same upload path as PERIODIC/RESTORATION captures, which already
+   * fails closed — see captureEvidenceFrame below).
+   */
+  captureIntegrityEvidence: () => void;
 };
 
 const EVIDENCE_CAPTURE_MAX_WIDTH = 960;
@@ -157,7 +169,7 @@ export function useScreenShareLifecycle(params: UseScreenShareLifecycleParams): 
   }, [stopAllTracks]);
 
   const captureEvidenceFrame = useCallback(
-    async (trigger: "PERIODIC" | "RESTORATION") => {
+    async (trigger: "PERIODIC" | "RESTORATION" | "INTEGRITY_EVENT") => {
       const video = videoRef.current;
       if (!video || video.readyState < 2 || video.videoWidth === 0) return;
       if (!policy.captureEvidence) return;
@@ -297,6 +309,11 @@ export function useScreenShareLifecycle(params: UseScreenShareLifecycleParams): 
   const start = requestShare;
   const resume = requestShare;
 
+  const captureIntegrityEvidence = useCallback(() => {
+    if (stateRef.current !== "ACTIVE") return;
+    void captureEvidenceFrame("INTEGRITY_EVENT");
+  }, [captureEvidenceFrame]);
+
   // Stop all tracks whenever monitoring is disabled (submission
   // finalized, attempt invalid/expired, authenticated user changed) —
   // never leaves capture active past the exam.
@@ -324,5 +341,6 @@ export function useScreenShareLifecycle(params: UseScreenShareLifecycleParams): 
     start,
     resume,
     stop,
+    captureIntegrityEvidence,
   };
 }

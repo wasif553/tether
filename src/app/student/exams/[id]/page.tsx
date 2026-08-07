@@ -104,7 +104,13 @@ import { useAnswerDevelopmentCapture } from "@/hooks/useAnswerDevelopmentCapture
 import { useResilientAutosave } from "@/hooks/useResilientAutosave";
 import { RecoveryStatusBanner } from "@/components/RecoveryStatusBanner";
 import { ManualReviewNotice } from "@/components/ManualReviewNotice";
-import { ensureLockdownBridgeInitialized, reportLockdownCapabilityTransition, reportLockdownScanUnavailable, type LockdownCapabilityInfo } from "@/lib/lockdownClient";
+import {
+  ensureLockdownBridgeInitialized,
+  reportLockdownCapabilityTransition,
+  reportLockdownScanUnavailable,
+  reportRemoteSessionMonitorTransition,
+  type LockdownCapabilityInfo,
+} from "@/lib/lockdownClient";
 
 /**
  * Strengthened phone detection (Part 3/4) — converts raw detector output
@@ -643,6 +649,14 @@ export default function TakeExamPage({
   // actually arrives, since the listener itself is registered
   // synchronously before the async fetch resolves).
   const lockdownCapabilityInfoRef = useRef<Map<string, LockdownCapabilityInfo>>(new Map());
+  // Mid-exam remote-session monitoring v1 — kept as a ref (not a direct
+  // closure reference) for the same reason as lockdownCapabilityInfoRef
+  // above: the IPC listener that needs it is registered once per
+  // submission inside an effect declared earlier in this component than
+  // the useScreenShareLifecycle() call that produces
+  // captureIntegrityEvidence, and must always see the LATEST function
+  // identity, not whatever it closed over at first render.
+  const remoteSessionCaptureEvidenceRef = useRef<() => void>(() => {});
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const lastEventAt = useRef<Partial<Record<IntegrityEventType, number>>>({});
   const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1395,6 +1409,40 @@ export default function TakeExamPage({
       reportLockdownScanUnavailable(payload.reason);
     });
 
+    // Mid-exam remote-session monitoring v1 — one call per de-duplicated
+    // transition (see remoteSessionMonitor.ts); registered once per
+    // submission, mirroring every other onLockdown*/onDisplay* listener
+    // above. secureClientSessionId reads the SAME `sessionId` this effect
+    // already resolved from GET .../secure-client/status above — null
+    // only for the (non-Tether-gated) case where no secure-client session
+    // exists at all, in which case this listener never fires in the first
+    // place (the monitor itself never starts — see setLockdownExamActive
+    // above, gated on the same `gated && verified`).
+    window.sesLockdown?.onRemoteSessionMonitorEvent?.((payload) => {
+      if (cancelled) return;
+      void reportRemoteSessionMonitorTransition({
+        submissionId,
+        kind: payload.kind,
+        effectiveAction: payload.effectiveAction,
+        previousState: payload.previousState,
+        currentState: payload.currentState,
+        detectedAtMsForClear: payload.detectedAtMsForClear,
+        classification: payload.classification,
+        tetherVersion: window.sesLockdown?.version ?? "unknown",
+        secureClientSessionId: sessionId,
+      });
+      // Required behaviour #7 — an event-triggered evidence frame when the
+      // remote-session state becomes active, only ever when screen
+      // evidence capture is actually enabled/active (gated inside
+      // useScreenShareLifecycle.captureIntegrityEvidence itself — this
+      // call is a harmless no-op otherwise, and any capture/upload
+      // failure is already non-fatal there, matching PERIODIC/RESTORATION
+      // captures).
+      if (payload.kind === "BECAME_ACTIVE") {
+        remoteSessionCaptureEvidenceRef.current();
+      }
+    });
+
     return () => {
       cancelled = true;
       // Part 10 — leaving this page (submission finalized, navigation
@@ -1427,6 +1475,7 @@ export default function TakeExamPage({
     },
     enabled: gateAcknowledged && data?.status === "IN_PROGRESS",
   });
+  remoteSessionCaptureEvidenceRef.current = screenShare.captureIntegrityEvidence;
   const requireScreenShare = secureSettings?.screenShareMode === "REQUIRED";
   const screenShareGateSatisfied = !requireScreenShare || screenShare.state === "ACTIVE";
 

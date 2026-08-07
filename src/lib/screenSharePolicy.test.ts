@@ -137,10 +137,15 @@ describe("upload rate limiting", () => {
 });
 
 describe("capture trigger validation", () => {
-  it("accepts only the three known trigger values", () => {
+  it("accepts only the four known trigger values", () => {
     expect(isValidScreenShareCaptureTrigger("PERIODIC")).toBe(true);
     expect(isValidScreenShareCaptureTrigger("INTERRUPTION")).toBe(true);
     expect(isValidScreenShareCaptureTrigger("RESTORATION")).toBe(true);
+    // Mid-exam remote-session monitoring v1 — an event-triggered capture
+    // from another integrity signal becoming active (see
+    // useScreenShareLifecycle.ts's captureIntegrityEvidence), distinct
+    // from INTERRUPTION (which is about the screen share's own lifecycle).
+    expect(isValidScreenShareCaptureTrigger("INTEGRITY_EVENT")).toBe(true);
     expect(isValidScreenShareCaptureTrigger("SOMETHING_ELSE")).toBe(false);
   });
 });
