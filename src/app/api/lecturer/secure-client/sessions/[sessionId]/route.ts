@@ -45,6 +45,24 @@ export async function GET(_req: Request, { params }: { params: Promise<{ session
 
   const student = await prisma.user.findUnique({ where: { id: clientSession.studentId }, select: { name: true } });
 
+  // Production administration hardening v1, Part G — Recovery Admin UX.
+  // See docs/tether-broad-rollout-readiness.md. A lecturer facing a
+  // RECOVERY_REQUIRED / device-change-flagged session previously had no
+  // way to see WHY on this page — recoveryOfSessionId,
+  // installationAttestationFailureReason, and the PRIOR session's own
+  // verification status all already existed on the schema but were never
+  // queried here. Read-only, additive: nothing about the actual recovery
+  // POLICY changes — see resolveRecoveryState (tetherRecovery.ts) and
+  // verifyExamSessionAttestation (tetherAttestationRunner.ts) for the
+  // real, authoritative decision logic this page only ever DISPLAYS
+  // evidence for.
+  const priorSession = clientSession.recoveryOfSessionId
+    ? await prisma.secureClientSession.findUnique({
+        where: { id: clientSession.recoveryOfSessionId },
+        select: { id: true, status: true, installationAttestationVerified: true, clientInstallationId: true, endedAt: true, endReason: true, closeReason: true },
+      })
+    : null;
+
   // Mandatory Tether Delivery for Final Examinations — Part 9: "Expose in
   // lecturer/admin views: assessment type; required delivery mode;
   // display policy; ... policy snapshot version/hash where already
@@ -87,7 +105,24 @@ export async function GET(_req: Request, { params }: { params: Promise<{ session
       displayPolicy: policySnapshot.displayPolicy,
       policyVersion: policySnapshot.policyVersion,
       policySchemaVersion: policySnapshot.schemaVersion,
+      // Part G — recovery admin UX. installationAttestationFailureReason
+      // is a single, bounded reason-code string (e.g.
+      // "DEVICE_CHANGE_DETECTED") — never a stack trace or raw request
+      // body (see recordExamSessionFailure in tetherAttestationRunner.ts).
+      installationAttestationVerified: clientSession.installationAttestationVerified,
+      installationAttestationFailureReason: clientSession.installationAttestationFailureReason,
+      recoveryOfSessionId: clientSession.recoveryOfSessionId,
     },
+    priorSession: priorSession
+      ? {
+          id: priorSession.id,
+          status: priorSession.status,
+          installationAttestationVerified: priorSession.installationAttestationVerified,
+          hadBoundInstallation: priorSession.clientInstallationId != null,
+          endedAt: priorSession.endedAt,
+          endReason: priorSession.endReason ?? priorSession.closeReason,
+        }
+      : null,
     attestations: clientSession.attestations.map((a) => ({
       id: a.id,
       overallStatus: a.overallStatus,

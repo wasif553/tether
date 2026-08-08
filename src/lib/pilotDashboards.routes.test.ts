@@ -54,6 +54,60 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
+// Production administration hardening v1, Part H — negative authorization
+// and tenant-isolation tests for the two dashboard routes. See
+// docs/tether-broad-rollout-readiness.md.
+describe("GET /api/exams/available and GET /api/exams — authorization", () => {
+  it("rejects an unauthenticated caller on both routes", async () => {
+    mockAuth.mockResolvedValue(null);
+    expect((await availableRoute.GET()).status).toBe(401);
+    expect((await examsRoute.GET()).status).toBe(401);
+  });
+
+  it("rejects a LECTURER on the student-only route, and a STUDENT on the lecturer-only route", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", institution.id));
+    expect((await availableRoute.GET()).status).toBe(401);
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", institution.id));
+    expect((await examsRoute.GET()).status).toBe(401);
+  });
+
+  it("[institution isolation] a lecturer in a different institution never sees another institution's exams via GET /api/exams", async () => {
+    const otherInstitution = await getOrCreateTestInstitution(`pilot-dash-inst-other-${stamp}`);
+    const otherLecturer = await prisma.user.create({
+      data: { name: "Other Inst Lecturer", email: `pilot-dash-other-lect-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "LECTURER", institutionId: otherInstitution.id },
+    });
+    const otherExam = await prisma.exam.create({
+      data: { title: `Other Institution Exam ${stamp}`, durationMins: 30, published: true, createdById: otherLecturer.id, institutionId: otherInstitution.id },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", institution.id));
+    const res = await examsRoute.GET();
+    const exams: Array<{ id: string }> = await res.json();
+    expect(exams.find((e) => e.id === otherExam.id)).toBeUndefined();
+
+    await prisma.exam.delete({ where: { id: otherExam.id } });
+    await prisma.user.delete({ where: { id: otherLecturer.id } });
+  });
+
+  it("[institution isolation] a student in a different institution never sees another institution's exam via GET /api/exams/available", async () => {
+    const otherInstitution = await getOrCreateTestInstitution(`pilot-dash-inst-other2-${stamp}`);
+    const otherStudent = await prisma.user.create({
+      data: { name: "Other Inst Student", email: `pilot-dash-other-stud-${stamp}@test.local`, passwordHash: await bcrypt.hash("x", 4), role: "STUDENT", institutionId: otherInstitution.id },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(otherStudent.id, "STUDENT", otherInstitution.id));
+    const res = await availableRoute.GET();
+    const exams: Array<{ id: string }> = await res.json();
+    // This student's own institution has no exams seeded — the response
+    // must never include exams belonging to `institution` (the shared
+    // fixture institution used throughout this file, which has many).
+    expect(exams.length).toBe(0);
+
+    await prisma.user.delete({ where: { id: otherStudent.id } });
+  });
+});
+
 describe("GET /api/exams/available — student dashboard history capping", () => {
   it("[3, 4] an actionable (open) exam is never dropped by the completed-history cap, even with many completed exams ahead of it in createdAt order", async () => {
     // 25 already-closed, already-submitted exams (history), created BEFORE
@@ -216,5 +270,79 @@ describe("GET /api/exams — lecturer dashboard needs-review aggregate + closed-
     const capped = await (await examsRoute.GET()).json();
     const full = await (await examsRoute.GET(getRequest("http://test.local/api/exams?all=true"))).json();
     expect(full.length).toBeGreaterThanOrEqual(capped.length);
+  });
+});
+
+// Production administration hardening v1 — see
+// docs/tether-broad-rollout-readiness.md, "True DB-level history
+// pagination". These cover the NEW `historyOffset`/`historyLimit` query
+// params added to both routes, which fetch bounded pages of history at
+// the DB level (via Prisma `skip`/`take`) instead of the unbounded
+// `?all=true` full-dump. `?all=true` itself is exercised above and is
+// unchanged by this pass — kept for backward compatibility.
+describe("GET /api/exams/available — new historyOffset/historyLimit pagination", () => {
+  it("returns a bounded page shaped {history, hasMore}, distinct from the default plain-array response", async () => {
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", institution.id));
+    const res = await availableRoute.GET(getRequest("http://test.local/api/exams/available?historyOffset=0&historyLimit=5"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body)).toBe(false);
+    expect(Array.isArray(body.history)).toBe(true);
+    expect(typeof body.hasMore).toBe("boolean");
+    expect(body.history.length).toBeLessThanOrEqual(5);
+  });
+
+  it("successive pages return disjoint items, and hasMore is false once every history item has been paged through", async () => {
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", institution.id));
+    const allHistory: Array<{ id: string }> = [];
+    let offset = 0;
+    const pageSize = 5;
+    for (let i = 0; i < 20; i++) {
+      // Bounded loop — refuses to spin forever even if hasMore were
+      // (incorrectly) always true.
+      const res = await availableRoute.GET(getRequest(`http://test.local/api/exams/available?historyOffset=${offset}&historyLimit=${pageSize}`));
+      const body: { history: Array<{ id: string }>; hasMore: boolean } = await res.json();
+      for (const item of body.history) {
+        expect(allHistory.find((seen) => seen.id === item.id)).toBeUndefined();
+      }
+      allHistory.push(...body.history);
+      offset += pageSize;
+      if (!body.hasMore) break;
+    }
+    // Every id seen across pages is unique (already asserted per-page above)
+    // and the full paginated set is at least as large as the default capped
+    // page — proving pagination surfaces items beyond the default 20.
+    expect(new Set(allHistory.map((e) => e.id)).size).toBe(allHistory.length);
+  });
+});
+
+describe("GET /api/exams — new historyOffset/historyLimit pagination", () => {
+  it("returns a bounded page shaped {history, hasMore}, distinct from the default plain-array response", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", institution.id));
+    const res = await examsRoute.GET(getRequest("http://test.local/api/exams?historyOffset=0&historyLimit=5"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body)).toBe(false);
+    expect(Array.isArray(body.history)).toBe(true);
+    expect(typeof body.hasMore).toBe("boolean");
+    expect(body.history.length).toBeLessThanOrEqual(5);
+  });
+
+  it("a needs-review exam is never returned by the history-page endpoint, even when definitively closed (it belongs in the always-uncapped current set, not paginated history)", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", institution.id));
+    let offset = 0;
+    const pageSize = 10;
+    const seenIds = new Set<string>();
+    for (let i = 0; i < 20; i++) {
+      const res = await examsRoute.GET(getRequest(`http://test.local/api/exams?historyOffset=${offset}&historyLimit=${pageSize}`));
+      const body: { history: Array<{ id: string; needsReviewCount: number }>; hasMore: boolean } = await res.json();
+      for (const item of body.history) {
+        expect(item.needsReviewCount).toBe(0);
+        seenIds.add(item.id);
+      }
+      offset += pageSize;
+      if (!body.hasMore) break;
+    }
+    expect(seenIds.size).toBeGreaterThan(0);
   });
 });

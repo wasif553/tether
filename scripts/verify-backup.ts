@@ -18,7 +18,8 @@
  */
 import path from "node:path";
 import { verifyBackupFile } from "./backupVerification/backupFileChecks";
-import { runRestoreRehearsal } from "./backupVerification/restoreRehearsal";
+import { runRestoreRehearsal, type RestoreRehearsalResult } from "./backupVerification/restoreRehearsal";
+import { buildBackupVerificationReport, writeBackupVerificationReport } from "./backupVerification/verificationReport";
 
 function log(message: string): void {
   console.log(`[backup:verify] ${message}`);
@@ -27,10 +28,12 @@ function log(message: string): void {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const restoreRequested = args.includes("--restore");
-  const filePath = args.find((a) => !a.startsWith("--"));
+  const reportFlagIndex = args.indexOf("--report");
+  const reportPath = reportFlagIndex >= 0 ? args[reportFlagIndex + 1] : null;
+  const filePath = args.find((a, i) => !a.startsWith("--") && args[i - 1] !== "--report");
 
   if (!filePath) {
-    log("Usage: npm run backup:verify -- <path-to-dump-file> [--restore]");
+    log("Usage: npm run backup:verify -- <path-to-dump-file> [--restore] [--report <path-to-report.json>]");
     process.exitCode = 1;
     return;
   }
@@ -47,7 +50,7 @@ async function main(): Promise<void> {
 
   if (!fileResult.passed) {
     log("File-level verification FAILED — refusing to proceed to a restore rehearsal, even if --restore was passed.");
-    printResult({ fileResult, restoreResult: null, overallPassed: false });
+    await finish({ fileResult, restoreResult: null, reportPath });
     process.exitCode = 1;
     return;
   }
@@ -55,7 +58,7 @@ async function main(): Promise<void> {
 
   if (!restoreRequested) {
     log("--restore not passed — skipping the disposable-restore rehearsal (file-level checks only).");
-    printResult({ fileResult, restoreResult: null, overallPassed: true });
+    await finish({ fileResult, restoreResult: null, reportPath });
     process.exitCode = 0;
     return;
   }
@@ -69,15 +72,20 @@ async function main(): Promise<void> {
   }
 
   const overallPassed = fileResult.passed && restoreResult.passed;
-  printResult({ fileResult, restoreResult, overallPassed });
+  await finish({ fileResult, restoreResult, reportPath });
   process.exitCode = overallPassed ? 0 : 1;
 }
 
-function printResult(summary: { fileResult: unknown; restoreResult: unknown; overallPassed: boolean }): void {
-  log("── Verification record ──────────────────────────");
-  log(JSON.stringify(summary, null, 2));
-  log(summary.overallPassed ? "backup:verify PASSED" : "backup:verify FAILED");
+async function finish(params: { fileResult: Parameters<typeof buildBackupVerificationReport>[0]["fileResult"]; restoreResult: RestoreRehearsalResult | null; reportPath: string | null }): Promise<void> {
+  const report = buildBackupVerificationReport({ filePath: params.fileResult.filePath, fileResult: params.fileResult, restoreResult: params.restoreResult });
+  log("── Verification record (standard machine-readable format) ──────────────────────────");
+  log(JSON.stringify(report, null, 2));
+  log(report.overallPassed ? "backup:verify PASSED" : "backup:verify FAILED");
   log("──────────────────────────────────────────────────");
+  if (params.reportPath) {
+    await writeBackupVerificationReport(report, params.reportPath);
+    log(`Report written to: ${path.resolve(params.reportPath)}`);
+  }
 }
 
 main().catch((err) => {
