@@ -773,6 +773,15 @@ export async function verifySystemCheckAttestation(params: VerifySystemCheckAtte
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       return { outcome: "REPLAY" };
     }
+    // Pilot operations + distribution readiness v1 — anything other than
+    // the expected P2002 replay case previously propagated with no
+    // breadcrumb distinguishing it from any other 500 in this route.
+    console.error("verifySystemCheckAttestation: verification transaction failed", {
+      userId: params.userId,
+      installationId: loaded.installation.id,
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorCode: (err as { code?: string })?.code ?? null,
+    });
     throw err;
   }
 }
@@ -1113,6 +1122,16 @@ export async function verifyExamSessionAttestation(params: VerifyExamSessionAtte
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       return { outcome: "REPLAY" };
     }
+    // Pilot operations + distribution readiness v1 — same rationale as
+    // verifySystemCheckAttestation's own breadcrumb above; this is the
+    // real-exam-session attestation path, not just system-check.
+    console.error("verifyExamSessionAttestation: verification transaction failed", {
+      userId: params.userId,
+      sessionId: session.id,
+      installationId: loaded.installation.id,
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorCode: (err as { code?: string })?.code ?? null,
+    });
     throw err;
   }
 }

@@ -83,7 +83,15 @@ type AccessCheckResult =
 type SecureClientLaunchField = { required: false } | { required: true; kind: "ALLOW" | "REDIRECT_TO_TETHER_LAUNCH"; redirectTo: string | null };
 type StartResponse = { id: string; secureClientLaunch?: SecureClientLaunchField };
 
-const INSTALLER_DOWNLOAD_URL = "/downloads/tether-secure-browser/latest/Tether-Secure-Browser-win-x64.exe";
+// Pilot operations + distribution readiness v1 — this used to be a
+// hardcoded literal (`/downloads/tether-secure-browser/latest/...`)
+// pointing at a route/file that never existed — a dead link shown to
+// every student who reached the installer-fallback state. Now sourced
+// from the one canonical release-metadata endpoint
+// (GET /api/tether/release-metadata -> resolveTetherReleaseMetadata),
+// so this can never again silently drift out of sync with whether a
+// real installer is actually published.
+type ReleaseMetadata = { version: string; installerUrl: string | null; downloadsEnabled: boolean };
 
 export default function TetherLaunchPage({ params }: { params: Promise<{ id: string }> }) {
   const { id: examId } = usePromise(params);
@@ -119,6 +127,10 @@ function OutsideTetherPrompt({ examId }: { examId: string }) {
   // purely for wording — never gates anything here (the actual
   // enforcement is entirely server-side; see secureClientStartGate.ts).
   const [isFinalExamination, setIsFinalExamination] = useState(false);
+  // Pilot operations + distribution readiness v1 — null until loaded;
+  // the fallback panel treats a still-loading/failed fetch the same as
+  // "downloads not configured" (never assumes a download link exists).
+  const [release, setRelease] = useState<ReleaseMetadata | null>(null);
 
   useEffect(() => {
     fetch(`/api/exams/${examId}/access-check`)
@@ -130,6 +142,13 @@ function OutsideTetherPrompt({ examId }: { examId: string }) {
       })
       .catch(() => {});
   }, [examId]);
+
+  useEffect(() => {
+    fetch("/api/tether/release-metadata")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: ReleaseMetadata | null) => setRelease(data))
+      .catch(() => setRelease(null));
+  }, []);
 
   useEffect(() => {
     if (attemptedAt == null) return;
@@ -175,23 +194,32 @@ function OutsideTetherPrompt({ examId }: { examId: string }) {
             If nothing opened, Tether Secure Browser may not be installed on this device yet — a webpage can never
             be completely certain either way.
           </p>
-          <a
-            href={INSTALLER_DOWNLOAD_URL}
-            className="mt-3 block w-full rounded border border-gray-300 px-4 py-2 text-center text-sm text-gray-800"
-          >
-            Download Tether Secure Browser (Windows)
-          </a>
+          {release?.downloadsEnabled && release.installerUrl ? (
+            <>
+              <a
+                href={release.installerUrl}
+                className="mt-3 block w-full rounded border border-gray-300 px-4 py-2 text-center text-sm text-gray-800"
+              >
+                Download Tether Secure Browser (Windows)
+              </a>
+              <div className="mt-4 text-xs text-gray-500">
+                <p className="font-medium text-gray-600">Installing Tether Secure Browser</p>
+                <ol className="mt-1 list-decimal space-y-1 pl-4">
+                  <li>Download the installer above.</li>
+                  <li>Run the downloaded file and follow the on-screen prompts.</li>
+                  <li>Once installed, return to this page and select &quot;I have installed it — open examination&quot;.</li>
+                </ol>
+              </div>
+            </>
+          ) : (
+            <p className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+              Tether Secure Browser is not yet available for public download. Contact your institution or exam
+              support for the approved installer.
+            </p>
+          )}
           <button onClick={attemptLaunch} className="mt-2 w-full rounded bg-black px-4 py-2 text-sm text-white">
             I have installed it — open examination
           </button>
-          <div className="mt-4 text-xs text-gray-500">
-            <p className="font-medium text-gray-600">Installing Tether Secure Browser</p>
-            <ol className="mt-1 list-decimal space-y-1 pl-4">
-              <li>Download the installer above.</li>
-              <li>Run the downloaded file and follow the on-screen prompts.</li>
-              <li>Once installed, return to this page and select &quot;I have installed it — open examination&quot;.</li>
-            </ol>
-          </div>
         </div>
       )}
     </div>
