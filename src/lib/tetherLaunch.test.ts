@@ -5,6 +5,7 @@ import {
   shouldShowInstallerFallback,
   resolveTetherLaunchFailureMessage,
   DEFAULT_INSTALLER_FALLBACK_THRESHOLD_MS,
+  isSecureClientSessionVerified,
 } from "./tetherLaunch";
 
 describe("buildTetherDeepLink", () => {
@@ -63,5 +64,41 @@ describe("resolveTetherLaunchFailureMessage", () => {
     const message = resolveTetherLaunchFailureMessage("TRANSIENT_FAILURE");
     expect(message).toBe("Your secure exam could not be opened. Please try again. If the problem continues, contact support.");
     expect(message).not.toMatch(/reinstall|install tether|check tether/i);
+  });
+});
+
+// P0 secure-launch redirect loop hotfix — see
+// docs/tether-secure-launch-loop-hotfix.md. This is THE authoritative
+// gate the fix added: tether-launch/page.tsx must never navigate into
+// exam content unless this returns true. Covers the exact conditions
+// that produced the physically-observed infinite loop (attestation
+// submitted but not VERIFIED) and proves the gate fails closed on every
+// malformed/absent-data shape.
+describe("isSecureClientSessionVerified — the authoritative post-attestation navigation gate", () => {
+  it("[3, 4] returns false when the session's verificationStatus is anything other than VERIFIED — the exact case that caused the P0 redirect loop (attestation submitted, overall status not READY)", () => {
+    expect(isSecureClientSessionVerified({ session: { verificationStatus: "NOT_CHECKED" } })).toBe(false);
+    expect(isSecureClientSessionVerified({ session: { verificationStatus: "UNVERIFIED_CLIENT" } })).toBe(false);
+    expect(isSecureClientSessionVerified({ session: { verificationStatus: "INVALID_CONFIGURATION" } })).toBe(false);
+    expect(isSecureClientSessionVerified({ session: { verificationStatus: "TECHNICAL_FAILURE" } })).toBe(false);
+  });
+
+  it("[9] returns true only for the exact string VERIFIED", () => {
+    expect(isSecureClientSessionVerified({ session: { verificationStatus: "VERIFIED" } })).toBe(true);
+  });
+
+  it("[2] fails closed when there is no current session at all (e.g. the manifest-consume/attestation request itself failed outright)", () => {
+    expect(isSecureClientSessionVerified({ session: null })).toBe(false);
+  });
+
+  it("fails closed for malformed/absent response shapes — never throws", () => {
+    expect(isSecureClientSessionVerified(null)).toBe(false);
+    expect(isSecureClientSessionVerified(undefined)).toBe(false);
+    expect(isSecureClientSessionVerified({})).toBe(false);
+    expect(isSecureClientSessionVerified({ session: {} })).toBe(false);
+  });
+
+  it("never treats a case-different or substring match as verified (e.g. 'verified' lowercase, or a status merely containing the word)", () => {
+    expect(isSecureClientSessionVerified({ session: { verificationStatus: "verified" } })).toBe(false);
+    expect(isSecureClientSessionVerified({ session: { verificationStatus: "NOT_VERIFIED" } })).toBe(false);
   });
 });

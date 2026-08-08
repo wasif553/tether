@@ -41,7 +41,7 @@
 import { useEffect, useRef, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
-import { buildTetherDeepLink, shouldShowInstallerFallback, resolveTetherLaunchFailureMessage } from "@/lib/tetherLaunch";
+import { buildTetherDeepLink, shouldShowInstallerFallback, resolveTetherLaunchFailureMessage, isSecureClientSessionVerified } from "@/lib/tetherLaunch";
 import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 import { ensureRegisteredInstallation } from "@/lib/secureClient/installationClient";
 import { ManualReviewNotice } from "@/components/ManualReviewNotice";
@@ -266,6 +266,34 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   const pendingIsFinalExamRef = useRef(false);
   const lockdownCapabilityInfoRef = useRef<Map<string, LockdownCapabilityInfo> | null>(null);
 
+  // P0 secure-launch redirect loop hotfix — see
+  // docs/tether-secure-launch-loop-hotfix.md. Two independent guards:
+  //
+  //  - `unmountedRef`: runLaunchSequence is a plain async function, not a
+  //    cancellable effect — if the student navigates away (e.g. clicks
+  //    "My Exams" in the nav bar) WHILE a launch attempt is still
+  //    in-flight, the in-flight promise chain previously kept running
+  //    after unmount and its trailing `router.replace(...)` would still
+  //    fire once network calls resolved, silently pulling the student
+  //    back into the exam/tether-launch bounce even though they had
+  //    already navigated away. Checked immediately before every
+  //    navigation call this component makes.
+  //  - `autoAttemptedRef`: the mount effect below auto-resumes an
+  //    existing IN_PROGRESS submission at most ONCE per mount — a
+  //    defensive one-shot guard, not a retry-count/timer hack. The real
+  //    fix for the infinite mount->redirect->remount cycle is that a
+  //    failed/unverified launch no longer navigates into the exam at all
+  //    (see runLaunchSequence below) — this guard is a second, cheap
+  //    line of defense against the same effect firing twice in one
+  //    mount for any other reason (e.g. a dependency re-run).
+  const unmountedRef = useRef(false);
+  const autoAttemptedRef = useRef(false);
+  useEffect(() => {
+    return () => {
+      unmountedRef.current = true;
+    };
+  }, []);
+
   /**
    * Part 3/5 — returns true when it is safe to proceed into
    * runLaunchSequence. Fails OPEN when this packaged build predates the
@@ -340,14 +368,17 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         // screen again; go straight into the start/launch sequence,
         // unless the authoritative recovery state says this attempt
         // requires manual review first.
-        if (data.ok && data.existingSubmission?.status === "IN_PROGRESS") {
+        if (data.ok && data.existingSubmission?.status === "IN_PROGRESS" && !autoAttemptedRef.current) {
           const requiresManualReview = await checkManualReviewRequired(data.existingSubmission.id);
           if (requiresManualReview) {
+            logClientTetherDiagnostic("RECOVERY_REQUIRED", { examId, submissionId: data.existingSubmission.id });
             setManualReview(true);
             return;
           }
           const preflightOk = await checkLockdownPreflight(null, data.exam.assessmentType === "FINAL_EXAMINATION");
           if (!preflightOk) return;
+          if (unmountedRef.current) return;
+          autoAttemptedRef.current = true;
           void runLaunchSequence(null);
         }
       })
@@ -428,8 +459,13 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         // Either this exam doesn't require Tether after all (shouldn't
         // normally reach this page in that case, but harmless), or a
         // verified session already exists (resuming after an earlier
-        // successful launch) — either way, proceed straight into the
-        // exam, exactly like the join page does.
+        // successful launch) — either way, POST /start has ALREADY made
+        // the authoritative eligibility decision here (kind: "ALLOW" is
+        // only ever returned once the server itself has confirmed a
+        // verified session exists) — proceed straight into the exam,
+        // exactly like the join page does.
+        logClientTetherDiagnostic("NAVIGATION_ALLOWED", { examId, reason: "start_allow" });
+        if (unmountedRef.current) return;
         router.replace(`/student/exams/${submission.id}`);
         return;
       }
@@ -446,7 +482,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       // contents (the manifest is the launch token; see
       // secureLaunchManifest.ts's own doc comment on why the raw nonce
       // must never be persisted, let alone logged).
-      logClientTetherDiagnostic("launch_manifest_issued", { manifestId: manifest.manifestId, clientType: manifest.clientType });
+      logClientTetherDiagnostic("MANIFEST_ISSUED", { manifestId: manifest.manifestId, clientType: manifest.clientType });
 
       const consumeRes = await fetch(`/api/secure-client/launch/${manifest.manifestId}/consume`, {
         method: "POST",
@@ -460,7 +496,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         return;
       }
       const consumed: { ok: boolean; sessionId?: string } = await consumeRes.json();
-      logClientTetherDiagnostic("launch_manifest_consumed_session_created", {
+      logClientTetherDiagnostic("MANIFEST_CONSUMED", {
         outcome: "CONSUMED",
         hasSessionId: Boolean(consumed.sessionId),
       });
@@ -488,7 +524,11 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       // establishes verification the same way the mock simulator always
       // has.
       if (consumed.sessionId) {
-        await submitInitialAttestation(consumed.sessionId, submission.id);
+        const attestationOutcome = await submitInitialAttestation(consumed.sessionId, submission.id);
+        logClientTetherDiagnostic(attestationOutcome.submitted ? "launch_manifest_attestation_submitted" : "LEGACY_ATTESTATION_FAILED", {
+          sessionId: consumed.sessionId,
+          submitted: attestationOutcome.submitted,
+        });
         // Secure Client Attestation v2 — see
         // docs/tether-system-check-v1.md, "Wiring installation attestation
         // into real exam sessions". Best-effort and additive: under the
@@ -501,10 +541,42 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         await submitExamSessionAttestationV2(consumed.sessionId, submission.id);
       }
 
+      // P0 secure-launch redirect loop hotfix — see
+      // docs/tether-secure-launch-loop-hotfix.md. THE FIX: consuming a
+      // manifest and submitting attestation only ever CREATES/ATTEMPTS
+      // verification — it never guarantees the session actually reached
+      // verificationStatus VERIFIED (attestation can fail outright, or
+      // succeed but resolve to ACTION_REQUIRED/CANNOT_START, e.g. a
+      // display-policy violation). Previously this function navigated
+      // into the exam unconditionally at this point; GET
+      // /api/submissions/[id]'s own TETHER_SESSION_REQUIRED gate would
+      // then immediately bounce back here, and this page's mount effect
+      // would auto-retry the exact same broken sequence — an infinite
+      // Loading/Opening-your-exam cycle with no stable error state ever
+      // shown, and the student never reaching camera/screen-share checks
+      // (which only render once the exam page itself loads).
+      //
+      // The fix re-reads the SAME authoritative, already-computed
+      // session state the real gate uses (GET
+      // /api/submissions/[id]/secure-client/status's session.verificationStatus
+      // — server-computed, never re-derived here) and only navigates
+      // when it is exactly "VERIFIED". This never duplicates security
+      // policy client-side: it is a read of the server's own decision,
+      // not a new one.
+      const verified = await checkAuthoritativeSessionVerified(submission.id);
+      if (!verified) {
+        logClientTetherDiagnostic("AUTHORITATIVE_SESSION_NOT_VERIFIED", { examId, submissionId: submission.id });
+        setError('Tether could not verify this secure exam session. Select "Try again" below, or contact support if this continues.');
+        uncoverOnFailure();
+        return;
+      }
+
       // Land directly in the exam; the Electron app's own live
       // display-enforcement (registered from app start, independent of
       // this page) takes over from here regardless of the one-time
       // attestation result above.
+      logClientTetherDiagnostic("NAVIGATION_ALLOWED", { examId, reason: "authoritative_session_verified" });
+      if (unmountedRef.current) return;
       router.replace(`/student/exams/${submission.id}`);
     } catch {
       // A thrown exception (network failure, etc.) rather than a
@@ -525,13 +597,24 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
    * a display check, reports the current Electron display count for
    * that ONE check if so (feature-detected — never fails hard if an
    * older packaged install doesn't expose getDisplayCount), and submits
-   * the attestation. Never blocks entry on failure here: if this call
-   * itself fails, the session simply stays unverified and the existing
-   * TETHER_SESSION_REQUIRED gate on GET /api/submissions/[id] will
-   * correctly send the student back to this page to retry, rather than
-   * silently granting access.
+   * the attestation.
+   *
+   * P0 secure-launch redirect loop hotfix — this used to return
+   * Promise<void> and never told its caller whether the HTTP submission
+   * itself succeeded, let alone whether the resulting overallStatus was
+   * actually READY. `runLaunchSequence` no longer needs that distinction
+   * from THIS function directly (it now separately re-checks the
+   * authoritative session.verificationStatus via
+   * checkAuthoritativeSessionVerified below, which is the single source
+   * of truth the real content gate also uses) — but `submitted` is still
+   * returned so the caller can log a clear LEGACY_ATTESTATION_FAILED
+   * diagnostic specifically for "the request itself never went through"
+   * (network failure), distinct from "it went through but didn't verify"
+   * (which the authoritative check below distinguishes on its own).
+   * Never throws — a request failure here just means the session stays
+   * unverified, which the authoritative check correctly detects.
    */
-  async function submitInitialAttestation(sessionId: string, submissionId: string): Promise<void> {
+  async function submitInitialAttestation(sessionId: string, submissionId: string): Promise<{ submitted: boolean }> {
     try {
       const statusRes = await fetch(`/api/submissions/${submissionId}/secure-client/status`);
       const status = statusRes.ok ? await statusRes.json().catch(() => null) : null;
@@ -554,12 +637,41 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         }),
       });
       const body = await res.json().catch(() => null);
-      logClientTetherDiagnostic("secure_client_session_verified", {
-        ok: res.ok,
-        overallStatus: typeof body?.overallStatus === "string" ? body.overallStatus : null,
-      });
+      const overallStatus = typeof body?.overallStatus === "string" ? body.overallStatus : null;
+      logClientTetherDiagnostic("secure_client_session_verified", { ok: res.ok, overallStatus });
+      if (res.ok && overallStatus !== "READY") {
+        logClientTetherDiagnostic("LEGACY_ATTESTATION_NOT_VERIFIED", { sessionId, overallStatus });
+      }
+      return { submitted: res.ok };
     } catch {
       logClientTetherDiagnostic("secure_client_session_verified", { ok: false, overallStatus: null });
+      return { submitted: false };
+    }
+  }
+
+  /**
+   * P0 secure-launch redirect loop hotfix — the authoritative gate this
+   * page must check before EVER navigating into exam content. Reads the
+   * SAME server-computed field (SecureClientSession.verificationStatus,
+   * via GET /api/submissions/[id]/secure-client/status) that GET
+   * /api/submissions/[id]'s own TETHER_SESSION_REQUIRED check is based
+   * on — never a second, client-derived approximation of that decision.
+   * Fails CLOSED (returns false) on any network/parse error or missing
+   * session, matching "NEVER navigate to exam content unless the server
+   * confirms the secure client session satisfies the authoritative entry
+   * gate."
+   */
+  async function checkAuthoritativeSessionVerified(submissionId: string): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/submissions/${submissionId}/secure-client/status`);
+      if (!res.ok) return false;
+      const body = await res.json();
+      // The actual decision logic lives in isSecureClientSessionVerified
+      // (src/lib/tetherLaunch.ts) — pure and unit-tested there — never
+      // duplicated here.
+      return isSecureClientSessionVerified(body);
+    } catch {
+      return false;
     }
   }
 
