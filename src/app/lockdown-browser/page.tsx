@@ -1,4 +1,15 @@
+import { resolveTetherReleaseMetadata } from "@/lib/tetherReleaseMetadata";
+
+// Pilot operations + distribution readiness v1 — see
+// docs/tether-release-management.md. Server component: reads release
+// metadata directly (no client fetch needed — resolveTetherReleaseMetadata
+// is a synchronous, server-only env-var resolver). Never shows a
+// download button pointing nowhere: the button only renders when
+// `downloadsEnabled` is actually true, which itself only ever happens
+// when an operator has configured a real, published installer URL.
 export default function LockdownBrowserPage() {
+  const release = resolveTetherReleaseMetadata();
+
   return (
     <div className="mx-auto max-w-2xl py-12">
       <h1 className="text-2xl font-semibold">Tether Secure Browser</h1>
@@ -7,6 +18,47 @@ export default function LockdownBrowserPage() {
         logging on top of the browser-based Secure Exam Mode already built
         into this platform.
       </p>
+
+      <div className="mt-6 rounded border border-gray-200 p-4">
+        {release.downloadsEnabled && release.installerUrl ? (
+          <div className="space-y-3 text-sm">
+            <h2 className="text-lg font-medium text-gray-900">Download Tether for Windows</h2>
+            <p className="text-gray-600">
+              Version {release.version} · Windows x64
+            </p>
+            <a
+              href={release.installerUrl}
+              className="inline-block rounded bg-black px-4 py-2 text-sm font-medium text-white"
+            >
+              Download Tether for Windows
+            </a>
+            <ol className="list-decimal space-y-1 pl-5 text-gray-700">
+              <li>Run the downloaded installer and accept the security warning (the installer is not yet code-signed — this is expected).</li>
+              <li>Follow the on-screen setup steps. No configuration is required.</li>
+              <li>
+                Once installed, visit <a href="/student/system-check" className="underline">Check this computer</a> to confirm Tether is detected and ready.
+              </li>
+            </ol>
+            <p className="text-gray-600">
+              Tether records OS-level integrity signals (window focus, fullscreen state, display and process changes, and — where an exam requires it — screen sharing and camera monitoring) as evidence for your lecturer to review. It does not automatically determine misconduct.
+            </p>
+            <p className="text-gray-500">
+              Having trouble? Contact your institution or exam support for help.
+            </p>
+            <details className="text-xs text-gray-500">
+              <summary className="cursor-pointer select-none">Technical details</summary>
+              <p className="mt-1">SHA-256: <code className="break-all">{release.sha256}</code></p>
+              <p className="mt-1">Installer filename: <code>{release.installerFilename}</code></p>
+            </details>
+          </div>
+        ) : (
+          <p className="text-sm text-gray-700">
+            Tether Secure Browser is not yet available for public download.
+            Contact your institution or exam support for the approved
+            installer.
+          </p>
+        )}
+      </div>
 
       <div className="mt-6 space-y-6 text-sm leading-6 text-gray-700">
         <section>
@@ -56,19 +108,6 @@ export default function LockdownBrowserPage() {
             security warning on first install — this is expected. There
             is no auto-update, no kiosk mode, and no managed/IT-fleet
             deployment path yet.
-          </p>
-        </section>
-
-        <section>
-          <h2 className="font-medium text-gray-900">
-            Installers are provided by your institution
-          </h2>
-          <p className="mt-1">
-            This page does not host a public download. Installers are
-            distributed by the pilot operator directly to enrolled
-            students and lecturers, alongside a step-by-step install
-            guide covering installation, troubleshooting, and
-            uninstallation for both Windows and macOS.
           </p>
         </section>
 

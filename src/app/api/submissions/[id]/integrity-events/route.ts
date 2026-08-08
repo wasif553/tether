@@ -204,7 +204,23 @@ export async function POST(
   };
 
   if (!debounceWindowMs) {
-    const event = await prisma.integrityEvent.create({ data: eventData });
+    let event;
+    try {
+      event = await prisma.integrityEvent.create({ data: eventData });
+    } catch (err) {
+      // Pilot operations + distribution readiness v1 — this route had no
+      // diagnostic breadcrumb at all: a create failure previously
+      // propagated as a fully opaque 500 with nothing distinguishing it
+      // from a client-input bug. Bounded fields only — never message or
+      // metadata, which are student-authored/free-form.
+      console.error("POST integrity-events: create failed", {
+        submissionId: id,
+        eventType,
+        errorName: err instanceof Error ? err.name : typeof err,
+        errorCode: (err as { code?: string })?.code ?? null,
+      });
+      throw err;
+    }
     return NextResponse.json(event, { status: 201 });
   }
 
@@ -219,18 +235,29 @@ export async function POST(
   // used for autosave revision safety (see answers/route.ts) — so this
   // is now a real idempotency boundary, not just an application-level
   // check.
-  const result = await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}), hashtext(${eventType}))`;
-    const recent = await tx.integrityEvent.findFirst({
-      where: { submissionId: id, eventType },
-      orderBy: { occurredAt: "desc" },
+  let result;
+  try {
+    result = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}), hashtext(${eventType}))`;
+      const recent = await tx.integrityEvent.findFirst({
+        where: { submissionId: id, eventType },
+        orderBy: { occurredAt: "desc" },
+      });
+      if (recent && Date.now() - recent.occurredAt.getTime() < debounceWindowMs) {
+        return { row: recent, deduped: true };
+      }
+      const created = await tx.integrityEvent.create({ data: eventData });
+      return { row: created, deduped: false };
     });
-    if (recent && Date.now() - recent.occurredAt.getTime() < debounceWindowMs) {
-      return { row: recent, deduped: true };
-    }
-    const created = await tx.integrityEvent.create({ data: eventData });
-    return { row: created, deduped: false };
-  });
+  } catch (err) {
+    console.error("POST integrity-events: debounced transaction failed", {
+      submissionId: id,
+      eventType,
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorCode: (err as { code?: string })?.code ?? null,
+    });
+    throw err;
+  }
 
   return NextResponse.json(result.row, { status: result.deduped ? 200 : 201 });
 }

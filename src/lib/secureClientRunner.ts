@@ -416,30 +416,46 @@ export async function issueLaunchManifest(params: IssueLaunchManifestParams) {
   const signature = signManifest(manifest, getSigningPrivateKey());
   const manifestHash = computeManifestHash(manifest);
 
-  const record = await prisma.secureClientLaunchManifest.create({
-    data: {
-      // Bug fix (hardening pass — found via disposable-database
-      // validation, see docs/migration-ledger.md): consumeLaunchManifest
-      // below rejects a manifest whose signed manifestId doesn't match
-      // the persisted row's id (defence-in-depth beyond the nonce/
-      // signature checks). Without pinning the row's id to the SAME
-      // manifestId embedded in the manifest, that check could never pass
-      // — every real consumption would fail with NOT_FOUND, since
-      // Prisma's default cuid() has no relation to the manifestId
-      // generated above.
-      id: manifestId,
-      institutionId: params.institutionId,
-      examId: params.examId,
+  let record;
+  try {
+    record = await prisma.secureClientLaunchManifest.create({
+      data: {
+        // Bug fix (hardening pass — found via disposable-database
+        // validation, see docs/migration-ledger.md): consumeLaunchManifest
+        // below rejects a manifest whose signed manifestId doesn't match
+        // the persisted row's id (defence-in-depth beyond the nonce/
+        // signature checks). Without pinning the row's id to the SAME
+        // manifestId embedded in the manifest, that check could never pass
+        // — every real consumption would fail with NOT_FOUND, since
+        // Prisma's default cuid() has no relation to the manifestId
+        // generated above.
+        id: manifestId,
+        institutionId: params.institutionId,
+        examId: params.examId,
+        submissionId: params.submissionId,
+        studentId: params.studentId,
+        configurationId: params.configurationId,
+        clientType: params.clientType,
+        nonceHash: hashNonce(nonce),
+        policyHash,
+        manifestHash,
+        expiresAt,
+      },
+    });
+  } catch (err) {
+    // Pilot operations + distribution readiness v1 — this write had no
+    // diagnostic breadcrumb at all: a failure here previously propagated
+    // as a fully opaque 500 from POST .../secure-client/launch with
+    // nothing in the logs to distinguish it from any other failure.
+    // Bounded fields only, same convention as consumeLaunchManifest's own
+    // console.error below.
+    console.error("issueLaunchManifest: manifest create failed", {
       submissionId: params.submissionId,
-      studentId: params.studentId,
-      configurationId: params.configurationId,
-      clientType: params.clientType,
-      nonceHash: hashNonce(nonce),
-      policyHash,
-      manifestHash,
-      expiresAt,
-    },
-  });
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorCode: (err as { code?: string })?.code ?? null,
+    });
+    throw err;
+  }
 
   return { record, manifest, signature };
 }
@@ -874,34 +890,48 @@ export async function recordAttestation(input: RecordAttestationInput) {
   const displayCount = displaySupported && isValidReportedDisplayCount(input.displayCount) ? input.displayCount : null;
   const displayTopology = displaySupported && typeof input.displayTopology === "string" && isValidDisplayTopology(input.displayTopology) ? input.displayTopology : null;
 
-  const attestation = await prisma.secureClientAttestation.create({
-    data: {
-      secureClientSessionId: input.sessionId,
+  let attestation;
+  try {
+    attestation = await prisma.secureClientAttestation.create({
+      data: {
+        secureClientSessionId: input.sessionId,
+        clientType: input.clientType,
+        platform: input.platform ?? null,
+        osVersion: input.osVersion ?? null,
+        clientVersion: input.clientVersion ?? null,
+        clientBuild: input.clientBuild ?? null,
+        displayCheckStatus: normalisedChecks.displayCheck ?? null,
+        displayCount,
+        remoteSessionStatus: normalisedChecks.remoteSession ?? null,
+        virtualMachineStatus: normalisedChecks.virtualMachine ?? null,
+        processCheckStatus: normalisedChecks.processCheck ?? null,
+        captureProtectionStatus: normalisedChecks.captureProtection ?? null,
+        clipboardPolicyStatus: normalisedChecks.clipboardPolicy ?? null,
+        printingPolicyStatus: normalisedChecks.printingPolicy ?? null,
+        externalNavigationPolicyStatus: normalisedChecks.externalNavigationPolicy ?? null,
+        configurationVerificationStatus: normalisedChecks.configurationVerification ?? null,
+        clientSignatureStatus: normalisedChecks.clientSignature ?? null,
+        overallStatus,
+        // displayTopology has no dedicated column (Single Display
+        // Requirement v1 deliberately avoids a schema change — see
+        // docs/migration-ledger.md) — stored inside the existing free-form
+        // detailsJson blob alongside the per-check statuses instead.
+        detailsJson: (displayTopology ? { ...normalisedChecks, displayTopology } : normalisedChecks) as Prisma.InputJsonValue,
+        clientReportedAt: input.clientReportedAt ?? null,
+      },
+    });
+  } catch (err) {
+    // Pilot operations + distribution readiness v1 — same rationale as
+    // issueLaunchManifest's own breadcrumb above: this write previously
+    // had zero diagnostic trail on failure.
+    console.error("recordAttestation: attestation create failed", {
+      sessionId: input.sessionId,
       clientType: input.clientType,
-      platform: input.platform ?? null,
-      osVersion: input.osVersion ?? null,
-      clientVersion: input.clientVersion ?? null,
-      clientBuild: input.clientBuild ?? null,
-      displayCheckStatus: normalisedChecks.displayCheck ?? null,
-      displayCount,
-      remoteSessionStatus: normalisedChecks.remoteSession ?? null,
-      virtualMachineStatus: normalisedChecks.virtualMachine ?? null,
-      processCheckStatus: normalisedChecks.processCheck ?? null,
-      captureProtectionStatus: normalisedChecks.captureProtection ?? null,
-      clipboardPolicyStatus: normalisedChecks.clipboardPolicy ?? null,
-      printingPolicyStatus: normalisedChecks.printingPolicy ?? null,
-      externalNavigationPolicyStatus: normalisedChecks.externalNavigationPolicy ?? null,
-      configurationVerificationStatus: normalisedChecks.configurationVerification ?? null,
-      clientSignatureStatus: normalisedChecks.clientSignature ?? null,
-      overallStatus,
-      // displayTopology has no dedicated column (Single Display
-      // Requirement v1 deliberately avoids a schema change — see
-      // docs/migration-ledger.md) — stored inside the existing free-form
-      // detailsJson blob alongside the per-check statuses instead.
-      detailsJson: (displayTopology ? { ...normalisedChecks, displayTopology } : normalisedChecks) as Prisma.InputJsonValue,
-      clientReportedAt: input.clientReportedAt ?? null,
-    },
-  });
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorCode: (err as { code?: string })?.code ?? null,
+    });
+    throw err;
+  }
 
   const newSessionStatus: SessionStatus =
     overallStatus === "READY" ? "ACTIVE" : overallStatus === "CANNOT_START" ? "REJECTED" : "PREFLIGHT";
@@ -918,16 +948,30 @@ export async function recordAttestation(input: RecordAttestationInput) {
               ? "TECHNICAL_FAILURE"
               : "NOT_CHECKED";
 
-  await prisma.secureClientSession.update({
-    where: { id: input.sessionId },
-    data: {
-      status: newSessionStatus,
-      verificationStatus: newVerificationStatus,
-      verifiedAt: overallStatus === "READY" ? new Date() : undefined,
-      platform: input.platform ?? undefined,
-      clientVersion: input.clientVersion ?? undefined,
-    },
-  });
+  try {
+    await prisma.secureClientSession.update({
+      where: { id: input.sessionId },
+      data: {
+        status: newSessionStatus,
+        verificationStatus: newVerificationStatus,
+        verifiedAt: overallStatus === "READY" ? new Date() : undefined,
+        platform: input.platform ?? undefined,
+        clientVersion: input.clientVersion ?? undefined,
+      },
+    });
+  } catch (err) {
+    // Leaves an orphaned SecureClientAttestation row with no matching
+    // session-status transition — rare (the session row is guaranteed to
+    // exist by loadValidatedSecureClientSession before this function is
+    // ever called), but never previously logged if it happened.
+    console.error("recordAttestation: session status update failed", {
+      sessionId: input.sessionId,
+      attestationId: attestation.id,
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorCode: (err as { code?: string })?.code ?? null,
+    });
+    throw err;
+  }
 
   return { attestation, overallStatus };
 }
@@ -942,14 +986,27 @@ export async function recordHeartbeat(sessionId: string, policy: { heartbeatInte
   // RECOVERY_REQUIRED is a stronger state that a plain heartbeat cannot
   // clear — that always requires an explicit lecturer-issued grant.
   const wasInterrupted = session.status === "INTERRUPTED";
-  return prisma.secureClientSession.update({
-    where: { id: sessionId },
-    data: {
-      lastHeartbeatAt: now,
-      status: wasInterrupted ? "ACTIVE" : session.status,
-      recoveredAt: wasInterrupted ? now : session.recoveredAt,
-    },
-  });
+  try {
+    return await prisma.secureClientSession.update({
+      where: { id: sessionId },
+      data: {
+        lastHeartbeatAt: now,
+        status: wasInterrupted ? "ACTIVE" : session.status,
+        recoveredAt: wasInterrupted ? now : session.recoveredAt,
+      },
+    });
+  } catch (err) {
+    // Pilot operations + distribution readiness v1 — heartbeats are
+    // high-frequency; a failure here previously vanished into an opaque
+    // 500 with no way to tell a transient DB blip from a systemic
+    // problem in the heartbeat path specifically.
+    console.error("recordHeartbeat: session update failed", {
+      sessionId,
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorCode: (err as { code?: string })?.code ?? null,
+    });
+    throw err;
+  }
 }
 
 /** Re-derives whether an ACTIVE session's heartbeat has gone overdue past its grace period, and persists that transition if so — called on demand (Part 10), never from a background job. */
@@ -1003,16 +1060,32 @@ const RECOVERY_GRANT_TTL_MS = 15 * 60 * 1000;
 export async function issueRecoveryGrant(sessionId: string, submissionId: string, issuedById: string, reason: string) {
   const rawToken = randomBytes(24).toString("base64url");
   const grantCodeHash = createHash("sha256").update(rawToken).digest("hex");
-  const grant = await prisma.secureClientRecoveryGrant.create({
-    data: {
-      secureClientSessionId: sessionId,
+  let grant;
+  try {
+    grant = await prisma.secureClientRecoveryGrant.create({
+      data: {
+        secureClientSessionId: sessionId,
+        submissionId,
+        grantCodeHash,
+        issuedById,
+        expiresAt: new Date(Date.now() + RECOVERY_GRANT_TTL_MS),
+        reason,
+      },
+    });
+  } catch (err) {
+    // Pilot operations + distribution readiness v1 — a lecturer-initiated
+    // recovery grant is a rare, high-stakes action for the specific
+    // student it unblocks; a silent failure here previously left the
+    // lecturer with only a generic error and support with nothing to
+    // investigate.
+    console.error("issueRecoveryGrant: grant create failed", {
+      sessionId,
       submissionId,
-      grantCodeHash,
-      issuedById,
-      expiresAt: new Date(Date.now() + RECOVERY_GRANT_TTL_MS),
-      reason,
-    },
-  });
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorCode: (err as { code?: string })?.code ?? null,
+    });
+    throw err;
+  }
   return { grant, rawToken };
 }
 

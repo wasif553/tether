@@ -71,6 +71,29 @@ CONFIRMATION**, not PASS.
    checklist below." The P0 requirement count is unaffected by this —
    see "Why 9 requirements but 12 test procedures" in the Summary.
 
+**Pilot operations + distribution readiness v1 (this revision).** A
+follow-up pass completed non-physical pilot/commercial-readiness
+operational work — student distribution UX, version/update messaging, a
+support runbook, production observability hardening, backup verification
+tooling, an evidence-retention runner, and five new planning/governance
+docs (release management, code-signing plan, signing-key runbook,
+data/privacy register). **No P0 physical test status below was changed
+by this revision** — every PASS/NEEDS PHYSICAL CONFIRMATION status and
+every row of the Remaining Physical Acceptance Checklist reflects only
+genuine physical evidence, exactly as in the previous revision. This
+revision's changes are confined to: one new P0 evidence note (Controlled
+installer distribution, reflecting the new in-app download UX — see that
+row) and P1 table updates (several items moved from NOT DONE to PARTIAL
+as real, tested, non-physical work landed). See
+`docs/tether-production-observability.md`,
+`docs/production-backup-restore-runbook.md`,
+`docs/tether-evidence-retention-plan.md`,
+`docs/tether-release-management.md`,
+`docs/tether-windows-code-signing-plan.md`,
+`docs/secure-launch-signing-key-runbook.md`,
+`docs/tether-data-and-privacy-register.md`, and
+`docs/tether-pilot-support-runbook.md` for full detail on each.
+
 ---
 
 ## P0 — MUST PASS BEFORE CONTROLLED PILOT
@@ -100,7 +123,8 @@ CONFIRMATION**, not PASS.
 | Student dashboard usability | PASS | `src/app/student/page.tsx` — Action Required / Available Now / Upcoming / Recently Completed / Exam History, capped at 5 recent + expandable history | `studentDashboardGrouping.test.ts` (10 tests), `pilotDashboards.routes.test.ts` (4 tests) | Verified in a real local browser session (seeded lecturer/student accounts, exams in every state) — all 5 sections rendered correctly, "Show all completed examinations" expansion confirmed working | History capping happens in application code after the existing `exam.findMany` result is retrieved, not via a SQL `LIMIT` — see "DB query scaling note" below | — | No | — |
 | Lecturer dashboard usability | PASS | `src/app/lecturer/page.tsx` — summary tiles, Needs Your Attention, Active/Upcoming/Drafts, Recent/Older examinations | `lecturerDashboardGrouping.test.ts` (9 tests), `pilotDashboards.routes.test.ts` (4 tests) | Verified in a real local browser session — Needs Your Attention correctly isolated the exam with an unreviewed integrity signal, summary tiles matched, "Show all older examinations" expansion confirmed working | Same history-capping note as above | — | No | — |
 | Canonical navigation / no 404s | PASS | `/student/dashboard` removed repo-wide (prior pass); `ManualReviewNotice` confirmed pointing at `/student`; added a back-link on the secure-client session detail page | `studentDashboardRoute.test.ts`, `pilotUiTerminology.test.ts` (navigation section) | Confirmed via live browser session (dashboard → exam link → back navigation) | None known | — | No | — |
-| Controlled installer distribution | PASS | `PILOT-INSTALL.md` updated with current version/capability summary | — | Hash-verified this pass (see below) | Not code-signed (by design for pilot) | Low | No | — |
+| Controlled installer distribution (manual, doc-based) | PASS | `PILOT-INSTALL.md` updated with current version/capability summary | — | Hash-verified this pass (see below) | Not code-signed (by design for pilot) | Low | No | — |
+| Student-facing in-app download UX | **IMPLEMENTATION READY — ACTIVATION PENDING RELEASE PUBLICATION** | New canonical release-metadata module (`src/lib/tetherReleaseMetadata.ts`), `/lockdown-browser` page and the `tether-launch` installer-fallback page both rewritten to be data-driven from it (fixing a confirmed dead download link — a hardcoded `/downloads/tether-secure-browser/latest/...` path with no matching route); shows the exact required "not yet available for public download" message whenever `TETHER_INSTALLER_DOWNLOAD_URL` is unset (true today — no real URL is configured) | `tetherReleaseMetadata.test.ts` (14 tests) | Not physically tested — the UX has not been exercised against a real published installer URL, since none exists yet | Downloads remain disabled until an operator configures a real `TETHER_INSTALLER_DOWNLOAD_URL` — this is intentional, not a defect | Low | No | Not a pilot blocker: this UX activates automatically (no code change) the moment a real installer URL is configured — see `docs/tether-release-management.md` |
 | Pilot support instructions | PASS (partial) | `PILOT-INSTALL.md` and `docs/known-limitations.md` updated to reflect 1.7.2 capabilities; `controlled-pilot-operator-guide.md`/`student-test-instructions.md`/`docs/lockdown-browser-known-limitations.md` reviewed, found not incorrect (no stale version/claims), left unchanged | — | Not re-verified live | Those three docs don't yet mention the newest monitoring capabilities explicitly (not wrong, just not updated) | Low | No | Optional follow-up: extend those 3 docs with the same capability summary added to `known-limitations.md` |
 
 **Known cross-cutting risk — RESOLVED this revision.** A prior revision
@@ -163,19 +187,21 @@ fill in Status and Physical evidence/date as each is actually run.
 
 | Requirement | Status | Notes |
 |---|---|---|
-| Windows code signing | NOT DONE | Installer currently unsigned/unnotarized — acceptable for controlled pilot only |
-| Evidence-retention automation | NOT DONE | No automated retention/expiry policy for integrity evidence assets |
-| Automated/verified backups | NOT DONE | No confirmed Supabase backup/restore drill on record in this repo |
-| Production observability | PARTIAL | `logServerTetherDiagnostic`/`diagnosticLog` exist but are opt-in/bounded, not a full observability stack (no metrics/alerting) |
-| Vercel/Supabase region optimisation | NOT DONE | Confirmed real: Vercel functions run in `iad1` (platform default, no `regions`/`preferredRegion` config), Supabase is `AP-Northeast` — flagged, not resolved, in the transaction-latency fix |
-| Formal release/version lifecycle | PARTIAL | This register is a first step; no formal versioning/changelog process yet |
+| Windows code signing | NOT DONE | Installer currently unsigned/unnotarized — acceptable for controlled pilot only. Planning complete this revision: `docs/tether-windows-code-signing-plan.md` (certificate options, build-host blocker, pilot-vs-broad-rollout recommendation) — no certificate purchased, no config changed |
+| Evidence-retention automation | PARTIAL (was NOT DONE) | A manual, operator-triggered retention runner now exists (`npm run evidence:retention`, age-based on `capturedAt`, default 90-day window, scoped to screen/camera evidence assets) — see `docs/tether-evidence-retention-plan.md`. Not wired into any automatic schedule; that remains an institutional policy decision |
+| Automated/verified backups | PARTIAL (was NOT DONE) | Backup **verification** tooling now exists (`npm run backup:verify`, file-level checks + optional disposable-restore rehearsal — see `docs/production-backup-restore-runbook.md`), directly addressing the historical 41-byte-unusable-backup incident. Still no confirmed *production* backup/restore drill on record, and this tool does not itself schedule or create backups |
+| Production observability | PARTIAL | `logServerTetherDiagnostic`/`diagnosticLog` exist but are opt-in/bounded, not a full observability stack (no metrics/alerting). This revision added `console.error` diagnostics (bounded, no secrets) to 6 previously-unlogged failure paths across the secure-client launch/attestation/heartbeat/recovery-grant/integrity-event pipeline, and documented recommended future alerts — see `docs/tether-production-observability.md`. Still no metrics/alerting infrastructure |
+| Vercel/Supabase region optimisation | NOT DONE | Confirmed real: Vercel functions run in `iad1` (platform default, no `regions`/`preferredRegion` config), Supabase is `AP-Northeast` — flagged, not resolved, in the transaction-latency fix. Documented as a follow-up in `docs/tether-production-observability.md`; no migration performed |
+| Formal release/version lifecycle | PARTIAL | This register is a first step. This revision added `docs/tether-release-management.md` (DEVELOPMENT → RELEASE CANDIDATE → PHYSICAL ACCEPTANCE → PILOT → GENERAL_AVAILABILITY → DEPRECATED → UNSUPPORTED lifecycle, semver policy, publication requirements, rollback path) and a canonical release-metadata module (`src/lib/tetherReleaseMetadata.ts`) — no formal changelog process/tooling yet |
 | Installer update mechanism | NOT DONE | "No auto-update — every pilot requires a freshly built installer" (per `known-limitations.md`) |
 | External security assessment | NOT DONE | No third-party pentest/audit on record |
-| Signing-key lifecycle | PARTIAL | `TETHER_SECURE_CLIENT_SIGNING_*` keys exist and are used; no documented rotation/revocation procedure |
-| Privacy/governance package | NOT DONE | `docs/privacy/student-exam-notice` page exists; no full data-protection/DPIA package confirmed |
+| Signing-key lifecycle | PARTIAL | `TETHER_SECURE_CLIENT_SIGNING_*` keys exist and are used. This revision formally documented the gap: `manifest.keyId`/challenge `keyId` fields exist but are never used to select a verification key, so there is no safe overlapping-verification-window rotation today — only a hard-cutover emergency procedure. See `docs/secure-launch-signing-key-runbook.md` for the full architecture, emergency response, and what safe rotation would require. No key generated or rotated |
+| Privacy/governance package | NOT DONE | `docs/privacy/student-exam-notice` page exists; no full data-protection/DPIA package confirmed. This revision added `docs/tether-data-and-privacy-register.md` — an internal technical register of every evidence/data type (purpose, access, retention, sensitivity, known gaps), explicitly NOT a legal compliance claim (no GDPR/Privacy Act/FERPA determination made) |
 | True DB-level history pagination | NOT DONE | Student/lecturer dashboard history capping is currently in-application-code, post-fetch (see "DB query scaling note" above) — fine at pilot scale, needs real `LIMIT`/cursor-based pagination before historical exam volume grows large |
 
-**P1 item count: 11.**
+**P1 item count: 11** (unchanged — this revision updated 6 existing rows'
+status/notes to reflect completed non-physical operational work; no rows
+were added or removed from this table).
 
 ---
 
@@ -205,20 +231,36 @@ source file changed in this pass.
 
 ## Summary
 
-- **P0 total requirements: 25.**
-- **P0 PASS: 16** (6 newly operator-confirmed this revision: Manual
-  startup → Home, Secure exam deep link, Secure launch consume,
-  Recovery, Entire Screen sharing, Screen evidence; plus 10 already
-  correctly PASS from pre-existing/unchanged functionality or
-  browser-verified UI work).
-- **P0 requirements still awaiting physical confirmation: 9** — Windows
-  installation, Camera where enabled, Prohibited-process continuous
-  detection, Display continuous detection, Mid-exam remote-session
-  detection, Duplicate-event prevention, "Remote session ended"
-  transition, Clean exit/restoration, Lecturer recovery workflow.
-  (16 + 9 = 25, matching the total above.)
+- **P0 total requirements: 26** (25 carried over unchanged from the
+  previous revision, plus 1 new row added this revision — "Student-facing
+  in-app download UX" — see below for why it uses a third status label
+  rather than the two-bucket PASS / NEEDS PHYSICAL CONFIRMATION system).
+- **P0 PASS: 16** (unchanged from the previous revision — 6
+  operator-confirmed: Manual startup → Home, Secure exam deep link,
+  Secure launch consume, Recovery, Entire Screen sharing, Screen
+  evidence; plus 10 already correctly PASS from pre-existing/unchanged
+  functionality or browser-verified UI work). **No PASS row's status was
+  changed by this revision.**
+- **P0 requirements still awaiting physical confirmation: 9** (unchanged
+  from the previous revision) — Windows installation, Camera where
+  enabled, Prohibited-process continuous detection, Display continuous
+  detection, Mid-exam remote-session detection, Duplicate-event
+  prevention, "Remote session ended" transition, Clean exit/restoration,
+  Lecturer recovery workflow. **No NEEDS PHYSICAL CONFIRMATION row's
+  status was changed by this revision.**
+- **1 new row uses a third status: "IMPLEMENTATION READY — ACTIVATION
+  PENDING RELEASE PUBLICATION"** — Student-facing in-app download UX.
+  This is deliberately not counted in either the PASS or NEEDS PHYSICAL
+  CONFIRMATION buckets: it is not physically testable yet in any
+  meaningful sense (there is no published installer URL for it to
+  download), and it is explicitly marked "Pilot blocker: No" — the
+  in-app UX is code-complete and automated-test-covered, and activates
+  with zero code change the moment a real installer URL is configured.
+  (16 + 9 + 1 = 26, matching the total above.)
 - **Number of actual physical test procedures: 12** — see the Remaining
-  Physical Acceptance Checklist above.
+  Physical Acceptance Checklist above. **Unchanged this revision** — the
+  new P0 row above adds no physical test procedure, since there is
+  nothing physically testable about it yet (see above).
 
 **Why 9 requirements but 12 test procedures?** Three of the nine
 unconfirmed requirements each need two distinct physical actions to
