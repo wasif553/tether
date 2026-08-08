@@ -54,6 +54,39 @@ export function shouldShowInstallerFallback(msSinceAttempt: number, thresholdMs:
   return msSinceAttempt >= thresholdMs;
 }
 
+/**
+ * P0 secure-launch redirect loop hotfix — see
+ * docs/tether-secure-launch-loop-hotfix.md. The shape of
+ * GET /api/submissions/[id]/secure-client/status's response this module
+ * cares about (deliberately narrow — this file has no fetch of its own;
+ * the caller fetches and passes the already-parsed body here).
+ */
+export type SecureClientStatusResponse = { session?: { verificationStatus?: string } | null } | null | undefined;
+
+/**
+ * THE authoritative navigation gate: a secure-launch attempt may only
+ * proceed into exam content when the server-computed
+ * SecureClientSession.verificationStatus is exactly "VERIFIED" — the
+ * SAME field GET /api/submissions/[id]'s own TETHER_SESSION_REQUIRED
+ * check is based on (never a second, client-derived approximation of
+ * that decision). Missing/malformed/absent session data is always
+ * "not eligible" — fails closed, never open.
+ *
+ * Root cause of the P0 redirect loop: tether-launch/page.tsx used to
+ * navigate into the exam unconditionally after consuming a manifest and
+ * submitting attestation, without ever checking this. Consuming a
+ * manifest only CREATES a session (verificationStatus: NOT_CHECKED);
+ * attestation can fail outright or resolve to a non-READY overall
+ * status, and the session then never reaches VERIFIED. Navigating
+ * anyway meant GET /api/submissions/[id] immediately bounced the student
+ * back here, and the page's own auto-resume effect repeated the exact
+ * same broken sequence — forever, with no stable failure state ever
+ * shown.
+ */
+export function isSecureClientSessionVerified(status: SecureClientStatusResponse): boolean {
+  return status?.session?.verificationStatus === "VERIFIED";
+}
+
 export type TetherLaunchFailureCode = "REPLAY" | "EXPIRED" | "REVOKED" | "NOT_FOUND" | "INVALID_SIGNATURE" | "INVALID_NONCE" | "TRANSIENT_FAILURE";
 
 /**
