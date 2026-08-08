@@ -4,6 +4,9 @@ import {
   getLtiEnvStatus,
   getAiEnvStatus,
   getDeploymentEnvStatus,
+  getSecureLaunchSigningEnvStatus,
+  getEvidenceStorageEnvStatus,
+  detectDangerousEnvCombinations,
 } from "./readiness";
 
 const ENV_KEYS = [
@@ -23,6 +26,13 @@ const ENV_KEYS = [
   "LTI_PLATFORM_JWKS",
   "LTI_TOKEN_ENDPOINT",
   "ANTHROPIC_API_KEY",
+  "TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY",
+  "TETHER_SECURE_CLIENT_SIGNING_PUBLIC_KEY",
+  "TETHER_SECURE_CLIENT_SIGNING_KEY_ID",
+  "EVIDENCE_STORAGE_PROVIDER",
+  "EVIDENCE_STORAGE_BUCKET",
+  "TETHER_MOCK_SECURE_CLIENT_ENABLED",
+  "TETHER_SECURE_CLIENT_BYPASS_ENABLED",
 ];
 
 let savedEnv: Record<string, string | undefined>;
@@ -107,5 +117,116 @@ describe("getDeploymentEnvStatus", () => {
     expect(status.lti.allPresent).toBe(false);
     expect(status.ai.allPresent).toBe(false);
     expect(status.allPresent).toBe(false);
+  });
+
+  it("includes secureLaunchSigning and evidenceStorage groups", () => {
+    clearAll();
+    const status = getDeploymentEnvStatus();
+    expect(status.secureLaunchSigning.allPresent).toBe(false);
+    expect(status.evidenceStorage.allPresent).toBe(false);
+  });
+});
+
+describe("getSecureLaunchSigningEnvStatus", () => {
+  it("is present only when both private and public keys are set", () => {
+    clearAll();
+    process.env.TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY = "priv";
+    expect(getSecureLaunchSigningEnvStatus().allPresent).toBe(false);
+    process.env.TETHER_SECURE_CLIENT_SIGNING_PUBLIC_KEY = "pub";
+    expect(getSecureLaunchSigningEnvStatus().allPresent).toBe(true);
+  });
+
+  it("never returns the actual key value", () => {
+    clearAll();
+    process.env.TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY = "TOP-SECRET-PEM-DATA";
+    const serialized = JSON.stringify(getSecureLaunchSigningEnvStatus());
+    expect(serialized).not.toContain("TOP-SECRET-PEM-DATA");
+  });
+});
+
+describe("getEvidenceStorageEnvStatus", () => {
+  it("is present only when both provider and bucket are set", () => {
+    clearAll();
+    process.env.EVIDENCE_STORAGE_PROVIDER = "supabase_storage";
+    expect(getEvidenceStorageEnvStatus().allPresent).toBe(false);
+    process.env.EVIDENCE_STORAGE_BUCKET = "evidence";
+    expect(getEvidenceStorageEnvStatus().allPresent).toBe(true);
+  });
+});
+
+describe("GET /api/readiness — Canvas/LTI must never gate standalone Tether readiness", () => {
+  it("the route source reports ltiKeysConfigured/aiKeyConfigured as independent fields, never ANDed into secureLaunchSigningConfigured/evidenceStorageConfigured/databaseConnected", async () => {
+    // Static, source-level check (mirrors the established pattern in
+    // pilotUiTerminology.test.ts) — deliberately does not invoke the
+    // route itself (it touches Prisma, requiring a DB). Production
+    // administration hardening v1, Part J: "Do NOT make Canvas/LTI
+    // failure mark standalone Tether unavailable."
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const source = fs.readFileSync(path.join(process.cwd(), "src/app/api/readiness/route.ts"), "utf8");
+    expect(source).toContain("ltiKeysConfigured: lti.allPresent");
+    expect(source).toContain("secureLaunchSigningConfigured: secureLaunchSigning.allPresent");
+    // The combined getDeploymentEnvStatus().allPresent aggregate (which
+    // DOES fold lti/ai into one boolean) must never be imported/used by
+    // this route — only the independent per-group functions.
+    expect(source).not.toMatch(/getDeploymentEnvStatus/);
+  });
+});
+
+describe("detectDangerousEnvCombinations", () => {
+  it("flags a missing APP_URL only in production, never in preview/local-development/unknown", () => {
+    clearAll();
+    expect(detectDangerousEnvCombinations("production").some((f) => f.code === "PRODUCTION_ORIGIN_MISSING")).toBe(true);
+    expect(detectDangerousEnvCombinations("preview").some((f) => f.code === "PRODUCTION_ORIGIN_MISSING")).toBe(false);
+    expect(detectDangerousEnvCombinations("local-development").some((f) => f.code === "PRODUCTION_ORIGIN_MISSING")).toBe(false);
+  });
+
+  it("flags a signing key id with no matching keys, regardless of environment", () => {
+    clearAll();
+    process.env.TETHER_SECURE_CLIENT_SIGNING_KEY_ID = "prod-key-1";
+    const findings = detectDangerousEnvCombinations("local-development");
+    expect(findings.some((f) => f.code === "SIGNING_KEY_ID_WITHOUT_MATCHING_KEYS")).toBe(true);
+  });
+
+  it("never flags a signing key id when both matching keys are present", () => {
+    clearAll();
+    process.env.TETHER_SECURE_CLIENT_SIGNING_KEY_ID = "prod-key-1";
+    process.env.TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY = "priv";
+    process.env.TETHER_SECURE_CLIENT_SIGNING_PUBLIC_KEY = "pub";
+    const findings = detectDangerousEnvCombinations("production");
+    expect(findings.some((f) => f.code === "SIGNING_KEY_ID_WITHOUT_MATCHING_KEYS")).toBe(false);
+  });
+
+  it("flags TETHER_MOCK_SECURE_CLIENT_ENABLED=true only in production", () => {
+    clearAll();
+    process.env.TETHER_MOCK_SECURE_CLIENT_ENABLED = "true";
+    expect(detectDangerousEnvCombinations("production").some((f) => f.code === "MOCK_SECURE_CLIENT_ENABLED_IN_PRODUCTION")).toBe(true);
+    expect(detectDangerousEnvCombinations("local-development").some((f) => f.code === "MOCK_SECURE_CLIENT_ENABLED_IN_PRODUCTION")).toBe(false);
+  });
+
+  it("flags TETHER_SECURE_CLIENT_BYPASS_ENABLED=true only in production", () => {
+    clearAll();
+    process.env.TETHER_SECURE_CLIENT_BYPASS_ENABLED = "true";
+    expect(detectDangerousEnvCombinations("production").some((f) => f.code === "SECURE_CLIENT_BYPASS_ENABLED_IN_PRODUCTION")).toBe(true);
+    expect(detectDangerousEnvCombinations("preview").some((f) => f.code === "SECURE_CLIENT_BYPASS_ENABLED_IN_PRODUCTION")).toBe(false);
+  });
+
+  it("returns an empty array, never null/undefined, for a clean production config", () => {
+    clearAll();
+    process.env.APP_URL = "https://example.edu";
+    const findings = detectDangerousEnvCombinations("production");
+    expect(findings).toEqual([]);
+  });
+
+  it("every finding is a bounded reason code + severity — never a raw secret or free-form message with interpolated env values", () => {
+    clearAll();
+    process.env.TETHER_SECURE_CLIENT_SIGNING_KEY_ID = "prod-key-1";
+    const findings = detectDangerousEnvCombinations("production");
+    for (const finding of findings) {
+      expect(finding).toHaveProperty("code");
+      expect(finding).toHaveProperty("severity");
+      expect(finding).toHaveProperty("detail");
+      expect(JSON.stringify(finding)).not.toContain("prod-key-1");
+    }
   });
 });

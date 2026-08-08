@@ -60,14 +60,23 @@ export type EligibleEvidenceAsset = {
   examId: string;
   institutionId: string;
   kind: string;
+  byteSize: number;
 };
 
-/** Pure read — never deletes anything itself. `now` is always passed explicitly (never `new Date()` read internally) so this is deterministically testable. */
-export async function findEligibleEvidenceAssetsForDeletion(retentionDays: number, now: Date): Promise<EligibleEvidenceAsset[]> {
+/**
+ * Pure read — never deletes anything itself. `now` is always passed
+ * explicitly (never `new Date()` read internally) so this is
+ * deterministically testable. `institutionId`, when provided, scopes the
+ * query to that institution only — added for the admin preview surface
+ * (Part E, production administration hardening v1); the CLI script
+ * (scripts/run-evidence-retention.ts) still defaults to no scope
+ * (deployment-wide) unless a future caller passes one.
+ */
+export async function findEligibleEvidenceAssetsForDeletion(retentionDays: number, now: Date, institutionId?: string): Promise<EligibleEvidenceAsset[]> {
   const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);
   return prisma.integrityEvidenceAsset.findMany({
-    where: { capturedAt: { lt: cutoff } },
-    select: { id: true, storageProvider: true, storageKey: true, capturedAt: true, submissionId: true, examId: true, institutionId: true, kind: true },
+    where: { capturedAt: { lt: cutoff }, ...(institutionId ? { institutionId } : {}) },
+    select: { id: true, storageProvider: true, storageKey: true, capturedAt: true, submissionId: true, examId: true, institutionId: true, kind: true, byteSize: true },
     orderBy: { capturedAt: "asc" },
   });
 }
@@ -118,10 +127,10 @@ export type EvidenceRetentionSweepReport = {
  * call (never re-queries mid-sweep, so a sweep's behavior is a
  * consistent snapshot).
  */
-export async function runEvidenceRetentionSweep(options: { retentionDays?: number; now?: Date; dryRun: boolean }): Promise<EvidenceRetentionSweepReport> {
+export async function runEvidenceRetentionSweep(options: { retentionDays?: number; now?: Date; dryRun: boolean; institutionId?: string }): Promise<EvidenceRetentionSweepReport> {
   const retentionDays = options.retentionDays ?? resolveEvidenceRetentionDays();
   const now = options.now ?? new Date();
-  const eligible = await findEligibleEvidenceAssetsForDeletion(retentionDays, now);
+  const eligible = await findEligibleEvidenceAssetsForDeletion(retentionDays, now, options.institutionId);
 
   const outcomes: DeleteEvidenceAssetOutcome[] = [];
   if (!options.dryRun) {

@@ -12,6 +12,7 @@ const examRoute = await import("../app/api/exams/[id]/route");
 const evidenceRoute = await import("../app/api/lecturer/submissions/[id]/evidence/route");
 const platformInstitutionsRoute = await import("../app/api/platform/institutions/route");
 const signupRoute = await import("../app/api/signup/route");
+const secureClientSessionRoute = await import("../app/api/lecturer/secure-client/sessions/[sessionId]/route");
 
 function sessionFor(
   userId: string,
@@ -298,5 +299,32 @@ describe("18. GET /api/exams (lecturer list) is never affected by question pools
     expect(ids).toContain(exam.id);
 
     await prisma.exam.delete({ where: { id: exam.id } });
+  });
+});
+
+// Production administration hardening v1, Part H/N — "cross-institution
+// session blocked" negative-authorization test. See
+// docs/tether-broad-rollout-readiness.md.
+describe("19. GET /api/lecturer/secure-client/sessions/[sessionId] — cross-institution access is blocked", () => {
+  it("blocks a lecturer in a different institution from reading a secure-client session belonging to another institution's exam", async () => {
+    const secureClientSession = await prisma.secureClientSession.create({
+      data: {
+        institutionId: instA.id,
+        examId: examA.id,
+        submissionId: submissionForExamA.id,
+        studentId: studentA.id,
+        clientType: "TETHER_SECURE_CLIENT",
+      },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerB.id, "LECTURER", instB.id));
+    const res = await secureClientSessionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ sessionId: secureClientSession.id }) });
+    expect(res.status).toBe(404);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA.id));
+    const okRes = await secureClientSessionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ sessionId: secureClientSession.id }) });
+    expect(okRes.status).toBe(200);
+
+    await prisma.secureClientSession.delete({ where: { id: secureClientSession.id } });
   });
 });

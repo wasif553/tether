@@ -85,6 +85,21 @@ failed. The full JSON verification record is printed to stdout — capture
 it (e.g. redirect to a file, or paste into an incident/ops log) as the
 evidence a given backup was actually verified, and when.
 
+```bash
+npm run backup:verify -- /path/to/backup.dump --restore --report ./backup-verification-report.json
+```
+
+Production administration hardening v1 — `--report <path>` additionally
+writes the SAME verification record to a local JSON file, in a standard,
+versioned, machine-readable shape (`schemaVersion`, `backupFilename`,
+`sizeBytes`, `sha256`, `verificationTimestamp`, `formatResult`,
+`disposableRestoreResult`, `overallPassed` — see
+`scripts/backupVerification/verificationReport.ts`). This is a plain
+local file artifact, never uploaded anywhere and never containing a
+connection string, password, or any other credential — safe to attach to
+an incident ticket or archive alongside the backup itself as durable
+evidence of verification.
+
 ## Safety guarantee — this can never target Production
 
 `scripts/backupVerification/restoreRehearsal.ts` never accepts a
