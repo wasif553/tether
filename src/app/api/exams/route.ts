@@ -4,6 +4,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { institutionWhere, requireInstitutionId, institutionErrorResponse } from "@/lib/institutionScope";
 import { assertCanAssignExamToCourse, assertStudentsInCourse, CourseAssignmentError } from "@/lib/courseAssignment";
+import { isLecturerClosedHistoryItem } from "@/lib/lecturerDashboardGrouping";
 
 const createExamSchema = z
   .object({
@@ -26,7 +27,17 @@ const createExamSchema = z
     { message: "availableUntil must be after availableFrom", path: ["availableUntil"] },
   );
 
-export async function GET() {
+// Pilot UI release readiness v1 — see
+// docs/tether-v1.7.2-pilot-release-readiness.md. Same rationale/pattern
+// as GET /api/exams/available (student list): bounds response growth for
+// a lecturer with many years of closed exams without adding a query per
+// exam. Drafts and anything still open/scheduled are never capped, and —
+// critically — neither is a closed exam that still needs review
+// (isLecturerClosedHistoryItem excludes it), so "Needs your attention"
+// can never silently lose an item to this cap.
+const DEFAULT_CLOSED_HISTORY_LIMIT = 20;
+
+export async function GET(req?: Request) {
   const session = await auth();
   if (!session || session.user.role !== "LECTURER") {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -42,14 +53,38 @@ export async function GET() {
       },
     });
 
+    // Needs-review counts — ONE aggregate query for every exam at once
+    // (never a query per exam): groupBy is index-backed
+    // (IntegrityEvent @@index([examId]) and @@index([reviewStatus])).
+    const examIds = exams.map((exam) => exam.id);
+    const reviewCounts = examIds.length
+      ? await prisma.integrityEvent.groupBy({
+          by: ["examId"],
+          where: { examId: { in: examIds }, reviewStatus: "NEEDS_REVIEW" },
+          _count: { _all: true },
+        })
+      : [];
+    const needsReviewByExamId = new Map(reviewCounts.map((row) => [row.examId, row._count._all]));
+
+    const now = new Date();
     // Never include accessCodeHash in any API response — see
     // docs/student-onboarding-and-exam-access.md.
     const sanitized = exams.map((exam) => {
-      const rest: Partial<typeof exam> = { ...exam };
+      const rest: Partial<typeof exam> & { needsReviewCount?: number } = { ...exam };
       delete rest.accessCodeHash;
+      rest.needsReviewCount = needsReviewByExamId.get(exam.id) ?? 0;
       return rest;
     });
-    return NextResponse.json(sanitized);
+
+    const includeAllHistory = req != null && new URL(req.url).searchParams.get("all") === "true";
+    const isHistory = (exam: (typeof sanitized)[number]) => isLecturerClosedHistoryItem(exam as { published: boolean; availableFrom: Date | null; availableUntil: Date | null; needsReviewCount: number }, now);
+    const active = sanitized.filter((exam) => !isHistory(exam));
+    const closedHistory = sanitized
+      .filter(isHistory)
+      .sort((a, b) => (b.availableUntil?.getTime() ?? 0) - (a.availableUntil?.getTime() ?? 0)); // most recently closed first
+    const boundedHistory = includeAllHistory ? closedHistory : closedHistory.slice(0, DEFAULT_CLOSED_HISTORY_LIMIT);
+
+    return NextResponse.json([...active, ...boundedHistory]);
   } catch (err) {
     const res = institutionErrorResponse(err);
     if (res) return res;

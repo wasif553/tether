@@ -5,8 +5,17 @@ installer is **not code-signed or notarized**. It will trigger OS
 security warnings — this is expected and covered below.
 
 **Product name:** Tether Secure Browser
+**Current controlled-pilot release candidate:** 1.7.2 (Windows x64).
+Not yet published as a GitHub Release — installers are distributed
+directly by the operator, per this guide.
 **What it does:** Detection and soft enforcement of OS-level integrity
-signals during an exam, with evidence recorded for lecturer review.
+signals during an exam, with evidence recorded for lecturer review —
+including Entire Screen sharing and screen evidence capture (where an
+exam requires it), camera monitoring (where required), continuous
+prohibited-application detection, continuous display-configuration
+monitoring, and mid-exam remote-session (Remote Desktop) detection. All
+of this feeds lecturer human review — none of it is an automatic
+misconduct determination.
 **What it does not do:** It is not a cheat-proof or guaranteed-lockdown
 tool. It does not perform full OS lockdown and does not detect cheating
 automatically. See `apps/lockdown/README.md` and

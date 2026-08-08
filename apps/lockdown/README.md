@@ -7,10 +7,12 @@ desktop app built with Electron, separate from the main Next.js web app.
 
 - Loads the SES web app (`https://tether-murex.vercel.app` by default,
   override with `SES_BASE_URL`) in a fullscreen window with a custom
-  user agent (`TetherSecureBrowser/1.0.0`) so the web app can detect it.
-  Older packaged builds still send the legacy `SESLockdown/1.0.0`
-  marker — both are recognized by `src/lib/lockdownDetection.ts`, so
-  existing installs keep working without a reinstall.
+  user agent (`TetherSecureBrowser/<LOCKDOWN_VERSION>` — see
+  `src/shared.ts`; current controlled-pilot release candidate is
+  `1.7.2`) so the web app can detect it. Older packaged builds still
+  send the legacy `SESLockdown/1.0.0` marker — both are recognized by
+  `src/lib/lockdownDetection.ts`, so existing installs keep working
+  without a reinstall.
 - Watches for OS-level integrity signals: window blur/focus, fullscreen
   exit (re-enters fullscreen after a short delay and shows a
   non-blocking warning), window minimize (auto-restores after 2s),
