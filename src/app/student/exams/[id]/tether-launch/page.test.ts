@@ -26,11 +26,20 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const source = fs.readFileSync(path.join(__dirname, "page.tsx"), "utf8");
 
-/** Extracts the body of `function runLaunchSequence(...) { ... }` by brace-matching, so assertions below are scoped to it specifically and can't accidentally match unrelated code elsewhere in the file. */
+/**
+ * Extracts the body of `function name(...) { ... }` by brace-matching, so
+ * assertions below are scoped to it specifically and can't accidentally
+ * match unrelated code elsewhere in the file. Searches for the opening
+ * brace starting AFTER the end of `signature`, not from its start — a
+ * function whose return type annotation itself contains braces (e.g.
+ * `Promise<{ submitted: boolean }>`) would otherwise have its body
+ * search anchored on the return-type's own brace instead of the real
+ * body.
+ */
 function extractFunctionBody(fnSource: string, signature: string): string {
   const start = fnSource.indexOf(signature);
   if (start === -1) throw new Error(`Could not find "${signature}" in source`);
-  const braceStart = fnSource.indexOf("{", start);
+  const braceStart = fnSource.indexOf("{", start + signature.length);
   let depth = 0;
   for (let i = braceStart; i < fnSource.length; i++) {
     if (fnSource[i] === "{") depth++;
@@ -149,10 +158,16 @@ describe("mount effect — auto-resume guards [1, 8, 10]", () => {
 });
 
 describe("manual retry [7]", () => {
-  it("the 'I have installed it — open examination' retry button in the busy/error view calls runLaunchSequence directly, never gated by autoAttemptedRef", () => {
-    const retrySection = source.slice(source.indexOf("existingSubmission?.status ===\n".trim()), source.indexOf("existingSubmission?.status ===") + 1500);
-    void retrySection; // best-effort slice; assert on the whole file instead for robustness
+  it("the 'Try again' retry button in the busy/error view calls runLaunchSequence directly, never gated by autoAttemptedRef", () => {
     expect(source).toMatch(/onClick=\{\(\)\s*=>\s*void runLaunchSequence\(accessCode \|\| null\)\}/);
+  });
+
+  it("P0 retest fix: the failed-verification retry button says 'Try again', never the installer-fallback copy 'I have installed it — open examination' (misleading here — the student is already inside Tether)", () => {
+    const busyErrorViewStart = source.indexOf('result.existingSubmission?.status === "IN_PROGRESS" || busy');
+    const busyErrorViewEnd = source.indexOf("return (", busyErrorViewStart) + 2000;
+    const busyErrorView = source.slice(busyErrorViewStart, busyErrorViewEnd);
+    expect(busyErrorView).toContain("Try again");
+    expect(busyErrorView).not.toContain("I have installed it — open examination");
   });
 });
 
@@ -179,5 +194,79 @@ describe("unrelated flows left untouched by this hotfix", () => {
     const docCommentStart = source.lastIndexOf("/**", source.indexOf("async function submitExamSessionAttestationV2("));
     const docComment = source.slice(docCommentStart, source.indexOf("async function submitExamSessionAttestationV2("));
     expect(docComment).toContain("Every failure path here is silent by");
+  });
+});
+
+// Narrowly-scoped diagnostic improvement — submits the same bounded
+// displayCount already used to derive checks.displayCheck to the server,
+// so recordAttestation's production-visible console.error diagnostic can
+// report the actual physical display count (client-side
+// logClientTetherDiagnostic checkpoints alone never reach production —
+// see docs/tether-secure-launch-verification-investigation.md).
+describe("submitInitialAttestation — displayCount submission [1, 2, 3]", () => {
+  // The full signature (through the return type annotation) is used as
+  // the anchor — see extractFunctionBody's own doc comment for why a
+  // bare "functionName(" anchor would incorrectly match the brace inside
+  // this function's own `Promise<{ submitted: boolean }>` return type.
+  const submitInitialAttestationBody = extractFunctionBody(
+    source,
+    "async function submitInitialAttestation(sessionId: string, submissionId: string): Promise<{ submitted: boolean }> ",
+  );
+
+  it("declares resolvedDisplayCount, defaulting to null (never fabricated)", () => {
+    expect(submitInitialAttestationBody).toMatch(/let resolvedDisplayCount: number \| null = null;/);
+  });
+
+  it("[1, 2] sets resolvedDisplayCount from the SAME value used to derive checks.displayCheck, before the attestation fetch", () => {
+    const displayCountAssignIndex = submitInitialAttestationBody.indexOf("resolvedDisplayCount = displayCount;");
+    const checksAssignIndex = submitInitialAttestationBody.indexOf("checks.displayCheck = displayCount <= 1");
+    const fetchIndex = submitInitialAttestationBody.indexOf("fetch(`/api/secure-client/sessions/");
+    expect(displayCountAssignIndex).toBeGreaterThan(-1);
+    expect(checksAssignIndex).toBeGreaterThan(-1);
+    expect(displayCountAssignIndex).toBeGreaterThan(checksAssignIndex);
+    expect(displayCountAssignIndex).toBeLessThan(fetchIndex);
+  });
+
+  it("[1, 2] the attestation request body includes displayCount, derived from resolvedDisplayCount, never a hardcoded/independent value", () => {
+    expect(submitInitialAttestationBody).toMatch(/displayCount:\s*resolvedDisplayCount\s*\?\?\s*undefined,/);
+  });
+
+  it("[3] resolvedDisplayCount assignment sits ONLY inside the successful try branch of the bridge call — the bridge-unavailable and bridge-threw paths never set it, so an unavailable/throwing bridge can never fabricate a displayCount", () => {
+    const bridgeUnavailableIndex = submitInitialAttestationBody.indexOf("DISPLAY_CHECK_BRIDGE_UNAVAILABLE");
+    const bridgeThrewIndex = submitInitialAttestationBody.indexOf("DISPLAY_CHECK_BRIDGE_THREW");
+    const assignIndex = submitInitialAttestationBody.indexOf("resolvedDisplayCount = displayCount;");
+    expect(bridgeUnavailableIndex).toBeGreaterThan(-1);
+    expect(bridgeThrewIndex).toBeGreaterThan(-1);
+    // The assignment must be strictly BETWEEN the two failure-path
+    // checkpoints in source order (bridge-unavailable branch, then the
+    // try block containing the assignment, then the catch/threw branch)
+    // — i.e. reachable only from the success path.
+    expect(assignIndex).toBeGreaterThan(bridgeUnavailableIndex);
+    expect(assignIndex).toBeLessThan(bridgeThrewIndex);
+  });
+});
+
+describe("recordAttestation source — displayCount in the production diagnostic [4, 5]", () => {
+  const secureClientRunnerSource = fs.readFileSync(path.join(__dirname, "..", "..", "..", "..", "..", "lib", "secureClientRunner.ts"), "utf8");
+  const recordAttestationBody = extractFunctionBody(secureClientRunnerSource, "export async function recordAttestation(");
+
+  it("[4] the not-reached-VERIFIED diagnostic includes the bounded, already-validated displayCount variable — never a raw/unvalidated client value", () => {
+    const diagnosticIndex = recordAttestationBody.indexOf('console.error("recordAttestation: session did not reach VERIFIED"');
+    expect(diagnosticIndex).toBeGreaterThan(-1);
+    const diagnosticCallEnd = recordAttestationBody.indexOf(");", diagnosticIndex);
+    const diagnosticPayload = recordAttestationBody.slice(diagnosticIndex, diagnosticCallEnd);
+    expect(diagnosticPayload).toMatch(/\bdisplayCount,/);
+    // Must reuse the SAME `displayCount` local (validated via
+    // isValidReportedDisplayCount earlier in the function) — never
+    // `input.displayCount` directly, which would bypass validation.
+    expect(diagnosticPayload).not.toContain("input.displayCount");
+  });
+
+  it("[5] overallStatus/newVerificationStatus computation is unchanged by this diagnostic — the new displayCount field is added to the console.error payload only, never read back into any decision", () => {
+    const diagnosticIndex = recordAttestationBody.indexOf('console.error("recordAttestation: session did not reach VERIFIED"');
+    const afterDiagnostic = recordAttestationBody.slice(diagnosticIndex);
+    // No branching on `displayCount` anywhere after the diagnostic log —
+    // it is diagnostic/evidence only.
+    expect(afterDiagnostic).not.toMatch(/if\s*\([^)]*displayCount[^)]*\)/);
   });
 });

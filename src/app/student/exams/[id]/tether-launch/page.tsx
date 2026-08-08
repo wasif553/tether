@@ -620,10 +620,43 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       const status = statusRes.ok ? await statusRes.json().catch(() => null) : null;
       const requireDisplayCheck = typeof status?.requireDisplayCheck === "boolean" ? status.requireDisplayCheck : false;
 
+      // P0 secure-launch verification investigation — see
+      // docs/tether-secure-launch-verification-investigation.md. Bounded
+      // diagnostics distinguishing every state that can prevent
+      // displayCheck from ever becoming PASS: bridge missing entirely,
+      // the bridge call itself throwing (isolated to its own try/catch
+      // so this doesn't get lumped into the generic outer-catch
+      // "request never sent" case), or a genuine multi-display FAIL.
+      // Never logs anything beyond a boolean/small integer/enum string.
+      //
+      // `resolvedDisplayCount` — the SAME bounded number used to derive
+      // checks.displayCheck above is also submitted to the server as
+      // `displayCount` (the attestation contract already accepts and
+      // stores this — see recordAttestation's displaySupported handling
+      // in secureClientRunner.ts). This is what makes the actual
+      // physical display count visible server-side even though
+      // logClientTetherDiagnostic itself is disabled in production (see
+      // isClientTetherDiagnosticLoggingEnabled in tetherDiagnosticLog.ts)
+      // — the client-side log lines above remain dev/staging-only, but
+      // this value now also reaches the server's own diagnostic (see
+      // recordAttestation below), which is NOT environment-gated.
+      // Deliberately null (never sent) when the bridge is unavailable or
+      // throws — never fabricated.
       const checks: Record<string, string> = {};
-      if (requireDisplayCheck && typeof window.sesLockdown?.getDisplayCount === "function") {
-        const displayCount = await window.sesLockdown.getDisplayCount();
-        checks.displayCheck = displayCount <= 1 ? "PASS" : "FAIL";
+      let resolvedDisplayCount: number | null = null;
+      if (requireDisplayCheck) {
+        if (typeof window.sesLockdown?.getDisplayCount !== "function") {
+          logClientTetherDiagnostic("DISPLAY_CHECK_BRIDGE_UNAVAILABLE", { sessionId });
+        } else {
+          try {
+            const displayCount = await window.sesLockdown.getDisplayCount();
+            checks.displayCheck = displayCount <= 1 ? "PASS" : "FAIL";
+            resolvedDisplayCount = displayCount;
+            logClientTetherDiagnostic("DISPLAY_CHECK_RESULT", { sessionId, displayCount, result: checks.displayCheck });
+          } catch {
+            logClientTetherDiagnostic("DISPLAY_CHECK_BRIDGE_THREW", { sessionId });
+          }
+        }
       }
 
       const res = await fetch(`/api/secure-client/sessions/${sessionId}/attestation`, {
@@ -634,6 +667,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
           clientVersion: window.sesLockdown?.version ?? undefined,
           checks,
           required: requireDisplayCheck ? { displayCheck: true } : {},
+          displayCount: resolvedDisplayCount ?? undefined,
         }),
       });
       const body = await res.json().catch(() => null);
@@ -798,11 +832,17 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         {error && (
           <div className="mt-3 rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700">
             {error}
+            {/* P0 retest fix — this button retries the launch/attestation
+                sequence itself, not an installer re-check; "I have
+                installed it — open examination" (copied from the
+                OutsideTetherPrompt installer-fallback flow, where it's
+                correct) was misleading here — the student is already
+                inside Tether and installation was never in question. */}
             <button
               onClick={() => void runLaunchSequence(accessCode || null)}
               className="mt-2 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm text-gray-800"
             >
-              I have installed it — open examination
+              Try again
             </button>
           </div>
         )}

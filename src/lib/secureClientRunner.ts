@@ -948,6 +948,43 @@ export async function recordAttestation(input: RecordAttestationInput) {
               ? "TECHNICAL_FAILURE"
               : "NOT_CHECKED";
 
+  // P0 secure-launch verification investigation — see
+  // docs/tether-secure-launch-verification-investigation.md. A session
+  // that submits attestation but does not reach VERIFIED previously left
+  // no trail distinguishing WHY: which specific required check(s) were
+  // FAIL/NOT_CHECKED/NOT_SUPPORTED, vs. one of the four boolean failure
+  // flags. Bounded to enum-like status strings and check-key names only
+  // — never a raw value, manifest, signature, nonce, token, cookie, or
+  // exam answer.
+  if (newVerificationStatus !== "VERIFIED") {
+    const failingRequiredChecks = Object.entries(input.required)
+      .filter(([, required]) => required)
+      .map(([key]) => ({ key, status: normalisedChecks[key as keyof typeof normalisedChecks] ?? "NOT_CHECKED" }))
+      .filter((entry) => entry.status !== "PASS");
+    console.error("recordAttestation: session did not reach VERIFIED", {
+      sessionId: input.sessionId,
+      clientType: input.clientType,
+      overallStatus,
+      newVerificationStatus,
+      failingRequiredChecks,
+      // The same bounded, already-validated value just stored on the
+      // attestation row above (`displayCount` at line ~890) — null
+      // whenever the client never reported one (bridge unavailable/threw)
+      // or the reported value failed validation/isn't supported for this
+      // client type. Never re-derived or trusted from anywhere else.
+      // This is NOT gated by NODE_ENV — unlike logClientTetherDiagnostic,
+      // console.error here lands in Vercel's function logs regardless of
+      // environment, closing the exact gap the P0 verification
+      // investigation found: client-side diagnostics alone cannot reach
+      // production logs.
+      displayCount,
+      clientVerificationFailed: input.clientVerificationFailed,
+      configurationInvalid: input.configurationInvalid,
+      versionUnsupported: input.versionUnsupported,
+      technicalFailure: input.technicalFailure,
+    });
+  }
+
   try {
     await prisma.secureClientSession.update({
       where: { id: input.sessionId },

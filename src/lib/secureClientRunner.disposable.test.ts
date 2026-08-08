@@ -981,6 +981,154 @@ describe("Corrective pass v1.2.2 — real direct-launch workflow establishes a g
     expect(gate.kind).toBe("ALLOW");
     expect(submission.status).toBe("IN_PROGRESS");
   });
+
+  // P0 secure-launch verification investigation — see
+  // docs/tether-secure-launch-verification-investigation.md.
+  it("a non-VERIFIED attestation logs a bounded diagnostic naming exactly which required check failed, never a secret", async () => {
+    const { manifest, signature } = await setupTetherRequiredSubmission("diagnostic-fail", true);
+    const consumed = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    if (consumed.outcome !== "CONSUMED") throw new Error(`expected CONSUMED, got ${consumed.outcome}`);
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await recordAttestation({
+        sessionId: consumed.sessionId,
+        clientType: "TETHER_SECURE_CLIENT",
+        checks: { displayCheck: "FAIL" },
+        required: { displayCheck: true },
+        clientVerificationFailed: false,
+        configurationInvalid: false,
+        versionUnsupported: false,
+        technicalFailure: false,
+        displayCount: 2,
+        displayTopology: "EXTEND",
+      });
+
+      const diagnosticCall = errorSpy.mock.calls.find((call) => call[0] === "recordAttestation: session did not reach VERIFIED");
+      expect(diagnosticCall).toBeDefined();
+      const payload = diagnosticCall![1] as { overallStatus: string; newVerificationStatus: string; failingRequiredChecks: Array<{ key: string; status: string }>; displayCount: number | null };
+      expect(payload.overallStatus).not.toBe("READY");
+      expect(payload.newVerificationStatus).toBe("NOT_CHECKED");
+      expect(payload.failingRequiredChecks).toEqual([{ key: "displayCheck", status: "FAIL" }]);
+      // [4] Narrowly-scoped diagnostic improvement — see
+      // docs/tether-secure-launch-verification-investigation.md. The
+      // bounded, validated displayCount is included alongside the
+      // failing-check breakdown.
+      expect(payload.displayCount).toBe(2);
+
+      const serialized = JSON.stringify(errorSpy.mock.calls);
+      for (const forbidden of ["nonce", "signature", "manifest", "token", "cookie", "privateKey", "publicKey"]) {
+        expect(serialized.toLowerCase()).not.toContain(forbidden.toLowerCase());
+      }
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  // [4] Narrowly-scoped diagnostic improvement.
+  it("a non-VERIFIED attestation with no reported displayCount logs displayCount: null, never fabricating a value", async () => {
+    const { manifest, signature } = await setupTetherRequiredSubmission("diagnostic-no-count", true);
+    const consumed = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    if (consumed.outcome !== "CONSUMED") throw new Error(`expected CONSUMED, got ${consumed.outcome}`);
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await recordAttestation({
+        sessionId: consumed.sessionId,
+        clientType: "TETHER_SECURE_CLIENT",
+        // Bridge unavailable/threw client-side — checks stays empty, no
+        // displayCount reported at all (mirrors the DISPLAY_CHECK_BRIDGE_UNAVAILABLE
+        // / DISPLAY_CHECK_BRIDGE_THREW client paths, which never set
+        // resolvedDisplayCount).
+        checks: {},
+        required: { displayCheck: true },
+        clientVerificationFailed: false,
+        configurationInvalid: false,
+        versionUnsupported: false,
+        technicalFailure: false,
+        displayCount: null,
+        displayTopology: null,
+      });
+
+      const diagnosticCall = errorSpy.mock.calls.find((call) => call[0] === "recordAttestation: session did not reach VERIFIED");
+      expect(diagnosticCall).toBeDefined();
+      const payload = diagnosticCall![1] as { failingRequiredChecks: Array<{ key: string; status: string }>; displayCount: number | null };
+      expect(payload.failingRequiredChecks).toEqual([{ key: "displayCheck", status: "NOT_CHECKED" }]);
+      expect(payload.displayCount).toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  // [5] Confirms the security decision (overallStatus/verificationStatus)
+  // is byte-for-byte identical whether or not displayCount is reported —
+  // this diagnostic field is evidence-only, never read back into any
+  // decision.
+  it("[5] reporting displayCount alongside a FAIL check does not change the resulting overallStatus/verificationStatus compared to omitting it", async () => {
+    const withCount = await setupTetherRequiredSubmission("security-outcome-with-count", true);
+    const consumedWithCount = await consumeLaunchManifest(withCount.manifest, withCount.signature, withCount.manifest.nonce);
+    if (consumedWithCount.outcome !== "CONSUMED") throw new Error(`expected CONSUMED, got ${consumedWithCount.outcome}`);
+    const resultWithCount = await recordAttestation({
+      sessionId: consumedWithCount.sessionId,
+      clientType: "TETHER_SECURE_CLIENT",
+      checks: { displayCheck: "FAIL" },
+      required: { displayCheck: true },
+      clientVerificationFailed: false,
+      configurationInvalid: false,
+      versionUnsupported: false,
+      technicalFailure: false,
+      displayCount: 3,
+      displayTopology: "EXTEND",
+    });
+
+    const withoutCount = await setupTetherRequiredSubmission("security-outcome-without-count", true);
+    const consumedWithoutCount = await consumeLaunchManifest(withoutCount.manifest, withoutCount.signature, withoutCount.manifest.nonce);
+    if (consumedWithoutCount.outcome !== "CONSUMED") throw new Error(`expected CONSUMED, got ${consumedWithoutCount.outcome}`);
+    const resultWithoutCount = await recordAttestation({
+      sessionId: consumedWithoutCount.sessionId,
+      clientType: "TETHER_SECURE_CLIENT",
+      checks: { displayCheck: "FAIL" },
+      required: { displayCheck: true },
+      clientVerificationFailed: false,
+      configurationInvalid: false,
+      versionUnsupported: false,
+      technicalFailure: false,
+      displayCount: null,
+      displayTopology: null,
+    });
+
+    expect(resultWithCount.overallStatus).toBe(resultWithoutCount.overallStatus);
+    const sessionWithCount = await getCurrentSessionForSubmission(withCount.submission.id);
+    const sessionWithoutCount = await getCurrentSessionForSubmission(withoutCount.submission.id);
+    expect(sessionWithCount?.verificationStatus).toBe(sessionWithoutCount?.verificationStatus);
+    expect(sessionWithCount?.status).toBe(sessionWithoutCount?.status);
+  });
+
+  it("a VERIFIED attestation never logs the not-reached-VERIFIED diagnostic", async () => {
+    const { manifest, signature } = await setupTetherRequiredSubmission("diagnostic-pass", true);
+    const consumed = await consumeLaunchManifest(manifest, signature, manifest.nonce);
+    if (consumed.outcome !== "CONSUMED") throw new Error(`expected CONSUMED, got ${consumed.outcome}`);
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await recordAttestation({
+        sessionId: consumed.sessionId,
+        clientType: "TETHER_SECURE_CLIENT",
+        checks: { displayCheck: "PASS" },
+        required: { displayCheck: true },
+        clientVerificationFailed: false,
+        configurationInvalid: false,
+        versionUnsupported: false,
+        technicalFailure: false,
+        displayCount: 1,
+        displayTopology: "SINGLE",
+      });
+      const diagnosticCall = errorSpy.mock.calls.find((call) => call[0] === "recordAttestation: session did not reach VERIFIED");
+      expect(diagnosticCall).toBeUndefined();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });
 
 describe("SEB allowed key encryption round trip against the real database", () => {
