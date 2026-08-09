@@ -1,11 +1,13 @@
 {
   "name": "ses-lockdown",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "private": true,
-  "description": "Tether Secure Browser v1.7.2 (mid-exam remote-session monitoring: the REMOTE_DESKTOP_SESSION capability is now polled continuously while an exam is ACTIVE, not just at preflight — see remoteSessionMonitor.ts/remoteSessionMonitorLogic.ts — reusing the existing REMOTE_CONTROL_SOFTWARE_DETECTED/PROHIBITED_APPLICATION_CLOSED event model, deduplicated state transitions, and an event-triggered evidence frame; also fixes a latent poll-serialization bug in processDetection.ts where a `.finally()`-wrapped promise's identity could never match its own in-flight guard, silently freezing during-exam process detection at its first scan result for the rest of the exam. Built on v1.7.1's destroyed-window crash fix: restoreLockdownControls/reportAuditFactBestEffort could throw 'Object has been destroyed' when the BrowserWindow's closed event fired, crashing the main process — restoration is now independent of any window and audit reporting is routed through a shared isWindowUsable/runOnWindowBestEffort guard. Built on v1.7.0's Tether Windows Lockdown Hardening v1 — adds a Windows-only process-detection service for known remote-control/debugging/virtualization/screen-capture applications, a remote-session/VM indicator, a main-owned preflight gate and during-exam blocking overlay, an idempotent restoration lifecycle, and materially strengthened Electron hardening: a permission allowlist, denied navigation/window.open/downloads, packaged-build DevTools prevention, rejected unsafe command-line switches, and blocked browser-chrome keyboard shortcuts. See docs/tether-windows-lockdown-hardening-v1.md. v1.4.0 and v1.5.0 were development-only, never distributed.)",
+  "description": "Tether Secure Browser v1.7.3 (sandboxed-preload hotfix: dist/preload.js is now bundled with esbuild (--bundle --external:electron) instead of plain tsc output, so it no longer contains a relative require(\"./shared\") that the sandboxed Electron preload require() polyfill rejects with 'module not found' — that failure previously aborted the entire preload script BEFORE contextBridge.exposeInMainWorld ran, silently disabling window.sesLockdown (and therefore getDisplayCount, breaking SINGLE_DISPLAY_REQUIRED exams) with no visible error. sandbox:true/contextIsolation:true/nodeIntegration:false are unchanged; the bridge surface exposed to the page is unchanged. See verifyPreloadBundle.ts (build-time regression guard) and sandboxPreloadRuntimeCheck.ts (runtime regression check against the real built preload). Previously v1.7.2 (mid-exam remote-session monitoring: the REMOTE_DESKTOP_SESSION capability is now polled continuously while an exam is ACTIVE, not just at preflight — see remoteSessionMonitor.ts/remoteSessionMonitorLogic.ts — reusing the existing REMOTE_CONTROL_SOFTWARE_DETECTED/PROHIBITED_APPLICATION_CLOSED event model, deduplicated state transitions, and an event-triggered evidence frame; also fixes a latent poll-serialization bug in processDetection.ts where a `.finally()`-wrapped promise's identity could never match its own in-flight guard, silently freezing during-exam process detection at its first scan result for the rest of the exam. Built on v1.7.1's destroyed-window crash fix: restoreLockdownControls/reportAuditFactBestEffort could throw 'Object has been destroyed' when the BrowserWindow's closed event fired, crashing the main process — restoration is now independent of any window and audit reporting is routed through a shared isWindowUsable/runOnWindowBestEffort guard. Built on v1.7.0's Tether Windows Lockdown Hardening v1 — adds a Windows-only process-detection service for known remote-control/debugging/virtualization/screen-capture applications, a remote-session/VM indicator, a main-owned preflight gate and during-exam blocking overlay, an idempotent restoration lifecycle, and materially strengthened Electron hardening: a permission allowlist, denied navigation/window.open/downloads, packaged-build DevTools prevention, rejected unsafe command-line switches, and blocked browser-chrome keyboard shortcuts. See docs/tether-windows-lockdown-hardening-v1.md. v1.4.0 and v1.5.0 were development-only, never distributed.)",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && npm run bundle:preload && npm run verify:preload-bundle",
+    "bundle:preload": "esbuild src/preload.ts --bundle --platform=node --format=cjs --target=node20 --external:electron --outfile=dist/preload.js --log-level=warning",
+    "verify:preload-bundle": "node dist/verifyPreloadBundle.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "start": "npm run build && electron .",
@@ -14,6 +16,7 @@
     "dist:win": "npm run build && electron-builder --win --dir && npm run embed:icon && electron-builder --win --prepackaged release/win-unpacked && npm run verify:package -- release/win-unpacked",
     "dist:mac": "npm run build && electron-builder --mac",
     "verify:package": "node dist/verifyPackagedRelease.js",
+    "verify:sandbox-preload": "electron dist/sandboxPreloadRuntimeCheck.js",
     "embed:icon": "node dist/embedWindowsIcon.js"
   },
   "dependencies": {
@@ -23,6 +26,7 @@
     "@types/node": "^20",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8",
+    "esbuild": "^0.28.2",
     "rcedit": "^5.0.2",
     "resedit": "^3.0.2",
     "typescript": "^5.7.0",

@@ -63,6 +63,9 @@ const VALID_INPUT = {
   packagedLockdownStartupRoutingJsContent:
     'function resolveStartupLoadUrl(examId, sesBaseUrl) { ... } exports.TETHER_HOME_PATH = "/student"; function parseExamIdFromDeepLinkUrl(url) { ... }',
   packagedScreenShareRequestHandlerJsContent: "function selectEntireScreenSource(sources, primaryDisplayId) { ... } async function handleDisplayMediaRequest(...) { ... }",
+  // v1.7.3 sandboxed-preload hotfix — a realistic esbuild-bundled shape:
+  // exactly one require("electron"), no relative/local require left over.
+  packagedPreloadJsContent: '"use strict";\nvar import_electron = require("electron");\nvar LOCKDOWN_VERSION = "1.2.1";\nimport_electron.contextBridge.exposeInMainWorld("sesLockdown", { version: LOCKDOWN_VERSION, async getDisplayCount() { return import_electron.ipcRenderer.invoke("lockdown:get-display-count"); } });\n',
   sourceIconIcoBuffer: buildIcoBuffer(FULL_ICON_RESOLUTIONS),
   electronBuilderYmlContent: VALID_ELECTRON_BUILDER_YML,
   packagedIconIcoBuffer: buildIcoBuffer(FULL_ICON_RESOLUTIONS),
@@ -136,6 +139,42 @@ describe("verifyPackagedReleaseContents", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("performLockdownRestoration"))).toBe(true);
+  });
+
+  // v1.7.3 sandboxed-preload hotfix — proves the packaged application's
+  // ACTUAL dist/preload.js (not just the local pre-packaging one) is the
+  // bundled, sandbox-safe artifact. See sandboxPreloadRuntimeCheck.ts and
+  // verifyPreloadBundle.ts for the runtime and build-time counterparts.
+  describe("v1.7.3 sandboxed-preload hotfix — packaged preload bundle", () => {
+    it("fails when dist/preload.js is missing from the packaged app", () => {
+      const result = verifyPackagedReleaseContents({ ...VALID_INPUT, packagedPreloadJsContent: null });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("Packaged dist/preload.js was not found"))).toBe(true);
+    });
+
+    it("fails when the packaged dist/preload.js still contains the v1.7.2 P0 regression — a literal require(\"./shared\")", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedPreloadJsContent:
+          '"use strict";\nconst electron_1 = require("electron");\nconst shared_1 = require("./shared");\nelectron_1.contextBridge.exposeInMainWorld("sesLockdown", { version: shared_1.LOCKDOWN_VERSION });\n',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("Packaged dist/preload.js") && e.includes('require("./shared")'))).toBe(true);
+    });
+
+    it("fails when the packaged dist/preload.js contains any other unbundled relative/local require, not just ./shared", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedPreloadJsContent: 'require("electron"); require("./someFutureLocalModule");',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes('require("./someFutureLocalModule")'))).toBe(true);
+    });
+
+    it("passes when the packaged dist/preload.js is a real bundled artifact (only require(\"electron\") survives)", () => {
+      const result = verifyPackagedReleaseContents(VALID_INPUT);
+      expect(result.ok).toBe(true);
+    });
   });
 
   // Mid-exam remote-session monitoring v1 (v1.7.2).

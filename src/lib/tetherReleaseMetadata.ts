@@ -50,15 +50,17 @@ export type TetherReleaseMetadata = {
 
 // ---------------------------------------------------------------------------
 // Current release candidate — the frozen, physically-untouched artifact.
-// See docs/tether-v1.7.2-pilot-release-readiness.md for its full
-// verification record (SHA-256 re-checked before every commit that
-// touches pilot readiness). Update these three constants together, in
-// lockstep with a real rebuilt+reverified installer — never edit the
-// hash alone.
+// v1.7.3 — sandboxed-preload hotfix (see apps/lockdown/src/shared.ts's own
+// LOCKDOWN_VERSION doc comment for the root cause/fix). Rebuilt via
+// `npm run dist:win` in apps/lockdown; SHA-256 below is this rebuild's
+// own verified hash, distinct from the v1.7.2 record in
+// docs/tether-v1.7.2-pilot-release-readiness.md. Update these three
+// constants together, in lockstep with a real rebuilt+reverified
+// installer — never edit the hash alone.
 // ---------------------------------------------------------------------------
-const CURRENT_RELEASE_CANDIDATE_VERSION = "1.7.2";
-const CURRENT_INSTALLER_FILENAME = "Tether-Secure-Browser-1.7.2-win-x64.exe";
-const CURRENT_INSTALLER_SHA256 = "2295deeb6d78ff3f42911d2c0af904355e9cbd7048505c14a60e7a7072faed2d";
+const CURRENT_RELEASE_CANDIDATE_VERSION = "1.7.3";
+const CURRENT_INSTALLER_FILENAME = "Tether-Secure-Browser-1.7.3-win-x64.exe";
+const CURRENT_INSTALLER_SHA256 = "676504f478f945d04df9bcbad427cc062e99dccf09bc8ea4118decb14bf6f232";
 
 /**
  * No installer URL is configured by default — downloads stay disabled

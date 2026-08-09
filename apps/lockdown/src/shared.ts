@@ -127,7 +127,28 @@
 // for lecturer review, never an automatic misconduct conclusion — see
 // that doc's "Core principles". No kernel driver, no TPM attestation, no
 // permanent Windows-setting change, no blanket process termination.
-export const LOCKDOWN_VERSION = "1.7.2";
+// v1.7.3 — sandboxed-preload hotfix. Root cause: with sandbox:true,
+// Electron's preload require() is a restricted polyfill that only
+// permits a small allowlist (electron itself) — a relative require(
+// "./shared") throws "module not found" inside that polyfill and aborts
+// the ENTIRE preload script before contextBridge.exposeInMainWorld ever
+// runs, silently disabling window.sesLockdown with no visible error.
+// Confirmed via direct reproduction: a real sandboxed BrowserWindow
+// loading the compiled v1.7.2 dist/preload.js fired a preload-error
+// event with exactly this message. Fix: dist/preload.js is now produced
+// by esbuild (`--bundle --platform=node --format=cjs --external:electron`,
+// see package.json's bundle:preload script) instead of plain tsc output
+// — every local/project dependency (this module) is inlined as real
+// code, leaving only the one Electron require the sandbox permits. See
+// verifyPreloadBundle.ts (build-time regression guard: dist/preload.js
+// must contain no require(...) other than "electron") and
+// sandboxPreloadRuntimeCheck.ts (runtime regression check: loads the
+// REAL built dist/preload.js into a sandbox:true/contextIsolation:true/
+// nodeIntegration:false BrowserWindow and calls
+// window.sesLockdown.getDisplayCount()). No change to sandbox,
+// contextIsolation, nodeIntegration, the exposed bridge surface, or any
+// server-side verification/enforcement logic.
+export const LOCKDOWN_VERSION = "1.7.3";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see
