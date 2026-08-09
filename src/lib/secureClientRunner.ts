@@ -48,6 +48,7 @@ import {
 import { deriveSessionStatus, checkRecoveryGrant, type SessionStatus } from "@/lib/secureClient/secureClientSession";
 import { parseSecureClientPolicy, isSecureClientDeliveryEnabled, type SecureClientPolicy } from "@/lib/secureClientPolicy";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
+import type { DisplayDiagnosticOutcome } from "@/lib/tetherLaunch";
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
 
@@ -870,6 +871,17 @@ export type RecordAttestationInput = {
    */
   displayCount?: number | null;
   displayTopology?: DisplayTopology | null;
+  /**
+   * P0 runtime display-bridge failure capture — see
+   * docs/tether-secure-launch-verification-investigation.md. Evidence
+   * only — see this function's own doc comment on the diagnostic block
+   * below for the hard guarantee that this is NEVER read to decide
+   * overallStatus/verificationStatus. Already bounded by the route's own
+   * zod schema before reaching here (outcome enum, errorName ≤100 chars,
+   * errorMessage ≤300 chars, `.strict()` — no stack trace, no arbitrary
+   * object).
+   */
+  displayDiagnostic?: { outcome: DisplayDiagnosticOutcome; errorName?: string; errorMessage?: string } | null;
 };
 
 export async function recordAttestation(input: RecordAttestationInput) {
@@ -978,6 +990,16 @@ export async function recordAttestation(input: RecordAttestationInput) {
       // investigation found: client-side diagnostics alone cannot reach
       // production logs.
       displayCount,
+      // P0 runtime display-bridge failure capture — see
+      // docs/tether-secure-launch-verification-investigation.md.
+      // EVIDENCE ONLY: passed straight through from the request (already
+      // bounded by the route's own zod schema — outcome enum,
+      // errorName/errorMessage length-capped, `.strict()`). Never read
+      // anywhere in this function to compute overallStatus,
+      // newVerificationStatus, or newSessionStatus above — those are
+      // already fully determined before this diagnostic block runs, from
+      // `checks`/`required`/the four boolean flags alone.
+      displayDiagnostic: input.displayDiagnostic ?? null,
       clientVerificationFailed: input.clientVerificationFailed,
       configurationInvalid: input.configurationInvalid,
       versionUnsupported: input.versionUnsupported,

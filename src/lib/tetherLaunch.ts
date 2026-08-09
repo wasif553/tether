@@ -87,6 +87,71 @@ export function isSecureClientSessionVerified(status: SecureClientStatusResponse
   return status?.session?.verificationStatus === "VERIFIED";
 }
 
+// ---------------------------------------------------------------------------
+// Display-count bridge diagnostic — P0 runtime-failure capture. See
+// docs/tether-secure-launch-verification-investigation.md. Purely
+// classification/formatting logic, pure and unit-testable without a
+// DOM/Electron bridge — the caller (submitInitialAttestation in
+// tether-launch/page.tsx) does the actual bridge call and passes its
+// outcome (or the caught exception) here.
+// ---------------------------------------------------------------------------
+
+export const DISPLAY_DIAGNOSTIC_OUTCOMES = [
+  "DISPLAY_COUNT_OK",
+  "SES_LOCKDOWN_UNAVAILABLE",
+  "DISPLAY_COUNT_METHOD_UNAVAILABLE",
+  "DISPLAY_COUNT_INVOKE_FAILED",
+  "DISPLAY_COUNT_INVALID_RESULT",
+] as const;
+export type DisplayDiagnosticOutcome = (typeof DISPLAY_DIAGNOSTIC_OUTCOMES)[number];
+
+export type DisplayDiagnostic = {
+  outcome: DisplayDiagnosticOutcome;
+  /** Only ever populated for DISPLAY_COUNT_INVOKE_FAILED. Bounded — see boundedDiagnosticString. */
+  errorName?: string;
+  errorMessage?: string;
+};
+
+const DISPLAY_DIAGNOSTIC_ERROR_NAME_MAX_LENGTH = 100;
+const DISPLAY_DIAGNOSTIC_ERROR_MESSAGE_MAX_LENGTH = 300;
+
+/**
+ * Truncates a value to a plain, bounded string for inclusion in a
+ * diagnostic payload — never a stack trace, never an arbitrary object
+ * (only ever called with `err.name`/`err.message`-shaped inputs, both
+ * already plain strings on a real `Error`), and never longer than
+ * `maxLength`. A non-string/non-primitive input is stringified minimally
+ * (`String(value)`) rather than JSON-serialized, so it can never emit a
+ * nested object/array structure that might carry more than intended.
+ */
+export function boundedDiagnosticString(value: unknown, maxLength: number): string {
+  const raw = typeof value === "string" ? value : String(value);
+  return raw.length > maxLength ? raw.slice(0, maxLength) : raw;
+}
+
+/**
+ * Distinguishes SES_LOCKDOWN_UNAVAILABLE from DISPLAY_COUNT_METHOD_UNAVAILABLE
+ * — the two states that were previously conflated into a single
+ * DISPLAY_CHECK_BRIDGE_UNAVAILABLE checkpoint. `sesLockdown` is typed
+ * `unknown` deliberately: this must be safe to call with anything a real
+ * (or absent) `window.sesLockdown` could ever be, including `undefined`.
+ */
+export function classifyDisplayBridgeAvailability(sesLockdown: unknown): "SES_LOCKDOWN_UNAVAILABLE" | "DISPLAY_COUNT_METHOD_UNAVAILABLE" | "AVAILABLE" {
+  if (sesLockdown === null || typeof sesLockdown !== "object") return "SES_LOCKDOWN_UNAVAILABLE";
+  const candidate = (sesLockdown as { getDisplayCount?: unknown }).getDisplayCount;
+  if (typeof candidate !== "function") return "DISPLAY_COUNT_METHOD_UNAVAILABLE";
+  return "AVAILABLE";
+}
+
+/** Builds the bounded DISPLAY_COUNT_INVOKE_FAILED diagnostic from a caught exception — never a stack trace, never a filesystem path beyond whatever (rarely) appears in a short error message, never an arbitrary object. */
+export function buildDisplayInvokeFailedDiagnostic(err: unknown): DisplayDiagnostic {
+  return {
+    outcome: "DISPLAY_COUNT_INVOKE_FAILED",
+    errorName: boundedDiagnosticString(err instanceof Error ? err.name : typeof err, DISPLAY_DIAGNOSTIC_ERROR_NAME_MAX_LENGTH),
+    errorMessage: boundedDiagnosticString(err instanceof Error ? err.message : String(err), DISPLAY_DIAGNOSTIC_ERROR_MESSAGE_MAX_LENGTH),
+  };
+}
+
 export type TetherLaunchFailureCode = "REPLAY" | "EXPIRED" | "REVOKED" | "NOT_FOUND" | "INVALID_SIGNATURE" | "INVALID_NONCE" | "TRANSIENT_FAILURE";
 
 /**

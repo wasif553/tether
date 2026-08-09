@@ -9,11 +9,30 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { CHECK_STATUSES, ATTESTATION_CHECK_KEYS, MAX_REPORTED_DISPLAY_COUNT, DISPLAY_TOPOLOGIES } from "@/lib/secureClient/attestation";
 import { SecureClientError, loadValidatedSecureClientSession, recordAttestation } from "@/lib/secureClientRunner";
+import { DISPLAY_DIAGNOSTIC_OUTCOMES } from "@/lib/tetherLaunch";
 
 const checkStatusSchema = z.enum(CHECK_STATUSES);
 const checksSchema = z
   .object(Object.fromEntries(ATTESTATION_CHECK_KEYS.map((k) => [k, checkStatusSchema.optional()])))
   .strict();
+
+// P0 runtime display-bridge failure capture — see
+// docs/tether-secure-launch-verification-investigation.md. Evidence
+// only: this is never read by recordAttestation to decide
+// overallStatus/verificationStatus — see that function's own doc
+// comment. Bounded server-side too (never trust the client's own
+// truncation alone) — matches the exact caps enforced client-side in
+// buildDisplayInvokeFailedDiagnostic (tetherLaunch.ts): ~100 chars for
+// errorName, ~300 for errorMessage. `.strict()` so no unexpected extra
+// field (e.g. a stack trace) can ever be smuggled through.
+const displayDiagnosticSchema = z
+  .object({
+    outcome: z.enum(DISPLAY_DIAGNOSTIC_OUTCOMES),
+    errorName: z.string().max(100).optional(),
+    errorMessage: z.string().max(300).optional(),
+  })
+  .strict()
+  .optional();
 
 const bodySchema = z.object({
   platform: z.string().max(50).optional(),
@@ -32,6 +51,7 @@ const bodySchema = z.object({
   // silently drops these for a SAFE_EXAM_BROWSER session).
   displayCount: z.number().int().min(1).max(MAX_REPORTED_DISPLAY_COUNT).optional(),
   displayTopology: z.enum(DISPLAY_TOPOLOGIES).optional(),
+  displayDiagnostic: displayDiagnosticSchema,
 });
 
 export async function POST(req: Request, { params }: { params: Promise<{ sessionId: string }> }) {
@@ -69,6 +89,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ session
     clientReportedAt: new Date(),
     displayCount: parsed.data.displayCount ?? null,
     displayTopology: parsed.data.displayTopology ?? null,
+    displayDiagnostic: parsed.data.displayDiagnostic ?? null,
   });
 
   return NextResponse.json({ ok: true, overallStatus: result.overallStatus, attestationId: result.attestation.id }, { status: 201 });

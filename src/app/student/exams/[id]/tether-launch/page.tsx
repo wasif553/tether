@@ -41,12 +41,21 @@
 import { useEffect, useRef, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
-import { buildTetherDeepLink, shouldShowInstallerFallback, resolveTetherLaunchFailureMessage, isSecureClientSessionVerified } from "@/lib/tetherLaunch";
+import {
+  buildTetherDeepLink,
+  shouldShowInstallerFallback,
+  resolveTetherLaunchFailureMessage,
+  isSecureClientSessionVerified,
+  classifyDisplayBridgeAvailability,
+  buildDisplayInvokeFailedDiagnostic,
+  type DisplayDiagnostic,
+} from "@/lib/tetherLaunch";
 import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 import { ensureRegisteredInstallation } from "@/lib/secureClient/installationClient";
 import { ManualReviewNotice } from "@/components/ManualReviewNotice";
 import { LockdownApplicationCheck } from "@/components/LockdownApplicationCheck";
 import { ensureLockdownBridgeInitialized, type LockdownCapabilityInfo } from "@/lib/lockdownClient";
+import { isValidReportedDisplayCount } from "@/lib/secureClient/attestation";
 
 // Exam Design Policy v1 — see docs/exam-design-policy-v1.md. Mirrors the
 // join page's own local type — this codebase does not share a central
@@ -620,43 +629,47 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       const status = statusRes.ok ? await statusRes.json().catch(() => null) : null;
       const requireDisplayCheck = typeof status?.requireDisplayCheck === "boolean" ? status.requireDisplayCheck : false;
 
-      // P0 secure-launch verification investigation — see
-      // docs/tether-secure-launch-verification-investigation.md. Bounded
-      // diagnostics distinguishing every state that can prevent
-      // displayCheck from ever becoming PASS: bridge missing entirely,
-      // the bridge call itself throwing (isolated to its own try/catch
-      // so this doesn't get lumped into the generic outer-catch
-      // "request never sent" case), or a genuine multi-display FAIL.
-      // Never logs anything beyond a boolean/small integer/enum string.
-      //
-      // `resolvedDisplayCount` — the SAME bounded number used to derive
-      // checks.displayCheck above is also submitted to the server as
-      // `displayCount` (the attestation contract already accepts and
-      // stores this — see recordAttestation's displaySupported handling
-      // in secureClientRunner.ts). This is what makes the actual
-      // physical display count visible server-side even though
-      // logClientTetherDiagnostic itself is disabled in production (see
-      // isClientTetherDiagnosticLoggingEnabled in tetherDiagnosticLog.ts)
-      // — the client-side log lines above remain dev/staging-only, but
-      // this value now also reaches the server's own diagnostic (see
-      // recordAttestation below), which is NOT environment-gated.
-      // Deliberately null (never sent) when the bridge is unavailable or
-      // throws — never fabricated.
+      // P0 runtime display-bridge failure capture — see
+      // docs/tether-secure-launch-verification-investigation.md. Five
+      // mutually-exclusive, conclusive outcomes (never merely "bridge
+      // unavailable or threw" lumped together, as before): the bridge
+      // object itself missing, the specific method missing, the call
+      // throwing/rejecting (with a bounded, stack-free error name/message
+      // — see buildDisplayInvokeFailedDiagnostic), an invalid resolved
+      // value (validated with the SAME isValidReportedDisplayCount the
+      // server itself uses — never a second, drifting validator), or a
+      // genuinely valid result. `displayDiagnostic` is submitted
+      // alongside the existing attestation request (never a new/separate
+      // security event) — this is evidence only; it never influences
+      // `checks`/`required`, which remain the sole inputs to the real
+      // verification decision.
       const checks: Record<string, string> = {};
       let resolvedDisplayCount: number | null = null;
+      let displayDiagnostic: DisplayDiagnostic | null = null;
       if (requireDisplayCheck) {
-        if (typeof window.sesLockdown?.getDisplayCount !== "function") {
-          logClientTetherDiagnostic("DISPLAY_CHECK_BRIDGE_UNAVAILABLE", { sessionId });
+        const availability = classifyDisplayBridgeAvailability(window.sesLockdown);
+        if (availability === "SES_LOCKDOWN_UNAVAILABLE" || availability === "DISPLAY_COUNT_METHOD_UNAVAILABLE") {
+          displayDiagnostic = { outcome: availability };
         } else {
           try {
-            const displayCount = await window.sesLockdown.getDisplayCount();
-            checks.displayCheck = displayCount <= 1 ? "PASS" : "FAIL";
-            resolvedDisplayCount = displayCount;
-            logClientTetherDiagnostic("DISPLAY_CHECK_RESULT", { sessionId, displayCount, result: checks.displayCheck });
-          } catch {
-            logClientTetherDiagnostic("DISPLAY_CHECK_BRIDGE_THREW", { sessionId });
+            // Bridge existence already confirmed by classifyDisplayBridgeAvailability
+            // above — non-null assertion is safe here, never re-derived.
+            const rawDisplayCount = await window.sesLockdown!.getDisplayCount!();
+            if (isValidReportedDisplayCount(rawDisplayCount)) {
+              checks.displayCheck = rawDisplayCount <= 1 ? "PASS" : "FAIL";
+              resolvedDisplayCount = rawDisplayCount;
+              displayDiagnostic = { outcome: "DISPLAY_COUNT_OK" };
+            } else {
+              // Never let an invalid value become PASS — checks.displayCheck
+              // stays unset (NOT_CHECKED server-side), exactly like the
+              // bridge-unavailable paths.
+              displayDiagnostic = { outcome: "DISPLAY_COUNT_INVALID_RESULT" };
+            }
+          } catch (err) {
+            displayDiagnostic = buildDisplayInvokeFailedDiagnostic(err);
           }
         }
+        logClientTetherDiagnostic(displayDiagnostic.outcome, { sessionId, ...displayDiagnostic });
       }
 
       const res = await fetch(`/api/secure-client/sessions/${sessionId}/attestation`, {
@@ -668,6 +681,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
           checks,
           required: requireDisplayCheck ? { displayCheck: true } : {},
           displayCount: resolvedDisplayCount ?? undefined,
+          displayDiagnostic: displayDiagnostic ?? undefined,
         }),
       });
       const body = await res.json().catch(() => null);

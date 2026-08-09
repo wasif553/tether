@@ -197,13 +197,15 @@ describe("unrelated flows left untouched by this hotfix", () => {
   });
 });
 
-// Narrowly-scoped diagnostic improvement — submits the same bounded
-// displayCount already used to derive checks.displayCheck to the server,
-// so recordAttestation's production-visible console.error diagnostic can
-// report the actual physical display count (client-side
-// logClientTetherDiagnostic checkpoints alone never reach production —
-// see docs/tether-secure-launch-verification-investigation.md).
-describe("submitInitialAttestation — displayCount submission [1, 2, 3]", () => {
+// P0 runtime display-bridge failure capture — see
+// docs/tether-secure-launch-verification-investigation.md. Structural
+// proof that submitInitialAttestation is wired to the pure
+// classification helpers (unit-tested directly in tetherLaunch.test.ts)
+// correctly, and that displayCount/displayDiagnostic reach the
+// attestation request body — covering cases 1-3, 5-7 at the integration
+// level (the underlying classification logic itself is covered
+// exhaustively, without a DOM, in tetherLaunch.test.ts).
+describe("submitInitialAttestation — display-bridge diagnostic wiring [1, 2, 3, 5, 6, 7]", () => {
   // The full signature (through the return type annotation) is used as
   // the anchor — see extractFunctionBody's own doc comment for why a
   // bare "functionName(" anchor would incorrectly match the brace inside
@@ -213,36 +215,49 @@ describe("submitInitialAttestation — displayCount submission [1, 2, 3]", () =>
     "async function submitInitialAttestation(sessionId: string, submissionId: string): Promise<{ submitted: boolean }> ",
   );
 
-  it("declares resolvedDisplayCount, defaulting to null (never fabricated)", () => {
+  it("declares resolvedDisplayCount and displayDiagnostic, both defaulting to null (never fabricated)", () => {
     expect(submitInitialAttestationBody).toMatch(/let resolvedDisplayCount: number \| null = null;/);
+    expect(submitInitialAttestationBody).toMatch(/let displayDiagnostic: DisplayDiagnostic \| null = null;/);
   });
 
-  it("[1, 2] sets resolvedDisplayCount from the SAME value used to derive checks.displayCheck, before the attestation fetch", () => {
-    const displayCountAssignIndex = submitInitialAttestationBody.indexOf("resolvedDisplayCount = displayCount;");
-    const checksAssignIndex = submitInitialAttestationBody.indexOf("checks.displayCheck = displayCount <= 1");
-    const fetchIndex = submitInitialAttestationBody.indexOf("fetch(`/api/secure-client/sessions/");
-    expect(displayCountAssignIndex).toBeGreaterThan(-1);
-    expect(checksAssignIndex).toBeGreaterThan(-1);
-    expect(displayCountAssignIndex).toBeGreaterThan(checksAssignIndex);
-    expect(displayCountAssignIndex).toBeLessThan(fetchIndex);
+  it("[1, 2] classifies bridge availability via the shared, unit-tested classifyDisplayBridgeAvailability helper — never a bespoke inline re-check", () => {
+    const classifyIndex = submitInitialAttestationBody.indexOf("classifyDisplayBridgeAvailability(window.sesLockdown)");
+    expect(classifyIndex).toBeGreaterThan(-1);
+    expect(submitInitialAttestationBody).toContain('"SES_LOCKDOWN_UNAVAILABLE"');
+    expect(submitInitialAttestationBody).toContain('"DISPLAY_COUNT_METHOD_UNAVAILABLE"');
   });
 
-  it("[1, 2] the attestation request body includes displayCount, derived from resolvedDisplayCount, never a hardcoded/independent value", () => {
+  it("[4] validates the resolved value via the SAME isValidReportedDisplayCount the server uses, before ever setting checks.displayCheck — an invalid value can never become PASS", () => {
+    const validateIndex = submitInitialAttestationBody.indexOf("isValidReportedDisplayCount(rawDisplayCount)");
+    const checksAssignIndex = submitInitialAttestationBody.indexOf("checks.displayCheck = rawDisplayCount <= 1");
+    const invalidOutcomeIndex = submitInitialAttestationBody.indexOf('"DISPLAY_COUNT_INVALID_RESULT"');
+    expect(validateIndex).toBeGreaterThan(-1);
+    expect(checksAssignIndex).toBeGreaterThan(validateIndex);
+    expect(invalidOutcomeIndex).toBeGreaterThan(validateIndex);
+  });
+
+  it("[3] a thrown/rejected bridge call is captured via buildDisplayInvokeFailedDiagnostic — never a bespoke inline error-message construction", () => {
+    expect(submitInitialAttestationBody).toMatch(/catch \(err\) \{\s*displayDiagnostic = buildDisplayInvokeFailedDiagnostic\(err\);/);
+  });
+
+  it("[1, 2, 3] resolvedDisplayCount is set ONLY inside the DISPLAY_COUNT_OK success path — every failure classification (SES_LOCKDOWN_UNAVAILABLE, DISPLAY_COUNT_METHOD_UNAVAILABLE, DISPLAY_COUNT_INVOKE_FAILED, DISPLAY_COUNT_INVALID_RESULT) leaves it null", () => {
+    const okAssignIndex = submitInitialAttestationBody.indexOf('displayDiagnostic = { outcome: "DISPLAY_COUNT_OK" };');
+    const countAssignIndex = submitInitialAttestationBody.indexOf("resolvedDisplayCount = rawDisplayCount;");
+    expect(okAssignIndex).toBeGreaterThan(-1);
+    expect(countAssignIndex).toBeGreaterThan(-1);
+    // The count assignment must come before the OK-outcome assignment,
+    // both inside the same success branch — and nowhere else in the
+    // function sets resolvedDisplayCount.
+    expect(countAssignIndex).toBeLessThan(okAssignIndex);
+    const allAssignments = [...submitInitialAttestationBody.matchAll(/resolvedDisplayCount = /g)];
+    expect(allAssignments).toHaveLength(1);
+  });
+
+  it("[5, 6, 7] both displayCount and displayDiagnostic reach the attestation request body, alongside (never replacing) checks/required — the diagnostic can only ever be additive evidence", () => {
     expect(submitInitialAttestationBody).toMatch(/displayCount:\s*resolvedDisplayCount\s*\?\?\s*undefined,/);
-  });
-
-  it("[3] resolvedDisplayCount assignment sits ONLY inside the successful try branch of the bridge call — the bridge-unavailable and bridge-threw paths never set it, so an unavailable/throwing bridge can never fabricate a displayCount", () => {
-    const bridgeUnavailableIndex = submitInitialAttestationBody.indexOf("DISPLAY_CHECK_BRIDGE_UNAVAILABLE");
-    const bridgeThrewIndex = submitInitialAttestationBody.indexOf("DISPLAY_CHECK_BRIDGE_THREW");
-    const assignIndex = submitInitialAttestationBody.indexOf("resolvedDisplayCount = displayCount;");
-    expect(bridgeUnavailableIndex).toBeGreaterThan(-1);
-    expect(bridgeThrewIndex).toBeGreaterThan(-1);
-    // The assignment must be strictly BETWEEN the two failure-path
-    // checkpoints in source order (bridge-unavailable branch, then the
-    // try block containing the assignment, then the catch/threw branch)
-    // — i.e. reachable only from the success path.
-    expect(assignIndex).toBeGreaterThan(bridgeUnavailableIndex);
-    expect(assignIndex).toBeLessThan(bridgeThrewIndex);
+    expect(submitInitialAttestationBody).toMatch(/displayDiagnostic:\s*displayDiagnostic\s*\?\?\s*undefined,/);
+    expect(submitInitialAttestationBody).toContain("checks,");
+    expect(submitInitialAttestationBody).toContain("required: requireDisplayCheck");
   });
 });
 
@@ -260,6 +275,13 @@ describe("recordAttestation source — displayCount in the production diagnostic
     // isValidReportedDisplayCount earlier in the function) — never
     // `input.displayCount` directly, which would bypass validation.
     expect(diagnosticPayload).not.toContain("input.displayCount");
+  });
+
+  it("[8] the not-reached-VERIFIED diagnostic also includes displayDiagnostic, passed straight through from the (already zod-bounded) request", () => {
+    const diagnosticIndex = recordAttestationBody.indexOf('console.error("recordAttestation: session did not reach VERIFIED"');
+    const diagnosticCallEnd = recordAttestationBody.indexOf(");", diagnosticIndex);
+    const diagnosticPayload = recordAttestationBody.slice(diagnosticIndex, diagnosticCallEnd);
+    expect(diagnosticPayload).toMatch(/displayDiagnostic:\s*input\.displayDiagnostic\s*\?\?\s*null,/);
   });
 
   it("[5] overallStatus/newVerificationStatus computation is unchanged by this diagnostic — the new displayCount field is added to the console.error payload only, never read back into any decision", () => {
