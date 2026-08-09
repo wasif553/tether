@@ -15,6 +15,24 @@ policy block" as the primary explanation (see the revised
 "What remains undetermined" section below) — the diagnostics in this
 change are what will pin down the actual cause on the next attempt.
 
+**Update — build provenance eliminated; runtime capture added.** SHA-256
+comparison of the actually-installed `preload.js`/`main.js` against the
+frozen v1.7.2 build confirmed the installed client IS the frozen
+candidate, and it DOES contain both `getDisplayCount()` (preload) and the
+`lockdown:get-display-count` IPC handler (main), correctly wired. This
+rules out a packaging/build defect as the explanation. What remained
+undetermined was the exact RUNTIME failure point — the previous
+diagnostic only distinguished "bridge unavailable or threw" as one
+lumped bucket. This revision adds a 5-outcome diagnostic
+(`DISPLAY_COUNT_OK` / `SES_LOCKDOWN_UNAVAILABLE` /
+`DISPLAY_COUNT_METHOD_UNAVAILABLE` / `DISPLAY_COUNT_INVOKE_FAILED` /
+`DISPLAY_COUNT_INVALID_RESULT`), with bounded `errorName`/`errorMessage`
+capture on the invoke-failed path, submitted alongside the existing
+attestation request and surfaced through the same production-visible
+`recordAttestation` `console.error` diagnostic as `displayDiagnostic`.
+See "Runtime display-bridge diagnostic (this revision)" below for the
+full contract.
+
 ## Traced physical path
 
 1. `POST /api/exams/[id]/start` — resumes the existing `IN_PROGRESS`
@@ -205,3 +223,60 @@ installer-fallback flow, where it is correct (the student may or may not
 have Tether installed). Inside this flow, the student is already running
 inside Tether; installation was never in question. Changed to "Try
 again."
+
+## Runtime display-bridge diagnostic (this revision)
+
+Build provenance is no longer in question (see the update note at the
+top of this document). What remains is the exact runtime failure point,
+and this revision's diagnostic exists specifically to capture it on the
+next physical attempt, distinguishing 5 mutually exclusive outcomes:
+
+| Outcome | Meaning |
+|---|---|
+| `DISPLAY_COUNT_OK` | The bridge call succeeded and returned a valid integer (1–8) — `displayCheck` is `PASS`/`FAIL` accordingly, and `displayCount` is set. |
+| `SES_LOCKDOWN_UNAVAILABLE` | `window.sesLockdown` itself is missing/not an object. |
+| `DISPLAY_COUNT_METHOD_UNAVAILABLE` | `window.sesLockdown` exists, but `getDisplayCount` is not a function on it. |
+| `DISPLAY_COUNT_INVOKE_FAILED` | `getDisplayCount()` was called and threw/rejected — `errorName`/`errorMessage` are captured, bounded to ~100/~300 characters, never a stack trace. |
+| `DISPLAY_COUNT_INVALID_RESULT` | The call succeeded but returned something other than a valid integer in range (validated via the SAME `isValidReportedDisplayCount` the server itself uses — never a second, drifting validator) — `checks.displayCheck` is left unset, exactly like the unavailable/threw cases; an invalid value can never become `PASS`. |
+
+**Implementation:**
+
+- `src/lib/tetherLaunch.ts` — pure, unit-tested classification helpers:
+  `classifyDisplayBridgeAvailability`, `buildDisplayInvokeFailedDiagnostic`,
+  `boundedDiagnosticString`, and the `DisplayDiagnosticOutcome`/`DisplayDiagnostic`
+  types.
+- `src/app/student/exams/[id]/tether-launch/page.tsx` —
+  `submitInitialAttestation` now builds a `displayDiagnostic` value using
+  these helpers and submits it alongside the existing `checks`/`required`/
+  `displayCount` fields in the same attestation POST request — never a
+  new, separate request or security event.
+- `src/app/api/secure-client/sessions/[sessionId]/attestation/route.ts`
+  — accepts `displayDiagnostic` via a `.strict()` zod schema (outcome
+  enum, `errorName` ≤100 chars, `errorMessage` ≤300 chars — bounded
+  server-side too, never trusting the client's own truncation alone).
+- `src/lib/secureClientRunner.ts` — `recordAttestation`'s existing,
+  production-visible `console.error("recordAttestation: session did not
+  reach VERIFIED", ...)` diagnostic now includes `displayDiagnostic`
+  verbatim. **Evidence only** — this value is never read anywhere in the
+  function to compute `overallStatus`, `newVerificationStatus`, or
+  `newSessionStatus`; those remain fully determined by `checks`/
+  `required`/the four existing boolean failure flags alone, exactly as
+  before.
+
+**Expected production log shape**, e.g. for an invoke failure:
+
+```
+recordAttestation: session did not reach VERIFIED {
+  ...,
+  displayCount: null,
+  displayDiagnostic: {
+    outcome: "DISPLAY_COUNT_INVOKE_FAILED",
+    errorName: "Error",
+    errorMessage: "..."
+  }
+}
+```
+
+This is a WEB/SERVER-only change — no Electron source was touched, no
+security/verification decision logic changed, and the frozen v1.7.2
+installer was not modified or rebuilt.
