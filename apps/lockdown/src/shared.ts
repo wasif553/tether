@@ -148,7 +148,54 @@
 // window.sesLockdown.getDisplayCount()). No change to sandbox,
 // contextIsolation, nodeIntegration, the exposed bridge surface, or any
 // server-side verification/enforcement logic.
-export const LOCKDOWN_VERSION = "1.7.3";
+// v1.7.4 — Pre-exam Readiness + Safe Lockdown Activation. Fixes three
+// confirmed problems from physical v1.7.3 testing: (1) pre-exam
+// remediation was too restrictive — the during-exam processDetection
+// overlay (screen-saver-level always-on-top) could obstruct Task
+// Manager even while the student was still meant to be freely
+// remediating (closing TeamViewer, disconnecting a display), because
+// setLockdownExamActive(true) used to fire at the same instant content
+// became reachable, with no calm, native-overlay-free readiness phase
+// of its own; (2) a BLOCKED display decision was always reported as
+// "Additional display connected" regardless of cause — active&&!ready
+// and an inconclusive/failed topology query both collapsed into the
+// same claim with no real evidence (see displayEnforcementLogic.ts's
+// new DisplayBlockingReason taxonomy: POLICY_NOT_READY/
+// ADDITIONAL_ELECTRON_DISPLAY/WINDOWS_TOPOLOGY_EXTEND/
+// WINDOWS_TOPOLOGY_CLONE/MULTIPLE_ACTIVE_TARGETS/TOPOLOGY_CHECK_UNAVAILABLE,
+// and resolveDisplayDecisionEventType, which now only ever reports
+// ADDITIONAL_DISPLAY_PRESENT for the four reasons backed by genuine
+// multi-display evidence); (3) exam timer/content could begin before
+// secure-client attestation and native lockdown activation actually
+// completed (Submission.startedAt was stamped at POST /start, before
+// manifest issue/consume/attestation even ran — see the main repo's
+// prisma/schema.prisma Submission.activatedAt doc comment).
+//
+// New two-phase lifecycle (see the main repo's
+// src/app/student/exams/[id]/tether-launch/page.tsx and
+// src/lib/secureClientActivation.ts): PHASE 1 PRE-EXAM READINESS runs
+// every mandatory native precheck (prohibited applications, remote
+// session, display topology) with NO strict overlay and NO submission
+// created — a calm, in-page remediation screen leaves Task Manager/
+// Alt+Tab/Windows display settings fully usable — followed by an
+// explicit "Begin examination" action (never an auto-start). PHASE 2
+// SECURE ACTIVATION then creates the submission (PREPARING — no
+// timer/content yet), completes the manifest/attestation sequence,
+// re-runs a FRESH native check via the new
+// lockdown:activate-secure-exam-lockdown IPC handler (closing the race
+// where TeamViewer or a second display appears between PRECHECK and
+// Begin examination), and only once that atomically activates display
+// enforcement + process detection's during-exam poll + remote-session
+// monitoring does the page call the new authoritative
+// POST /api/submissions/[id]/activate — which is what actually starts
+// the timer and unlocks question content server-side (never merely by
+// hiding React content; see the main repo's
+// src/lib/secureClientActivation.ts isSubmissionContentAccessible,
+// enforced in GET /api/submissions/[id] and every other content-bearing
+// route). No change to sandbox, contextIsolation, nodeIntegration,
+// active-exam display/process enforcement, or fail-closed server
+// verification.
+export const LOCKDOWN_VERSION = "1.7.4";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

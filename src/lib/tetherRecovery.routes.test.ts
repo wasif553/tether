@@ -42,6 +42,10 @@ const registrationChallengeRoute = await import("../app/api/tether/installation/
 const registerRoute = await import("../app/api/tether/installation/register/route");
 const examSessionChallengeRoute = await import("../app/api/tether/exam-session/attestation/challenge/route");
 const examSessionVerifyRoute = await import("../app/api/tether/exam-session/attestation/verify/route");
+// v1.7.4 pre-exam readiness — a VERIFIED secure-client session alone no
+// longer grants content access; see src/lib/secureClientActivation.ts
+// and startAsStudentAndActivate's own doc comment below.
+const activateRoute = await import("../app/api/submissions/[id]/activate/route");
 
 const { signRegistrationProofOfPossession, buildExamSessionAttestationCanonicalString } = await import("./secureClient/tetherAttestation");
 
@@ -126,6 +130,42 @@ async function startAsStudent(examId: string, studentUser: { id: string } = stud
   const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: examId }) });
   expect(res.status).toBeLessThan(300);
   return res.json();
+}
+
+/**
+ * v1.7.4 pre-exam readiness — for tests in this file that need a
+ * content-accessible TETHER_CLIENT_REQUIRED submission but are testing
+ * something else entirely (autosave idempotency/concurrency, final-
+ * submission idempotency) and don't care about the secure-client
+ * verification/native-activation dance itself: directly stamps
+ * activatedAt, bypassing the real POST /activate route (which requires a
+ * genuinely VERIFIED SecureClientSession — see
+ * src/lib/secureClientActivation.ts). Tests that DO care about
+ * verification/activation call the real routes directly instead (see
+ * launchAndConsume/attestExamSessionV2 and the recovery-flow tests
+ * below).
+ */
+async function startAsStudentAndActivate(examId: string, studentUser: { id: string } = student) {
+  const submission = await startAsStudent(examId, studentUser);
+  await prisma.submission.update({ where: { id: submission.id }, data: { activatedAt: new Date() } });
+  return submission;
+}
+
+/**
+ * v1.7.4 pre-exam readiness — drives the REAL POST /api/submissions/[id]/activate
+ * route. Requires the caller to have already established a genuinely
+ * VERIFIED SecureClientSession (e.g. via legacy attestation or
+ * attestExamSessionV2) and to have set mockAuth to the owning student —
+ * exactly mirroring the real tether-launch client's own sequencing.
+ */
+async function activateSubmission(studentUser: { id: string }, submissionId: string) {
+  mockAuth.mockResolvedValue(sessionFor(studentUser.id, "STUDENT"));
+  const res = await activateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submissionId }) });
+  if (res.status !== 200) {
+    const body = await res.json().catch(() => null);
+    throw new Error(`activateSubmission(${submissionId}) failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return res;
 }
 
 /** Registers a fresh Tether installation for the given student, returning the id and keypair for signing exam-session attestations. */
@@ -219,7 +259,7 @@ async function launchAndConsume(studentUser: { id: string }, submissionId: strin
 describe("Autosave idempotency and revision control (Part 2)", () => {
   it("1. retrying the same clientRequestId returns the previous acknowledgement without creating a duplicate row", async () => {
     const exam = await createTetherExam("Idempotent Autosave");
-    const submission = await startAsStudent(exam.id);
+    const submission = await startAsStudentAndActivate(exam.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
 
     const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
@@ -242,7 +282,7 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
 
   it("2. two concurrent duplicate autosave requests produce exactly one logical save, never two rows", async () => {
     const exam = await createTetherExam("Concurrent Autosave");
-    const submission = await startAsStudent(exam.id);
+    const submission = await startAsStudentAndActivate(exam.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
     const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
     const payload = { questionId: question.id, response: "concurrent answer", clientRequestId: "req-concurrent", clientRevision: 1 };
@@ -261,7 +301,7 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
 
   it("3/34. a stale (older or equal) revision cannot overwrite a newer acknowledged revision, and never creates a duplicate row", async () => {
     const exam = await createTetherExam("Stale Revision");
-    const submission = await startAsStudent(exam.id);
+    const submission = await startAsStudentAndActivate(exam.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
     const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
 
@@ -303,7 +343,7 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
   // to read as a guard.
   it("3b/4b. concurrent PATCHes with differing revisions never let the lower one win, across many repeated races", async () => {
     const exam = await createTetherExam("Concurrent Differing Revisions");
-    const submission = await startAsStudent(exam.id);
+    const submission = await startAsStudentAndActivate(exam.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
 
     const ITERATIONS = 25;
@@ -334,7 +374,7 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
 
   it("4. a genuinely newer revision safely supersedes an earlier acknowledged one", async () => {
     const exam = await createTetherExam("Newer Revision Supersedes");
-    const submission = await startAsStudent(exam.id);
+    const submission = await startAsStudentAndActivate(exam.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
     const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
 
@@ -353,8 +393,8 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
   it("malformed/cross-submission request ids never let another student's request affect this submission's answer", async () => {
     const examA = await createTetherExam("Cross Submission A");
     const examB = await createTetherExam("Cross Submission B");
-    const submissionA = await startAsStudent(examA.id, student);
-    const submissionB = await startAsStudent(examB.id, otherStudent);
+    const submissionA = await startAsStudentAndActivate(examA.id, student);
+    const submissionB = await startAsStudentAndActivate(examB.id, otherStudent);
     const questionA = await prisma.question.findFirstOrThrow({ where: { examId: examA.id } });
     const questionB = await prisma.question.findFirstOrThrow({ where: { examId: examB.id } });
 
@@ -391,7 +431,7 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
 describe("Final submission idempotency (Part 9)", () => {
   it("32. duplicate final submission (same submissionRequestId) is idempotent and audited distinctly on replay", async () => {
     const exam = await createTetherExam("Idempotent Submit");
-    const submission = await startAsStudent(exam.id);
+    const submission = await startAsStudentAndActivate(exam.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
     const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
     await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "ok" }), { params: Promise.resolve({ id: submission.id }) });
@@ -417,7 +457,7 @@ describe("Final submission idempotency (Part 9)", () => {
 
   it("33. after a lost response, querying submission status confirms prior acceptance ('Checking submission status')", async () => {
     const exam = await createTetherExam("Confirm Prior Acceptance");
-    const submission = await startAsStudent(exam.id);
+    const submission = await startAsStudentAndActivate(exam.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
     await submitRoute.POST(jsonRequest("POST", { submissionRequestId: "submit-req-timeout" }), { params: Promise.resolve({ id: submission.id }) });
 
@@ -569,11 +609,19 @@ describe("Crash, relaunch and Windows-restart recovery (Parts 6-8)", () => {
     await attestationRoute.POST(jsonRequest("POST", { clientType: "TETHER_SECURE_CLIENT", checks: {}, required: {} }), {
       params: Promise.resolve({ sessionId: finalSessionId }),
     });
+    await activateSubmission(student, submission.id);
 
     const getRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect(getRes.status).toBe(200);
     const getBody = await getRes.json();
-    const expectedDeadline = new Date(before.startedAt.getTime() + exam.durationMins * 60_000).toISOString();
+    // v1.7.4 pre-exam readiness — activation resets startedAt to the
+    // activation instant (see prisma/schema.prisma's Submission.activatedAt
+    // doc comment); the expected deadline must be computed from the
+    // ACTIVATED submission's startedAt, not the pre-activation `before`
+    // snapshot. `before.startedAt` itself is still correctly unaffected by
+    // the relaunch (asserted above) — only activation legitimately moves it.
+    const activated = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    const expectedDeadline = new Date(activated.startedAt.getTime() + exam.durationMins * 60_000).toISOString();
     expect(new Date(getBody.deadline).toISOString()).toBe(expectedDeadline);
   });
 });
@@ -596,8 +644,9 @@ describe("Freshness-gated verification (Part 6) — 'a previously verified sessi
 
       const verified = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: sessionId } });
       expect(verified.verificationStatus).toBe("VERIFIED");
+      await activateSubmission(student, submission.id);
 
-      // Content is accessible immediately after verification.
+      // Content is accessible immediately after verification (+ activation).
       const freshGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
       expect(freshGet.status).toBe(200);
 
@@ -668,7 +717,7 @@ describe("Recovery-status endpoint authorization and non-final-assessment regres
 
   it("SUBMITTED state once finalized; 21 — never reopens", async () => {
     const exam = await createTetherExam("Recovery Status Submitted");
-    const submission = await startAsStudent(exam.id);
+    const submission = await startAsStudentAndActivate(exam.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
     await submitRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
     const res = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
@@ -728,6 +777,7 @@ describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", ()
     const statusRes = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect((await statusRes.json()).state).toBe("ACTIVE");
 
+    await activateSubmission(testStudent, submission.id);
     const getRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect(getRes.status).toBe(200);
   });
@@ -790,6 +840,7 @@ describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", ()
     expect(session1.clientInstallationId).toBeNull();
 
     // Content is accessible on the ORIGINAL attempt — ordinary LEGACY-mode behaviour, completely unaffected (requirement 4).
+    await activateSubmission(testStudent, submission.id);
     const originalGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect(originalGet.status).toBe(200);
 

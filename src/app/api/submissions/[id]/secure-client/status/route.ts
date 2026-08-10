@@ -37,6 +37,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     requireDisplayCheck: policy.requireDisplayCheck,
     maximumDisplays: policy.maximumDisplays,
     displayRequirement: describeDisplayRequirement(policy),
+    // v1.7.4 pre-exam readiness — the Phase 2 native-activation handshake
+    // (tether-launch/page.tsx's ensureSecureActivation) needs this
+    // FROZEN per-attempt value to know whether to ask
+    // activateSecureExamLockdown() to run a fresh remote-session check.
+    requireRemoteSessionCheck: policy.requireRemoteSessionCheck,
     session: current
       ? {
           id: current.id,

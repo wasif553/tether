@@ -9,6 +9,11 @@ import {
   resolveDisplayEnforcementEventType,
   DEFAULT_DISPLAY_EVENT_DEBOUNCE_MS,
   INITIAL_SECURE_CLIENT_ENFORCEMENT_STATE,
+  resolveCombinedDisplayDecision,
+  resolveReadinessGatedDisplayDecision,
+  resolveDisplayDecisionEventType,
+  isGenuineMultiDisplayReason,
+  displayBlockingReasonCopy,
 } from "./displayEnforcementLogic";
 
 // ---------------------------------------------------------------------------
@@ -358,6 +363,175 @@ describe("displayEnforcement.ts source guarantees", () => {
     expect(overlayOptions).toMatch(/movable:\s*false/);
     expect(overlayOptions).not.toMatch(/transparent:\s*true/);
     expect(overlayOptions).not.toMatch(/focusable:\s*false/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.7.4 pre-exam readiness — Part 13B: the confirmed
+// BLOCKED==ADDITIONAL_DISPLAY_PRESENT bug and its fix. See
+// docs/tether-preflight-lifecycle-v1.7.4.md.
+// ---------------------------------------------------------------------------
+
+describe("resolveCombinedDisplayDecision — reason-carrying replacement for resolveCombinedDisplayEnforcementState", () => {
+  it("!requireSingleDisplay always OK regardless of display count/topology", () => {
+    expect(resolveCombinedDisplayDecision(2, false, "EXTEND")).toEqual({ state: "OK" });
+  });
+
+  it("displayCount > 1 -> ADDITIONAL_ELECTRON_DISPLAY (genuine multi-display evidence)", () => {
+    expect(resolveCombinedDisplayDecision(2, true, "INTERNAL_ONLY")).toEqual({ state: "BLOCKED", reason: "ADDITIONAL_ELECTRON_DISPLAY" });
+  });
+
+  it("topology EXTEND -> WINDOWS_TOPOLOGY_EXTEND", () => {
+    expect(resolveCombinedDisplayDecision(1, true, "EXTEND")).toEqual({ state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_EXTEND" });
+  });
+
+  it("topology CLONE_OR_DUPLICATE -> WINDOWS_TOPOLOGY_CLONE", () => {
+    expect(resolveCombinedDisplayDecision(1, true, "CLONE_OR_DUPLICATE")).toEqual({ state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_CLONE" });
+  });
+
+  it("topology MULTIPLE_ACTIVE_TARGETS -> MULTIPLE_ACTIVE_TARGETS", () => {
+    expect(resolveCombinedDisplayDecision(1, true, "MULTIPLE_ACTIVE_TARGETS")).toEqual({ state: "BLOCKED", reason: "MULTIPLE_ACTIVE_TARGETS" });
+  });
+
+  it("topology ERROR/UNKNOWN -> TOPOLOGY_CHECK_UNAVAILABLE — fails closed, but never claims a real display exists", () => {
+    expect(resolveCombinedDisplayDecision(1, true, "ERROR")).toEqual({ state: "BLOCKED", reason: "TOPOLOGY_CHECK_UNAVAILABLE" });
+    expect(resolveCombinedDisplayDecision(1, true, "UNKNOWN")).toEqual({ state: "BLOCKED", reason: "TOPOLOGY_CHECK_UNAVAILABLE" });
+  });
+
+  it("INTERNAL_ONLY/EXTERNAL_ONLY with a single display never blocks", () => {
+    expect(resolveCombinedDisplayDecision(1, true, "INTERNAL_ONLY")).toEqual({ state: "OK" });
+    expect(resolveCombinedDisplayDecision(1, true, "EXTERNAL_ONLY")).toEqual({ state: "OK" });
+  });
+});
+
+describe("resolveReadinessGatedDisplayDecision — the confirmed fix: active&&!ready is POLICY_NOT_READY, never conflated with a display fact", () => {
+  it("!active always OK, regardless of ready/requireSingleDisplay/topology", () => {
+    expect(resolveReadinessGatedDisplayDecision({ active: false, ready: false, requireSingleDisplay: true }, 2, "EXTEND")).toEqual({ state: "OK" });
+  });
+
+  it("active && !ready -> POLICY_NOT_READY — THE confirmed bug this fixes: previously indistinguishable from a real display block", () => {
+    expect(resolveReadinessGatedDisplayDecision({ active: true, ready: false, requireSingleDisplay: false }, 1, "INTERNAL_ONLY")).toEqual({
+      state: "BLOCKED",
+      reason: "POLICY_NOT_READY",
+    });
+    // Even with a single real display and no topology issue — the block
+    // is purely the readiness gate, never a display fact.
+    expect(resolveReadinessGatedDisplayDecision({ active: true, ready: false, requireSingleDisplay: true }, 1, "INTERNAL_ONLY")).toEqual({
+      state: "BLOCKED",
+      reason: "POLICY_NOT_READY",
+    });
+  });
+
+  it("active && ready delegates to resolveCombinedDisplayDecision unchanged", () => {
+    expect(resolveReadinessGatedDisplayDecision({ active: true, ready: true, requireSingleDisplay: true }, 2, "INTERNAL_ONLY")).toEqual({
+      state: "BLOCKED",
+      reason: "ADDITIONAL_ELECTRON_DISPLAY",
+    });
+    expect(resolveReadinessGatedDisplayDecision({ active: true, ready: true, requireSingleDisplay: true }, 1, "INTERNAL_ONLY")).toEqual({ state: "OK" });
+  });
+});
+
+describe("isGenuineMultiDisplayReason", () => {
+  it("true only for the four reasons backed by real display evidence", () => {
+    expect(isGenuineMultiDisplayReason("ADDITIONAL_ELECTRON_DISPLAY")).toBe(true);
+    expect(isGenuineMultiDisplayReason("WINDOWS_TOPOLOGY_EXTEND")).toBe(true);
+    expect(isGenuineMultiDisplayReason("WINDOWS_TOPOLOGY_CLONE")).toBe(true);
+    expect(isGenuineMultiDisplayReason("MULTIPLE_ACTIVE_TARGETS")).toBe(true);
+  });
+
+  it("false for POLICY_NOT_READY and TOPOLOGY_CHECK_UNAVAILABLE — neither is display evidence", () => {
+    expect(isGenuineMultiDisplayReason("POLICY_NOT_READY")).toBe(false);
+    expect(isGenuineMultiDisplayReason("TOPOLOGY_CHECK_UNAVAILABLE")).toBe(false);
+  });
+});
+
+describe("resolveDisplayDecisionEventType — only genuine multi-display facts may ever produce ADDITIONAL_DISPLAY_PRESENT", () => {
+  it("[Part 13B] active&&!ready (POLICY_NOT_READY) never produces any event — not an integrity signal", () => {
+    const nextDecision = { state: "BLOCKED" as const, reason: "POLICY_NOT_READY" as const };
+    expect(resolveDisplayDecisionEventType({ previousDecision: null, nextDecision, previousDisplayCount: null, nextDisplayCount: 1 })).toBeNull();
+    expect(
+      resolveDisplayDecisionEventType({
+        previousDecision: { state: "OK" },
+        nextDecision,
+        previousDisplayCount: 1,
+        nextDisplayCount: 1,
+      }),
+    ).toBeNull();
+  });
+
+  it("[Part 13B] displayCount > 1 produces ADDITIONAL_DISPLAY_PRESENT on first transition into BLOCKED", () => {
+    const nextDecision = { state: "BLOCKED" as const, reason: "ADDITIONAL_ELECTRON_DISPLAY" as const };
+    expect(resolveDisplayDecisionEventType({ previousDecision: { state: "OK" }, nextDecision, previousDisplayCount: 1, nextDisplayCount: 2 })).toBe(
+      "ADDITIONAL_DISPLAY_PRESENT",
+    );
+    expect(resolveDisplayDecisionEventType({ previousDecision: null, nextDecision, previousDisplayCount: null, nextDisplayCount: 2 })).toBe(
+      "ADDITIONAL_DISPLAY_PRESENT",
+    );
+  });
+
+  it("[Part 13B] EXTEND produces ADDITIONAL_DISPLAY_PRESENT on first transition, DISPLAY_CONFIGURATION_CHANGED on a further count change while still blocked for the SAME reason", () => {
+    const extend = { state: "BLOCKED" as const, reason: "WINDOWS_TOPOLOGY_EXTEND" as const };
+    expect(resolveDisplayDecisionEventType({ previousDecision: { state: "OK" }, nextDecision: extend, previousDisplayCount: 1, nextDisplayCount: 2 })).toBe(
+      "ADDITIONAL_DISPLAY_PRESENT",
+    );
+    expect(resolveDisplayDecisionEventType({ previousDecision: extend, nextDecision: extend, previousDisplayCount: 2, nextDisplayCount: 3 })).toBe(
+      "DISPLAY_CONFIGURATION_CHANGED",
+    );
+    expect(resolveDisplayDecisionEventType({ previousDecision: extend, nextDecision: extend, previousDisplayCount: 2, nextDisplayCount: 2 })).toBeNull();
+  });
+
+  it("[Part 13B] CLONE produces ADDITIONAL_DISPLAY_PRESENT on first transition", () => {
+    const clone = { state: "BLOCKED" as const, reason: "WINDOWS_TOPOLOGY_CLONE" as const };
+    expect(resolveDisplayDecisionEventType({ previousDecision: { state: "OK" }, nextDecision: clone, previousDisplayCount: 1, nextDisplayCount: 2 })).toBe(
+      "ADDITIONAL_DISPLAY_PRESENT",
+    );
+  });
+
+  it("[Part 13B] ERROR/UNKNOWN (TOPOLOGY_CHECK_UNAVAILABLE) produces DISPLAY_CHECK_TECHNICAL_FAILURE once, then null while unchanged — NEVER ADDITIONAL_DISPLAY_PRESENT", () => {
+    const unavailable = { state: "BLOCKED" as const, reason: "TOPOLOGY_CHECK_UNAVAILABLE" as const };
+    expect(
+      resolveDisplayDecisionEventType({ previousDecision: { state: "OK" }, nextDecision: unavailable, previousDisplayCount: 1, nextDisplayCount: 1 }),
+    ).toBe("DISPLAY_CHECK_TECHNICAL_FAILURE");
+    expect(
+      resolveDisplayDecisionEventType({ previousDecision: unavailable, nextDecision: unavailable, previousDisplayCount: 1, nextDisplayCount: 1 }),
+    ).toBeNull();
+  });
+
+  it("[Part 13B] transitioning from a genuine multi-display block back to OK produces DISPLAY_POLICY_RESTORED", () => {
+    const extend = { state: "BLOCKED" as const, reason: "WINDOWS_TOPOLOGY_EXTEND" as const };
+    expect(resolveDisplayDecisionEventType({ previousDecision: extend, nextDecision: { state: "OK" }, previousDisplayCount: 2, nextDisplayCount: 1 })).toBe(
+      "DISPLAY_POLICY_RESTORED",
+    );
+  });
+
+  it("[Part 13B] transitioning from POLICY_NOT_READY or TOPOLOGY_CHECK_UNAVAILABLE back to OK produces NO event — neither was ever reported as a display-presence problem", () => {
+    const notReady = { state: "BLOCKED" as const, reason: "POLICY_NOT_READY" as const };
+    const unavailable = { state: "BLOCKED" as const, reason: "TOPOLOGY_CHECK_UNAVAILABLE" as const };
+    expect(resolveDisplayDecisionEventType({ previousDecision: notReady, nextDecision: { state: "OK" }, previousDisplayCount: 1, nextDisplayCount: 1 })).toBeNull();
+    expect(
+      resolveDisplayDecisionEventType({ previousDecision: unavailable, nextDecision: { state: "OK" }, previousDisplayCount: 1, nextDisplayCount: 1 }),
+    ).toBeNull();
+  });
+});
+
+describe("displayBlockingReasonCopy — never claims a display exists without genuine evidence", () => {
+  it("ADDITIONAL_ELECTRON_DISPLAY/EXTEND/CLONE/MULTIPLE_ACTIVE_TARGETS mention a display", () => {
+    for (const reason of ["ADDITIONAL_ELECTRON_DISPLAY", "WINDOWS_TOPOLOGY_EXTEND", "WINDOWS_TOPOLOGY_CLONE", "MULTIPLE_ACTIVE_TARGETS"] as const) {
+      const copy = displayBlockingReasonCopy(reason);
+      expect(copy.title.toLowerCase() + copy.message.toLowerCase()).toMatch(/display/);
+    }
+  });
+
+  it("POLICY_NOT_READY never claims a display was found", () => {
+    const copy = displayBlockingReasonCopy("POLICY_NOT_READY");
+    expect(copy.message.toLowerCase()).not.toContain("additional display");
+    expect(copy.message.toLowerCase()).not.toContain("disconnect");
+  });
+
+  it("TOPOLOGY_CHECK_UNAVAILABLE uses neutral wording and never claims a display was found", () => {
+    const copy = displayBlockingReasonCopy("TOPOLOGY_CHECK_UNAVAILABLE");
+    expect(copy.message).toBe("Tether could not verify the display configuration. Resolve the display check before beginning the examination.");
+    expect(copy.message.toLowerCase()).not.toContain("additional display connected");
   });
 });
 

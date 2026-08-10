@@ -9,6 +9,8 @@ import {
   classifyDisplayBridgeAvailability,
   buildDisplayInvokeFailedDiagnostic,
   boundedDiagnosticString,
+  resolveDisplayPreflightIssue,
+  resolveActivationFailureIssue,
 } from "./tetherLaunch";
 import { isValidReportedDisplayCount } from "./secureClient/attestation";
 
@@ -199,5 +201,65 @@ describe("isValidReportedDisplayCount — [4, 5, 6] reused directly by the clien
   it("[5, 6] accepts 1 and 2 — the exact values distinguishing PASS from FAIL", () => {
     expect(isValidReportedDisplayCount(1)).toBe(true);
     expect(isValidReportedDisplayCount(2)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.7.4 pre-exam readiness — Part 13A/B: calm PRECHECK/remediation copy.
+// Mirrors apps/lockdown/src/displayEnforcementLogic.ts's taxonomy on the
+// web side (separate compiled packages, so never literally shared code —
+// see resolveDisplayPreflightIssue's own doc comment).
+// ---------------------------------------------------------------------------
+
+describe("resolveDisplayPreflightIssue — Part 8 factual display PRECHECK reporting", () => {
+  it("[Part 8] reports exactly what Windows observed — genuine multi-display evidence", () => {
+    expect(resolveDisplayPreflightIssue(2, "INTERNAL_ONLY")?.title).toBe("Additional display connected");
+    expect(resolveDisplayPreflightIssue(1, "EXTEND")?.title).toBe("Extended display detected");
+    expect(resolveDisplayPreflightIssue(1, "CLONE_OR_DUPLICATE")?.title).toBe("Mirrored display detected");
+    expect(resolveDisplayPreflightIssue(1, "MULTIPLE_ACTIVE_TARGETS")?.title).toBe("Additional display connected");
+  });
+
+  it("[Part 8] a single physical display with no TeamViewer/virtual-target evidence never shows an issue — the confirmed TEST 2 false positive this fixes", () => {
+    expect(resolveDisplayPreflightIssue(1, "INTERNAL_ONLY")).toBeNull();
+    expect(resolveDisplayPreflightIssue(1, "EXTERNAL_ONLY")).toBeNull();
+  });
+
+  it("[Part 8] ERROR/UNKNOWN uses neutral wording, never claims a display was found", () => {
+    const issue = resolveDisplayPreflightIssue(1, "ERROR");
+    expect(issue?.message).toBe("Tether could not verify the display configuration. Resolve the display check and select Recheck before beginning the examination.");
+    expect(issue?.message.toLowerCase()).not.toContain("additional display connected");
+    expect(resolveDisplayPreflightIssue(1, "UNKNOWN")?.title).toBe("Display configuration could not be verified");
+  });
+});
+
+describe("resolveActivationFailureIssue — Part 6/E: the fresh Phase 2 native check's failure copy matches the calm PRECHECK screen exactly", () => {
+  it("[Part 6 TeamViewer race] PROHIBITED_APPLICATION lists the matched application display names via the SAME capability-id lookup", () => {
+    const names = new Map([["TEAMVIEWER", "TeamViewer"]]);
+    const issue = resolveActivationFailureIssue({ reason: "PROHIBITED_APPLICATION", matchedCapabilityIds: ["TEAMVIEWER"] }, names);
+    expect(issue.title).toBe("Close applications before continuing");
+    expect(issue.applicationNames).toEqual(["TeamViewer"]);
+  });
+
+  it("PROHIBITED_APPLICATION falls back to 'an application' when no display-name map is supplied", () => {
+    const issue = resolveActivationFailureIssue({ reason: "PROHIBITED_APPLICATION", matchedCapabilityIds: ["UNKNOWN_ID"] });
+    expect(issue.applicationNames).toEqual(["an application"]);
+  });
+
+  it("[Part 6 display race] the four genuine display reasons produce the exact same copy as resolveDisplayPreflightIssue", () => {
+    expect(resolveActivationFailureIssue({ reason: "ADDITIONAL_ELECTRON_DISPLAY" })).toEqual(resolveDisplayPreflightIssue(2, "INTERNAL_ONLY"));
+    expect(resolveActivationFailureIssue({ reason: "WINDOWS_TOPOLOGY_EXTEND" })).toEqual(resolveDisplayPreflightIssue(1, "EXTEND"));
+    expect(resolveActivationFailureIssue({ reason: "TOPOLOGY_CHECK_UNAVAILABLE" })).toEqual(resolveDisplayPreflightIssue(1, "ERROR"));
+  });
+
+  it("REMOTE_SESSION_DETECTED and the two *_UNAVAILABLE reasons never claim a clean scan", () => {
+    expect(resolveActivationFailureIssue({ reason: "REMOTE_SESSION_DETECTED" }).title).toContain("Remote Desktop");
+    expect(resolveActivationFailureIssue({ reason: "PROCESS_CHECK_UNAVAILABLE" }).message.toLowerCase()).not.toContain("clean");
+    expect(resolveActivationFailureIssue({ reason: "REMOTE_SESSION_CHECK_UNAVAILABLE" }).message.toLowerCase()).not.toContain("clean");
+  });
+
+  it("an unrecognised reason falls back to a generic, factual, non-alarming message rather than throwing", () => {
+    const issue = resolveActivationFailureIssue({ reason: "SOMETHING_UNEXPECTED" });
+    expect(issue.title.length).toBeGreaterThan(0);
+    expect(issue.message.length).toBeGreaterThan(0);
   });
 });

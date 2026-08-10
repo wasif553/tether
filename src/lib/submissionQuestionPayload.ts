@@ -17,12 +17,16 @@ import {
   resolveEffectiveQuestionIds,
   resolveOptionOrder,
 } from "@/lib/questionDelivery";
+import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_CODE, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
 
 export class OneQuestionModeError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** v1.7.4 pre-exam readiness — optional machine-readable code (e.g. EXAM_NOT_ACTIVATED) so a caller can distinguish this from an ordinary "not found"/"disabled" error without string-matching the message. */
+  code?: string;
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -48,6 +52,14 @@ export async function loadOneQuestionSubmission(submissionId: string, studentId:
   }
   if (submission.status !== "IN_PROGRESS") {
     throw new OneQuestionModeError(409, "This submission is no longer active");
+  }
+  // v1.7.4 pre-exam readiness — same server-authoritative content gate as
+  // GET /api/submissions/[id]; see src/lib/secureClientActivation.ts.
+  // A gated attempt that has not yet been server-activated must never
+  // leak a question's text/options through this one-question-at-a-time
+  // path, even though the main submission GET already blocks it too.
+  if (!isSubmissionContentAccessible(submission)) {
+    throw new OneQuestionModeError(403, EXAM_NOT_ACTIVATED_MESSAGE, EXAM_NOT_ACTIVATED_CODE);
   }
   const settings = parseSecureSettings(submission.exam.secureSettings);
   if (!settings.oneQuestionAtATime) {

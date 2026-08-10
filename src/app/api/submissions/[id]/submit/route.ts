@@ -12,6 +12,7 @@ import { endExamAttemptSessionsForSubmission } from "@/lib/examAttemptSessionRun
 import { parseAnswerProvenancePolicy, isAnswerProvenanceEnabled } from "@/lib/answerProvenancePolicy";
 import { isSourceDeclarationSatisfied, createFinalDevelopmentRecordsWithTx } from "@/lib/answerDevelopmentRunner";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
+import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_CODE, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
 
 function studentSubmitResponse(submission: {
   id: string;
@@ -111,6 +112,13 @@ export async function POST(
         ...studentSubmitResponse(submission),
         code: "ALREADY_FINALIZED",
       });
+    }
+
+    // v1.7.4 pre-exam readiness — a secure-client-required attempt that
+    // was never server-activated has no timed clock and no exposed
+    // content to submit; see src/lib/secureClientActivation.ts.
+    if (!isSubmissionContentAccessible(submission)) {
+      return NextResponse.json({ error: EXAM_NOT_ACTIVATED_MESSAGE, code: EXAM_NOT_ACTIVATED_CODE }, { status: 403 });
     }
 
     const settings = parseSecureSettings(submission.exam.secureSettings);

@@ -42,14 +42,16 @@
  */
 import { screen, BrowserWindow } from "electron";
 import {
-  resolveCombinedDisplayEnforcementState,
-  resolveReadinessGatedDisplayEnforcementState,
+  resolveReadinessGatedDisplayDecision,
   debounceDisplayEvent,
-  resolveDisplayEnforcementEventType,
+  resolveDisplayDecisionEventType,
+  displayBlockingReasonCopy,
   DEFAULT_DISPLAY_EVENT_DEBOUNCE_MS,
   INITIAL_SECURE_CLIENT_ENFORCEMENT_STATE,
   type DisplayEnforcementState,
-  type DisplayEnforcementEventType,
+  type DisplayDecision,
+  type DisplayDecisionEventType,
+  type DisplayBlockingReason,
   type SecureClientEnforcementState,
 } from "./displayEnforcementLogic";
 import { getWindowsDisplayTopology } from "./windowsDisplayTopology";
@@ -59,7 +61,17 @@ import { diagnosticLog } from "./diagnosticLog";
 // Bundled inline (a data: URL) rather than a separate packaged asset, so
 // the overlay renders even if offline and packaging never needs to know
 // about an extra file. No external requests, no network dependency.
-const OVERLAY_HTML = `<!doctype html>
+//
+// v1.7.4 pre-exam readiness — the overlay copy is now a function of the
+// specific DisplayBlockingReason (see displayEnforcementLogic.ts), never
+// a single hardcoded "Additional display connected" string. This is the
+// direct fix for the confirmed BLOCKED==ADDITIONAL_DISPLAY_PRESENT bug:
+// a POLICY_NOT_READY (loading-transition) or TOPOLOGY_CHECK_UNAVAILABLE
+// (inconclusive query) block previously showed the exact same "Additional
+// display connected" text as a genuine second monitor.
+const OVERLAY_HTML = (reason: DisplayBlockingReason) => {
+  const { title, message } = displayBlockingReasonCopy(reason);
+  return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
@@ -74,16 +86,18 @@ const OVERLAY_HTML = `<!doctype html>
 </style>
 </head>
 <body>
-  <h1>Additional display connected</h1>
-  <p>Disconnect all additional, mirrored or extended displays to continue.</p>
+  <h1>${title}</h1>
+  <p>${message}</p>
 </body>
 </html>`;
+};
 
 /** Windows topology transitions may not always produce the same Electron display event — this periodic recheck is the backstop (Part 2 of the corrective pass). */
 const PERIODIC_RECHECK_MS = 2_000;
 
 export type DisplayEnforcementCallbacks = {
-  onEventType?: (eventType: DisplayEnforcementEventType, displayCount: number) => void;
+  /** v1.7.4 — eventType is now the reason-aware DisplayDecisionEventType (see displayEnforcementLogic.ts); main.ts maps DISPLAY_CHECK_TECHNICAL_FAILURE to the existing CLIENT_TECHNICAL_FAILURE server event type, never a display-presence claim. */
+  onEventType?: (eventType: NonNullable<DisplayDecisionEventType>, displayCount: number) => void;
   /** Task A/B — fired whenever this module's own piece of the diagnostic snapshot changes (decision, display count, topology, active target count). main.ts merges this with page-reported context and does its own change comparison before pushing to the panel / appending to the log file. */
   onDiagnosticsChanged?: (snapshot: ReturnType<DisplayEnforcement["getDiagnosticsSnapshot"]>) => void;
 };
@@ -91,7 +105,7 @@ export type DisplayEnforcementCallbacks = {
 export class DisplayEnforcement {
   private enforcementState: SecureClientEnforcementState = INITIAL_SECURE_CLIENT_ENFORCEMENT_STATE;
   private lastHandledAtMs: number | null = null;
-  private previousState: DisplayEnforcementState | null = null;
+  private previousDecision: DisplayDecision | null = null;
   private previousDisplayCount: number | null = null;
   private previousTopology: WindowsDisplayTopologyClassification | null = null;
   private previousActiveTargetCount: number | null = null;
@@ -156,6 +170,25 @@ export class DisplayEnforcement {
   }
 
   /**
+   * v1.7.4 pre-exam readiness — awaitable counterpart to evaluate(), for
+   * the native lockdown activation handshake (main.ts's
+   * lockdown:activate-secure-exam-lockdown IPC handler / the preload's
+   * activateSecureExamLockdown()). `evaluate()`'s other call sites are
+   * all fire-and-forget (`void this.evaluate(...)`) because nothing
+   * before v1.7.4 needed to know the RESULT of one specific evaluation —
+   * only that the live loop kept running. Activation is different: the
+   * caller must know, synchronously with respect to its own IPC
+   * response, whether the FRESH check (not a stale cached decision) came
+   * back OK or BLOCKED, and if BLOCKED, why. Always bypasses the
+   * debounce — an explicit activation check must never be silently
+   * dropped for arriving too soon after an unrelated OS event.
+   */
+  async evaluateNowAndGetDecision(): Promise<DisplayDecision> {
+    await this.evaluate({ bypassDebounce: true });
+    return this.previousDecision ?? { state: "OK" };
+  }
+
+  /**
    * Tether System Check and Exam Readiness v1 — an on-demand, fresh
    * native topology read for the "getDisplayTopology()" preload method,
    * independent of the live enforcement loop's cached
@@ -183,6 +216,8 @@ export class DisplayEnforcement {
     windowsTopologyClassification: WindowsDisplayTopologyClassification | null;
     activeWindowsTargetCount: number | null;
     currentDecision: DisplayEnforcementState;
+    /** v1.7.4 — the specific reason the last decision was BLOCKED (null when OK or never evaluated). See displayEnforcementLogic.ts's DisplayBlockingReason. */
+    blockingReason: DisplayBlockingReason | null;
     overlayVisible: boolean;
     lastDisplayCheckAt: string | null;
     lastErrorCode: string | null;
@@ -192,7 +227,8 @@ export class DisplayEnforcement {
       electronDisplayCount: this.getCurrentDisplayCount(),
       windowsTopologyClassification: this.previousTopology,
       activeWindowsTargetCount: this.previousActiveTargetCount,
-      currentDecision: this.previousState ?? "OK",
+      currentDecision: this.previousDecision?.state ?? "OK",
+      blockingReason: this.previousDecision?.state === "BLOCKED" ? this.previousDecision.reason : null,
       overlayVisible: Boolean(this.overlayWindow && !this.overlayWindow.isDestroyed()),
       lastDisplayCheckAt: this.lastDisplayCheckAtMs != null ? new Date(this.lastDisplayCheckAtMs).toISOString() : null,
       lastErrorCode: this.lastErrorCode,
@@ -288,15 +324,11 @@ export class DisplayEnforcement {
       this.lastErrorCode = "EVALUATE_THREW";
     }
 
-    const nextState: DisplayEnforcementState = resolveReadinessGatedDisplayEnforcementState(
-      this.enforcementState,
-      displayCount,
-      classification.classification,
-    );
+    const nextDecision: DisplayDecision = resolveReadinessGatedDisplayDecision(this.enforcementState, displayCount, classification.classification);
 
-    const eventType = resolveDisplayEnforcementEventType({
-      previousState: this.previousState,
-      nextState,
+    const eventType = resolveDisplayDecisionEventType({
+      previousDecision: this.previousDecision,
+      nextDecision,
       previousDisplayCount: this.previousDisplayCount,
       nextDisplayCount: displayCount,
     });
@@ -306,22 +338,23 @@ export class DisplayEnforcement {
       electronDisplayCount: displayCount,
       windowsTopology: classification.classification,
       windowsActiveTargetCount: classification.activeTargetCount,
-      nextState,
-      previousState: this.previousState,
+      nextDecision,
+      previousDecision: this.previousDecision,
     });
 
-    if (nextState === "BLOCKED") this.showOverlay();
+    if (nextDecision.state === "BLOCKED") this.showOverlay(nextDecision.reason);
     else this.hideOverlay();
 
     if (eventType) this.callbacks.onEventType?.(eventType, displayCount);
 
     const changed =
-      nextState !== this.previousState ||
+      nextDecision.state !== this.previousDecision?.state ||
+      (nextDecision.state === "BLOCKED" && nextDecision.reason !== (this.previousDecision?.state === "BLOCKED" ? this.previousDecision.reason : undefined)) ||
       displayCount !== this.previousDisplayCount ||
       classification.classification !== this.previousTopology ||
       classification.activeTargetCount !== this.previousActiveTargetCount;
 
-    this.previousState = nextState;
+    this.previousDecision = nextDecision;
     this.previousDisplayCount = displayCount;
     this.previousTopology = classification.classification;
     this.previousActiveTargetCount = classification.activeTargetCount;
@@ -329,11 +362,12 @@ export class DisplayEnforcement {
     if (changed) this.callbacks.onDiagnosticsChanged?.(this.getDiagnosticsSnapshot());
   }
 
-  private showOverlay(): void {
+  private showOverlay(reason: DisplayBlockingReason): void {
     if (!this.targetWindow || this.targetWindow.isDestroyed()) return;
     if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
+      this.overlayWindow.webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(OVERLAY_HTML(reason))}`);
       this.overlayWindow.show();
-      diagnosticLog("overlay: show (already existed)", { result: "shown" });
+      diagnosticLog("overlay: show (already existed)", { result: "shown", reason });
       return;
     }
     const bounds = this.targetWindow.getBounds();
@@ -354,7 +388,7 @@ export class DisplayEnforcement {
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
     });
     overlay.setAlwaysOnTop(true, "screen-saver");
-    overlay.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(OVERLAY_HTML)}`);
+    overlay.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(OVERLAY_HTML(reason))}`);
     overlay.on("closed", () => {
       if (this.overlayWindow === overlay) this.overlayWindow = null;
     });

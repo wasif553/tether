@@ -88,10 +88,22 @@ describe("runLaunchSequence — the dangerous pre-fix pattern must never reappea
     expect(failureBranchMatch![1]).not.toContain("router.replace");
   });
 
-  it("[15] secure-client enforcement is released (uncoverOnFailure) when the authoritative check fails", () => {
+  // v1.7.4 pre-exam readiness — uncoverOnFailure() and its early,
+  // speculative setSecureClientEnforcementState({active:true,ready:false})
+  // cover no longer exist (see docs/tether-preflight-lifecycle-v1.7.4.md).
+  // Native lockdown is never activated speculatively before verification
+  // succeeds — it only ever activates atomically, inside
+  // ensureSecureActivation, once every fresh Phase 2 check has already
+  // passed — so there is nothing to "release" on a failed authoritative
+  // check: this test now proves the failure branch is a plain, terminal
+  // setError+return with no enforcement-toggling side effect at all.
+  it("[15] a failed authoritative check sets an error and returns — no enforcement-toggling side effect (uncoverOnFailure no longer exists anywhere in this file)", () => {
     const checkIndex = runLaunchSequenceBody.indexOf("checkAuthoritativeSessionVerified(");
     const failureBranchMatch = runLaunchSequenceBody.slice(checkIndex).match(/if\s*\(!verified\)\s*\{([\s\S]*?)\n\s*\}/);
-    expect(failureBranchMatch![1]).toContain("uncoverOnFailure()");
+    expect(failureBranchMatch![1]).toContain("setError(");
+    expect(failureBranchMatch![1]).toContain("return");
+    expect(source).not.toContain("uncoverOnFailure");
+    expect(source).not.toMatch(/setSecureClientEnforcementState\?\.\(\{\s*active:\s*true,\s*ready:\s*false/);
   });
 
   it("[12] every router.replace call in this function is guarded by an unmountedRef check immediately before it — a stale in-flight attempt can never navigate after the student has left the page", () => {
@@ -112,6 +124,51 @@ describe("runLaunchSequence — the dangerous pre-fix pattern must never reappea
     const hasAuthoritativeGate = runLaunchSequenceBody.includes("checkAuthoritativeSessionVerified(");
     expect(hasAllowGate).toBe(true);
     expect(hasAuthoritativeGate).toBe(true);
+  });
+});
+
+// v1.7.4 pre-exam readiness — Part 13A: PHASE 1 PRECHECK never creates a
+// submission, never starts a timer, and never auto-starts the exam even
+// once clean. See docs/tether-preflight-lifecycle-v1.7.4.md.
+describe("v1.7.4 Phase 1 PRECHECK — no submission/timer until an explicit Begin examination", () => {
+  const runPrecheckBody = extractFunctionBody(source, "async function runPrecheck(");
+
+  it("runPrecheck never calls fetch(`/api/exams/${examId}/start`) — no submission is ever created during precheck", () => {
+    expect(runPrecheckBody).not.toMatch(/fetch\(`\/api\/exams\/\$\{examId\}\/start`/);
+  });
+
+  it("the Start-exam button only ever calls runPrecheck, never runLaunchSequence directly — precheck becoming clean sets precheckPassed, it never auto-launches", () => {
+    const startButtonIdx = source.indexOf('{precheckChecking ? "Checking…" : "Start exam"}');
+    const precedingSlice = source.slice(Math.max(0, startButtonIdx - 800), startButtonIdx);
+    expect(precedingSlice).toMatch(/void runPrecheck\(/);
+    expect(precedingSlice).toMatch(/setPrecheckPassed\(true\)/);
+    expect(precedingSlice).not.toMatch(/void runLaunchSequence\(/);
+  });
+
+  it("the 'Ready to begin' screen's Begin examination button is the only thing that calls runLaunchSequence for a fresh (non-resume) attempt", () => {
+    const readyScreenIdx = source.indexOf('<h1 className="text-lg font-medium">Ready to begin</h1>');
+    const beginButtonSlice = source.slice(readyScreenIdx, readyScreenIdx + 500);
+    expect(beginButtonSlice).toMatch(/void runLaunchSequence\(accessCode \|\| null\)/);
+    expect(beginButtonSlice).toContain("Begin examination");
+  });
+
+  it("a BLOCKED process scan and a genuine display-topology issue both route through the SAME unified precheckIssue state — never two separate UI paths", () => {
+    expect(runPrecheckBody).toMatch(/setPrecheckIssue\(\{/);
+    expect(runPrecheckBody).toMatch(/setPrecheckIssue\(issue\)/);
+  });
+});
+
+// v1.7.4 pre-exam readiness — Part 13E/F: PHASE 2 ordering. See
+// docs/tether-preflight-lifecycle-v1.7.4.md's required ordering diagram.
+describe("v1.7.4 Phase 2 — ensureSecureActivation runs strictly after verification and strictly before navigation", () => {
+  it("runLaunchSequence calls ensureSecureActivation only after verified is true, and never navigates unless ensureSecureActivation returned true", () => {
+    const verifiedCheckIdx = runLaunchSequenceBody.indexOf("if (!verified) {");
+    const activationCallIdx = runLaunchSequenceBody.indexOf("ensureSecureActivation(submission.id)");
+    const finalReplaceIdx = runLaunchSequenceBody.lastIndexOf("router.replace(`/student/exams/${submission.id}`);");
+    expect(verifiedCheckIdx).toBeGreaterThan(-1);
+    expect(activationCallIdx).toBeGreaterThan(verifiedCheckIdx);
+    expect(finalReplaceIdx).toBeGreaterThan(activationCallIdx);
+    expect(runLaunchSequenceBody).toMatch(/const activated = await ensureSecureActivation\(submission\.id\);\s*\n\s*if \(!activated\) return;/);
   });
 });
 

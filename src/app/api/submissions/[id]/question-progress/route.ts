@@ -74,7 +74,7 @@ export async function POST(
         return NextResponse.json({ error: err.message }, { status: err.status });
       }
       if (err instanceof OneQuestionModeError) {
-        return NextResponse.json({ error: err.message }, { status: err.status });
+        return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
       }
       throw err;
     }

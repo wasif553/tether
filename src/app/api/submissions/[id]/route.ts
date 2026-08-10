@@ -11,6 +11,7 @@ import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/s
 import { parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
 import { resolveTrustedTetherVerification } from "@/lib/tetherRecovery";
 import { resolveOfflineContinueMs } from "@/lib/tetherRecoveryConfig";
+import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_CODE, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
 
 export async function GET(
   _req: Request,
@@ -99,6 +100,24 @@ export async function GET(
           {
             error: "This exam requires Tether Secure Browser.",
             code: "TETHER_SESSION_REQUIRED",
+            action: { redirectTo: buildTetherLaunchPagePath(submission.examId) },
+          },
+          { status: 403 },
+        );
+      }
+      // v1.7.4 pre-exam readiness — the CONTENT-EXPOSURE boundary this
+      // route already enforces (see the doc comment above) extends one
+      // step further: a verified secure-client session is necessary but
+      // no longer sufficient. Server-side activation
+      // (POST /api/submissions/[id]/activate) — reached only after
+      // native lockdown is confirmed ACTIVE — is what actually unlocks
+      // question content and the exam timer. Never rely on React to hide
+      // Question 1: this is the real, server-authoritative gate.
+      if (!isSubmissionContentAccessible(submission)) {
+        return NextResponse.json(
+          {
+            error: EXAM_NOT_ACTIVATED_MESSAGE,
+            code: EXAM_NOT_ACTIVATED_CODE,
             action: { redirectTo: buildTetherLaunchPagePath(submission.examId) },
           },
           { status: 403 },

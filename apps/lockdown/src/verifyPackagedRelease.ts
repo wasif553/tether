@@ -139,7 +139,13 @@ const REQUIRED_MAIN_JS_MARKERS = [
 const FORBIDDEN_MAIN_JS_MARKER = 'store.set("lastExamId"';
 const REQUIRED_DISPLAY_ENFORCEMENT_JS_MARKERS = [
   "setEnforcementState",
-  "resolveReadinessGatedDisplayEnforcementState",
+  // v1.7.4 pre-exam readiness — the reason-aware replacement for
+  // resolveReadinessGatedDisplayEnforcementState (see
+  // displayEnforcementLogic.ts's DisplayDecision/DisplayBlockingReason);
+  // fails loudly on a stale pre-1.7.4 build that predates the
+  // BLOCKED==ADDITIONAL_DISPLAY_PRESENT fix.
+  "resolveReadinessGatedDisplayDecision",
+  "showOverlay(nextDecision.reason)",
   // v1.7.2 poll-serialization fix — the corrected in-flight assignment
   // (evaluateNow()'s own promise, never a `.finally()`-wrapped one).
   "this.evaluateInFlight = run;",

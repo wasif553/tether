@@ -24,7 +24,13 @@ export type TetherDiagnosticsSnapshot = {
   windowsTopologyClassification: string | null;
   activeWindowsTargetCount: number | null;
   enforcementEnabled: boolean;
+  /** v1.7.4 — enforcementState.ready, distinct from enforcementEnabled (which is enforcementState.active). Lets a POLICY_NOT_READY block be distinguished in the diagnostic panel/log from a genuine display block, closing the gap that let BLOCKED read as ADDITIONAL_DISPLAY_PRESENT with no way to tell why. */
+  enforcementReady: boolean;
+  /** v1.7.4 — enforcementState.requireSingleDisplay, the frozen per-attempt policy this decision was actually made against. */
+  requireSingleDisplay: boolean;
   currentDecision: "ALLOW" | "BLOCK";
+  /** v1.7.4 — the specific DisplayBlockingReason when currentDecision is BLOCK; null otherwise. See apps/lockdown/src/displayEnforcementLogic.ts. */
+  blockingReason: string | null;
   overlayVisible: boolean;
   /** ISO timestamp of the last display-check evaluation. Excluded from equality (see snapshotsEqualIgnoringTimestamp) so a timer tick alone never counts as a "state change". */
   lastDisplayCheckAt: string | null;
@@ -44,7 +50,10 @@ export const INITIAL_TETHER_DIAGNOSTICS_SNAPSHOT: TetherDiagnosticsSnapshot = {
   windowsTopologyClassification: null,
   activeWindowsTargetCount: null,
   enforcementEnabled: false,
+  enforcementReady: false,
+  requireSingleDisplay: false,
   currentDecision: "ALLOW",
+  blockingReason: null,
   overlayVisible: false,
   lastDisplayCheckAt: null,
   lastErrorCode: null,
@@ -72,7 +81,10 @@ export function snapshotsEqualIgnoringTimestamp(a: TetherDiagnosticsSnapshot, b:
     a.windowsTopologyClassification === b.windowsTopologyClassification &&
     a.activeWindowsTargetCount === b.activeWindowsTargetCount &&
     a.enforcementEnabled === b.enforcementEnabled &&
+    a.enforcementReady === b.enforcementReady &&
+    a.requireSingleDisplay === b.requireSingleDisplay &&
     a.currentDecision === b.currentDecision &&
+    a.blockingReason === b.blockingReason &&
     a.overlayVisible === b.overlayVisible &&
     a.lastErrorCode === b.lastErrorCode
   );

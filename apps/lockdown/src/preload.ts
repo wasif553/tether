@@ -303,6 +303,27 @@ contextBridge.exposeInMainWorld("sesLockdown", {
     ipcRenderer.send("lockdown:set-lockdown-exam-active", Boolean(active));
   },
 
+  /**
+   * v1.7.4 pre-exam readiness — the ONE narrow purpose-specific invoke
+   * for the Phase 2 secure-activation handshake (never a generic
+   * ipcRenderer passthrough). Re-runs fresh native process/remote-
+   * session/display checks and, only if every one is clean, atomically
+   * activates display enforcement, process detection's during-exam poll,
+   * and remote-session monitoring — then resolves. The caller must never
+   * treat a resolved promise alone as proof of anything; only
+   * `result.ok === true` means native lockdown is actually ACTIVE.
+   */
+  async activateSecureExamLockdown(params: { requireSingleDisplay: boolean; requireRemoteSessionCheck: boolean }): Promise<
+    | { ok: true; displayDecision: string; processDecision: string }
+    | { ok: false; reason: string; matchedCapabilityIds?: string[] }
+  > {
+    if (typeof params !== "object" || params === null) return { ok: false, reason: "INVALID_PARAMS" };
+    return ipcRenderer.invoke("lockdown:activate-secure-exam-lockdown", {
+      requireSingleDisplay: Boolean(params.requireSingleDisplay),
+      requireRemoteSessionCheck: Boolean(params.requireRemoteSessionCheck),
+    });
+  },
+
   onLockdownCapabilityTransition(callback: (payload: LockdownCapabilityTransitionPayload) => void): void {
     if (typeof callback === "function") capabilityTransitionListeners.push(callback);
   },

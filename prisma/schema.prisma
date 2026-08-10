@@ -543,6 +543,58 @@ model Submission {
   status          SubmissionStatus         @default(IN_PROGRESS)
   attemptNumber   Int                      @default(1)
   startedAt       DateTime                 @default(now())
+  /**
+   * v1.7.4 pre-exam readiness — see docs/tether-preflight-lifecycle-v1.7.4.md
+   * and src/lib/secureClientActivation.ts. Null while a
+   * TETHER_CLIENT_REQUIRED/SEB_REQUIRED attempt is PREPARING: the
+   * secure-client session is verified, but native lockdown has not yet
+   * been confirmed ACTIVE and the server has not authoritatively
+   * activated the timed attempt (POST /api/submissions/[id]/activate is
+   * the ONLY writer that ever sets this for a PREPARING attempt; it sets
+   * it exactly once, atomically, and never moves it again — a repeat
+   * call is idempotent and returns the existing value unchanged). Every
+   * content-bearing route must treat a PREPARING attempt (activatedAt
+   * null AND the frozen secureClientPolicySnapshotJson requires a secure
+   * client) as having no question content and no running deadline — see
+   * isSubmissionContentAccessible.
+   *
+   * `@default(now())` exists ONLY for zero-downtime cutover safety, not
+   * for v1.7.4 application code to rely on — see the "Zero-downtime
+   * cutover" note below. v1.7.4's own POST /api/exams/[id]/start ALWAYS
+   * passes this field explicitly, on both branches
+   * (`activatedAt: requiresActivation ? null : new Date()`), so it never
+   * actually falls through to the DB default itself; the default exists
+   * purely to protect a row created by the OLD (pre-v1.7.4) application
+   * during the deploy window, which has no idea this column exists and
+   * therefore never mentions it in its INSERT at all.
+   *
+   * Zero-downtime cutover: the migration (see
+   * docs/tether-preflight-lifecycle-v1.7.4-migration.sql) adds this
+   * column BEFORE the v1.7.4 application code is deployed, and backfills
+   * every EXISTING row to activatedAt = startedAt, and ONLY THEN sets
+   * the database-level DEFAULT CURRENT_TIMESTAMP (in that order — a
+   * DEFAULT set before backfilling would otherwise stamp every
+   * historical row with the migration's own run time instead of each
+   * row's real startedAt). Without the DB-level default, any Submission
+   * row created by OLD application code between "migration applied" and
+   * "v1.7.4 code deployed" would land on activatedAt = NULL (old code's
+   * generated Prisma client never mentions this column in its INSERT at
+   * all) — indistinguishable from a genuine v1.7.4 PREPARING attempt,
+   * and liable to be incorrectly blocked mid-exam the moment v1.7.4 code
+   * takes over. The DB default closes that gap unconditionally: ANY
+   * insert that omits this column (old code, always) gets it stamped
+   * non-null by Postgres itself, at the instant of insert — exactly
+   * matching pre-v1.7.4 semantics ("created = active") for every row old
+   * code could ever produce. Only v1.7.4 code's explicit `activatedAt:
+   * null` ever produces a genuinely PREPARING row.
+   *
+   * Every row that existed before this column was added is backfilled
+   * to activatedAt = startedAt by the migration file itself (Block 2) —
+   * this is no longer dependent on a separately-run script (see
+   * scripts/backfill-submission-activated-at.ts's own doc comment for
+   * its now-secondary, verification-only role).
+   */
+  activatedAt     DateTime?                @default(now())
   submittedAt     DateTime?
   gradedAt        DateTime?
   totalScore      Int?

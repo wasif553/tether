@@ -75,6 +75,14 @@ const examSessionVerifyRoute = await import("../app/api/tether/exam-session/atte
 const installationListRoute = await import("../app/api/tether/installation/list/route");
 const legacyAttestationRoute = await import("../app/api/secure-client/sessions/[sessionId]/attestation/route");
 const submitRoute = await import("../app/api/submissions/[id]/submit/route");
+// v1.7.4 pre-exam readiness — a VERIFIED secure-client session alone no
+// longer grants content access; POST /api/submissions/[id]/activate is
+// now the ONE authoritative step that unlocks it (see
+// src/lib/secureClientActivation.ts). Every test in this file that
+// establishes verification and then expects GET /api/submissions/[id]
+// (or submit) to succeed must call this AFTER verification, mirroring
+// what the real tether-launch client now does.
+const activateRoute = await import("../app/api/submissions/[id]/activate/route");
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT", institutionId: string) {
   return {
@@ -1358,9 +1366,14 @@ describe("Freeze timing policy for active exam attempts", () => {
     // verified Tether session for a TETHER_CLIENT_REQUIRED exam — this
     // exam is a FINAL_EXAMINATION, so it's required here too.
     await establishLegacyVerifiedSession(sessionA.id);
-    const expectedDeadlineA = new Date(new Date(submissionA.startedAt).getTime() + 30 * 60_000).toISOString();
 
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instId));
+    await activateSubmission(submissionA.id);
+    // activateSubmission resets startedAt to the activation instant — the
+    // expected deadline must be computed from the ACTIVATED submission's
+    // startedAt, not the pre-activation value captured at /start.
+    const activatedA = await prisma.submission.findUniqueOrThrow({ where: { id: submissionA.id } });
+    const expectedDeadlineA = new Date(activatedA.startedAt.getTime() + 30 * 60_000).toISOString();
     const beforeRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submissionA.id }) });
     expect((await beforeRes.json()).deadline).toBe(expectedDeadlineA);
 
@@ -1396,15 +1409,20 @@ describe("Freeze timing policy for active exam attempts", () => {
     });
     await establishLegacyVerifiedSession(sessionB.id);
     mockAuth.mockResolvedValue(sessionFor(studentB.id, "STUDENT", instId));
+    await activateSubmission(submissionB.id);
+    const activatedB = await prisma.submission.findUniqueOrThrow({ where: { id: submissionB.id } });
     const getResB = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submissionB.id }) });
-    const expectedDeadlineB = new Date(new Date(submissionB.startedAt).getTime() + 5 * 60_000).toISOString();
+    const expectedDeadlineB = new Date(activatedB.startedAt.getTime() + 5 * 60_000).toISOString();
     expect((await getResB.json()).deadline).toBe(expectedDeadlineB);
   });
 
   it("2/6. changing allowLateSubmit after an attempt starts does not change whether that attempt's late manual submission is accepted — the frozen snapshot governs, matching the exam's own submit route", async () => {
     const s = await freshStudent("Late Submit Frozen Student");
     // allowLateSubmit defaults false — frozen into this attempt's snapshot at start.
-    const { exam, submission } = await startFinalExamWithSession(s, "freeze-late-submit");
+    const { exam, submission, session } = await startFinalExamWithSession(s, "freeze-late-submit");
+    await establishLegacyVerifiedSession(session.id);
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    await activateSubmission(submission.id);
 
     await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
 
@@ -1427,7 +1445,10 @@ describe("Freeze timing policy for active exam attempts", () => {
   it("3/6. changing autoSubmitOnTimerEnd after an attempt starts does not change whether that attempt's forced system auto-submit is accepted — the frozen snapshot governs", async () => {
     const s = await freshStudent("Auto Submit Frozen Student");
     // autoSubmitOnTimerEnd defaults true — frozen into this attempt's snapshot at start.
-    const { exam, submission } = await startFinalExamWithSession(s, "freeze-auto-submit");
+    const { exam, submission, session } = await startFinalExamWithSession(s, "freeze-auto-submit");
+    await establishLegacyVerifiedSession(session.id);
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    await activateSubmission(submission.id);
 
     await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
 
@@ -1450,6 +1471,8 @@ describe("Freeze timing policy for active exam attempts", () => {
     const { installationId } = await reg.registerRes.json();
     const { exam, submission, session } = await startFinalExamWithSession(s, "freeze-revoke-submit-parity");
     await establishLegacyVerifiedSession(session.id);
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    await activateSubmission(submission.id);
 
     // 20 minutes elapsed against the frozen 30-minute duration.
     await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 20 * 60_000) } });
@@ -1473,9 +1496,11 @@ describe("Freeze timing policy for active exam attempts", () => {
 
   it("7/8. server time remains authoritative for submission acceptance too — no client-supplied clock/deadline/remaining-time value in the submit request body can override the frozen snapshot", async () => {
     const s = await freshStudent("Submit Server Time Authoritative Student");
-    const { submission } = await startFinalExamWithSession(s, "freeze-submit-server-time-authoritative");
-
+    const { submission, session } = await startFinalExamWithSession(s, "freeze-submit-server-time-authoritative");
+    await establishLegacyVerifiedSession(session.id);
     mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    await activateSubmission(submission.id);
+
     // Genuinely still within the frozen window — a forged body claiming
     // the deadline has already passed must have no effect. The submit
     // route only ever reads `systemAutoSubmit` from the body; every
@@ -2070,6 +2095,24 @@ async function establishLegacyVerifiedSession(sessionId: string, clientVersion =
 }
 
 /**
+ * v1.7.4 pre-exam readiness — drives the REAL POST /api/submissions/[id]/activate
+ * route. The student for `submissionId` must already be the mocked
+ * session (mockAuth) at call time — matches the real client's own
+ * sequencing (attestation/verification always happens first, activation
+ * second). Asserts success since every caller here expects activation to
+ * genuinely succeed; a caller testing activation FAILURE itself should
+ * call the route directly instead.
+ */
+async function activateSubmission(submissionId: string) {
+  const res = await activateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submissionId }) });
+  if (res.status !== 200) {
+    const body = await res.json().catch(() => null);
+    throw new Error(`activateSubmission(${submissionId}) failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return res;
+}
+
+/**
  * Full real flow: publish a TETHER_CLIENT_REQUIRED final exam, start it,
  * and create the SecureClientSession a genuine launch-manifest consume
  * would have produced — mirrors setUpInProgressSession's pattern but
@@ -2244,6 +2287,7 @@ describe("TETHER_EXAM_ATTESTATION_MODE — real enforcement wiring (POST /start,
     await establishLegacyVerifiedSession(session.id);
 
     mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    await activateSubmission(submission.id);
     const contentRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect(contentRes.status).toBe(200);
   });
@@ -2275,6 +2319,7 @@ describe("TETHER_EXAM_ATTESTATION_MODE — real enforcement wiring (POST /start,
       expect(v2Res.status).toBe(200);
 
       mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+      await activateSubmission(submission.id);
       const contentRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
       expect(contentRes.status).toBe(200);
     } finally {
@@ -2352,6 +2397,7 @@ describe("TETHER_EXAM_ATTESTATION_MODE — real enforcement wiring (POST /start,
     vi.stubEnv("TETHER_EXAM_ATTESTATION_MODE", "DUAL");
     try {
       mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+      await activateSubmission(submission.id);
       const contentRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
       // Still 200 — the environment changing to DUAL AFTER this session
       // was created must never retroactively demand v2 evidence it was
@@ -2410,6 +2456,7 @@ describe("TETHER_EXAM_ATTESTATION_MODE — real enforcement wiring (POST /start,
       expect(v2Res.status).toBe(200);
 
       mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+      await activateSubmission(submission.id);
       const contentRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
       expect(contentRes.status).toBe(200);
     } finally {

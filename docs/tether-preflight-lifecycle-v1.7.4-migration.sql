@@ -1,0 +1,232 @@
+-- Tether v1.7.4 Pre-exam Readiness + Safe Lockdown Activation (additive
+-- schema change + one-time data backfill) — see
+-- docs/tether-preflight-lifecycle-v1.7.4.md and prisma/schema.prisma's
+-- own doc comment on Submission.activatedAt.
+--
+-- Generated via:
+--   npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script
+-- then hand-extracted to just the one new column this feature adds —
+-- see docs/migration-ledger.md, "Migration convention" (this project
+-- does not use `prisma migrate`; every schema change is a hand-written,
+-- manually-applied SQL file like this one).
+--
+-- Changes:
+--   1. One new nullable column on the EXISTING Submission table —
+--      activatedAt (the authoritative "native lockdown confirmed ACTIVE
+--      and the timed attempt server-activated" marker for secure-client-
+--      required attempts; see src/lib/secureClientActivation.ts).
+--   2. A ONE-TIME backfill: activatedAt = startedAt for every row where
+--      activatedAt IS NULL, immediately after adding the column.
+--   3. A database-level DEFAULT CURRENT_TIMESTAMP for the column, set
+--      ONLY AFTER the backfill (Block 3 below) — this is what closes the
+--      zero-downtime cutover race described next. It affects ONLY future
+--      inserts that omit the column; it never touches any existing row.
+--
+-- UNLIKE every prior migration in docs/migration-ledger.md, this file
+-- backfills existing data (Block 2 below) rather than being purely
+-- additive-with-no-data-change. This is DELIBERATE and REQUIRED, not an
+-- oversight: the application code added alongside this column
+-- (isSubmissionContentAccessible, src/lib/secureClientActivation.ts)
+-- treats `activatedAt IS NULL` on a TETHER_CLIENT_REQUIRED/SEB_REQUIRED
+-- submission as "never activated — no question content, no running
+-- deadline". Without the backfill, EVERY historical
+-- TETHER_CLIENT_REQUIRED/SEB_REQUIRED submission in this database
+-- (including already-SUBMITTED/GRADED ones a lecturer or student may
+-- still need to review) would read back as "never activated" the moment
+-- the NEW v1.7.4 application code starts running against this column —
+-- a real, immediate regression, not a hypothetical one. Backfilling
+-- activatedAt = startedAt is exactly correct for every such row: under
+-- the pre-v1.7.4 architecture that produced them, `startedAt` already
+-- meant "when this attempt's timed clock/content access effectively
+-- began" — there was no separate PREPARING phase to distinguish from.
+--
+-- ZERO-DOWNTIME CUTOVER RACE — why Block 3 (SET DEFAULT) exists:
+-- This migration is applied BEFORE the v1.7.4 application code is
+-- deployed (see docs/tether-preflight-lifecycle-v1.7.4.md, "Production
+-- rollout order"). In the window between "migration applied" and
+-- "v1.7.4 code deployed", the OLD (pre-v1.7.4) application server is
+-- still running and can still create new Submission rows. The OLD
+-- code's generated Prisma client was built from the OLD schema.prisma —
+-- it has NO knowledge this column exists at all, so any
+-- `prisma.submission.create()` call it makes structurally never mentions
+-- `activatedAt` in its INSERT, regardless of what the column's default
+-- is. Without a DATABASE-level default, such a row would land on
+-- activatedAt = NULL — indistinguishable from a genuine v1.7.4 PREPARING
+-- row — and the moment v1.7.4 code takes over, that student's NEXT
+-- content request (e.g. an autosave) would be incorrectly blocked with
+-- EXAM_NOT_ACTIVATED (403), a real mid-exam interruption for a student
+-- who never went through the new PREPARING flow at all. Block 3 closes
+-- this unconditionally: ANY insert that omits the column (old code,
+-- always) gets it stamped non-null by Postgres itself, at the instant of
+-- insert — exactly matching pre-v1.7.4 semantics ("created = active")
+-- for every row old code could ever produce. Only v1.7.4 code's
+-- EXPLICIT `activatedAt: null` (see POST /api/exams/[id]/start) ever
+-- produces a genuinely PREPARING row, because Prisma sends an explicit
+-- SQL NULL for an explicitly-passed `null`, which overrides/bypasses a
+-- column DEFAULT — proven with a real DB-backed test, not assumed; see
+-- src/lib/tetherActivatedAtCutover.test.ts.
+--
+-- WHY BLOCK 3 MUST COME AFTER BLOCK 2, NOT BE COMBINED WITH BLOCK 1:
+-- Postgres physically rewrites the entire table when a column is ADDed
+-- WITH a VOLATILE default expression (CURRENT_TIMESTAMP/now() is
+-- volatile) in the SAME statement — every EXISTING row would be stamped
+-- with the SAME literal value (the migration's own run time), destroying
+-- each row's real historical startedAt/activatedAt relationship. Adding
+-- the column with NO default (Block 1), backfilling each row from its
+-- OWN data (Block 2), and ONLY THEN setting the default (Block 3, a
+-- lightweight metadata-only change that affects future inserts alone) is
+-- the only sequencing that is both historically correct AND zero-
+-- downtime safe.
+--
+-- Safety for a live, mixed-version rollout (see docs/migration-ledger.md,
+-- "Migration convention" — this file is applied manually, BEFORE the
+-- application code deploy that reads/writes this column, exactly like
+-- every prior file in that ledger):
+--   - The OLD (pre-v1.7.4) application code never reads or writes
+--     `activatedAt` at all. After Block 3, any row it creates gets
+--     activatedAt stamped to the insert time by the database default —
+--     harmless and correct: old code never checks the column, and it
+--     matches pre-v1.7.4 "created = active" semantics exactly, so a
+--     student mid-exam under old code is never later misclassified as
+--     PREPARING once v1.7.4 code takes over.
+--   - The backfill UPDATE (Block 2) only ever touches rows that already
+--     exist at apply time and only ever WHERE activatedAt IS NULL — it
+--     can never touch a row created by NEW (v1.7.4) application code
+--     after deploy, because that code always sets activatedAt itself
+--     (immediately, for non-gated delivery modes; explicitly to null,
+--     for gated ones, until POST /api/submissions/[id]/activate runs) —
+--     see POST /api/exams/[id]/start's own doc comment. This means the
+--     backfill is safe to run even if, for some reason, it were applied
+--     AFTER the new code was already live (though the documented order
+--     below never requires that): it would simply do nothing to any row
+--     the new code has already correctly activated or left PREPARING.
+--   - The UPDATE's WHERE clause makes it naturally idempotent — safe to
+--     re-run (a second run always affects 0 rows, since the first run
+--     already cleared every NULL).
+--   - Block 3 (SET DEFAULT) is also safe to re-run — setting the same
+--     default twice is a no-op metadata change, not an error.
+--
+-- IMPORTANT — shared database: Preview and Production currently point at
+-- the SAME Supabase database (see docs/migration-ledger.md). This
+-- migration must be applied ONCE, not once per environment. Run the
+-- pre-check query below first; if it already shows the change applied,
+-- do not re-run this file.
+--
+-- Apply via the Supabase SQL Editor (or `psql`). Do NOT run
+-- `prisma db push`, `prisma migrate deploy`, `prisma migrate dev`, or
+-- `prisma migrate resolve`.
+--
+-- Idempotency: Block 1 (ALTER TABLE ADD COLUMN) is NOT idempotent — it
+-- is a ONE-TIME statement; re-running it after a successful apply will
+-- error ("column already exists"). Block 2 (the backfill UPDATE) IS
+-- idempotent — safe to re-run any number of times. Block 3 (SET
+-- DEFAULT) IS idempotent — re-applying the same default is a no-op. Run
+-- the pre-check query first regardless.
+--
+-- THIS MIGRATION HAS NOT BEEN APPLIED TO ANY ENVIRONMENT. Do not apply
+-- it without explicit authorization. Mark as PENDING — NOT APPLIED in
+-- docs/migration-ledger.md until an operator actually runs it, and
+-- record the date there once applied — see that file's own "Ledger"
+-- table and "Deployment procedure" section conventions.
+
+-- ============================================================================
+-- 0. Pre-check (read-only) — run BEFORE applying anything below, to
+--    confirm this migration has not already been applied to this
+--    database (remember: Preview and Production are the SAME database).
+-- ============================================================================
+-- SELECT column_name FROM information_schema.columns
+--   WHERE table_name = 'Submission' AND column_name = 'activatedAt';
+-- No rows → safe to apply. A row → this migration has already run;
+-- investigate before re-applying (in particular, re-run the Block 2
+-- verification query below rather than re-running Block 1).
+
+-- ============================================================================
+-- 1. AlterTable: Submission — the authoritative "native lockdown
+--    confirmed ACTIVE and the timed attempt server-activated" marker.
+--    Nullable; null means "this TETHER_CLIENT_REQUIRED/SEB_REQUIRED
+--    attempt is still PREPARING" (see isSubmissionContentAccessible in
+--    src/lib/secureClientActivation.ts). No DEFAULT — new rows created
+--    by OLD (pre-v1.7.4) application code land on SQL NULL here, which
+--    is inert to that code and is exactly the value Block 2 below would
+--    have backfilled anyway.
+-- ============================================================================
+ALTER TABLE "Submission" ADD COLUMN "activatedAt" TIMESTAMP(3);
+
+-- ============================================================================
+-- 2. Backfill (ONE-TIME data change, idempotent via the WHERE clause) —
+--    every row that exists at apply time gets activatedAt = startedAt,
+--    exactly matching how that row's timing already behaved under the
+--    pre-v1.7.4 architecture. See the top-of-file note above for the
+--    full safety analysis of why this is correct and cannot affect any
+--    row the new application code creates/activates after deploy.
+-- ============================================================================
+UPDATE "Submission" SET "activatedAt" = "startedAt" WHERE "activatedAt" IS NULL;
+
+-- ============================================================================
+-- 3. Set the database-level default for FUTURE inserts only — run ONLY
+--    after Block 2 has completed. See the "ZERO-DOWNTIME CUTOVER RACE"
+--    and "WHY BLOCK 3 MUST COME AFTER BLOCK 2" notes above for why this
+--    ordering is mandatory (a default set in the same statement as
+--    Block 1 would stamp every existing row with the migration's own
+--    run time instead of preserving each row's real startedAt).
+-- ============================================================================
+ALTER TABLE "Submission" ALTER COLUMN "activatedAt" SET DEFAULT CURRENT_TIMESTAMP;
+
+-- ============================================================================
+-- Verification queries (read-only) — run after applying all three blocks
+-- above.
+-- ============================================================================
+-- 1. Column exists:
+-- SELECT column_name, is_nullable, data_type FROM information_schema.columns
+--   WHERE table_name = 'Submission' AND column_name = 'activatedAt';
+-- Expected: one row, is_nullable = 'YES', data_type = 'timestamp without time zone'.
+--
+-- 2. No historical row was left unbackfilled:
+-- SELECT count(*) FROM "Submission" WHERE "activatedAt" IS NULL;
+-- Expected: 0, immediately after applying Block 2 (a nonzero count
+-- afterwards would mean new v1.7.4 application code has already started
+-- creating genuinely PREPARING rows — expected and correct once the new
+-- code is live, NOT a sign the backfill failed).
+--
+-- 3. Backfilled values exactly match startedAt (spot-check — no row's
+--    timing was altered, only copied):
+-- SELECT count(*) FROM "Submission" WHERE "activatedAt" IS NOT NULL AND "activatedAt" <> "startedAt";
+-- Expected: 0 immediately after applying (every row was just backfilled
+-- from its own startedAt) — this count will legitimately grow later,
+-- once real v1.7.4 activations start resetting startedAt to a later,
+-- genuine activation instant for gated attempts (see
+-- POST /api/submissions/[id]/activate) — that is expected, correct
+-- future drift, not a migration problem.
+--
+-- 4. Row count unchanged (no row deleted or created by this migration):
+-- SELECT count(*) FROM "Submission";
+-- Compare against the count from immediately before applying.
+--
+-- 5. Database default is actually set (confirms Block 3 applied — this
+--    is the guard that protects the cutover window):
+-- SELECT column_default FROM information_schema.columns
+--   WHERE table_name = 'Submission' AND column_name = 'activatedAt';
+-- Expected: 'CURRENT_TIMESTAMP' (or equivalent, e.g. 'now()').
+--
+-- This migration is additive-plus-backfill-plus-default and safe to
+-- apply to a live production database at any time, BEFORE deploying the
+-- v1.7.4 application code that reads this column (see the safety
+-- analysis above and docs/migration-ledger.md's established "migrate
+-- first, then deploy" order for every prior hand-written migration in
+-- this project). Unlike every prior migration in this ledger, the
+-- window between applying THIS migration and deploying the v1.7.4 code
+-- is not merely inert to old code — Block 3 makes it actively
+-- zero-downtime-safe for rows old code creates during that window.
+--
+-- ============================================================================
+-- Rollback (documentation only — see docs/migration-ledger.md for the
+-- full procedure; not executed automatically by this file)
+-- ============================================================================
+-- The column is safe to drop if needed:
+--   ALTER TABLE "Submission" DROP COLUMN "activatedAt";
+-- (every OLD application code path never reads it at all; only the
+-- v1.7.4 application code depends on it — rolling back the column
+-- requires first rolling back to pre-v1.7.4 application code, exactly
+-- like any other additive column in this ledger). The backfilled values
+-- themselves need no separate rollback — they were derived data
+-- (activatedAt = startedAt), never a change to any pre-existing column.

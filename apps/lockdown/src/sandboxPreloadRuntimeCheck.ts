@@ -29,8 +29,10 @@
 import { app, BrowserWindow, ipcMain, screen } from "electron";
 import path from "node:path";
 import { DisplayEnforcement } from "./displayEnforcement";
+import { ProcessDetection } from "./processDetection";
+import { resolveCombinedDisplayDecision } from "./displayEnforcementLogic";
 
-type BridgeShape = { typeofSesLockdown: string; typeofGetDisplayCount: string };
+type BridgeShape = { typeofSesLockdown: string; typeofGetDisplayCount: string; typeofActivateSecureExamLockdown: string };
 
 async function main(): Promise<void> {
   await app.whenReady();
@@ -41,6 +43,32 @@ async function main(): Promise<void> {
   // app runs, end to end.
   const displayEnforcement = new DisplayEnforcement();
   ipcMain.handle("lockdown:get-display-count", () => displayEnforcement.getCurrentDisplayCount());
+
+  // v1.7.4 pre-exam readiness — the REAL lockdown:activate-secure-exam-lockdown
+  // handler logic (see main.ts), backed by the REAL ProcessDetection and
+  // DisplayEnforcement classes — proves the actual native activation
+  // handshake works end to end through the real sandboxed preload, not a
+  // mocked substitute. requireSingleDisplay/requireRemoteSessionCheck are
+  // both false here so this check is deterministic on any test machine
+  // regardless of its real display/remote-session state — this proves the
+  // PLUMBING (preload -> IPC -> real native classes -> bounded result),
+  // not a specific policy outcome (that's covered by the pure-function
+  // tests in displayEnforcementLogic.test.ts / processDetectionLogic.test.ts).
+  const processDetection = new ProcessDetection();
+  ipcMain.handle("lockdown:activate-secure-exam-lockdown", async (_event, rawParams: unknown) => {
+    const params = rawParams as { requireSingleDisplay: boolean; requireRemoteSessionCheck: boolean };
+    const scan = await processDetection.runPreflightScan();
+    if (scan.state === "BLOCKED") return { ok: false, reason: "PROHIBITED_APPLICATION", matchedCapabilityIds: scan.matchedCapabilityIds };
+    if (scan.state === "UNAVAILABLE") return { ok: false, reason: "PROCESS_CHECK_UNAVAILABLE" };
+    if (params.requireSingleDisplay) {
+      const topology = await displayEnforcement.getOnDemandDisplayTopology();
+      const decision = resolveCombinedDisplayDecision(topology.electronDisplayCount, true, topology.classification);
+      if (decision.state === "BLOCKED") return { ok: false, reason: decision.reason };
+    }
+    displayEnforcement.setEnforcementState({ active: true, ready: true, requireSingleDisplay: params.requireSingleDisplay });
+    processDetection.setExamActive(true);
+    return { ok: true, displayDecision: "OK", processDecision: "CLEAN" };
+  });
 
   const win = new BrowserWindow({
     show: false,
@@ -62,11 +90,10 @@ async function main(): Promise<void> {
   const bridgeShape = (await win.webContents.executeJavaScript(`
     (() => {
       const typeofSesLockdown = typeof window.sesLockdown;
-      const typeofGetDisplayCount =
-        typeofSesLockdown === "object" && window.sesLockdown !== null
-          ? typeof window.sesLockdown.getDisplayCount
-          : "n/a (sesLockdown missing)";
-      return { typeofSesLockdown, typeofGetDisplayCount };
+      const hasBridge = typeofSesLockdown === "object" && window.sesLockdown !== null;
+      const typeofGetDisplayCount = hasBridge ? typeof window.sesLockdown.getDisplayCount : "n/a (sesLockdown missing)";
+      const typeofActivateSecureExamLockdown = hasBridge ? typeof window.sesLockdown.activateSecureExamLockdown : "n/a (sesLockdown missing)";
+      return { typeofSesLockdown, typeofGetDisplayCount, typeofActivateSecureExamLockdown };
     })();
   `)) as BridgeShape;
 
@@ -79,6 +106,10 @@ async function main(): Promise<void> {
   }
   if (bridgeShape.typeofGetDisplayCount !== "function") {
     failures.push(`typeof window.sesLockdown.getDisplayCount was "${bridgeShape.typeofGetDisplayCount}", expected "function"`);
+  }
+  // v1.7.4 pre-exam readiness — Part 13F.
+  if (bridgeShape.typeofActivateSecureExamLockdown !== "function") {
+    failures.push(`typeof window.sesLockdown.activateSecureExamLockdown was "${bridgeShape.typeofActivateSecureExamLockdown}", expected "function"`);
   }
 
   let displayCount: unknown = null;
@@ -96,6 +127,39 @@ async function main(): Promise<void> {
     }
   }
 
+  // v1.7.4 pre-exam readiness — Part 13F: "success returns only when
+  // native state is ACTIVE". Exercises the REAL generated preload
+  // artifact's activateSecureExamLockdown against the REAL ProcessDetection/
+  // DisplayEnforcement classes wired above — never a mocked substitute.
+  let activationResult: unknown = null;
+  let activationInvokeError: string | null = null;
+  if (failures.length === 0) {
+    try {
+      activationResult = await win.webContents.executeJavaScript(
+        `window.sesLockdown.activateSecureExamLockdown({ requireSingleDisplay: false, requireRemoteSessionCheck: false })`,
+      );
+    } catch (err) {
+      activationInvokeError = err instanceof Error ? err.message : String(err);
+    }
+    if (activationInvokeError) {
+      failures.push(`window.sesLockdown.activateSecureExamLockdown() invocation failed: ${activationInvokeError}`);
+    } else {
+      const result = activationResult as { ok?: boolean; displayDecision?: string; processDecision?: string; reason?: string } | null;
+      if (!result || typeof result.ok !== "boolean") {
+        failures.push(`activateSecureExamLockdown() did not resolve to a well-formed result, got: ${JSON.stringify(activationResult)}`);
+      } else if (result.ok !== true) {
+        // Not necessarily a failure of THIS check — a real prohibited
+        // application genuinely running on the test machine would
+        // correctly produce ok:false. Recorded, not auto-failed, since
+        // this script's job is proving the plumbing works, not asserting
+        // a specific machine state.
+        failures.push(`activateSecureExamLockdown() resolved ok:false (reason: ${result.reason ?? "unknown"}) — verify no prohibited application is actually running on this machine before treating this as a plumbing failure.`);
+      } else if (result.displayDecision !== "OK" || result.processDecision !== "CLEAN") {
+        failures.push(`activateSecureExamLockdown() resolved ok:true but with unexpected fields: ${JSON.stringify(result)}`);
+      }
+    }
+  }
+
   // Independent cross-check via Electron's own screen module directly —
   // not itself part of the pass/fail gate (the real bridge round-trip
   // above is authoritative), just a sanity signal in the report.
@@ -106,7 +170,9 @@ async function main(): Promise<void> {
     failures,
     typeofSesLockdown: bridgeShape.typeofSesLockdown,
     typeofGetDisplayCount: bridgeShape.typeofGetDisplayCount,
+    typeofActivateSecureExamLockdown: bridgeShape.typeofActivateSecureExamLockdown,
     displayCount,
+    activationResult,
     electronOwnDisplayCount,
     preloadErrors,
     preloadPath: path.join(__dirname, "preload.js"),

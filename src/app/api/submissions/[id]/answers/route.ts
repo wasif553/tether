@@ -6,6 +6,7 @@ import { parseSecureSettings } from "@/lib/secureExam";
 import { resolveSubmissionTimingPolicy, submissionDeadline } from "@/lib/assessmentLifecycle";
 import { recordAnswerSavedActivity } from "@/lib/answerActivityTelemetry";
 import { findMostRecentSessionId } from "@/lib/examAttemptSessionRunner";
+import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_CODE, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
 
 // Tether Secure Exam Recovery and Resilient Autosave v1 (Part 2) — see
 // docs/tether-secure-resume-recovery-v1.md, "Autosave idempotency and
@@ -46,6 +47,16 @@ export async function PATCH(
 
   if (submission.status !== "IN_PROGRESS") {
     return NextResponse.json({ error: "Submission already finalized" }, { status: 409 });
+  }
+
+  // v1.7.4 pre-exam readiness — an answer can never be saved for a
+  // secure-client-required attempt before server-side activation; see
+  // src/lib/secureClientActivation.ts. This is a genuine security
+  // boundary, not just a UX nicety: without it, a PREPARING attempt's
+  // question ids (guessed or leaked elsewhere) could still record an
+  // answer before the student ever passed native lockdown activation.
+  if (!isSubmissionContentAccessible(submission)) {
+    return NextResponse.json({ error: EXAM_NOT_ACTIVATED_MESSAGE, code: EXAM_NOT_ACTIVATED_CODE }, { status: 403 });
   }
 
   // Freeze timing policy for active exam attempts — see

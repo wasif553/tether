@@ -184,3 +184,84 @@ export function resolveTetherLaunchFailureMessage(code: string): string {
       return "Something went wrong opening this exam. Select \"I have installed it — open examination\" to try again.";
   }
 }
+
+// ---------------------------------------------------------------------------
+// v1.7.4 pre-exam readiness — calm, factual PRECHECK/remediation copy. See
+// docs/tether-preflight-lifecycle-v1.7.4.md and
+// apps/lockdown/src/displayEnforcementLogic.ts's displayBlockingReasonCopy
+// (the same taxonomy, mirrored here since apps/lockdown is a separately
+// compiled package — never imported directly by the web app). Every
+// message here is factual and non-accusatory: never infers misconduct,
+// never claims an additional display exists unless the reason is genuine
+// display evidence (never for POLICY_NOT_READY-shaped or
+// inconclusive/technical-failure reasons — see Part 7 of the
+// investigation this fixes).
+// ---------------------------------------------------------------------------
+
+export type PreflightIssue = { title: string; message: string; applicationNames?: string[] };
+
+const DISPLAY_PREFLIGHT_REASON_COPY: Record<string, PreflightIssue> = {
+  ADDITIONAL_ELECTRON_DISPLAY: { title: "Additional display connected", message: "Disconnect all additional, mirrored or extended displays, then select Recheck." },
+  WINDOWS_TOPOLOGY_EXTEND: { title: "Extended display detected", message: "An extended display was detected. Disconnect it, then select Recheck." },
+  WINDOWS_TOPOLOGY_CLONE: { title: "Mirrored display detected", message: "A mirrored or duplicated display was detected. Disconnect it, then select Recheck." },
+  MULTIPLE_ACTIVE_TARGETS: { title: "Additional display connected", message: "Disconnect all additional, mirrored or extended displays, then select Recheck." },
+  TOPOLOGY_CHECK_UNAVAILABLE: {
+    title: "Display configuration could not be verified",
+    message: "Tether could not verify the display configuration. Resolve the display check and select Recheck before beginning the examination.",
+  },
+};
+
+/**
+ * Part 8 — the Phase 1 PRECHECK's own fresh, read-only display check
+ * (window.sesLockdown.getDisplayTopology()). Reports EXACTLY what
+ * Windows observed — never labels a genuinely inconclusive/failed query
+ * as "additional display connected" (the confirmed BLOCKED==ADDITIONAL_DISPLAY_PRESENT
+ * bug this whole pass fixes). Returns null when the display requirement
+ * is currently satisfied (no remediation needed).
+ */
+export function resolveDisplayPreflightIssue(electronDisplayCount: number, topologyClassification: string): PreflightIssue | null {
+  if (electronDisplayCount > 1) return DISPLAY_PREFLIGHT_REASON_COPY.ADDITIONAL_ELECTRON_DISPLAY;
+  if (topologyClassification === "EXTEND") return DISPLAY_PREFLIGHT_REASON_COPY.WINDOWS_TOPOLOGY_EXTEND;
+  if (topologyClassification === "CLONE_OR_DUPLICATE") return DISPLAY_PREFLIGHT_REASON_COPY.WINDOWS_TOPOLOGY_CLONE;
+  if (topologyClassification === "MULTIPLE_ACTIVE_TARGETS") return DISPLAY_PREFLIGHT_REASON_COPY.MULTIPLE_ACTIVE_TARGETS;
+  if (topologyClassification === "ERROR" || topologyClassification === "UNKNOWN") return DISPLAY_PREFLIGHT_REASON_COPY.TOPOLOGY_CHECK_UNAVAILABLE;
+  return null;
+}
+
+/**
+ * Phase 2E/2G — maps a FAILED window.sesLockdown.activateSecureExamLockdown()
+ * result (see apps/lockdown/src/main.ts's SecureExamLockdownActivationResult)
+ * to the same calm PreflightIssue shape, so a race-condition failure
+ * (TeamViewer/a second display appearing between the calm PRECHECK and
+ * Begin examination) is shown with the exact same factual wording as the
+ * original precheck — never a generic/alarming error. `capabilityDisplayNames`
+ * is the same bounded id->displayName map runLockdownPreflightScan's
+ * BLOCKED handling already resolves via ensureLockdownBridgeInitialized —
+ * reused here, never a second lookup mechanism.
+ */
+export function resolveActivationFailureIssue(
+  result: { reason: string; matchedCapabilityIds?: string[] },
+  capabilityDisplayNames?: Map<string, string>,
+): PreflightIssue {
+  if (result.reason === "PROHIBITED_APPLICATION") {
+    const names = (result.matchedCapabilityIds ?? []).map((id) => capabilityDisplayNames?.get(id) ?? "an application");
+    return {
+      title: "Close applications before continuing",
+      message: "Tether found applications that may allow screen sharing, remote access, recording or debugging. Close the listed applications, then select Recheck.",
+      applicationNames: [...new Set(names)],
+    };
+  }
+  if (result.reason === "PROCESS_CHECK_UNAVAILABLE") {
+    return { title: "Application check could not be completed", message: "Tether could not verify that prohibited applications are closed. Restart Tether or contact exam support." };
+  }
+  if (result.reason === "REMOTE_SESSION_DETECTED") {
+    return { title: "Remote Desktop session detected", message: "This computer is connected to over Remote Desktop. End the remote session, then select Recheck." };
+  }
+  if (result.reason === "REMOTE_SESSION_CHECK_UNAVAILABLE") {
+    return { title: "Remote session check could not be completed", message: "Tether could not verify the remote-session status of this computer. Restart Tether or contact exam support." };
+  }
+  if (result.reason in DISPLAY_PREFLIGHT_REASON_COPY) {
+    return DISPLAY_PREFLIGHT_REASON_COPY[result.reason];
+  }
+  return { title: "Tether could not start this examination", message: "Something went wrong preparing your secure exam session. Select Recheck to try again." };
+}
