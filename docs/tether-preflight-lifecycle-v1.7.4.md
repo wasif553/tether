@@ -194,6 +194,15 @@ still only ever produces exactly one activation write).
    src/lib/tetherReleaseMetadata.ts; both remain at their safe INTERNAL/
    unset defaults until an operator deliberately changes them).
 
-None of steps 1-6 have been performed as part of this pass — this
-document and the branch's own code/migration/tests are preparation for
-an operator to carry them out deliberately, in this order.
+**Status: step 1 (database migration + historical backfill +
+zero-downtime default) is complete** — applied to the shared
+Preview/Production Supabase database on 2026-08-11 and verified per
+docs/migration-ledger.md's "Verification — activatedAt zero-downtime
+cutover migration" record (zero NULL rows post-backfill, every
+historical row's `activatedAt` matches its own `startedAt`, and the
+`CURRENT_TIMESTAMP` database default is confirmed set). Steps 2-6
+(verify existing production, deploy the v1.7.4 application code,
+publish the native installer, physical validation, and promotion to the
+recommended download) have NOT been performed — this document and the
+branch's own code/tests remain preparation for an operator to carry
+those out deliberately, in order, next.

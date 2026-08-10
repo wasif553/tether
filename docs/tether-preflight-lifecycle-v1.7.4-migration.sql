@@ -123,11 +123,13 @@
 -- DEFAULT) IS idempotent — re-applying the same default is a no-op. Run
 -- the pre-check query first regardless.
 --
--- THIS MIGRATION HAS NOT BEEN APPLIED TO ANY ENVIRONMENT. Do not apply
--- it without explicit authorization. Mark as PENDING — NOT APPLIED in
--- docs/migration-ledger.md until an operator actually runs it, and
--- record the date there once applied — see that file's own "Ledger"
--- table and "Deployment procedure" section conventions.
+-- APPLIED ONCE — 2026-08-11, to the shared Preview/Production Supabase
+-- database. Do not apply again. See docs/migration-ledger.md's Ledger
+-- table (row 18) and "Verification — activatedAt zero-downtime cutover
+-- migration" section for the full read-only post-apply confirmation
+-- record (zero NULL rows post-backfill, every historical row's
+-- activatedAt matches its own startedAt, and the CURRENT_TIMESTAMP
+-- default confirmed set on the column).
 
 -- ============================================================================
 -- 0. Pre-check (read-only) — run BEFORE applying anything below, to
