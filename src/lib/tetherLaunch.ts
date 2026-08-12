@@ -265,3 +265,95 @@ export function resolveActivationFailureIssue(
   }
   return { title: "Tether could not start this examination", message: "Something went wrong preparing your secure exam session. Select Recheck to try again." };
 }
+
+// ---------------------------------------------------------------------------
+// PR #22 release-blocking review — secure-activation failure
+// reconciliation. See tether-launch/page.tsx's ensureSecureActivation.
+//
+// The gap: window.sesLockdown.activateSecureExamLockdown() succeeding
+// means native lockdown (display enforcement, process detection,
+// remote-session monitoring) is ALREADY active in the Electron main
+// process — before the renderer ever calls
+// POST /api/submissions/[id]/activate. If that POST fails, native
+// lockdown must be restored to the pre-exam state (never left active
+// with no authoritative server-side activation behind it). But a naive
+// "any failure -> restore" rule is itself unsafe: some failures are
+// AMBIGUOUS (the request may have reached the server and committed
+// before the response was lost), and blindly restoring in that case
+// could turn OFF lockdown while the timed exam is genuinely ACTIVE
+// server-side. These pure functions classify exactly which case applies
+// so the page component never has to guess.
+// ---------------------------------------------------------------------------
+
+export type ActivatePostOutcome = { kind: "SUCCESS" } | { kind: "DEFINITIVE_REJECTION"; code: string | null } | { kind: "AMBIGUOUS" };
+
+/**
+ * Every non-2xx path in POST /api/submissions/[id]/activate (401
+ * Unauthorized, 404 Not found, 409 SUBMISSION_NOT_IN_PROGRESS, 403
+ * SECURE_SESSION_NOT_VERIFIED) returns BEFORE the route ever touches
+ * `activatedAt` — see that route's own doc comment. That structural fact
+ * is what makes a successfully-received response with one of these
+ * statuses trustworthy proof the write never happened, regardless of
+ * whether its JSON body parsed. Anything else — the fetch itself
+ * throwing (network failure, timeout/abort), or a status this route
+ * cannot actually produce (500, or any other unrecognized code) — is
+ * NOT proof of anything: the request may have reached the server and
+ * committed before the response was lost. Only a genuine 2xx is treated
+ * as SUCCESS; only these four specific statuses are trusted as a
+ * DEFINITIVE_REJECTION. Every other outcome is AMBIGUOUS and must be
+ * resolved by reconciliation (classifyReconciliationCheck below), never
+ * guessed.
+ */
+const DEFINITIVE_ACTIVATE_REJECTION_STATUSES = [401, 403, 404, 409];
+
+export function classifyActivatePostOutcome(params: { threw: boolean; status: number | null; code: string | null }): ActivatePostOutcome {
+  if (params.threw || params.status == null) return { kind: "AMBIGUOUS" };
+  if (params.status >= 200 && params.status < 300) return { kind: "SUCCESS" };
+  if (DEFINITIVE_ACTIVATE_REJECTION_STATUSES.includes(params.status)) return { kind: "DEFINITIVE_REJECTION", code: params.code };
+  return { kind: "AMBIGUOUS" };
+}
+
+export type ReconciliationOutcome = "ACTIVATED" | "NOT_ACTIVATED" | "UNDETERMINED";
+
+/**
+ * Classifies one read of GET /api/submissions/[id]/secure-client/status's
+ * `activated` field (a plain boolean derived server-side from
+ * `Submission.activatedAt !== null` — never question content, never the
+ * raw timestamp) — the narrow, read-only, side-effect-free check used to
+ * resolve an AMBIGUOUS POST /activate outcome. A non-ok response or a
+ * non-boolean `activated` value both mean "this read itself proved
+ * nothing" — UNDETERMINED, never guessed as either true or false.
+ */
+export function classifyReconciliationCheck(params: { ok: boolean; activated: unknown }): ReconciliationOutcome {
+  if (!params.ok) return "UNDETERMINED";
+  if (params.activated === true) return "ACTIVATED";
+  if (params.activated === false) return "NOT_ACTIVATED";
+  return "UNDETERMINED";
+}
+
+/** Shown after a DEFINITIVE_REJECTION, or after reconciliation definitively confirms NOT_ACTIVATED — native lockdown has already been restored by the time this is shown (see ensureSecureActivation). */
+export function resolveServerActivationNotConfirmedIssue(): PreflightIssue {
+  return {
+    title: "Tether could not activate this examination",
+    message: "The secure exam server did not confirm activation, so secure lockdown has been turned off again. Select Recheck to try again.",
+  };
+}
+
+/**
+ * Shown only when reconciliation itself could not determine the true
+ * server-side state after retrying — deliberately distinct wording from
+ * resolveServerActivationNotConfirmedIssue: native lockdown was NOT
+ * restored here (doing so could be wrong if the server genuinely did
+ * activate), so this must never claim lockdown is off. Recheck safely
+ * re-runs the whole sequence regardless of the true underlying state —
+ * every step it retries (activateSecureExamLockdown, POST /activate) is
+ * itself idempotent — and Return to dashboard remains available exactly
+ * as it does for every other PreflightIssue, so the student is never
+ * left with no way forward.
+ */
+export function resolveServerActivationUndeterminedIssue(): PreflightIssue {
+  return {
+    title: "Tether could not confirm your exam activation status",
+    message: "Tether could not confirm with the exam server whether this examination activated. Do not worry if secure lockdown still appears active. Select Recheck to try again.",
+  };
+}

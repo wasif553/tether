@@ -172,6 +172,124 @@ describe("v1.7.4 Phase 2 — ensureSecureActivation runs strictly after verifica
   });
 });
 
+// PR #22 release-blocking review — secure-activation failure
+// reconciliation. See src/lib/tetherLaunch.ts's classifyActivatePostOutcome/
+// classifyReconciliationCheck for the pure-function coverage of the
+// classification logic itself; these tests prove ensureSecureActivation is
+// actually WIRED to call restoreLockdownControls in exactly the right
+// branches, and never in the wrong ones.
+describe("PR #22 — ensureSecureActivation restores native lockdown on a definitive non-activation, never on success or genuine uncertainty", () => {
+  const ensureSecureActivationBody = extractFunctionBody(source, "async function ensureSecureActivation(submissionId: string): Promise<boolean> ");
+  const reconcileBody = extractFunctionBody(
+    source,
+    'async function reconcileServerActivationState(submissionId: string): Promise<"ACTIVATED" | "NOT_ACTIVATED" | "UNDETERMINED"> ',
+  );
+
+  it("REQUIRED TEST 2: the immediate activateRes.ok success branch returns true directly and never calls restoreLockdownControls", () => {
+    const successBranchMatch = ensureSecureActivationBody.match(/if \(activateRes\.ok\) \{([\s\S]*?)\n\s*\}/);
+    expect(successBranchMatch).not.toBeNull();
+    expect(successBranchMatch![1]).toContain("return true;");
+    expect(successBranchMatch![1]).not.toContain("restoreLockdownControls");
+  });
+
+  it("REQUIRED TEST 1: an AMBIGUOUS-then-NOT_ACTIVATED or DEFINITIVE_REJECTION outcome falls through to a single restoreLockdownControls call, textually before the final return false", () => {
+    const restoreIdx = ensureSecureActivationBody.indexOf('restoreLockdownControls?.("secure-activation-server-not-confirmed")');
+    const finalReturnIdx = ensureSecureActivationBody.lastIndexOf("return false;");
+    expect(restoreIdx).toBeGreaterThan(-1);
+    expect(finalReturnIdx).toBeGreaterThan(restoreIdx);
+    // Exactly one restore call site in this function — no duplicate/divergent path.
+    expect((ensureSecureActivationBody.match(/restoreLockdownControls\?\.\(/g) ?? []).length).toBe(1);
+  });
+
+  it("REQUIRED TEST 3: the reconciliation-ACTIVATED branch returns true and does not reach the restoreLockdownControls call", () => {
+    const activatedBranchMatch = ensureSecureActivationBody.match(/if \(reconciliation === "ACTIVATED"\) \{([\s\S]*?)\n\s*\}/);
+    expect(activatedBranchMatch).not.toBeNull();
+    expect(activatedBranchMatch![1]).toContain("return true;");
+    expect(activatedBranchMatch![1]).not.toContain("restoreLockdownControls");
+  });
+
+  it("REQUIRED TEST 5: the reconciliation-UNDETERMINED branch returns false WITHOUT calling restoreLockdownControls — native lockdown is deliberately left as-is, not guessed at", () => {
+    const undeterminedBranchMatch = ensureSecureActivationBody.match(/if \(reconciliation === "UNDETERMINED"\) \{([\s\S]*?)\n\s*\}/);
+    expect(undeterminedBranchMatch).not.toBeNull();
+    expect(undeterminedBranchMatch![1]).toContain("resolveServerActivationUndeterminedIssue()");
+    expect(undeterminedBranchMatch![1]).toContain("return false;");
+    expect(undeterminedBranchMatch![1]).not.toContain("restoreLockdownControls");
+  });
+
+  it("an AMBIGUOUS outcome is resolved via reconcileServerActivationState BEFORE any restore/issue decision is made — never guessed", () => {
+    const ambiguousIdx = ensureSecureActivationBody.indexOf('outcome.kind === "AMBIGUOUS"');
+    const reconcileCallIdx = ensureSecureActivationBody.indexOf("reconcileServerActivationState(submissionId)");
+    const restoreIdx = ensureSecureActivationBody.indexOf('restoreLockdownControls?.("secure-activation-server-not-confirmed")');
+    expect(ambiguousIdx).toBeGreaterThan(-1);
+    expect(reconcileCallIdx).toBeGreaterThan(ambiguousIdx);
+    expect(restoreIdx).toBeGreaterThan(reconcileCallIdx);
+  });
+
+  it("the pending-confirmation ref is set to true immediately after native activation succeeds, and cleared on every terminal branch (success, reconciled-active, restored, undetermined)", () => {
+    const setIdx = ensureSecureActivationBody.indexOf("nativeActivationPendingServerConfirmationRef.current = true;");
+    const activationOkIdx = ensureSecureActivationBody.indexOf("if (!activation.ok)");
+    expect(setIdx).toBeGreaterThan(activationOkIdx);
+    // Cleared (set back to false) at least 3 times: immediate success,
+    // reconciled ACTIVATED, and the final restore path.
+    const clearCount = (ensureSecureActivationBody.match(/nativeActivationPendingServerConfirmationRef\.current = false;/g) ?? []).length;
+    expect(clearCount).toBeGreaterThanOrEqual(3);
+    // The UNDETERMINED branch must NOT be among the clearing sites —
+    // confirmed separately above (that branch has no clear/restore at all).
+  });
+
+  it("REQUIRED TEST 5: reconcileServerActivationState retries a bounded number of times and returns UNDETERMINED only after exhausting them — never a single-shot guess", () => {
+    expect(reconcileBody).toMatch(/RECONCILIATION_ATTEMPTS/);
+    expect(reconcileBody).toMatch(/for \(let attempt = 0; attempt < RECONCILIATION_ATTEMPTS; attempt\+\+\)/);
+    expect(reconcileBody).toMatch(/return "UNDETERMINED";\s*\n\s*\}\s*$/);
+  });
+
+  it("reconcileServerActivationState never calls restoreLockdownControls or navigates itself — a pure, read-only, side-effect-free status check", () => {
+    expect(reconcileBody).not.toContain("restoreLockdownControls");
+    expect(reconcileBody).not.toContain("router.replace");
+    expect(reconcileBody).toContain("/secure-client/status");
+    expect(reconcileBody).not.toMatch(/method:\s*"POST"/);
+  });
+
+  it("REQUIRED TEST 6 / requirement 8: retrying after a restore goes through the SAME Recheck -> Begin examination -> runLaunchSequence path as every other precheck failure — both new issues are set via setPrecheckIssue + setPrecheckPassed(false), never a bespoke retry mechanism", () => {
+    expect(ensureSecureActivationBody).toMatch(/setPrecheckIssue\(resolveServerActivationNotConfirmedIssue\(\)\);\s*\n\s*setPrecheckPassed\(false\);/);
+    expect(ensureSecureActivationBody).toMatch(/setPrecheckIssue\(resolveServerActivationUndeterminedIssue\(\)\);\s*\n\s*setPrecheckPassed\(false\);/);
+  });
+});
+
+describe("PR #22 — mid-flight unmount (native activation succeeded, server outcome still pending) restores native lockdown defensively", () => {
+  it("a SEPARATE unmount effect (independent of the pre-existing unmountedRef effect) checks nativeActivationPendingServerConfirmationRef and calls restoreLockdownControls only when it is true", () => {
+    const guardIdx = source.indexOf("nativeActivationPendingServerConfirmationRef.current) {");
+    expect(guardIdx).toBeGreaterThan(-1);
+    const nearbySlice = source.slice(guardIdx, guardIdx + 300);
+    expect(nearbySlice).toContain('restoreLockdownControls?.("tether-launch-unmount-during-pending-activation")');
+  });
+
+  it("the pre-existing unmountedRef cleanup effect is untouched by this fix — still exactly `{ unmountedRef.current = true; }`", () => {
+    expect(source).toMatch(/return\s*\(\)\s*=>\s*\{\s*unmountedRef\.current = true;\s*\};/);
+  });
+
+  it("the new guard effect has an empty dependency array, mirroring every other mount/unmount-only effect in this component", () => {
+    const guardEffectIdx = source.indexOf("if (nativeActivationPendingServerConfirmationRef.current) {");
+    const effectStart = source.lastIndexOf("useEffect(() => {", guardEffectIdx);
+    const effectEnd = source.indexOf("}, []);", guardEffectIdx);
+    expect(effectStart).toBeGreaterThan(-1);
+    expect(effectEnd).toBeGreaterThan(guardEffectIdx);
+  });
+});
+
+describe("PR #22 — requirement 7: the exam CONTENT page's during-exam enforcement is untouched by this fix", () => {
+  it("this fix only modifies tether-launch/page.tsx and its supporting library — the exam content page's own strict enforcement code is unchanged", () => {
+    const contentPageSource = fs.readFileSync(path.join(__dirname, "..", "page.tsx"), "utf8");
+    // The pre-activation gap this PR fixes is specific to tether-launch's
+    // ensureSecureActivation — the content page never calls
+    // activateSecureExamLockdown or POST /activate at all (it is only
+    // ever reached AFTER both have already succeeded), so it has no
+    // reconciliation concept to wire up in the first place.
+    expect(contentPageSource).not.toContain("reconcileServerActivationState");
+    expect(contentPageSource).not.toContain("classifyActivatePostOutcome");
+  });
+});
+
 describe("mount effect — auto-resume guards [1, 8, 10]", () => {
   // The mount effect is identified by its unique marker
   // (`existingSubmission?.status === "IN_PROGRESS"` appears only once,

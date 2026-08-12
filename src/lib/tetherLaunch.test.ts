@@ -11,6 +11,10 @@ import {
   boundedDiagnosticString,
   resolveDisplayPreflightIssue,
   resolveActivationFailureIssue,
+  classifyActivatePostOutcome,
+  classifyReconciliationCheck,
+  resolveServerActivationNotConfirmedIssue,
+  resolveServerActivationUndeterminedIssue,
 } from "./tetherLaunch";
 import { isValidReportedDisplayCount } from "./secureClient/attestation";
 
@@ -261,5 +265,89 @@ describe("resolveActivationFailureIssue — Part 6/E: the fresh Phase 2 native c
     const issue = resolveActivationFailureIssue({ reason: "SOMETHING_UNEXPECTED" });
     expect(issue.title.length).toBeGreaterThan(0);
     expect(issue.message.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #22 release-blocking review — secure-activation failure
+// reconciliation. See tether-launch/page.tsx's ensureSecureActivation.
+// ---------------------------------------------------------------------------
+
+describe("classifyActivatePostOutcome", () => {
+  it("REQUIRED TEST 2 groundwork: a 2xx status is always SUCCESS, regardless of code", () => {
+    expect(classifyActivatePostOutcome({ threw: false, status: 200, code: null })).toEqual({ kind: "SUCCESS" });
+    expect(classifyActivatePostOutcome({ threw: false, status: 201, code: "irrelevant" })).toEqual({ kind: "SUCCESS" });
+  });
+
+  it("REQUIRED TEST 1 groundwork: 401/403/404/409 are trusted as DEFINITIVE_REJECTION — POST /api/submissions/[id]/activate never writes activatedAt before any of these statuses", () => {
+    expect(classifyActivatePostOutcome({ threw: false, status: 401, code: null })).toEqual({ kind: "DEFINITIVE_REJECTION", code: null });
+    expect(classifyActivatePostOutcome({ threw: false, status: 403, code: "SECURE_SESSION_NOT_VERIFIED" })).toEqual({
+      kind: "DEFINITIVE_REJECTION",
+      code: "SECURE_SESSION_NOT_VERIFIED",
+    });
+    expect(classifyActivatePostOutcome({ threw: false, status: 404, code: null })).toEqual({ kind: "DEFINITIVE_REJECTION", code: null });
+    expect(classifyActivatePostOutcome({ threw: false, status: 409, code: "SUBMISSION_NOT_IN_PROGRESS" })).toEqual({
+      kind: "DEFINITIVE_REJECTION",
+      code: "SUBMISSION_NOT_IN_PROGRESS",
+    });
+  });
+
+  it("REQUIRED TEST 3 groundwork: a thrown network exception is AMBIGUOUS, never treated as a rejection", () => {
+    expect(classifyActivatePostOutcome({ threw: true, status: null, code: null })).toEqual({ kind: "AMBIGUOUS" });
+  });
+
+  it("a 500 (or any status this route cannot actually produce) is AMBIGUOUS, never guessed as a rejection — a 500 could occur AFTER the write already committed", () => {
+    expect(classifyActivatePostOutcome({ threw: false, status: 500, code: null })).toEqual({ kind: "AMBIGUOUS" });
+    expect(classifyActivatePostOutcome({ threw: false, status: 502, code: null })).toEqual({ kind: "AMBIGUOUS" });
+    expect(classifyActivatePostOutcome({ threw: false, status: 418, code: null })).toEqual({ kind: "AMBIGUOUS" });
+  });
+
+  it("a null status with no exception (should not normally happen, but defensively) is AMBIGUOUS", () => {
+    expect(classifyActivatePostOutcome({ threw: false, status: null, code: null })).toEqual({ kind: "AMBIGUOUS" });
+  });
+});
+
+describe("classifyReconciliationCheck", () => {
+  it("REQUIRED TEST 3: ok:true + activated:true -> ACTIVATED", () => {
+    expect(classifyReconciliationCheck({ ok: true, activated: true })).toBe("ACTIVATED");
+  });
+
+  it("REQUIRED TEST 4: ok:true + activated:false -> NOT_ACTIVATED", () => {
+    expect(classifyReconciliationCheck({ ok: true, activated: false })).toBe("NOT_ACTIVATED");
+  });
+
+  it("REQUIRED TEST 5: a non-ok response is UNDETERMINED, never guessed as either outcome", () => {
+    expect(classifyReconciliationCheck({ ok: false, activated: true })).toBe("UNDETERMINED");
+    expect(classifyReconciliationCheck({ ok: false, activated: false })).toBe("UNDETERMINED");
+    expect(classifyReconciliationCheck({ ok: false, activated: undefined })).toBe("UNDETERMINED");
+  });
+
+  it("REQUIRED TEST 5: a malformed/missing activated field on an ok response is UNDETERMINED, never coerced to false", () => {
+    expect(classifyReconciliationCheck({ ok: true, activated: undefined })).toBe("UNDETERMINED");
+    expect(classifyReconciliationCheck({ ok: true, activated: null })).toBe("UNDETERMINED");
+    expect(classifyReconciliationCheck({ ok: true, activated: "true" })).toBe("UNDETERMINED");
+  });
+});
+
+describe("resolveServerActivationNotConfirmedIssue / resolveServerActivationUndeterminedIssue — distinct, honest wording", () => {
+  it("the definitive-rejection issue states lockdown has been turned off, matching what the caller actually does (restoreLockdownControls first)", () => {
+    const issue = resolveServerActivationNotConfirmedIssue();
+    expect(issue.title.length).toBeGreaterThan(0);
+    expect(issue.message.toLowerCase()).toContain("turned off");
+  });
+
+  it("the undetermined issue never claims lockdown is off — the caller deliberately does not restore it in this case", () => {
+    const issue = resolveServerActivationUndeterminedIssue();
+    expect(issue.message.toLowerCase()).not.toContain("turned off");
+    expect(issue.message.toLowerCase()).not.toContain("secure lockdown is off");
+  });
+
+  it("both issues are structurally identical PreflightIssue shapes to every other precheck failure — rendered by the SAME LockdownApplicationCheck component, never a bespoke UI", () => {
+    const rejected = resolveServerActivationNotConfirmedIssue();
+    const undetermined = resolveServerActivationUndeterminedIssue();
+    expect(typeof rejected.title).toBe("string");
+    expect(typeof rejected.message).toBe("string");
+    expect(typeof undetermined.title).toBe("string");
+    expect(typeof undetermined.message).toBe("string");
   });
 });

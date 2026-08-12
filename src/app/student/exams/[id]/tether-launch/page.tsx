@@ -70,6 +70,10 @@ import {
   buildDisplayInvokeFailedDiagnostic,
   resolveDisplayPreflightIssue,
   resolveActivationFailureIssue,
+  classifyActivatePostOutcome,
+  classifyReconciliationCheck,
+  resolveServerActivationNotConfirmedIssue,
+  resolveServerActivationUndeterminedIssue,
   type DisplayDiagnostic,
   type PreflightIssue,
 } from "@/lib/tetherLaunch";
@@ -311,6 +315,16 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   const pendingSecurePreflightRef = useRef<SecurePreflightSummary | null>(null);
   const lockdownCapabilityInfoRef = useRef<Map<string, LockdownCapabilityInfo> | null>(null);
 
+  // PR #22 release-blocking review — true from the instant
+  // window.sesLockdown.activateSecureExamLockdown() has genuinely
+  // succeeded (native lockdown is now ACTIVE in the Electron main
+  // process) until ensureSecureActivation reaches a state where native
+  // lockdown's fate is definitively known again (server activation
+  // confirmed, restored after a confirmed non-activation, or
+  // reconciliation confirms ACTIVATED). See the unmount effect below and
+  // ensureSecureActivation's own doc comment.
+  const nativeActivationPendingServerConfirmationRef = useRef(false);
+
   // P0 secure-launch redirect loop hotfix — see
   // docs/tether-secure-launch-loop-hotfix.md. Two independent guards:
   //
@@ -336,6 +350,27 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   useEffect(() => {
     return () => {
       unmountedRef.current = true;
+    };
+  }, []);
+
+  // PR #22 release-blocking review — the exceptional path a naive
+  // fix would miss: the student navigates away, or this component
+  // unmounts for any other reason, WHILE native lockdown has already
+  // activated but ensureSecureActivation has not yet reached a
+  // definitive outcome (still awaiting POST /activate, or mid-
+  // reconciliation). Without this, native lockdown (display enforcement,
+  // process detection, remote-session monitoring) would be left ACTIVE
+  // with no page left running that could ever restore it. Safe to call
+  // unconditionally when the ref is true — restoreLockdownControls is
+  // idempotent (see apps/lockdown/src/lockdownLifecycle.ts) — and this
+  // never fires when the ref is false, so it has zero effect on the
+  // ordinary navigate-into-exam-content unmount.
+  useEffect(() => {
+    return () => {
+      if (nativeActivationPendingServerConfirmationRef.current) {
+        window.sesLockdown?.restoreLockdownControls?.("tether-launch-unmount-during-pending-activation");
+        nativeActivationPendingServerConfirmationRef.current = false;
+      }
     };
   }, []);
 
@@ -641,6 +676,34 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   }
 
   /**
+   * PR #22 release-blocking review — the narrow, read-only reconciliation
+   * step for an AMBIGUOUS POST /activate outcome (see
+   * classifyActivatePostOutcome in tetherLaunch.ts): the request may have
+   * reached the server and committed before its response was lost, so
+   * this must never guess. Retries GET /secure-client/status's `activated`
+   * boolean a bounded number of times with backoff — every attempt is a
+   * plain, side-effect-free read, safe to repeat indefinitely, and never
+   * exposes question content. Returns "UNDETERMINED" only after every
+   * attempt itself failed to produce a definitive answer.
+   */
+  async function reconcileServerActivationState(submissionId: string): Promise<"ACTIVATED" | "NOT_ACTIVATED" | "UNDETERMINED"> {
+    const RECONCILIATION_ATTEMPTS = 3;
+    for (let attempt = 0; attempt < RECONCILIATION_ATTEMPTS; attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+      try {
+        const res = await fetch(`/api/submissions/${submissionId}/secure-client/status`);
+        const body = res.ok ? await res.json().catch(() => null) : null;
+        const outcome = classifyReconciliationCheck({ ok: res.ok, activated: body?.activated });
+        if (outcome !== "UNDETERMINED") return outcome;
+      } catch {
+        // Network exception on the read itself — fall through and retry;
+        // never treated as proof of either ACTIVATED or NOT_ACTIVATED.
+      }
+    }
+    return "UNDETERMINED";
+  }
+
+  /**
    * v1.7.4 pre-exam readiness — PHASE 2, steps E-I (the required
    * ordering: fresh native checks -> native lockdown ACTIVE confirmed ->
    * server activates timed attempt). Returns true only once BOTH the
@@ -652,6 +715,20 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
    * (POST /api/submissions/[id]/activate) independently re-derives its
    * own eligibility from the authoritative VERIFIED secure-client
    * session — this function's only job is sequencing, never trust.
+   *
+   * PR #22 release-blocking review — the moment activateSecureExamLockdown
+   * resolves ok:true, native lockdown is ALREADY active in the Electron
+   * main process, before the POST below has even been attempted.
+   * `nativeActivationPendingServerConfirmationRef` is true for exactly
+   * that window, so the unmount effect above can restore defensively if
+   * the student navigates away before this function reaches a definitive
+   * outcome. Every failure branch from here on either (a) confirms
+   * genuine success and leaves native lockdown active, (b) definitively
+   * confirms non-activation and restores native lockdown via the
+   * existing restoreLockdownControls bridge before returning, or (c)
+   * cannot be determined at all, in which case native lockdown is left
+   * exactly as-is (restoring it could be wrong) and the student is told
+   * so honestly, never guessed at.
    */
   async function ensureSecureActivation(submissionId: string): Promise<boolean> {
     const statusRes = await fetch(`/api/submissions/${submissionId}/secure-client/status`);
@@ -690,13 +767,76 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       return false;
     }
 
-    const activateRes = await fetch(`/api/submissions/${submissionId}/activate`, { method: "POST" });
-    if (!activateRes.ok) {
+    // Native lockdown is now genuinely ACTIVE — from this point, any
+    // exit from this function that does not confirm genuine server
+    // success must either restore it (definitively not activated) or
+    // deliberately leave it untouched (undetermined) — never fall
+    // through to a return without deciding which.
+    nativeActivationPendingServerConfirmationRef.current = true;
+
+    let activateStatus: number | null = null;
+    let activateCode: string | null = null;
+    let activateThrew = false;
+    try {
+      const activateRes = await fetch(`/api/submissions/${submissionId}/activate`, { method: "POST" });
+      activateStatus = activateRes.status;
+      if (activateRes.ok) {
+        logClientTetherDiagnostic("secure_activation_server_result", { submissionId, outcome: "SUCCESS" });
+        nativeActivationPendingServerConfirmationRef.current = false;
+        return true;
+      }
       const body = await activateRes.json().catch(() => null);
-      setError(typeof body?.error === "string" ? body.error : "Tether could not activate this secure exam session. Select \"Try again\" below.");
-      return false;
+      activateCode = typeof body?.code === "string" ? body.code : null;
+    } catch {
+      activateThrew = true;
     }
-    return true;
+
+    const outcome = classifyActivatePostOutcome({ threw: activateThrew, status: activateStatus, code: activateCode });
+    logClientTetherDiagnostic("secure_activation_server_result", { submissionId, outcome: outcome.kind });
+
+    if (outcome.kind === "AMBIGUOUS") {
+      // Do NOT guess whether the POST committed — ask the server, via a
+      // narrow read that exposes no question content, before deciding
+      // anything about native lockdown.
+      const reconciliation = await reconcileServerActivationState(submissionId);
+      logClientTetherDiagnostic("secure_activation_reconciliation_result", { submissionId, reconciliation });
+
+      if (reconciliation === "ACTIVATED") {
+        // The server genuinely committed — only its response was lost.
+        // Native lockdown is already correctly active; proceed exactly
+        // like a definitive SUCCESS.
+        nativeActivationPendingServerConfirmationRef.current = false;
+        return true;
+      }
+      if (reconciliation === "UNDETERMINED") {
+        // Cannot be determined either way, even after retrying. Content
+        // stays blocked either way (never navigate below) — but native
+        // lockdown is deliberately left exactly as-is: restoring it here
+        // could be wrong if the server genuinely did activate. The
+        // student stays on this ordinary in-page screen (never a native
+        // overlay) and can safely retry the whole sequence — every step
+        // it retries is itself idempotent — for as long as needed.
+        setPrecheckIssue(resolveServerActivationUndeterminedIssue());
+        setPrecheckPassed(false);
+        return false;
+      }
+      // reconciliation === "NOT_ACTIVATED" — now definitively known; falls
+      // through to the same restoration path as a DEFINITIVE_REJECTION.
+    }
+
+    // Definitively not activated (a DEFINITIVE_REJECTION, or
+    // reconciliation resolved an AMBIGUOUS outcome to NOT_ACTIVATED) —
+    // restore every native control back to the pre-exam state via the
+    // existing narrow bridge before returning the student to a retryable
+    // screen. The SAME still-unactivated submission is reused on retry
+    // (POST /api/exams/[id]/start's own idempotency, unchanged by this
+    // fix) — no attempt is consumed merely because server activation
+    // failed.
+    window.sesLockdown?.restoreLockdownControls?.("secure-activation-server-not-confirmed");
+    nativeActivationPendingServerConfirmationRef.current = false;
+    setPrecheckIssue(resolveServerActivationNotConfirmedIssue());
+    setPrecheckPassed(false);
+    return false;
   }
 
   /**
