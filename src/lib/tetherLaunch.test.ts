@@ -14,7 +14,9 @@ import {
   classifyActivatePostOutcome,
   classifyReconciliationCheck,
   resolveServerActivationNotConfirmedIssue,
-  resolveServerActivationUndeterminedIssue,
+  resolveActivationConfirmationPendingCopy,
+  parseSecureClientStatusForActivation,
+  resolveSecureClientStatusUnavailableIssue,
 } from "./tetherLaunch";
 import { isValidReportedDisplayCount } from "./secureClient/attestation";
 
@@ -329,25 +331,79 @@ describe("classifyReconciliationCheck", () => {
   });
 });
 
-describe("resolveServerActivationNotConfirmedIssue / resolveServerActivationUndeterminedIssue — distinct, honest wording", () => {
-  it("the definitive-rejection issue states lockdown has been turned off, matching what the caller actually does (restoreLockdownControls first)", () => {
+describe("resolveServerActivationNotConfirmedIssue — an ordinary, known-safe PreflightIssue", () => {
+  it("REQUIRED TEST 8: states lockdown has been turned off, matching what the caller actually does (restoreLockdownControls first, always, before this is ever shown)", () => {
     const issue = resolveServerActivationNotConfirmedIssue();
     expect(issue.title.length).toBeGreaterThan(0);
     expect(issue.message.toLowerCase()).toContain("turned off");
   });
 
-  it("the undetermined issue never claims lockdown is off — the caller deliberately does not restore it in this case", () => {
-    const issue = resolveServerActivationUndeterminedIssue();
-    expect(issue.message.toLowerCase()).not.toContain("turned off");
-    expect(issue.message.toLowerCase()).not.toContain("secure lockdown is off");
+  it("is a plain PreflightIssue shape, rendered by the ordinary LockdownApplicationCheck component (Recheck + Return to dashboard both genuinely safe here)", () => {
+    const issue = resolveServerActivationNotConfirmedIssue();
+    expect(typeof issue.title).toBe("string");
+    expect(typeof issue.message).toBe("string");
+  });
+});
+
+// PR #22 follow-up review, Issue 1 — the UNDETERMINED activation
+// state deliberately is NOT a PreflightIssue.
+describe("resolveActivationConfirmationPendingCopy — REQUIRED TEST 7 groundwork: distinct from every PreflightIssue", () => {
+  it("never claims lockdown is off, and never uses the word 'Recheck' — this is a genuinely different screen from LockdownApplicationCheck, with its own Retry action", () => {
+    const copy = resolveActivationConfirmationPendingCopy();
+    expect(copy.message.toLowerCase()).not.toContain("turned off");
+    expect(copy.message.toLowerCase()).not.toContain("recheck");
   });
 
-  it("both issues are structurally identical PreflightIssue shapes to every other precheck failure — rendered by the SAME LockdownApplicationCheck component, never a bespoke UI", () => {
-    const rejected = resolveServerActivationNotConfirmedIssue();
-    const undetermined = resolveServerActivationUndeterminedIssue();
-    expect(typeof rejected.title).toBe("string");
-    expect(typeof rejected.message).toBe("string");
-    expect(typeof undetermined.title).toBe("string");
-    expect(typeof undetermined.message).toBe("string");
+  it("honestly warns the exam may already be active and instructs the student not to close Tether", () => {
+    const copy = resolveActivationConfirmationPendingCopy();
+    expect(copy.message.toLowerCase()).toContain("already be active");
+    expect(copy.message.toLowerCase()).toContain("do not close tether");
+  });
+
+  it("is NOT the PreflightIssue shape — it carries its own retryLabel, never applicationNames", () => {
+    const copy = resolveActivationConfirmationPendingCopy();
+    expect(typeof copy.retryLabel).toBe("string");
+    expect(copy.retryLabel.length).toBeGreaterThan(0);
+    expect((copy as Record<string, unknown>).applicationNames).toBeUndefined();
+  });
+});
+
+describe("parseSecureClientStatusForActivation — REQUIRED TESTS 1-5 groundwork: never defaults a required security policy to false", () => {
+  it("REQUIRED TEST 4: a valid ENFORCED_BY_SECURE_CLIENT display requirement parses to requireSingleDisplay:true", () => {
+    const result = parseSecureClientStatusForActivation({
+      displayRequirement: { status: "ENFORCED_BY_SECURE_CLIENT" },
+      requireRemoteSessionCheck: false,
+    });
+    expect(result).toEqual({ requireSingleDisplay: true, requireRemoteSessionCheck: false });
+  });
+
+  it("REQUIRED TEST 5: a valid NOT_APPLICABLE display requirement parses to requireSingleDisplay:false", () => {
+    const result = parseSecureClientStatusForActivation({
+      displayRequirement: { status: "NOT_APPLICABLE" },
+      requireRemoteSessionCheck: true,
+    });
+    expect(result).toEqual({ requireSingleDisplay: false, requireRemoteSessionCheck: true });
+  });
+
+  it("REQUIRED TEST 1 groundwork: null body (network failure / non-ok response) fails validation, never defaults to false", () => {
+    expect(parseSecureClientStatusForActivation(null)).toBeNull();
+  });
+
+  it("REQUIRED TEST 3 groundwork: malformed payloads fail validation, never defaulted to false", () => {
+    expect(parseSecureClientStatusForActivation({})).toBeNull();
+    expect(parseSecureClientStatusForActivation({ displayRequirement: null, requireRemoteSessionCheck: true })).toBeNull();
+    expect(parseSecureClientStatusForActivation({ displayRequirement: { status: "NOT_A_REAL_STATUS" }, requireRemoteSessionCheck: true })).toBeNull();
+    expect(parseSecureClientStatusForActivation({ displayRequirement: { status: "ENFORCED_BY_SECURE_CLIENT" } })).toBeNull(); // requireRemoteSessionCheck missing
+    expect(parseSecureClientStatusForActivation({ displayRequirement: { status: "ENFORCED_BY_SECURE_CLIENT" }, requireRemoteSessionCheck: "true" })).toBeNull(); // wrong type
+    expect(parseSecureClientStatusForActivation("not an object")).toBeNull();
+    expect(parseSecureClientStatusForActivation(42)).toBeNull();
+  });
+});
+
+describe("resolveSecureClientStatusUnavailableIssue", () => {
+  it("is a plain PreflightIssue — native activation is never attempted when this is shown, so Recheck/Return to dashboard are both genuinely safe", () => {
+    const issue = resolveSecureClientStatusUnavailableIssue();
+    expect(typeof issue.title).toBe("string");
+    expect(typeof issue.message).toBe("string");
   });
 });

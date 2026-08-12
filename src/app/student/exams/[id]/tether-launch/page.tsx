@@ -73,7 +73,9 @@ import {
   classifyActivatePostOutcome,
   classifyReconciliationCheck,
   resolveServerActivationNotConfirmedIssue,
-  resolveServerActivationUndeterminedIssue,
+  resolveActivationConfirmationPendingCopy,
+  parseSecureClientStatusForActivation,
+  resolveSecureClientStatusUnavailableIssue,
   type DisplayDiagnostic,
   type PreflightIssue,
 } from "@/lib/tetherLaunch";
@@ -81,6 +83,7 @@ import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 import { ensureRegisteredInstallation } from "@/lib/secureClient/installationClient";
 import { ManualReviewNotice } from "@/components/ManualReviewNotice";
 import { LockdownApplicationCheck } from "@/components/LockdownApplicationCheck";
+import { ActivationConfirmationPending } from "@/components/ActivationConfirmationPending";
 import { ensureLockdownBridgeInitialized, type LockdownCapabilityInfo } from "@/lib/lockdownClient";
 import { isValidReportedDisplayCount } from "@/lib/secureClient/attestation";
 
@@ -315,15 +318,20 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   const pendingSecurePreflightRef = useRef<SecurePreflightSummary | null>(null);
   const lockdownCapabilityInfoRef = useRef<Map<string, LockdownCapabilityInfo> | null>(null);
 
-  // PR #22 release-blocking review — true from the instant
-  // window.sesLockdown.activateSecureExamLockdown() has genuinely
-  // succeeded (native lockdown is now ACTIVE in the Electron main
-  // process) until ensureSecureActivation reaches a state where native
-  // lockdown's fate is definitively known again (server activation
-  // confirmed, restored after a confirmed non-activation, or
-  // reconciliation confirms ACTIVATED). See the unmount effect below and
-  // ensureSecureActivation's own doc comment.
-  const nativeActivationPendingServerConfirmationRef = useRef(false);
+  // PR #22 follow-up review — ACTIVATION_CONFIRMATION_PENDING. Distinct
+  // from precheckIssue on purpose: every precheckIssue means native
+  // lockdown is in a KNOWN, SAFE, pre-exam state (either never activated,
+  // or already restored) — Recheck and Return to dashboard are both
+  // always genuinely safe there. This state means the opposite: native
+  // lockdown activated, POST /activate's outcome could not be confirmed
+  // even after reconciliation retries, and the exam MAY already be
+  // genuinely ACTIVE server-side. See ensureSecureActivation's own doc
+  // comment and ActivationConfirmationPending.tsx for the full reasoning
+  // on why this must never be treated as an ordinary retryable issue —
+  // in particular, why there is deliberately NO unmount-triggered
+  // restoration and NO Return-to-dashboard link while this is true.
+  const [activationConfirmationPending, setActivationConfirmationPending] = useState<{ submissionId: string } | null>(null);
+  const [activationConfirmationChecking, setActivationConfirmationChecking] = useState(false);
 
   // P0 secure-launch redirect loop hotfix — see
   // docs/tether-secure-launch-loop-hotfix.md. Two independent guards:
@@ -353,26 +361,34 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
     };
   }, []);
 
-  // PR #22 release-blocking review — the exceptional path a naive
-  // fix would miss: the student navigates away, or this component
-  // unmounts for any other reason, WHILE native lockdown has already
-  // activated but ensureSecureActivation has not yet reached a
-  // definitive outcome (still awaiting POST /activate, or mid-
-  // reconciliation). Without this, native lockdown (display enforcement,
-  // process detection, remote-session monitoring) would be left ACTIVE
-  // with no page left running that could ever restore it. Safe to call
-  // unconditionally when the ref is true — restoreLockdownControls is
-  // idempotent (see apps/lockdown/src/lockdownLifecycle.ts) — and this
-  // never fires when the ref is false, so it has zero effect on the
-  // ordinary navigate-into-exam-content unmount.
-  useEffect(() => {
-    return () => {
-      if (nativeActivationPendingServerConfirmationRef.current) {
-        window.sesLockdown?.restoreLockdownControls?.("tether-launch-unmount-during-pending-activation");
-        nativeActivationPendingServerConfirmationRef.current = false;
-      }
-    };
-  }, []);
+  // PR #22 follow-up review — REMOVED, deliberately: an earlier version
+  // of this fix restored native lockdown unconditionally on unmount
+  // whenever a "pending" ref was true. That is unsafe: POST /activate may
+  // have already reached the server and committed (activatedAt set,
+  // timer started) before its response was lost — if the student then
+  // navigates away (e.g. via the ordinary "Return to dashboard" link an
+  // earlier version of the UNDETERMINED screen offered) and this
+  // component unmounts, blindly restoring here could turn native
+  // lockdown OFF while the server-side timed attempt is genuinely
+  // ACTIVE. There is no way to safely resolve that ambiguity locally on
+  // unmount — see ensureSecureActivation's own doc comment for the
+  // actual design: every genuinely SAFE restoration happens
+  // synchronously, inside ensureSecureActivation itself, only once the
+  // outcome is definitively known (a DEFINITIVE_REJECTION, or
+  // reconciliation resolving to NOT_ACTIVATED) — never speculatively on
+  // unmount. When the true state cannot be determined
+  // (activationConfirmationPending), this component intentionally
+  // offers no ordinary navigation away at all (see
+  // ActivationConfirmationPending.tsx) — the only ways to leave this
+  // screen are Retry (a read-only reconciliation check, safe to repeat)
+  // or closing Tether entirely via the OS, which is a fundamentally
+  // different, unavoidable risk category handled by main.ts's own
+  // unconditional before-quit/window-closed/render-process-gone
+  // restoration (see that file's own doc comments) — once the whole
+  // Electron process is gone, there is nothing left running to be
+  // "left active" in the first place, and the server-side authoritative
+  // gate (isSubmissionContentAccessible), not this native overlay, is
+  // what actually protects exam integrity from that point on.
 
   /**
    * v1.7.4 pre-exam readiness — PHASE 1 PRECHECK. Runs EVERY mandatory
@@ -716,25 +732,47 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
    * own eligibility from the authoritative VERIFIED secure-client
    * session — this function's only job is sequencing, never trust.
    *
-   * PR #22 release-blocking review — the moment activateSecureExamLockdown
+   * PR #22 follow-up review — the moment activateSecureExamLockdown
    * resolves ok:true, native lockdown is ALREADY active in the Electron
-   * main process, before the POST below has even been attempted.
-   * `nativeActivationPendingServerConfirmationRef` is true for exactly
-   * that window, so the unmount effect above can restore defensively if
-   * the student navigates away before this function reaches a definitive
-   * outcome. Every failure branch from here on either (a) confirms
-   * genuine success and leaves native lockdown active, (b) definitively
-   * confirms non-activation and restores native lockdown via the
-   * existing restoreLockdownControls bridge before returning, or (c)
-   * cannot be determined at all, in which case native lockdown is left
-   * exactly as-is (restoring it could be wrong) and the student is told
-   * so honestly, never guessed at.
+   * main process, before the POST below has even been attempted. Every
+   * branch from here on either (a) confirms genuine success and leaves
+   * native lockdown active, (b) definitively confirms non-activation and
+   * restores native lockdown via the existing restoreLockdownControls
+   * bridge before returning, or (c) cannot be determined at all even
+   * after reconciliation retries — in which case native lockdown is left
+   * exactly as-is (restoring it could be wrong if the server genuinely
+   * did activate) and the student is moved to the dedicated
+   * ACTIVATION_CONFIRMATION_PENDING screen (activationConfirmationPending
+   * state, rendered via ActivationConfirmationPending — never an
+   * ordinary precheckIssue). There is deliberately NO unmount-triggered
+   * restoration anywhere in this component: restoring native lockdown is
+   * never safe based solely on "the renderer unmounted" — see the
+   * removed-effect doc comment near unmountedRef above for the full
+   * reasoning.
    */
   async function ensureSecureActivation(submissionId: string): Promise<boolean> {
-    const statusRes = await fetch(`/api/submissions/${submissionId}/secure-client/status`);
-    const status = statusRes.ok ? await statusRes.json().catch(() => null) : null;
-    const requireSingleDisplay = status?.displayRequirement?.status === "ENFORCED_BY_SECURE_CLIENT";
-    const requireRemoteSessionCheck = status?.requireRemoteSessionCheck === true;
+    // PR #22 follow-up review, Issue 2 — a missing/failed/malformed
+    // secure-client/status response must NEVER silently resolve to "no
+    // fresh check required". Strictly validated via
+    // parseSecureClientStatusForActivation; null means the frozen
+    // per-attempt policy could not be confirmed, so native activation is
+    // never attempted at all — fail closed, exactly like every other
+    // mandatory-check failure on this page.
+    let statusBody: unknown = null;
+    try {
+      const statusRes = await fetch(`/api/submissions/${submissionId}/secure-client/status`);
+      if (statusRes.ok) statusBody = await statusRes.json().catch(() => null);
+    } catch {
+      statusBody = null;
+    }
+    const validatedStatus = parseSecureClientStatusForActivation(statusBody);
+    if (!validatedStatus) {
+      logClientTetherDiagnostic("secure_client_status_invalid_before_activation", { submissionId });
+      setPrecheckIssue(resolveSecureClientStatusUnavailableIssue());
+      setPrecheckPassed(false);
+      return false;
+    }
+    const { requireSingleDisplay, requireRemoteSessionCheck } = validatedStatus;
 
     if (typeof window.sesLockdown?.activateSecureExamLockdown !== "function") {
       // A build old enough to predate the whole v1.7.4 activation
@@ -767,13 +805,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       return false;
     }
 
-    // Native lockdown is now genuinely ACTIVE — from this point, any
-    // exit from this function that does not confirm genuine server
-    // success must either restore it (definitively not activated) or
-    // deliberately leave it untouched (undetermined) — never fall
-    // through to a return without deciding which.
-    nativeActivationPendingServerConfirmationRef.current = true;
-
+    // Native lockdown is now genuinely ACTIVE.
     let activateStatus: number | null = null;
     let activateCode: string | null = null;
     let activateThrew = false;
@@ -782,7 +814,6 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       activateStatus = activateRes.status;
       if (activateRes.ok) {
         logClientTetherDiagnostic("secure_activation_server_result", { submissionId, outcome: "SUCCESS" });
-        nativeActivationPendingServerConfirmationRef.current = false;
         return true;
       }
       const body = await activateRes.json().catch(() => null);
@@ -805,19 +836,21 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         // The server genuinely committed — only its response was lost.
         // Native lockdown is already correctly active; proceed exactly
         // like a definitive SUCCESS.
-        nativeActivationPendingServerConfirmationRef.current = false;
         return true;
       }
       if (reconciliation === "UNDETERMINED") {
-        // Cannot be determined either way, even after retrying. Content
-        // stays blocked either way (never navigate below) — but native
-        // lockdown is deliberately left exactly as-is: restoring it here
-        // could be wrong if the server genuinely did activate. The
-        // student stays on this ordinary in-page screen (never a native
-        // overlay) and can safely retry the whole sequence — every step
-        // it retries is itself idempotent — for as long as needed.
-        setPrecheckIssue(resolveServerActivationUndeterminedIssue());
-        setPrecheckPassed(false);
+        // PR #22 follow-up review, Issue 1 — cannot be determined either
+        // way, even after retrying. Content stays blocked either way
+        // (never navigate below), but this is NOT an ordinary,
+        // known-safe precheckIssue: the exam MAY already be genuinely
+        // ACTIVE server-side, so native lockdown is deliberately left
+        // exactly as-is (restoring could be wrong), and the student is
+        // moved to the dedicated ACTIVATION_CONFIRMATION_PENDING screen
+        // — no ordinary Return-to-dashboard navigation is offered while
+        // this is true (see ActivationConfirmationPending.tsx). The
+        // caller (runLaunchSequence) never navigates on a `false`
+        // return, so content stays withheld regardless.
+        if (!unmountedRef.current) setActivationConfirmationPending({ submissionId });
         return false;
       }
       // reconciliation === "NOT_ACTIVATED" — now definitively known; falls
@@ -833,10 +866,51 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
     // fix) — no attempt is consumed merely because server activation
     // failed.
     window.sesLockdown?.restoreLockdownControls?.("secure-activation-server-not-confirmed");
-    nativeActivationPendingServerConfirmationRef.current = false;
+    setActivationConfirmationPending(null);
     setPrecheckIssue(resolveServerActivationNotConfirmedIssue());
     setPrecheckPassed(false);
     return false;
+  }
+
+  /**
+   * PR #22 follow-up review, Issue 1 — the ONLY action available on the
+   * ACTIVATION_CONFIRMATION_PENDING screen. Re-runs JUST the read-only
+   * reconciliation check (never re-attempts native activation or POST
+   * /activate — both already ran; this only asks the server, again,
+   * whether the earlier one committed). Safe to call any number of
+   * times. Resolves the same three ways ensureSecureActivation's own
+   * AMBIGUOUS branch does: ACTIVATED navigates into the exam,
+   * NOT_ACTIVATED restores native lockdown and returns to the ordinary
+   * retryable precheckIssue screen, UNDETERMINED stays on this same
+   * screen for another Retry.
+   */
+  async function retryActivationConfirmation() {
+    if (!activationConfirmationPending) return;
+    const { submissionId } = activationConfirmationPending;
+    setActivationConfirmationChecking(true);
+    try {
+      const reconciliation = await reconcileServerActivationState(submissionId);
+      logClientTetherDiagnostic("secure_activation_reconciliation_retry_result", { submissionId, reconciliation });
+      if (unmountedRef.current) return;
+
+      if (reconciliation === "ACTIVATED") {
+        setActivationConfirmationPending(null);
+        logClientTetherDiagnostic("NAVIGATION_ALLOWED", { examId, reason: "activation_confirmation_retry_activated" });
+        router.replace(`/student/exams/${submissionId}`);
+        return;
+      }
+      if (reconciliation === "NOT_ACTIVATED") {
+        window.sesLockdown?.restoreLockdownControls?.("secure-activation-server-not-confirmed");
+        setActivationConfirmationPending(null);
+        setPrecheckIssue(resolveServerActivationNotConfirmedIssue());
+        setPrecheckPassed(false);
+        return;
+      }
+      // Still UNDETERMINED — remain on this same screen; the student can
+      // Retry again for as long as needed.
+    } finally {
+      if (!unmountedRef.current) setActivationConfirmationChecking(false);
+    }
   }
 
   /**
@@ -1024,6 +1098,25 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   // submission.
   if (manualReview) {
     return <ManualReviewNotice />;
+  }
+
+  // PR #22 follow-up review, Issue 1 — takes priority over precheckIssue
+  // below: native lockdown activated and the server's own activation
+  // outcome could not be confirmed, even after retrying. Deliberately a
+  // DIFFERENT component from LockdownApplicationCheck (no Return to
+  // dashboard) — see ActivationConfirmationPending.tsx's own doc comment
+  // for why offering that navigation here would be unsafe.
+  if (activationConfirmationPending) {
+    const copy = resolveActivationConfirmationPendingCopy();
+    return (
+      <ActivationConfirmationPending
+        title={copy.title}
+        message={copy.message}
+        retryLabel={copy.retryLabel}
+        onRetry={() => void retryActivationConfirmation()}
+        checking={activationConfirmationChecking}
+      />
+    );
   }
 
   // v1.7.4 pre-exam readiness — PHASE 1 remediation screen. Plain page

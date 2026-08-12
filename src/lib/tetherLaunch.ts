@@ -7,6 +7,7 @@
  * is installed — this module only builds the protocol-launch attempt and
  * decides the TIMING of the installer fallback; it never asserts success.
  */
+import { DISPLAY_REQUIREMENT_STATUSES } from "./secureClientPolicy";
 
 /**
  * The branded tether:// deep link for a given exam. Carries ONLY the
@@ -339,21 +340,74 @@ export function resolveServerActivationNotConfirmedIssue(): PreflightIssue {
   };
 }
 
-/**
- * Shown only when reconciliation itself could not determine the true
- * server-side state after retrying — deliberately distinct wording from
- * resolveServerActivationNotConfirmedIssue: native lockdown was NOT
- * restored here (doing so could be wrong if the server genuinely did
- * activate), so this must never claim lockdown is off. Recheck safely
- * re-runs the whole sequence regardless of the true underlying state —
- * every step it retries (activateSecureExamLockdown, POST /activate) is
- * itself idempotent — and Return to dashboard remains available exactly
- * as it does for every other PreflightIssue, so the student is never
- * left with no way forward.
- */
-export function resolveServerActivationUndeterminedIssue(): PreflightIssue {
+// ---------------------------------------------------------------------------
+// PR #22 follow-up review — the UNDETERMINED activation-confirmation state
+// is deliberately NOT a PreflightIssue. Every other PreflightIssue means
+// "native lockdown is (or has been restored to) a known, safe, pre-exam
+// state — Recheck and Return to dashboard are both always safe." That
+// invariant does not hold here: the exam MAY already be genuinely ACTIVE
+// server-side, with native lockdown correctly still on, and we simply
+// could not confirm it. Treating this as an ordinary PreflightIssue would
+// let the student navigate away via the same "Return to dashboard" link
+// every other issue offers — an ordinary in-page navigation that unmounts
+// this component — with no restoration guarantee either way. See
+// ActivationConfirmationPending.tsx and tether-launch/page.tsx's own
+// handling of this state.
+// ---------------------------------------------------------------------------
+
+export type ActivationConfirmationPendingCopy = { title: string; message: string; retryLabel: string };
+
+export function resolveActivationConfirmationPendingCopy(): ActivationConfirmationPendingCopy {
   return {
-    title: "Tether could not confirm your exam activation status",
-    message: "Tether could not confirm with the exam server whether this examination activated. Do not worry if secure lockdown still appears active. Select Recheck to try again.",
+    title: "Confirming exam start",
+    message:
+      "Tether could not confirm with the exam server whether this examination has started. Do not close Tether — your secure exam session may already be active. Select Retry to check again.",
+    retryLabel: "Retry",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PR #22 follow-up review, Issue 2 — strict validation of
+// GET /api/submissions/[id]/secure-client/status before it is ever used to
+// decide whether activateSecureExamLockdown() should request a fresh
+// display/remote-session check. A missing/failed/malformed response must
+// NEVER silently resolve to "no check required" — that would let native
+// activation proceed without a mandatory fresh check the frozen
+// per-attempt policy actually requires. Returns null for ANYTHING that
+// does not structurally match the known response contract; the caller's
+// only correct response to null is to refuse to call
+// activateSecureExamLockdown at all, never to default the missing fields
+// to false.
+// ---------------------------------------------------------------------------
+
+export type ValidatedSecureClientStatusForActivation = {
+  requireSingleDisplay: boolean;
+  requireRemoteSessionCheck: boolean;
+};
+
+export function parseSecureClientStatusForActivation(body: unknown): ValidatedSecureClientStatusForActivation | null {
+  if (typeof body !== "object" || body === null) return null;
+  const record = body as Record<string, unknown>;
+
+  const displayRequirement = record.displayRequirement;
+  if (typeof displayRequirement !== "object" || displayRequirement === null) return null;
+  const displayStatus = (displayRequirement as Record<string, unknown>).status;
+  if (typeof displayStatus !== "string" || !(DISPLAY_REQUIREMENT_STATUSES as readonly string[]).includes(displayStatus)) {
+    return null;
+  }
+
+  if (typeof record.requireRemoteSessionCheck !== "boolean") return null;
+
+  return {
+    requireSingleDisplay: displayStatus === "ENFORCED_BY_SECURE_CLIENT",
+    requireRemoteSessionCheck: record.requireRemoteSessionCheck,
+  };
+}
+
+/** Shown when secure-client/status could not be fetched or failed strict validation — native activation is never attempted in this state. */
+export function resolveSecureClientStatusUnavailableIssue(): PreflightIssue {
+  return {
+    title: "Tether could not verify this examination's secure policy",
+    message: "Tether could not confirm the required secure-client checks for this examination. Select Recheck to try again.",
   };
 }
