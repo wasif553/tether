@@ -127,7 +127,75 @@
 // for lecturer review, never an automatic misconduct conclusion — see
 // that doc's "Core principles". No kernel driver, no TPM attestation, no
 // permanent Windows-setting change, no blanket process termination.
-export const LOCKDOWN_VERSION = "1.7.2";
+// v1.7.3 — sandboxed-preload hotfix. Root cause: with sandbox:true,
+// Electron's preload require() is a restricted polyfill that only
+// permits a small allowlist (electron itself) — a relative require(
+// "./shared") throws "module not found" inside that polyfill and aborts
+// the ENTIRE preload script before contextBridge.exposeInMainWorld ever
+// runs, silently disabling window.sesLockdown with no visible error.
+// Confirmed via direct reproduction: a real sandboxed BrowserWindow
+// loading the compiled v1.7.2 dist/preload.js fired a preload-error
+// event with exactly this message. Fix: dist/preload.js is now produced
+// by esbuild (`--bundle --platform=node --format=cjs --external:electron`,
+// see package.json's bundle:preload script) instead of plain tsc output
+// — every local/project dependency (this module) is inlined as real
+// code, leaving only the one Electron require the sandbox permits. See
+// verifyPreloadBundle.ts (build-time regression guard: dist/preload.js
+// must contain no require(...) other than "electron") and
+// sandboxPreloadRuntimeCheck.ts (runtime regression check: loads the
+// REAL built dist/preload.js into a sandbox:true/contextIsolation:true/
+// nodeIntegration:false BrowserWindow and calls
+// window.sesLockdown.getDisplayCount()). No change to sandbox,
+// contextIsolation, nodeIntegration, the exposed bridge surface, or any
+// server-side verification/enforcement logic.
+// v1.7.4 — Pre-exam Readiness + Safe Lockdown Activation. Fixes three
+// confirmed problems from physical v1.7.3 testing: (1) pre-exam
+// remediation was too restrictive — the during-exam processDetection
+// overlay (screen-saver-level always-on-top) could obstruct Task
+// Manager even while the student was still meant to be freely
+// remediating (closing TeamViewer, disconnecting a display), because
+// setLockdownExamActive(true) used to fire at the same instant content
+// became reachable, with no calm, native-overlay-free readiness phase
+// of its own; (2) a BLOCKED display decision was always reported as
+// "Additional display connected" regardless of cause — active&&!ready
+// and an inconclusive/failed topology query both collapsed into the
+// same claim with no real evidence (see displayEnforcementLogic.ts's
+// new DisplayBlockingReason taxonomy: POLICY_NOT_READY/
+// ADDITIONAL_ELECTRON_DISPLAY/WINDOWS_TOPOLOGY_EXTEND/
+// WINDOWS_TOPOLOGY_CLONE/MULTIPLE_ACTIVE_TARGETS/TOPOLOGY_CHECK_UNAVAILABLE,
+// and resolveDisplayDecisionEventType, which now only ever reports
+// ADDITIONAL_DISPLAY_PRESENT for the four reasons backed by genuine
+// multi-display evidence); (3) exam timer/content could begin before
+// secure-client attestation and native lockdown activation actually
+// completed (Submission.startedAt was stamped at POST /start, before
+// manifest issue/consume/attestation even ran — see the main repo's
+// prisma/schema.prisma Submission.activatedAt doc comment).
+//
+// New two-phase lifecycle (see the main repo's
+// src/app/student/exams/[id]/tether-launch/page.tsx and
+// src/lib/secureClientActivation.ts): PHASE 1 PRE-EXAM READINESS runs
+// every mandatory native precheck (prohibited applications, remote
+// session, display topology) with NO strict overlay and NO submission
+// created — a calm, in-page remediation screen leaves Task Manager/
+// Alt+Tab/Windows display settings fully usable — followed by an
+// explicit "Begin examination" action (never an auto-start). PHASE 2
+// SECURE ACTIVATION then creates the submission (PREPARING — no
+// timer/content yet), completes the manifest/attestation sequence,
+// re-runs a FRESH native check via the new
+// lockdown:activate-secure-exam-lockdown IPC handler (closing the race
+// where TeamViewer or a second display appears between PRECHECK and
+// Begin examination), and only once that atomically activates display
+// enforcement + process detection's during-exam poll + remote-session
+// monitoring does the page call the new authoritative
+// POST /api/submissions/[id]/activate — which is what actually starts
+// the timer and unlocks question content server-side (never merely by
+// hiding React content; see the main repo's
+// src/lib/secureClientActivation.ts isSubmissionContentAccessible,
+// enforced in GET /api/submissions/[id] and every other content-bearing
+// route). No change to sandbox, contextIsolation, nodeIntegration,
+// active-exam display/process enforcement, or fail-closed server
+// verification.
+export const LOCKDOWN_VERSION = "1.7.4";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

@@ -159,6 +159,7 @@ Interpretation:
 | 15 | `docs/sql/add-tether-secure-resume-recovery.sql` | Tether Secure Exam Recovery and Resilient Autosave v1 | **APPLIED ONCE — 2026-08-02** | **APPLIED ONCE — 2026-08-02 (same shared database as Preview)** | Confirmed applied — do not re-apply. Additive only — three new nullable/defaulted columns on `SecureClientSession`, four on `Submission` (one unique), two on `Answer`, plus one index and one self-referencing foreign key. See docs/tether-secure-resume-recovery-v1.md and "Verification — secure recovery migration" below for the full read-only confirmation record. |
 | 16 | `docs/sql/add-tether-windows-lockdown-hardening.sql` | Tether Windows Lockdown Hardening v1 | **APPLIED ONCE — 2026-08-05** | **APPLIED ONCE — 2026-08-05 (same shared database as Preview)** | Confirmed applied — do not re-apply. Additive only — five new `IntegrityEventType` enum values (`REMOTE_CONTROL_SOFTWARE_DETECTED`, `SCREEN_CAPTURE_SOFTWARE_DETECTED`, `DEBUGGING_TOOL_DETECTED`, `PROHIBITED_APPLICATION_DETECTED`, `PROHIBITED_APPLICATION_CLOSED`) — no new table, no new column, no existing row modified. Every other lockdown fact is `PlatformAuditLog` only (its `action` column is a plain string, needing no schema change). See docs/tether-windows-lockdown-hardening-v1.md and "Verification — Windows lockdown hardening migration" below for the full read-only confirmation record. |
 | 17 | `docs/sql/repair-installation-attestation-foundation.sql` | Production schema repair — complete installation-attestation foundation (supersedes the earlier, narrower SecureClientSession-only repair) | **APPLIED ONCE — 2026-08-06** | **APPLIED ONCE — 2026-08-06 (same shared database as Preview)** | Confirmed applied — do not re-apply. Repaired a confirmed production gap spanning FIVE previously untracked files, none of which had ever been applied: `docs/sql/add-tether-client-installation.sql`, `docs/sql/add-tether-installation-registration-challenge.sql`, `docs/sql/add-system-check-secure-client-verification.sql`, `docs/sql/add-tether-system-check-readiness.sql`, and `docs/sql/add-secure-client-session-installation-attestation.sql` (all written 2026-07-30 through 2026-08-01, "Secure Client Attestation v2" / "Tether System Check and Exam Readiness v1"). Live inspection had confirmed the whole rollout was missing: `SecureClientSession` lacked all six installation-attestation columns (causing Prisma error P2022), and `TetherClientInstallation`/`TetherInstallationRegistrationChallenge`/`SystemCheckSecureClientVerification`/`TetherSystemCheckRun` did not exist at all. Unrelated to, and not superseded by, row 15's 2026-08-02 migration, which never touched any of these objects. The production P2022 failure is resolved. See "Deployment procedure — repair-installation-attestation-foundation.sql" and "Verification — installation attestation foundation repair" below for the full dependency graph, audit, and read-only confirmation record. **This migration must not be applied again.** |
+| 18 | `docs/tether-preflight-lifecycle-v1.7.4-migration.sql` | Tether v1.7.4 Pre-exam Readiness + Safe Lockdown Activation | **APPLIED ONCE — 2026-08-11** | **APPLIED ONCE — 2026-08-11 (same shared database as Preview)** | Confirmed applied — do not re-apply. One new nullable column on the existing `Submission` table (`activatedAt`), a one-time backfill UPDATE (`activatedAt = startedAt WHERE activatedAt IS NULL`), PLUS (for zero-downtime cutover safety) a database-level `DEFAULT CURRENT_TIMESTAMP` set only after the backfill — the first migration in this ledger to include both a data backfill AND a default set in a deliberately ordered 3-block sequence; see the SQL file's own extensive safety-analysis header (in particular "ZERO-DOWNTIME CUTOVER RACE" and "WHY BLOCK 3 MUST COME AFTER BLOCK 2"). Verified post-apply: zero `activatedAt IS NULL` rows immediately after the backfill; every existing row's `activatedAt` equals its own `startedAt`; `information_schema.columns.column_default` confirms `CURRENT_TIMESTAMP` is set on the column. Applied BEFORE the v1.7.4 application code deploy, per docs/tether-preflight-lifecycle-v1.7.4.md's "Production rollout order" step 1 — the application code itself has not yet been deployed. See docs/tether-preflight-lifecycle-v1.7.4.md and "Deployment procedure — tether-preflight-lifecycle-v1.7.4-migration.sql" below. |
 
 Rows 2-9 predate this ledger's creation, so their actual apply dates are
 not recorded here — an operator who has applied them should backfill the
@@ -981,3 +982,116 @@ in src/lib/tetherAttestationConfig.ts falls back to LEGACY when
 production has been running in. Dropping anything after applying it
 would simply restore the P2022 failure this file exists to repair —
 there is no practical scenario where that is the right move.
+
+## Deployment procedure — `docs/tether-preflight-lifecycle-v1.7.4-migration.sql`
+
+**APPLIED ONCE — 2026-08-11, to the shared Preview/Production Supabase
+database. Do not re-apply.** Unlike every prior file in this
+ledger, this one includes a one-time data backfill (Block 2) AND a
+database-level default set after the backfill (Block 3), alongside the
+additive schema change (Block 1) — see the SQL file's own header for the
+full safety analysis of why that's required and why it's still safe to
+apply to a live database ahead of the v1.7.4 code deploy. Block 3 exists
+specifically to close the zero-downtime cutover race: without it, a
+Submission row created by the OLD (pre-v1.7.4) application code between
+"migration applied" and "v1.7.4 code deployed" would land on
+`activatedAt IS NULL` — indistinguishable from a genuine v1.7.4
+PREPARING attempt — and be incorrectly blocked (403 `EXAM_NOT_ACTIVATED`)
+the moment v1.7.4 code takes over, even mid-exam. Do NOT apply Block 1
+with a default already attached, and do NOT apply Block 3 before Block
+2 — see the SQL file's "WHY BLOCK 3 MUST COME AFTER BLOCK 2" note (a
+volatile default set before backfilling stamps every existing row with
+the migration's own run time, destroying each row's real `startedAt`).
+
+### Preview
+
+1. Run the read-only pre-check query (top of the SQL file) against the
+   Preview database first, to confirm the migration has not already
+   been partially applied.
+2. Note the current `SELECT count(*) FROM "Submission";` — used to
+   confirm no row is created/deleted by this migration (Verification
+   query 4).
+3. Open the Preview Supabase project → SQL Editor.
+4. Paste and run Block 1 (`ALTER TABLE ... ADD COLUMN "activatedAt"`),
+   then Block 2 (the backfill `UPDATE`), then Block 3
+   (`ALTER COLUMN ... SET DEFAULT CURRENT_TIMESTAMP`) — the file is
+   already in execution order; run them strictly in that order, not out
+   of sequence.
+5. Run all five "Verification queries" at the bottom of the SQL file.
+   Query 2 (`count(*) WHERE "activatedAt" IS NULL`) MUST return 0
+   immediately after this step; Query 5 (`column_default`) MUST show
+   the default is set — if either doesn't hold, STOP and investigate
+   before deploying any v1.7.4 code; do not proceed to production.
+6. Record the date in the Ledger table above (row 18, "Preview applied").
+7. Only after this is confirmed clean should the v1.7.4 web/server
+   application code be deployed to Preview (see
+   docs/tether-preflight-lifecycle-v1.7.4.md's deployment-order section)
+   — never before.
+
+### Production
+
+Only after Preview has been verified (and, ideally, briefly smoke-tested
+with the v1.7.4 code running against it):
+
+1. Run the same pre-check and row-count queries against **production**
+   first.
+2. Open the **production** Supabase project → SQL Editor (double-check
+   you are pointed at production, not Preview — though as of this
+   ledger's own topology note, they are currently the same database, so
+   this step is likely already done by the Preview steps above).
+3. Apply the same three blocks, in the same order, the same way. Do not
+   skip Block 3 and do not reorder it ahead of Block 2.
+4. Re-run all five verification queries against production. Query 2
+   must return 0; Query 5 must show the default is set.
+5. Record the date in the Ledger table above (row 18, "Production
+   applied").
+6. Once Block 3 (the default) is confirmed live in production, the
+   cutover window is safe: the OLD application code may continue
+   running and creating Submission rows indefinitely with no risk of an
+   ambiguous NULL, for as long as needed before the v1.7.4 code deploy
+   actually happens.
+7. Only after this is confirmed clean should the v1.7.4 web/server
+   application code be deployed to production, followed by publishing
+   the v1.7.4 native installer, followed by physical validation, and
+   only then promoting v1.7.4 to the normal recommended download — see
+   docs/tether-preflight-lifecycle-v1.7.4.md's full deployment-order
+   checklist. Do not skip ahead to publishing the installer or
+   promoting the version before the code deploy is confirmed healthy.
+
+### Verification — activatedAt zero-downtime cutover migration
+
+Applied and verified in the shared Preview/Production Supabase database
+on 2026-08-11 by the operator running the migration's own three blocks
+through the Supabase SQL Editor, per the "Production" procedure above.
+**Preview and Production point at this same shared database — this
+migration has now been applied to that one database and must not be
+applied again, in either environment.**
+
+- All three blocks applied, in order, exactly once: `ADD COLUMN
+  "activatedAt"` (no default), the backfill `UPDATE ... WHERE
+  "activatedAt" IS NULL`, then `ALTER COLUMN ... SET DEFAULT
+  CURRENT_TIMESTAMP`. No `prisma migrate` or `prisma db push` command
+  was run against this database.
+- Existing rows backfilled: every pre-existing `Submission` row now has
+  `activatedAt` equal to its own `startedAt` (Verification query 3 in
+  the SQL file — the backfill copies each row's own historical value,
+  never a single shared timestamp).
+- Zero NULL rows immediately after migration: Verification query 2
+  (`count(*) FROM "Submission" WHERE "activatedAt" IS NULL`) returned 0
+  immediately after the backfill completed — no historical row was left
+  unbackfilled.
+- Database default confirmed: Verification query 5
+  (`information_schema.columns.column_default` for
+  `Submission.activatedAt`) confirms `CURRENT_TIMESTAMP` is set — this
+  is the zero-downtime guarantee itself: any Submission row the OLD
+  (pre-v1.7.4) application code creates from this point forward gets a
+  non-null `activatedAt` automatically, so it can never be misread as an
+  ambiguous PREPARING row once v1.7.4 code goes live.
+- Row count unaffected: Verification query 4 confirms no row was created
+  or deleted by this migration.
+- Sequencing confirmed: this migration was applied **before** the
+  v1.7.4 web/server application code has been deployed to any
+  environment (see docs/tether-preflight-lifecycle-v1.7.4.md's
+  "Production rollout order", step 1) — the application code deploy,
+  native installer publication, physical validation, and promotion to
+  the recommended download (steps 2-6) have not yet occurred.

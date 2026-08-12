@@ -6,11 +6,11 @@ afterEach(() => {
 });
 
 describe("resolveTetherReleaseMetadata — canonical source", () => {
-  it("[2] reports the frozen v1.7.2 metadata matching the known tested artifact", () => {
+  it("[2] reports the frozen v1.7.4 metadata matching the known tested artifact (pre-exam readiness + safe lockdown activation rebuild)", () => {
     const meta = resolveTetherReleaseMetadata();
-    expect(meta.version).toBe("1.7.2");
-    expect(meta.installerFilename).toBe("Tether-Secure-Browser-1.7.2-win-x64.exe");
-    expect(meta.sha256).toBe("2295deeb6d78ff3f42911d2c0af904355e9cbd7048505c14a60e7a7072faed2d");
+    expect(meta.version).toBe("1.7.4");
+    expect(meta.installerFilename).toBe("Tether-Secure-Browser-1.7.4-win-x64.exe");
+    expect(meta.sha256).toBe("b44eaf94a0b32ec1672d4c4f16ea1c2a2c5a0332bd2cbcd071ff9e6cec35c19c");
     expect(meta.platform).toBe("WINDOWS");
     expect(meta.architecture).toBe("x64");
   });
@@ -23,9 +23,9 @@ describe("resolveTetherReleaseMetadata — canonical source", () => {
   });
 
   it("[4] a valid configured installer URL enables downloads", () => {
-    vi.stubEnv("TETHER_INSTALLER_DOWNLOAD_URL", "https://cdn.example.edu/tether/Tether-Secure-Browser-1.7.2-win-x64.exe");
+    vi.stubEnv("TETHER_INSTALLER_DOWNLOAD_URL", "https://cdn.example.edu/tether/Tether-Secure-Browser-1.7.4-win-x64.exe");
     const meta = resolveTetherReleaseMetadata();
-    expect(meta.installerUrl).toBe("https://cdn.example.edu/tether/Tether-Secure-Browser-1.7.2-win-x64.exe");
+    expect(meta.installerUrl).toBe("https://cdn.example.edu/tether/Tether-Secure-Browser-1.7.4-win-x64.exe");
     expect(meta.downloadsEnabled).toBe(true);
   });
 

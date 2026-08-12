@@ -36,6 +36,7 @@ import { evaluateFinalExamSystemCheckGate } from "@/lib/systemCheck/readiness";
 import { parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
 import { resolveTrustedTetherVerification } from "@/lib/tetherRecovery";
 import { resolveOfflineContinueMs } from "@/lib/tetherRecoveryConfig";
+import { submissionRequiresActivation } from "@/lib/secureClientActivation";
 
 // Tether launch/install flow v1 — Requirement 9 ("Production start
 // protection"). Additive response field: `{required: false}` for every
@@ -503,6 +504,18 @@ export async function POST(
   );
 
   try {
+    // v1.7.4 pre-exam readiness — activatedAt is the new authoritative
+    // "is this attempt's timed clock/content actually unlocked" marker
+    // (see prisma/schema.prisma's own doc comment and
+    // src/lib/secureClientActivation.ts). For every delivery mode that
+    // does NOT require secure-client activation, there is nothing to
+    // gate — stamped immediately, identical to today's behaviour (the
+    // attempt is fully live from creation, exactly as before this
+    // column existed). Only TETHER_CLIENT_REQUIRED/SEB_REQUIRED
+    // attempts start PREPARING (null) — POST /api/submissions/[id]/activate
+    // is the ONLY thing that may ever set it for those, once native
+    // lockdown is confirmed ACTIVE.
+    const requiresActivation = submissionRequiresActivation(secureClientPolicySnapshot);
     const submission = await prisma.submission.create({
       data: {
         examId: id,
@@ -514,6 +527,7 @@ export async function POST(
         screenSharePolicySnapshotJson: screenSharePolicySnapshot as unknown as Prisma.InputJsonValue,
         answerProvenancePolicySnapshotJson: answerProvenancePolicySnapshot as unknown as Prisma.InputJsonValue,
         secureClientPolicySnapshotJson: secureClientPolicySnapshot as unknown as Prisma.InputJsonValue,
+        activatedAt: requiresActivation ? null : new Date(),
       },
     });
 

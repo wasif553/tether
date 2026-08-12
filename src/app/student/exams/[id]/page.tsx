@@ -877,7 +877,24 @@ export default function TakeExamPage({
         // and none exists yet (e.g. the student reached this page
         // directly, outside Tether) — send them to the Tether launch
         // page instead of showing a dead-end access error.
-        if (res.status === 403 && body?.code === "TETHER_SESSION_REQUIRED" && typeof body?.action?.redirectTo === "string") {
+        //
+        // v1.7.4 pre-exam readiness, Part 6 — EXAM_NOT_ACTIVATED is the
+        // SAME class of redirect: a secure-client-required attempt whose
+        // native lockdown was never (or is no longer) confirmed ACTIVE
+        // server-side (activatedAt still null — see
+        // src/lib/secureClientActivation.ts). This is what closes the
+        // direct-load bypass: a student cannot reach question content by
+        // navigating straight to /student/exams/[submissionId] (bookmark,
+        // browser history, a Tether restart resuming the last route) for
+        // an attempt that was created but never activated — this GET
+        // itself refuses the content, and the page below sends them back
+        // through tether-launch's Phase 2 activation handshake instead of
+        // ever rendering exam content from stale/absent `data`.
+        if (
+          res.status === 403 &&
+          (body?.code === "TETHER_SESSION_REQUIRED" || body?.code === "EXAM_NOT_ACTIVATED") &&
+          typeof body?.action?.redirectTo === "string"
+        ) {
           // Secure-recovery hardening v1, Part B — before bouncing to the
           // tether-launch page (which, for an ordinary session gap, would
           // just relaunch and bounce straight back here), check whether
@@ -1380,10 +1397,22 @@ export default function TakeExamPage({
       // (server-assigned) — never display names, serials, EDID or
       // device paths, matching the existing displayMetadataSchema in
       // src/lib/secureClient/secureClientEvents.ts.
+      //
+      // v1.7.4 pre-exam readiness — DISPLAY_CHECK_TECHNICAL_FAILURE (the
+      // native topology query being inconclusive/ERROR/UNKNOWN) is NOT a
+      // display-presence claim and must never be recorded under
+      // ADDITIONAL_DISPLAY_PRESENT/DISPLAY_CONFIGURATION_CHANGED's
+      // displayMetadataSchema — it maps to the existing, generic
+      // CLIENT_TECHNICAL_FAILURE event type instead, exactly like any
+      // other technical (non-integrity) client failure.
+      const body =
+        payload.eventType === "DISPLAY_CHECK_TECHNICAL_FAILURE"
+          ? { eventType: "CLIENT_TECHNICAL_FAILURE", metadata: { reasonCode: "TOPOLOGY_CHECK_UNAVAILABLE" } }
+          : { eventType: payload.eventType, metadata: { displayCount: payload.displayCount } };
       fetch(`/api/secure-client/sessions/${sessionId}/events`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventType: payload.eventType, metadata: { displayCount: payload.displayCount } }),
+        body: JSON.stringify(body),
       }).catch(() => {});
     });
 

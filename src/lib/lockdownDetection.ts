@@ -123,6 +123,16 @@ type SesLockdownBridge = {
     vmSignatureMatched: string | null;
   }>;
   restoreLockdownControls?(trigger: string): void;
+  // v1.7.4 pre-exam readiness — the Phase 2 secure-activation handshake.
+  // Optional: only present in a v1.7.4+ packaged build; every caller
+  // must feature-detect first, exactly like every other optional method
+  // above. See apps/lockdown/src/main.ts's
+  // SecureExamLockdownActivationResult for the exact result shape this
+  // mirrors.
+  activateSecureExamLockdown?(params: { requireSingleDisplay: boolean; requireRemoteSessionCheck: boolean }): Promise<
+    | { ok: true; displayDecision: string; processDecision: string }
+    | { ok: false; reason: string; matchedCapabilityIds?: string[] }
+  >;
   getLockdownLifecycleState?(): Promise<string>;
   getLockdownCapabilityInfo?(): Promise<Array<{ id: string; category: string; displayName: string }>>;
   reportLockdownAuditFact?(action: string, metadata?: Record<string, unknown>): void;

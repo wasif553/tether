@@ -1,3 +1,5 @@
+import { verifyPreloadBundleContents } from "./verifyPreloadBundle";
+
 /**
  * Tether Secure Browser — corrective pass v1.2.1, Task D. "Add an
  * automated packaging assertion that verifies the release application
@@ -54,6 +56,18 @@ export type PackagedReleaseVerificationInput = {
    * the .exe could not be found/read/parsed.
    */
   packagedExeIconResolutions: number[] | null;
+  /**
+   * v1.7.3 sandboxed-preload hotfix — the PACKAGED app's actual
+   * dist/preload.js contents (resources/app/dist/preload.js for an
+   * unpacked --dir build), read back and independently re-verified
+   * against the same require(...) allowlist verifyPreloadBundleContents
+   * enforces at build time. This is the check requirement #12 calls for:
+   * proving the preload INSIDE the real packaged application is the
+   * bundled artifact, not just that dist/preload.js looked right before
+   * packaging (electron-builder's file copy / asar step, or a stale
+   * `files` glob, could in principle diverge from what was just built).
+   */
+  packagedPreloadJsContent: string | null;
 };
 
 export type PackagedReleaseVerificationResult = {
@@ -125,7 +139,13 @@ const REQUIRED_MAIN_JS_MARKERS = [
 const FORBIDDEN_MAIN_JS_MARKER = 'store.set("lastExamId"';
 const REQUIRED_DISPLAY_ENFORCEMENT_JS_MARKERS = [
   "setEnforcementState",
-  "resolveReadinessGatedDisplayEnforcementState",
+  // v1.7.4 pre-exam readiness — the reason-aware replacement for
+  // resolveReadinessGatedDisplayEnforcementState (see
+  // displayEnforcementLogic.ts's DisplayDecision/DisplayBlockingReason);
+  // fails loudly on a stale pre-1.7.4 build that predates the
+  // BLOCKED==ADDITIONAL_DISPLAY_PRESENT fix.
+  "resolveReadinessGatedDisplayDecision",
+  "showOverlay(nextDecision.reason)",
   // v1.7.2 poll-serialization fix — the corrected in-flight assignment
   // (evaluateNow()'s own promise, never a `.finally()`-wrapped one).
   "this.evaluateInFlight = run;",
@@ -267,6 +287,24 @@ export function verifyPackagedReleaseContents(input: PackagedReleaseVerification
     // configured with the correct, non-conflicting identifier.
     if (!input.packagedSharedJsContent.includes('TETHER_APP_USER_MODEL_ID = "com.tether.securebrowser"')) {
       errors.push('Packaged dist/shared.js does not contain TETHER_APP_USER_MODEL_ID = "com.tether.securebrowser" — the stable AppUserModelID is missing or stale.');
+    }
+  }
+
+  // v1.7.3 sandboxed-preload hotfix — the packaged preload must be the
+  // esbuild-bundled artifact (no relative/local require survives), never
+  // the plain tsc output that caused the v1.7.2 P0 ("Error: module not
+  // found: ./shared" — preload aborted before contextBridge.exposeInMainWorld
+  // ever ran). Reuses the exact same allowlist check the build step runs
+  // against the pre-packaged dist/preload.js, applied here to the file
+  // actually copied into the packaged application.
+  if (!input.packagedPreloadJsContent) {
+    errors.push("Packaged dist/preload.js was not found.");
+  } else {
+    const preloadBundleResult = verifyPreloadBundleContents(input.packagedPreloadJsContent);
+    if (!preloadBundleResult.ok) {
+      for (const error of preloadBundleResult.errors) {
+        errors.push(`Packaged dist/preload.js: ${error}`);
+      }
     }
   }
 
@@ -454,6 +492,7 @@ if (require.main === module) {
     expectedVersion: sourcePackageJson.version,
     packagedPackageJsonContent: readIfExists(path.join(appDir, "package.json")),
     packagedSharedJsContent: readIfExists(path.join(appDir, "dist", "shared.js")),
+    packagedPreloadJsContent: readIfExists(path.join(appDir, "dist", "preload.js")),
     packagedMainJsContent: readIfExists(path.join(appDir, "dist", "main.js")),
     packagedDisplayEnforcementJsContent: readIfExists(path.join(appDir, "dist", "displayEnforcement.js")),
     packagedProcessDetectionJsContent: readIfExists(path.join(appDir, "dist", "processDetection.js")),

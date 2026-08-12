@@ -56,13 +56,16 @@ const VALID_INPUT = {
   packagedMainJsContent:
     'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger); app.setAppUserModelId(shared_1.TETHER_APP_USER_MODEL_ID); const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico"); const remoteSessionMonitor = new remoteSessionMonitor_1.RemoteSessionMonitor({...}); ipcMain.on("lockdown:set-lockdown-exam-active", (_e, active) => { processDetection.setExamActive(active); remoteSessionMonitor.setExamActive(active); }); mainWindow.on("closed", () => { processDetection.stop(); remoteSessionMonitor.stop(); }); mainWindow.webContents.session.setDisplayMediaRequestHandler((_request, callback) => { void (0, screenShareRequestHandler_1.handleDisplayMediaRequest)(() => electron_1.desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 } }), ...); }); const initialExamId = (0, lockdownStartupRouting_1.resolveInitialExamIdFromArgv)(process.argv);',
   packagedDisplayEnforcementJsContent:
-    "setEnforcementState(state) { ... } resolveReadinessGatedDisplayEnforcementState(...) evaluate() { ... const run = this.evaluateNow(); this.evaluateInFlight = run; ... }",
+    "setEnforcementState(state) { ... } resolveReadinessGatedDisplayDecision(...) evaluate() { ... const run = this.evaluateNow(); this.evaluateInFlight = run; showOverlay(nextDecision.reason); ... }",
   packagedProcessDetectionJsContent: "runPreflightScan() { ... } setExamActive(active) { ... } pollOnce() { ... this.scanInFlight = this.pollOnceNow(); ... }",
   packagedRemoteSessionMonitorJsContent:
     "class RemoteSessionMonitor { setExamActive(active) { ... resolveRemoteSessionMonitorIntervalSeconds() ... } stop() { ... } pollOnceNow() { ... computeRemoteSessionMonitorTransitions(this.state, classification) ... } }",
   packagedLockdownStartupRoutingJsContent:
     'function resolveStartupLoadUrl(examId, sesBaseUrl) { ... } exports.TETHER_HOME_PATH = "/student"; function parseExamIdFromDeepLinkUrl(url) { ... }',
   packagedScreenShareRequestHandlerJsContent: "function selectEntireScreenSource(sources, primaryDisplayId) { ... } async function handleDisplayMediaRequest(...) { ... }",
+  // v1.7.3 sandboxed-preload hotfix — a realistic esbuild-bundled shape:
+  // exactly one require("electron"), no relative/local require left over.
+  packagedPreloadJsContent: '"use strict";\nvar import_electron = require("electron");\nvar LOCKDOWN_VERSION = "1.2.1";\nimport_electron.contextBridge.exposeInMainWorld("sesLockdown", { version: LOCKDOWN_VERSION, async getDisplayCount() { return import_electron.ipcRenderer.invoke("lockdown:get-display-count"); } });\n',
   sourceIconIcoBuffer: buildIcoBuffer(FULL_ICON_RESOLUTIONS),
   electronBuilderYmlContent: VALID_ELECTRON_BUILDER_YML,
   packagedIconIcoBuffer: buildIcoBuffer(FULL_ICON_RESOLUTIONS),
@@ -136,6 +139,42 @@ describe("verifyPackagedReleaseContents", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("performLockdownRestoration"))).toBe(true);
+  });
+
+  // v1.7.3 sandboxed-preload hotfix — proves the packaged application's
+  // ACTUAL dist/preload.js (not just the local pre-packaging one) is the
+  // bundled, sandbox-safe artifact. See sandboxPreloadRuntimeCheck.ts and
+  // verifyPreloadBundle.ts for the runtime and build-time counterparts.
+  describe("v1.7.3 sandboxed-preload hotfix — packaged preload bundle", () => {
+    it("fails when dist/preload.js is missing from the packaged app", () => {
+      const result = verifyPackagedReleaseContents({ ...VALID_INPUT, packagedPreloadJsContent: null });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("Packaged dist/preload.js was not found"))).toBe(true);
+    });
+
+    it("fails when the packaged dist/preload.js still contains the v1.7.2 P0 regression — a literal require(\"./shared\")", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedPreloadJsContent:
+          '"use strict";\nconst electron_1 = require("electron");\nconst shared_1 = require("./shared");\nelectron_1.contextBridge.exposeInMainWorld("sesLockdown", { version: shared_1.LOCKDOWN_VERSION });\n',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes("Packaged dist/preload.js") && e.includes('require("./shared")'))).toBe(true);
+    });
+
+    it("fails when the packaged dist/preload.js contains any other unbundled relative/local require, not just ./shared", () => {
+      const result = verifyPackagedReleaseContents({
+        ...VALID_INPUT,
+        packagedPreloadJsContent: 'require("electron"); require("./someFutureLocalModule");',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors.some((e) => e.includes('require("./someFutureLocalModule")'))).toBe(true);
+    });
+
+    it("passes when the packaged dist/preload.js is a real bundled artifact (only require(\"electron\") survives)", () => {
+      const result = verifyPackagedReleaseContents(VALID_INPUT);
+      expect(result.ok).toBe(true);
+    });
   });
 
   // Mid-exam remote-session monitoring v1 (v1.7.2).

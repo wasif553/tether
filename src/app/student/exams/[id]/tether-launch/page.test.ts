@@ -88,10 +88,22 @@ describe("runLaunchSequence — the dangerous pre-fix pattern must never reappea
     expect(failureBranchMatch![1]).not.toContain("router.replace");
   });
 
-  it("[15] secure-client enforcement is released (uncoverOnFailure) when the authoritative check fails", () => {
+  // v1.7.4 pre-exam readiness — uncoverOnFailure() and its early,
+  // speculative setSecureClientEnforcementState({active:true,ready:false})
+  // cover no longer exist (see docs/tether-preflight-lifecycle-v1.7.4.md).
+  // Native lockdown is never activated speculatively before verification
+  // succeeds — it only ever activates atomically, inside
+  // ensureSecureActivation, once every fresh Phase 2 check has already
+  // passed — so there is nothing to "release" on a failed authoritative
+  // check: this test now proves the failure branch is a plain, terminal
+  // setError+return with no enforcement-toggling side effect at all.
+  it("[15] a failed authoritative check sets an error and returns — no enforcement-toggling side effect (uncoverOnFailure no longer exists anywhere in this file)", () => {
     const checkIndex = runLaunchSequenceBody.indexOf("checkAuthoritativeSessionVerified(");
     const failureBranchMatch = runLaunchSequenceBody.slice(checkIndex).match(/if\s*\(!verified\)\s*\{([\s\S]*?)\n\s*\}/);
-    expect(failureBranchMatch![1]).toContain("uncoverOnFailure()");
+    expect(failureBranchMatch![1]).toContain("setError(");
+    expect(failureBranchMatch![1]).toContain("return");
+    expect(source).not.toContain("uncoverOnFailure");
+    expect(source).not.toMatch(/setSecureClientEnforcementState\?\.\(\{\s*active:\s*true,\s*ready:\s*false/);
   });
 
   it("[12] every router.replace call in this function is guarded by an unmountedRef check immediately before it — a stale in-flight attempt can never navigate after the student has left the page", () => {
@@ -112,6 +124,260 @@ describe("runLaunchSequence — the dangerous pre-fix pattern must never reappea
     const hasAuthoritativeGate = runLaunchSequenceBody.includes("checkAuthoritativeSessionVerified(");
     expect(hasAllowGate).toBe(true);
     expect(hasAuthoritativeGate).toBe(true);
+  });
+});
+
+// v1.7.4 pre-exam readiness — Part 13A: PHASE 1 PRECHECK never creates a
+// submission, never starts a timer, and never auto-starts the exam even
+// once clean. See docs/tether-preflight-lifecycle-v1.7.4.md.
+describe("v1.7.4 Phase 1 PRECHECK — no submission/timer until an explicit Begin examination", () => {
+  const runPrecheckBody = extractFunctionBody(source, "async function runPrecheck(");
+
+  it("runPrecheck never calls fetch(`/api/exams/${examId}/start`) — no submission is ever created during precheck", () => {
+    expect(runPrecheckBody).not.toMatch(/fetch\(`\/api\/exams\/\$\{examId\}\/start`/);
+  });
+
+  it("the Start-exam button only ever calls runPrecheck, never runLaunchSequence directly — precheck becoming clean sets precheckPassed, it never auto-launches", () => {
+    const startButtonIdx = source.indexOf('{precheckChecking ? "Checking…" : "Start exam"}');
+    const precedingSlice = source.slice(Math.max(0, startButtonIdx - 800), startButtonIdx);
+    expect(precedingSlice).toMatch(/void runPrecheck\(/);
+    expect(precedingSlice).toMatch(/setPrecheckPassed\(true\)/);
+    expect(precedingSlice).not.toMatch(/void runLaunchSequence\(/);
+  });
+
+  it("the 'Ready to begin' screen's Begin examination button is the only thing that calls runLaunchSequence for a fresh (non-resume) attempt", () => {
+    const readyScreenIdx = source.indexOf('<h1 className="text-lg font-medium">Ready to begin</h1>');
+    const beginButtonSlice = source.slice(readyScreenIdx, readyScreenIdx + 500);
+    expect(beginButtonSlice).toMatch(/void runLaunchSequence\(accessCode \|\| null\)/);
+    expect(beginButtonSlice).toContain("Begin examination");
+  });
+
+  it("a BLOCKED process scan and a genuine display-topology issue both route through the SAME unified precheckIssue state — never two separate UI paths", () => {
+    expect(runPrecheckBody).toMatch(/setPrecheckIssue\(\{/);
+    expect(runPrecheckBody).toMatch(/setPrecheckIssue\(issue\)/);
+  });
+});
+
+// v1.7.4 pre-exam readiness — Part 13E/F: PHASE 2 ordering. See
+// docs/tether-preflight-lifecycle-v1.7.4.md's required ordering diagram.
+describe("v1.7.4 Phase 2 — ensureSecureActivation runs strictly after verification and strictly before navigation", () => {
+  it("runLaunchSequence calls ensureSecureActivation only after verified is true, and never navigates unless ensureSecureActivation returned true", () => {
+    const verifiedCheckIdx = runLaunchSequenceBody.indexOf("if (!verified) {");
+    const activationCallIdx = runLaunchSequenceBody.indexOf("ensureSecureActivation(submission.id)");
+    const finalReplaceIdx = runLaunchSequenceBody.lastIndexOf("router.replace(`/student/exams/${submission.id}`);");
+    expect(verifiedCheckIdx).toBeGreaterThan(-1);
+    expect(activationCallIdx).toBeGreaterThan(verifiedCheckIdx);
+    expect(finalReplaceIdx).toBeGreaterThan(activationCallIdx);
+    expect(runLaunchSequenceBody).toMatch(/const activated = await ensureSecureActivation\(submission\.id\);\s*\n\s*if \(!activated\) return;/);
+  });
+});
+
+// PR #22 follow-up review, Issue 2 — a missing/failed/malformed
+// secure-client/status response must never silently disable a mandatory
+// display/remote-session check. See src/lib/tetherLaunch.ts's
+// parseSecureClientStatusForActivation for the pure-function coverage of
+// the validation logic itself; these tests prove ensureSecureActivation
+// actually refuses to call activateSecureExamLockdown at all when
+// validation fails, and passes through the true validated values when it
+// succeeds.
+describe("PR #22 follow-up, Issue 2 — ensureSecureActivation never calls activateSecureExamLockdown without a validated secure-client/status", () => {
+  const ensureSecureActivationBodyForStatus = extractFunctionBody(source, "async function ensureSecureActivation(submissionId: string): Promise<boolean> ");
+
+  it("REQUIRED TESTS 1-3: the validation-failure branch returns false BEFORE the activateSecureExamLockdown call ever appears in the function", () => {
+    const validationFailIdx = ensureSecureActivationBodyForStatus.indexOf("if (!validatedStatus) {");
+    const activateCallIdx = ensureSecureActivationBodyForStatus.indexOf("window.sesLockdown.activateSecureExamLockdown(");
+    expect(validationFailIdx).toBeGreaterThan(-1);
+    expect(activateCallIdx).toBeGreaterThan(validationFailIdx);
+    const failureBranchMatch = ensureSecureActivationBodyForStatus.match(/if \(!validatedStatus\) \{([\s\S]*?)\n\s*\}/);
+    expect(failureBranchMatch).not.toBeNull();
+    expect(failureBranchMatch![1]).toContain("return false;");
+    expect(failureBranchMatch![1]).not.toContain("activateSecureExamLockdown");
+  });
+
+  it("REQUIRED TESTS 1-3: never defaults requireSingleDisplay/requireRemoteSessionCheck to false via optional chaining on a possibly-null status — the raw fetch body is validated FIRST via parseSecureClientStatusForActivation, and destructured only from its non-null result", () => {
+    expect(ensureSecureActivationBodyForStatus).toMatch(/const validatedStatus = parseSecureClientStatusForActivation\(statusBody\);/);
+    expect(ensureSecureActivationBodyForStatus).toMatch(/const \{ requireSingleDisplay, requireRemoteSessionCheck \} = validatedStatus;/);
+    // The dangerous pre-fix pattern (`status?.displayRequirement?.status === ...`,
+    // silently yielding false for a missing/failed status) must never
+    // reappear.
+    expect(ensureSecureActivationBodyForStatus).not.toMatch(/status\?\.displayRequirement\?\.status/);
+    expect(ensureSecureActivationBodyForStatus).not.toMatch(/status\?\.requireRemoteSessionCheck/);
+  });
+
+  it("a thrown fetch exception is caught and also routes through the SAME validation-failure path (statusBody stays null, parseSecureClientStatusForActivation(null) is null)", () => {
+    const tryBlockMatch = ensureSecureActivationBodyForStatus.match(/try \{([\s\S]*?)\n\s*\} catch \{([\s\S]*?)\n\s*\}/);
+    expect(tryBlockMatch).not.toBeNull();
+    expect(tryBlockMatch![2]).toContain("statusBody = null;");
+  });
+
+  it("REQUIRED TESTS 4-5: the validated requireSingleDisplay/requireRemoteSessionCheck values are passed straight through to activateSecureExamLockdown, unmodified", () => {
+    expect(ensureSecureActivationBodyForStatus).toMatch(
+      /activateSecureExamLockdown\(\{ requireSingleDisplay, requireRemoteSessionCheck \}\)/,
+    );
+  });
+
+  it("the validation-failure screen is an ordinary, known-safe PreflightIssue (resolveSecureClientStatusUnavailableIssue) — native lockdown was never touched, so Recheck/Return to dashboard are both genuinely safe here", () => {
+    const failureBranchMatch = ensureSecureActivationBodyForStatus.match(/if \(!validatedStatus\) \{([\s\S]*?)\n\s*\}/);
+    expect(failureBranchMatch![1]).toContain("setPrecheckIssue(resolveSecureClientStatusUnavailableIssue());");
+    expect(failureBranchMatch![1]).toContain("setPrecheckPassed(false);");
+  });
+});
+
+// PR #22 follow-up review — secure-activation failure reconciliation,
+// Issue 1 fix. See src/lib/tetherLaunch.ts's classifyActivatePostOutcome/
+// classifyReconciliationCheck for the pure-function coverage of the
+// classification logic itself; these tests prove ensureSecureActivation is
+// actually WIRED to call restoreLockdownControls in exactly the right
+// branches (and never in the wrong ones), and that the UNDETERMINED case
+// no longer has ANY path — including unmount — that could restore native
+// lockdown speculatively.
+describe("PR #22 follow-up — ensureSecureActivation restores native lockdown on a definitive non-activation, never on success or genuine uncertainty", () => {
+  const ensureSecureActivationBody = extractFunctionBody(source, "async function ensureSecureActivation(submissionId: string): Promise<boolean> ");
+  const reconcileBody = extractFunctionBody(
+    source,
+    'async function reconcileServerActivationState(submissionId: string): Promise<"ACTIVATED" | "NOT_ACTIVATED" | "UNDETERMINED"> ',
+  );
+  const retryBody = extractFunctionBody(source, "async function retryActivationConfirmation() ");
+
+  it("REQUIRED TEST 10: the immediate activateRes.ok success branch returns true directly and never calls restoreLockdownControls", () => {
+    const successBranchMatch = ensureSecureActivationBody.match(/if \(activateRes\.ok\) \{([\s\S]*?)\n\s*\}/);
+    expect(successBranchMatch).not.toBeNull();
+    expect(successBranchMatch![1]).toContain("return true;");
+    expect(successBranchMatch![1]).not.toContain("restoreLockdownControls");
+  });
+
+  it("REQUIRED TEST 8: an AMBIGUOUS-then-NOT_ACTIVATED or DEFINITIVE_REJECTION outcome falls through to a single restoreLockdownControls call, textually before the final return false", () => {
+    const restoreIdx = ensureSecureActivationBody.indexOf('restoreLockdownControls?.("secure-activation-server-not-confirmed")');
+    const finalReturnIdx = ensureSecureActivationBody.lastIndexOf("return false;");
+    expect(restoreIdx).toBeGreaterThan(-1);
+    expect(finalReturnIdx).toBeGreaterThan(restoreIdx);
+    // Exactly one restore call site in this function — no duplicate/divergent path.
+    expect((ensureSecureActivationBody.match(/restoreLockdownControls\?\.\(/g) ?? []).length).toBe(1);
+  });
+
+  it("REQUIRED TEST 9: the reconciliation-ACTIVATED branch returns true and does not reach the restoreLockdownControls call", () => {
+    const activatedBranchMatch = ensureSecureActivationBody.match(/if \(reconciliation === "ACTIVATED"\) \{([\s\S]*?)\n\s*\}/);
+    expect(activatedBranchMatch).not.toBeNull();
+    expect(activatedBranchMatch![1]).toContain("return true;");
+    expect(activatedBranchMatch![1]).not.toContain("restoreLockdownControls");
+  });
+
+  it("REQUIRED TEST 7: the reconciliation-UNDETERMINED branch returns false WITHOUT calling restoreLockdownControls, and routes to activationConfirmationPending state — NEVER setPrecheckIssue (which would offer the unsafe ordinary Return-to-dashboard path)", () => {
+    const undeterminedBranchMatch = ensureSecureActivationBody.match(/if \(reconciliation === "UNDETERMINED"\) \{([\s\S]*?)\n\s*\}/);
+    expect(undeterminedBranchMatch).not.toBeNull();
+    expect(undeterminedBranchMatch![1]).toContain("setActivationConfirmationPending({ submissionId });");
+    expect(undeterminedBranchMatch![1]).toContain("return false;");
+    expect(undeterminedBranchMatch![1]).not.toContain("restoreLockdownControls");
+    expect(undeterminedBranchMatch![1]).not.toContain("setPrecheckIssue");
+  });
+
+  it("an AMBIGUOUS outcome is resolved via reconcileServerActivationState BEFORE any restore/issue decision is made — never guessed", () => {
+    const ambiguousIdx = ensureSecureActivationBody.indexOf('outcome.kind === "AMBIGUOUS"');
+    const reconcileCallIdx = ensureSecureActivationBody.indexOf("reconcileServerActivationState(submissionId)");
+    const restoreIdx = ensureSecureActivationBody.indexOf('restoreLockdownControls?.("secure-activation-server-not-confirmed")');
+    expect(ambiguousIdx).toBeGreaterThan(-1);
+    expect(reconcileCallIdx).toBeGreaterThan(ambiguousIdx);
+    expect(restoreIdx).toBeGreaterThan(reconcileCallIdx);
+  });
+
+  it("REQUIRED TEST 5: reconcileServerActivationState retries a bounded number of times and returns UNDETERMINED only after exhausting them — never a single-shot guess", () => {
+    expect(reconcileBody).toMatch(/RECONCILIATION_ATTEMPTS/);
+    expect(reconcileBody).toMatch(/for \(let attempt = 0; attempt < RECONCILIATION_ATTEMPTS; attempt\+\+\)/);
+    expect(reconcileBody).toMatch(/return "UNDETERMINED";\s*\n\s*\}\s*$/);
+  });
+
+  it("reconcileServerActivationState never calls restoreLockdownControls or navigates itself — a pure, read-only, side-effect-free status check", () => {
+    expect(reconcileBody).not.toContain("restoreLockdownControls");
+    expect(reconcileBody).not.toContain("router.replace");
+    expect(reconcileBody).toContain("/secure-client/status");
+    expect(reconcileBody).not.toMatch(/method:\s*"POST"/);
+  });
+
+  it("REQUIRED TEST 8 / requirement: retrying after a definitive restore goes through the SAME Recheck -> Begin examination -> runLaunchSequence path as every other precheck failure — set via setPrecheckIssue + setPrecheckPassed(false), never a bespoke retry mechanism", () => {
+    expect(ensureSecureActivationBody).toMatch(/setPrecheckIssue\(resolveServerActivationNotConfirmedIssue\(\)\);\s*\n\s*setPrecheckPassed\(false\);/);
+  });
+
+  it("retryActivationConfirmation only ever calls reconcileServerActivationState — never activateSecureExamLockdown or POST /activate again", () => {
+    expect(retryBody).toContain("reconcileServerActivationState(submissionId)");
+    expect(retryBody).not.toContain("activateSecureExamLockdown");
+    expect(retryBody).not.toMatch(/fetch\(`\/api\/submissions\/\$\{submissionId\}\/activate`/);
+  });
+
+  it("REQUIRED TEST 9 (retry path): retryActivationConfirmation's ACTIVATED branch navigates directly into the exam and clears the pending state, without ever calling restoreLockdownControls", () => {
+    const activatedBranchMatch = retryBody.match(/if \(reconciliation === "ACTIVATED"\) \{([\s\S]*?)\n\s*\}/);
+    expect(activatedBranchMatch).not.toBeNull();
+    expect(activatedBranchMatch![1]).toContain("router.replace(`/student/exams/${submissionId}`)");
+    expect(activatedBranchMatch![1]).not.toContain("restoreLockdownControls");
+  });
+
+  it("REQUIRED TEST 8 (retry path): retryActivationConfirmation's NOT_ACTIVATED branch restores native lockdown and returns to the ordinary retryable screen", () => {
+    const notActivatedBranchMatch = retryBody.match(/if \(reconciliation === "NOT_ACTIVATED"\) \{([\s\S]*?)\n\s*\}/);
+    expect(notActivatedBranchMatch).not.toBeNull();
+    expect(notActivatedBranchMatch![1]).toContain('restoreLockdownControls?.("secure-activation-server-not-confirmed")');
+    expect(notActivatedBranchMatch![1]).toContain("setPrecheckIssue(resolveServerActivationNotConfirmedIssue());");
+  });
+});
+
+// PR #22 follow-up review, Issue 1 — the unsafe unconditional
+// unmount-restore effect from the previous commit has been REMOVED
+// entirely (not merely guarded) — restoring native lockdown is NEVER
+// safe based solely on "this component unmounted", since the server may
+// have already committed activation before its response was lost. These
+// tests prove that dangerous pattern cannot silently reappear.
+describe("PR #22 follow-up — no code path restores native lockdown merely because the renderer unmounted", () => {
+  it("the string 'nativeActivationPendingServerConfirmationRef' (the removed, unsafe ref) no longer appears anywhere in this file", () => {
+    expect(source).not.toContain("nativeActivationPendingServerConfirmationRef");
+  });
+
+  it("'tether-launch-unmount-during-pending-activation' (the removed unmount-restore trigger string) no longer appears anywhere in this file", () => {
+    expect(source).not.toContain("tether-launch-unmount-during-pending-activation");
+  });
+
+  it("the pre-existing unmountedRef cleanup effect is untouched by this fix — still exactly `{ unmountedRef.current = true; }`, with no second statement added to it", () => {
+    expect(source).toMatch(/return\s*\(\)\s*=>\s*\{\s*unmountedRef\.current = true;\s*\};/);
+  });
+
+  it("restoreLockdownControls is called from exactly two places in this file: ensureSecureActivation's definitive-non-activation path, and retryActivationConfirmation's NOT_ACTIVATED path — never from any useEffect cleanup", () => {
+    const allRestoreCalls = [...source.matchAll(/restoreLockdownControls\?\.\(/g)];
+    // Plus the pre-existing, unrelated exam-page-unmount / submission-completed
+    // calls do NOT exist in this file (they belong to the exam content
+    // page) — every call here is one of this fix's own two sites.
+    expect(allRestoreCalls.length).toBe(2);
+  });
+});
+
+describe("PR #22 follow-up — the dedicated ACTIVATION_CONFIRMATION_PENDING screen never offers an ordinary Return-to-dashboard navigation", () => {
+  it("REQUIRED TEST 7: the render branch for activationConfirmationPending uses ActivationConfirmationPending, never LockdownApplicationCheck", () => {
+    const branchIdx = source.indexOf("if (activationConfirmationPending) {");
+    expect(branchIdx).toBeGreaterThan(-1);
+    const branchSlice = source.slice(branchIdx, branchIdx + 500);
+    expect(branchSlice).toContain("<ActivationConfirmationPending");
+    expect(branchSlice).not.toContain("<LockdownApplicationCheck");
+  });
+
+  it("this branch is checked BEFORE precheckIssue in render order — it must take priority so an UNDETERMINED state is never momentarily shown as an ordinary, safe-looking precheck screen", () => {
+    const pendingBranchIdx = source.indexOf("if (activationConfirmationPending) {");
+    const precheckIssueBranchIdx = source.indexOf("if (precheckIssue) {");
+    expect(pendingBranchIdx).toBeGreaterThan(-1);
+    expect(precheckIssueBranchIdx).toBeGreaterThan(pendingBranchIdx);
+  });
+
+  it("ActivationConfirmationPending.tsx itself contains no href/Link to the dashboard — the ordinary escape route is structurally absent, not just unused here", () => {
+    const componentSource = fs.readFileSync(path.join(__dirname, "..", "..", "..", "..", "..", "components", "ActivationConfirmationPending.tsx"), "utf8");
+    expect(componentSource).not.toMatch(/href=/);
+  });
+});
+
+describe("PR #22 — requirement 7: the exam CONTENT page's during-exam enforcement is untouched by this fix", () => {
+  it("this fix only modifies tether-launch/page.tsx and its supporting library — the exam content page's own strict enforcement code is unchanged", () => {
+    const contentPageSource = fs.readFileSync(path.join(__dirname, "..", "page.tsx"), "utf8");
+    // The pre-activation gap this PR fixes is specific to tether-launch's
+    // ensureSecureActivation — the content page never calls
+    // activateSecureExamLockdown or POST /activate at all (it is only
+    // ever reached AFTER both have already succeeded), so it has no
+    // reconciliation concept to wire up in the first place.
+    expect(contentPageSource).not.toContain("reconcileServerActivationState");
+    expect(contentPageSource).not.toContain("classifyActivatePostOutcome");
   });
 });
 

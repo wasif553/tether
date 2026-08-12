@@ -93,7 +93,10 @@ describe("IPC chain hop 4: displayEnforcement stores the policy and evaluate() r
   });
 
   it("evaluateNow's decision call uses the readiness-gated resolver (not the old ungated one) — this is what actually closes the fail-open gap", () => {
-    expect(displayEnforcementSource).toMatch(/resolveReadinessGatedDisplayEnforcementState\(/);
+    // v1.7.4 pre-exam readiness — the reason-aware replacement for
+    // resolveReadinessGatedDisplayEnforcementState; see
+    // displayEnforcementLogic.ts's DisplayDecision/DisplayBlockingReason.
+    expect(displayEnforcementSource).toMatch(/resolveReadinessGatedDisplayDecision\(/);
   });
 });
 
@@ -103,7 +106,9 @@ describe("IPC chain hop 5: the overlay BrowserWindow is created and shown", () =
       displayEnforcementSource.indexOf("private async evaluateNow"),
       displayEnforcementSource.indexOf("private showOverlay"),
     );
-    expect(evaluateNow).toMatch(/if \(nextState === "BLOCKED"\) this\.showOverlay\(\);/);
+    // v1.7.4 pre-exam readiness — showOverlay now takes the specific
+    // DisplayBlockingReason (never a hardcoded, reason-blind overlay).
+    expect(evaluateNow).toMatch(/if \(nextDecision\.state === "BLOCKED"\) this\.showOverlay\(nextDecision\.reason\);/);
     expect(evaluateNow).toMatch(/else this\.hideOverlay\(\);/);
   });
 
@@ -124,20 +129,104 @@ describe("IPC chain hop 5: the overlay BrowserWindow is created and shown", () =
 // the actual fix, not just the pre-existing v1.2.1 wiring above.
 // ---------------------------------------------------------------------------
 
-describe("Task 3: exam-entry cover activates from the click, not just the exam-page mount", () => {
-  it("runLaunchSequence sets active:true,ready:false synchronously at its top, before any fetch", () => {
+describe("Task 3 (superseded by v1.7.4 Phase 2) — exam-entry cover no longer activates early from the click", () => {
+  // v1.7.4 pre-exam readiness — the old "cover the window the instant
+  // runLaunchSequence starts, active:true/ready:false" mechanism (and its
+  // uncoverOnFailure counterpart) is GONE. It existed because content
+  // used to become reachable the moment this page navigated into it;
+  // now content is genuinely unreachable server-side
+  // (isSubmissionContentAccessible) until POST /activate succeeds, and
+  // native lockdown only ever activates atomically (see the v1.7.4 Phase
+  // 2 describe block below) — there is no more "loading" window that
+  // needs a temporary, reason-blind cover. Removing it is also what
+  // eliminates the confirmed BLOCKED==ADDITIONAL_DISPLAY_PRESENT false
+  // positive from this page's own transition into the exam
+  // (POLICY_NOT_READY can no longer appear here).
+  it("runLaunchSequence no longer sets active:true,ready:false at all", () => {
     const fnStart = tetherLaunchSource.indexOf("async function runLaunchSequence(");
-    const firstAwait = tetherLaunchSource.indexOf("await fetch(", fnStart);
-    const beforeFirstFetch = tetherLaunchSource.slice(fnStart, firstAwait);
-    expect(beforeFirstFetch).toMatch(/setSecureClientEnforcementState\?\.\(\{\s*active:\s*true,\s*ready:\s*false/);
+    const fnEnd = tetherLaunchSource.indexOf("async function ensureSecureActivation(");
+    const fnBody = tetherLaunchSource.slice(fnStart, fnEnd);
+    expect(fnBody).not.toMatch(/setSecureClientEnforcementState\?\.\(\{\s*active:\s*true,\s*ready:\s*false/);
   });
 
-  it("uncoverOnFailure sets active:false and is called from every non-ok response branch and the catch block", () => {
-    expect(tetherLaunchSource).toMatch(/function uncoverOnFailure\(\)/);
-    expect(tetherLaunchSource).toMatch(/setSecureClientEnforcementState\?\.\(\{\s*active:\s*false/);
-    const occurrences = tetherLaunchSource.match(/uncoverOnFailure\(\);/g) ?? [];
-    // 3 non-ok branches (start/launch/consume) + 1 catch block = 4 call sites, plus the function's own definition line is excluded by this pattern (no trailing semicolon match on `function uncoverOnFailure() {`).
-    expect(occurrences.length).toBeGreaterThanOrEqual(4);
+  it("uncoverOnFailure no longer exists — failures are handled by setError alone, never a client-side cover toggle", () => {
+    expect(tetherLaunchSource).not.toMatch(/function uncoverOnFailure\(\)/);
+    expect(tetherLaunchSource).not.toMatch(/uncoverOnFailure\(\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.7.4 pre-exam readiness — Part 13A/E/F: the new Phase 2 secure-
+// activation handshake. See docs/tether-preflight-lifecycle-v1.7.4.md.
+// ---------------------------------------------------------------------------
+
+describe("v1.7.4 Phase 2 — preload exposes a narrow activateSecureExamLockdown invoke, never a generic ipcRenderer passthrough", () => {
+  it("preload.ts's activateSecureExamLockdown invokes exactly lockdown:activate-secure-exam-lockdown with only the two booleans", () => {
+    const fnBody = preloadSource.slice(
+      preloadSource.indexOf("async activateSecureExamLockdown("),
+      preloadSource.indexOf("},", preloadSource.indexOf("async activateSecureExamLockdown(")),
+    );
+    expect(fnBody).toMatch(/ipcRenderer\.invoke\("lockdown:activate-secure-exam-lockdown"/);
+    expect(fnBody).toMatch(/requireSingleDisplay:\s*Boolean\(params\.requireSingleDisplay\)/);
+    expect(fnBody).toMatch(/requireRemoteSessionCheck:\s*Boolean\(params\.requireRemoteSessionCheck\)/);
+  });
+});
+
+describe("v1.7.4 Phase 2 — main.ts's lockdown:activate-secure-exam-lockdown handler runs fresh checks BEFORE activating anything", () => {
+  const handlerBody = mainSource.slice(
+    mainSource.indexOf('ipcMain.handle("lockdown:activate-secure-exam-lockdown"'),
+    mainSource.indexOf("});", mainSource.indexOf('return { ok: true, displayDecision: "OK", processDecision: "CLEAN" };')),
+  );
+
+  it("runs processDetection.runPreflightScan() — the SAME one-shot scan the calm PRECHECK screen uses, never a separate/looser check", () => {
+    expect(handlerBody).toMatch(/processDetection\.runPreflightScan\(\)/);
+  });
+
+  it("runs a READ-ONLY display check (getOnDemandDisplayTopology) — never evaluateNowAndGetDecision — so a FAILED fresh check never flips the overlay on before activation", () => {
+    expect(handlerBody).toMatch(/displayEnforcement\.getOnDemandDisplayTopology\(\)/);
+    expect(handlerBody).not.toMatch(/evaluateNowAndGetDecision/);
+  });
+
+  it("only activates display enforcement, process detection, and remote-session monitoring AFTER every fresh check already passed", () => {
+    const activationIdx = handlerBody.indexOf('displayEnforcement.setEnforcementState({ active: true, ready: true');
+    const scanIdx = handlerBody.indexOf("processDetection.runPreflightScan()");
+    expect(activationIdx).toBeGreaterThan(scanIdx);
+    expect(handlerBody).toMatch(/processDetection\.setExamActive\(true\)/);
+    expect(handlerBody).toMatch(/remoteSessionMonitor\.setExamActive\(true\)/);
+    expect(handlerBody.indexOf("processDetection.setExamActive(true)")).toBeGreaterThan(activationIdx);
+  });
+
+  it("registers restoration via lockdownLifecycle.activate() as part of successful activation", () => {
+    expect(handlerBody).toMatch(/lockdownLifecycle\.activate\(\)/);
+  });
+
+  it("a PROHIBITED_APPLICATION result carries the matched capability ids (never raw process names)", () => {
+    expect(mainSource).toMatch(/reason:\s*"PROHIBITED_APPLICATION",\s*matchedCapabilityIds:\s*scan\.matchedCapabilityIds/);
+  });
+});
+
+describe("v1.7.4 Phase 2 — tether-launch/page.tsx's ensureSecureActivation runs the native handshake BEFORE the server activation call, and never trusts a client-side boolean alone", () => {
+  const fnBody = tetherLaunchSource.slice(
+    tetherLaunchSource.indexOf("async function ensureSecureActivation("),
+    tetherLaunchSource.indexOf("/**", tetherLaunchSource.indexOf("async function ensureSecureActivation(") + 50),
+  );
+
+  it("calls window.sesLockdown.activateSecureExamLockdown before POST /activate", () => {
+    const nativeIdx = fnBody.indexOf("activateSecureExamLockdown(");
+    const serverIdx = fnBody.indexOf("/activate`, { method: \"POST\" }");
+    expect(nativeIdx).toBeGreaterThan(-1);
+    expect(serverIdx).toBeGreaterThan(nativeIdx);
+  });
+
+  it("never navigates or calls POST /activate when the native result is not ok", () => {
+    const failureBranch = fnBody.slice(fnBody.indexOf("if (!activation.ok)"), fnBody.indexOf("const activateRes"));
+    expect(failureBranch).toMatch(/return false;/);
+    expect(failureBranch).not.toMatch(/fetch\(/);
+  });
+
+  it("fails closed (never silently proceeds) when activateSecureExamLockdown itself is missing from an old build", () => {
+    expect(fnBody).toMatch(/typeof window\.sesLockdown\?\.activateSecureExamLockdown !== "function"/);
+    expect(fnBody).toMatch(/return false;/);
   });
 });
 

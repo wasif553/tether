@@ -35,7 +35,7 @@ import { DisplayEnforcement } from "./displayEnforcement";
 import { resolveStartupLoadUrl, parseExamIdFromDeepLinkUrl, findDeepLinkArg, resolveInitialExamIdFromArgv } from "./lockdownStartupRouting";
 import { handleDisplayMediaRequest, type ScreenShareSource } from "./screenShareRequestHandler";
 import { ensureInstallationKey, getInstallationInfo, signWithInstallationKey, type InstallationKeyStoreSchema } from "./installationKey";
-import type { DisplayEnforcementEventType, SecureClientEnforcementState } from "./displayEnforcementLogic";
+import { resolveCombinedDisplayDecision, type DisplayDecisionEventType, type DisplayBlockingReason, type SecureClientEnforcementState } from "./displayEnforcementLogic";
 import {
   isDiagnosticsPanelEnabled,
   snapshotsEqualIgnoringTimestamp,
@@ -104,7 +104,7 @@ const store = new Store<StoreSchema>({
 });
 
 const displayEnforcement = new DisplayEnforcement({
-  onEventType: (eventType: DisplayEnforcementEventType, displayCount: number) => {
+  onEventType: (eventType: NonNullable<DisplayDecisionEventType>, displayCount: number) => {
     runOnWindowBestEffort(mainWindow, (window) => window.webContents.send("lockdown:display-enforcement-event", { eventType, displayCount }));
   },
   onDiagnosticsChanged: () => maybeEmitDiagnostics(),
@@ -241,7 +241,10 @@ function buildCurrentDiagnosticsSnapshot(): TetherDiagnosticsSnapshot {
     windowsTopologyClassification: de.windowsTopologyClassification,
     activeWindowsTargetCount: de.activeWindowsTargetCount,
     enforcementEnabled: de.enforcementState.active,
+    enforcementReady: de.enforcementState.ready,
+    requireSingleDisplay: de.enforcementState.requireSingleDisplay,
     currentDecision: de.currentDecision === "BLOCKED" ? "BLOCK" : "ALLOW",
+    blockingReason: de.blockingReason,
     overlayVisible: de.overlayVisible,
     lastDisplayCheckAt: de.lastDisplayCheckAt,
     lastErrorCode: de.lastErrorCode,
@@ -992,6 +995,112 @@ ipcMain.on("lockdown:set-lockdown-exam-active", (_event, active: unknown) => {
 
 /** Part 5 — remote-session/VM classification, on demand. */
 ipcMain.handle("lockdown:get-remote-session-status", async () => getWindowsSessionClassification());
+
+// ---------------------------------------------------------------------------
+// v1.7.4 pre-exam readiness — the single narrow IPC handshake that proves
+// native lockdown has actually reached its intended ACTIVE state before
+// the hosted page is allowed to call the server activation endpoint
+// (POST /api/submissions/[id]/activate) and reveal Question 1. See
+// docs/tether-secure-launch-verification-investigation.md, Part C/E of
+// the preflight-lifecycle investigation this implements.
+//
+// Deliberately NOT a generic ipcRenderer passthrough: takes only the two
+// booleans the page's own already-authoritative (server-derived) policy
+// snapshot carries (requireSingleDisplay, requireRemoteSessionCheck),
+// and returns only a bounded, narrow result — never a raw process list,
+// window handle, or anything else a compromised/modified page could use
+// beyond "was activation successful, and if not, which single reason".
+//
+// Runs FRESH checks (never reuses a value cached from the earlier
+// PRE-EXAM READINESS preflight) — this is what closes the race where
+// TeamViewer/a second display appears in the gap between the calm
+// preflight screen and the student clicking "Begin examination": process
+// detection reuses processDetection.runPreflightScan() (the exact same
+// one-shot scan the preflight screen itself uses), and the display check
+// reuses displayEnforcement.getOnDemandDisplayTopology() (a READ-ONLY,
+// side-effect-free native topology query — deliberately not
+// evaluateNowAndGetDecision() here, so a fresh check that FAILS never
+// flips the overlay on while the student is still on the tether-launch
+// page; the overlay only ever appears once enforcement is actually
+// activated below, after every fresh check has already passed).
+//
+// Only once EVERY fresh check is clean does this activate the real,
+// live, continuous native controls atomically: display enforcement
+// (ready:true, so any FUTURE change is caught immediately), process
+// detection's during-exam poll, and remote-session monitoring — the same
+// three mechanisms lockdown:set-secure-client-enforcement-state /
+// lockdown:set-lockdown-exam-active activate separately today, now
+// started together, synchronously with this one IPC call, so the hosted
+// page can `await` a guarantee they are live before it ever navigates to
+// exam content (previously: setLockdownExamActive(true) fired
+// fire-and-forget at the same instant the display cover lifted, with no
+// way for the page to know the FIRST process scan had actually
+// completed).
+// ---------------------------------------------------------------------------
+
+export type SecureExamLockdownActivationParams = {
+  requireSingleDisplay: boolean;
+  requireRemoteSessionCheck: boolean;
+};
+
+export type SecureExamLockdownActivationFailureReason =
+  | "INVALID_PARAMS"
+  | "PROHIBITED_APPLICATION"
+  | "PROCESS_CHECK_UNAVAILABLE"
+  | "REMOTE_SESSION_DETECTED"
+  | "REMOTE_SESSION_CHECK_UNAVAILABLE"
+  | DisplayBlockingReason;
+
+export type SecureExamLockdownActivationResult =
+  | { ok: true; displayDecision: "OK"; processDecision: "CLEAN" }
+  | { ok: false; reason: SecureExamLockdownActivationFailureReason; matchedCapabilityIds?: string[] };
+
+function isValidSecureExamLockdownActivationParams(value: unknown): value is SecureExamLockdownActivationParams {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.requireSingleDisplay === "boolean" && typeof v.requireRemoteSessionCheck === "boolean";
+}
+
+ipcMain.handle("lockdown:activate-secure-exam-lockdown", async (_event, rawParams: unknown): Promise<SecureExamLockdownActivationResult> => {
+  if (!isValidSecureExamLockdownActivationParams(rawParams)) return { ok: false, reason: "INVALID_PARAMS" };
+  const params = rawParams;
+
+  // Part 17 — dev/test-only fault injection, same modeling as
+  // lockdown:run-preflight-scan above: an IPC timeout is indistinguishable
+  // from "detection unavailable" to the caller.
+  if (consumeLockdownFault("IPC_TIMEOUT")) return { ok: false, reason: "PROCESS_CHECK_UNAVAILABLE" };
+
+  const scan = await processDetection.runPreflightScan();
+  if (scan.state === "BLOCKED") return { ok: false, reason: "PROHIBITED_APPLICATION", matchedCapabilityIds: scan.matchedCapabilityIds };
+  if (scan.state === "UNAVAILABLE") return { ok: false, reason: "PROCESS_CHECK_UNAVAILABLE" };
+
+  if (params.requireRemoteSessionCheck) {
+    const remoteSession = await getWindowsSessionClassification();
+    if (!remoteSession || remoteSession.remoteSessionSignalSource === "UNAVAILABLE") {
+      return { ok: false, reason: "REMOTE_SESSION_CHECK_UNAVAILABLE" };
+    }
+    if (remoteSession.isRemoteSession) return { ok: false, reason: "REMOTE_SESSION_DETECTED" };
+  }
+
+  if (params.requireSingleDisplay) {
+    const topology = await displayEnforcement.getOnDemandDisplayTopology();
+    const decision = resolveCombinedDisplayDecision(topology.electronDisplayCount, true, topology.classification);
+    if (decision.state === "BLOCKED") return { ok: false, reason: decision.reason };
+  }
+
+  // Every fresh check passed — activate the real, live native controls
+  // atomically. displayEnforcement's own evaluate() (triggered by
+  // setEnforcementState below) will immediately re-derive the same OK
+  // decision this handler just confirmed — no overlay should appear from
+  // this call.
+  displayEnforcement.setEnforcementState({ active: true, ready: true, requireSingleDisplay: params.requireSingleDisplay });
+  processDetection.setExamActive(true);
+  remoteSessionMonitor.setExamActive(true);
+  lockdownLifecycle.activate();
+  maybeEmitDiagnostics();
+
+  return { ok: true, displayDecision: "OK", processDecision: "CLEAN" };
+});
 
 /** Part 10 — the page calls this at every normal-exit/failure point (successful submission, lecturer-authorised exit, failed launch, failed attestation, blocked preflight) — see restoreLockdownControls's own doc comment; also fires automatically on window close / renderer crash / app quit regardless. */
 ipcMain.on("lockdown:restore-lockdown-controls", (_event, trigger: unknown) => {

@@ -26,16 +26,36 @@
  *    a short timeout.
  *
  *  - INSIDE Tether Secure Browser (isRunningInLockdownBrowser() ===
- *    true): runs the same access-check -> policy-acknowledgement ->
- *    start sequence as the join-by-link page
- *    (src/app/student/exams/join/[examId]/page.tsx), then — because the
- *    exam requires a verified secure-client session — additionally
- *    issues and consumes a signed launch manifest
- *    (POST .../secure-client/launch -> POST
- *    /api/secure-client/launch/[manifestId]/consume, reusing the exact
- *    sequence already proven by src/app/dev/mock-secure-client/[id]/page.tsx)
- *    before redirecting straight into the exam — the student never
- *    returns to the dashboard to find it themselves.
+ *    true): v1.7.4 pre-exam readiness two-phase lifecycle (see
+ *    docs/tether-preflight-lifecycle-v1.7.4.md):
+ *
+ *      PHASE 1 — PRE-EXAM READINESS: runs the access-check -> policy-
+ *      acknowledgement screen, then (on Start exam / auto-resume) a
+ *      calm, in-page PRECHECK of every mandatory native condition
+ *      (prohibited applications, remote session, display topology) with
+ *      NO strict overlay and NO submission/timer created yet. A failed
+ *      check shows a factual remediation screen (Task Manager, Alt+Tab,
+ *      Windows display settings all remain fully usable) with a
+ *      Recheck button. Only once every mandatory check passes does an
+ *      explicit "Ready to begin — Begin examination" screen appear
+ *      (never an auto-start).
+ *
+ *      PHASE 2 — SECURE ACTIVATION: only after Begin examination is
+ *      selected — POST /start (creates/resumes the submission, but for
+ *      a gated exam its activatedAt stays null: no timer, no question
+ *      content yet — see src/lib/secureClientActivation.ts) -> issue/
+ *      consume the signed launch manifest -> submit genuine client
+ *      attestation -> require server verificationStatus VERIFIED -> a
+ *      FRESH native pre-activation check (closes the race where
+ *      TeamViewer/a second display appears between PRECHECK and Begin
+ *      examination) -> window.sesLockdown.activateSecureExamLockdown()
+ *      (the real native lockdown ACTIVATE+ACKNOWLEDGE handshake — never
+ *      a client-trusted boolean) -> only once that succeeds, POST
+ *      /api/submissions/[id]/activate (the authoritative SERVER
+ *      activation — this is what actually starts the timer and unlocks
+ *      question content server-side) -> only then does this page
+ *      navigate into the exam. The student never returns to the
+ *      dashboard to find it themselves.
  */
 
 import { useEffect, useRef, useState, use as usePromise } from "react";
@@ -48,12 +68,22 @@ import {
   isSecureClientSessionVerified,
   classifyDisplayBridgeAvailability,
   buildDisplayInvokeFailedDiagnostic,
+  resolveDisplayPreflightIssue,
+  resolveActivationFailureIssue,
+  classifyActivatePostOutcome,
+  classifyReconciliationCheck,
+  resolveServerActivationNotConfirmedIssue,
+  resolveActivationConfirmationPendingCopy,
+  parseSecureClientStatusForActivation,
+  resolveSecureClientStatusUnavailableIssue,
   type DisplayDiagnostic,
+  type PreflightIssue,
 } from "@/lib/tetherLaunch";
 import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 import { ensureRegisteredInstallation } from "@/lib/secureClient/installationClient";
 import { ManualReviewNotice } from "@/components/ManualReviewNotice";
 import { LockdownApplicationCheck } from "@/components/LockdownApplicationCheck";
+import { ActivationConfirmationPending } from "@/components/ActivationConfirmationPending";
 import { ensureLockdownBridgeInitialized, type LockdownCapabilityInfo } from "@/lib/lockdownClient";
 import { isValidReportedDisplayCount } from "@/lib/secureClient/attestation";
 
@@ -66,6 +96,18 @@ type ExamPolicySummary = {
   allowed: string[];
   notAllowed: string[];
   secureControlStatements: string[];
+};
+
+// v1.7.4 pre-exam readiness — computed from the exam's CURRENT settings
+// (no per-attempt frozen snapshot exists before /start — see
+// GET /api/exams/[id]/access-check's own doc comment), used only to
+// decide which mandatory native PRECHECK conditions apply before Begin
+// examination is ever shown.
+type SecurePreflightSummary = {
+  requiresSecureClient: boolean;
+  requireDisplayCheck: boolean;
+  displayPolicy: string;
+  requireRemoteSessionCheck: boolean;
 };
 
 type AccessCheckResult =
@@ -84,6 +126,7 @@ type AccessCheckResult =
       };
       existingSubmission: { id: string; status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" } | null;
       examPolicySummary: ExamPolicySummary;
+      securePreflight: SecurePreflightSummary;
     }
   | { ok: false; reason: "no_access" }
   | { ok: false; reason: "not_open"; opensAt: string }
@@ -236,9 +279,8 @@ function OutsideTetherPrompt({ examId }: { examId: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Inside Tether — automatic access-check -> acknowledgement -> start ->
-// launch -> consume -> redirect. The student never returns to the
-// dashboard to find the exam themselves.
+// Inside Tether — v1.7.4 two-phase lifecycle: PRECHECK -> Ready to begin
+// -> Begin examination -> secure activation -> exam content.
 // ---------------------------------------------------------------------------
 
 function InsideTetherLaunchFlow({ examId }: { examId: string }) {
@@ -260,20 +302,36 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   // starts.
   const [manualReview, setManualReview] = useState(false);
 
-  // Tether Windows Lockdown Hardening v1, Part 3 — see
-  // docs/tether-windows-lockdown-hardening-v1.md. `lockdownBlocked` and
-  // `lockdownUnavailable` are mutually exclusive with `manualReview`
-  // above and with each other; `pendingLaunchCodeRef` remembers which
-  // launch attempt (auto-resume vs a manual Start click, and if manual,
-  // with which access code) was interrupted by the preflight check, so
-  // "Check again" can resume the EXACT same attempt rather than
-  // re-deriving it.
-  const [lockdownBlocked, setLockdownBlocked] = useState<string[] | null>(null);
-  const [lockdownUnavailable, setLockdownUnavailable] = useState(false);
-  const [lockdownChecking, setLockdownChecking] = useState(false);
+  // v1.7.4 pre-exam readiness — PHASE 1 PRECHECK state. `precheckIssue`
+  // unifies every possible mandatory-condition failure (prohibited
+  // application, remote session, display topology) into one calm,
+  // factual remediation screen — see LockdownApplicationCheck.tsx and
+  // resolveActivationFailureIssue/resolveDisplayPreflightIssue in
+  // tetherLaunch.ts. `precheckPassed` gates the explicit "Ready to
+  // begin — Begin examination" screen: precheck becoming clean NEVER
+  // auto-starts the exam on its own.
+  const [precheckIssue, setPrecheckIssue] = useState<PreflightIssue | null>(null);
+  const [precheckPassed, setPrecheckPassed] = useState(false);
+  const [precheckChecking, setPrecheckChecking] = useState(false);
   const pendingLaunchCodeRef = useRef<string | null>(null);
   const pendingIsFinalExamRef = useRef(false);
+  const pendingSecurePreflightRef = useRef<SecurePreflightSummary | null>(null);
   const lockdownCapabilityInfoRef = useRef<Map<string, LockdownCapabilityInfo> | null>(null);
+
+  // PR #22 follow-up review — ACTIVATION_CONFIRMATION_PENDING. Distinct
+  // from precheckIssue on purpose: every precheckIssue means native
+  // lockdown is in a KNOWN, SAFE, pre-exam state (either never activated,
+  // or already restored) — Recheck and Return to dashboard are both
+  // always genuinely safe there. This state means the opposite: native
+  // lockdown activated, POST /activate's outcome could not be confirmed
+  // even after reconciliation retries, and the exam MAY already be
+  // genuinely ACTIVE server-side. See ensureSecureActivation's own doc
+  // comment and ActivationConfirmationPending.tsx for the full reasoning
+  // on why this must never be treated as an ordinary retryable issue —
+  // in particular, why there is deliberately NO unmount-triggered
+  // restoration and NO Return-to-dashboard link while this is true.
+  const [activationConfirmationPending, setActivationConfirmationPending] = useState<{ submissionId: string } | null>(null);
+  const [activationConfirmationChecking, setActivationConfirmationChecking] = useState(false);
 
   // P0 secure-launch redirect loop hotfix — see
   // docs/tether-secure-launch-loop-hotfix.md. Two independent guards:
@@ -303,68 +361,137 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
     };
   }, []);
 
+  // PR #22 follow-up review — REMOVED, deliberately: an earlier version
+  // of this fix restored native lockdown unconditionally on unmount
+  // whenever a "pending" ref was true. That is unsafe: POST /activate may
+  // have already reached the server and committed (activatedAt set,
+  // timer started) before its response was lost — if the student then
+  // navigates away (e.g. via the ordinary "Return to dashboard" link an
+  // earlier version of the UNDETERMINED screen offered) and this
+  // component unmounts, blindly restoring here could turn native
+  // lockdown OFF while the server-side timed attempt is genuinely
+  // ACTIVE. There is no way to safely resolve that ambiguity locally on
+  // unmount — see ensureSecureActivation's own doc comment for the
+  // actual design: every genuinely SAFE restoration happens
+  // synchronously, inside ensureSecureActivation itself, only once the
+  // outcome is definitively known (a DEFINITIVE_REJECTION, or
+  // reconciliation resolving to NOT_ACTIVATED) — never speculatively on
+  // unmount. When the true state cannot be determined
+  // (activationConfirmationPending), this component intentionally
+  // offers no ordinary navigation away at all (see
+  // ActivationConfirmationPending.tsx) — the only ways to leave this
+  // screen are Retry (a read-only reconciliation check, safe to repeat)
+  // or closing Tether entirely via the OS, which is a fundamentally
+  // different, unavoidable risk category handled by main.ts's own
+  // unconditional before-quit/window-closed/render-process-gone
+  // restoration (see that file's own doc comments) — once the whole
+  // Electron process is gone, there is nothing left running to be
+  // "left active" in the first place, and the server-side authoritative
+  // gate (isSubmissionContentAccessible), not this native overlay, is
+  // what actually protects exam integrity from that point on.
+
   /**
-   * Part 3/5 — returns true when it is safe to proceed into
-   * runLaunchSequence. Fails OPEN when this packaged build predates the
-   * lockdown bridge (older installs simply don't expose
-   * runLockdownPreflightScan — feature-detected like every other
-   * optional bridge method) so existing installations are never broken
-   * by this addition. `isFinalExamination` is passed explicitly (never
-   * read from the `result` component-state closure) because this
-   * function is also called from inside the mount effect's async
-   * callback, before `result` state has been set for the first time —
-   * reading the stale closure there would silently apply the WRONG
-   * exam-type gate.
+   * v1.7.4 pre-exam readiness — PHASE 1 PRECHECK. Runs EVERY mandatory
+   * native condition this exam's policy requires (Part 1): prohibited
+   * applications/processes (incl. TeamViewer), remote session, and now
+   * display topology (Part 8) — extended from the pre-v1.7.4
+   * checkLockdownPreflight, which covered only the first two. No
+   * submission is created and no timer starts here — this may run any
+   * number of times (Recheck) with zero side effects beyond the reads
+   * themselves. Fails OPEN only when the installed build predates the
+   * relevant bridge method entirely (feature-detected, exactly like
+   * every other optional bridge method) — existing installations are
+   * never broken by this addition; the REAL, non-bypassable enforcement
+   * remains Phase 2's fresh native check + server-side activation gate.
    */
-  async function checkLockdownPreflight(code: string | null, isFinalExamination: boolean): Promise<boolean> {
+  async function runPrecheck(code: string | null, isFinalExamination: boolean, securePreflight: SecurePreflightSummary): Promise<boolean> {
     pendingLaunchCodeRef.current = code;
     pendingIsFinalExamRef.current = isFinalExamination;
-    if (typeof window.sesLockdown?.runLockdownPreflightScan !== "function") return true;
-    lockdownCapabilityInfoRef.current = await ensureLockdownBridgeInitialized();
-    setLockdownChecking(true);
+    pendingSecurePreflightRef.current = securePreflight;
+    setPrecheckChecking(true);
     try {
+      if (typeof window.sesLockdown?.runLockdownPreflightScan !== "function") {
+        setPrecheckIssue(null);
+        return true;
+      }
+      lockdownCapabilityInfoRef.current = await ensureLockdownBridgeInitialized();
       const scan = await window.sesLockdown.runLockdownPreflightScan();
       if (scan.state === "BLOCKED") {
-        const names = scan.matchedCapabilityIds.map((id) => lockdownCapabilityInfoRef.current?.get(id)?.displayName ?? "an application");
-        setLockdownBlocked([...new Set(names)]);
+        const names = scan.matchedCapabilityIds.map((capId) => lockdownCapabilityInfoRef.current?.get(capId)?.displayName ?? "an application");
+        setPrecheckIssue({
+          title: "Close applications before continuing",
+          message:
+            "Tether found applications that may allow screen sharing, remote access, recording or debugging. Close the listed applications, then select Recheck.",
+          applicationNames: [...new Set(names)],
+        });
         window.sesLockdown?.reportLockdownAuditFact?.("TETHER_LOCKDOWN_PREFLIGHT_BLOCKED", { examId, capabilityCount: scan.matchedCapabilityIds.length });
         return false;
       }
       if (scan.state === "UNAVAILABLE") {
-        setLockdownUnavailable(true);
+        setPrecheckIssue({
+          title: "Application check could not be completed",
+          message: "Tether could not verify that prohibited applications are closed. Restart Tether or contact exam support.",
+        });
         window.sesLockdown?.reportLockdownAuditFact?.("TETHER_LOCKDOWN_PROCESS_INSPECTION_UNAVAILABLE", { examId, reason: scan.reason });
         return false;
       }
+
       // Part 5 — "fail closed for final examinations when remote-session
       // state cannot be safely resolved and policy requires it; ordinary
       // non-final assessments must remain unchanged unless configured."
-      // Checked only after the process scan itself is clean, and only
-      // for final examinations — a non-final Tether exam never runs this
-      // check at all (Part 16 item 32).
-      if (isFinalExamination) {
+      // Extended (unchanged reasoning) to also cover an exam whose
+      // frozen-equivalent policy explicitly requires it regardless of
+      // assessment type.
+      if (isFinalExamination || securePreflight.requireRemoteSessionCheck) {
         const session = await window.sesLockdown?.getRemoteSessionStatus?.();
         if (!session || session.remoteSessionSignalSource === "UNAVAILABLE") {
-          setLockdownUnavailable(true);
+          setPrecheckIssue({
+            title: "Remote session check could not be completed",
+            message: "Tether could not verify the remote-session status of this computer. Restart Tether or contact exam support.",
+          });
           window.sesLockdown?.reportLockdownAuditFact?.("TETHER_LOCKDOWN_REMOTE_SESSION_CHECK_FAILED_CLOSED", { examId });
           return false;
         }
         if (session.isRemoteSession) {
-          setLockdownBlocked(["Remote Desktop session"]);
+          setPrecheckIssue({
+            title: "Remote Desktop session detected",
+            message: "This computer is connected to over Remote Desktop. End the remote session, then select Recheck.",
+          });
           window.sesLockdown?.reportLockdownAuditFact?.("TETHER_LOCKDOWN_PREFLIGHT_BLOCKED", { examId, capabilityCount: 1, reason: "REMOTE_SESSION" });
           return false;
         }
       }
-      setLockdownBlocked(null);
-      setLockdownUnavailable(false);
+
+      // Part 8 — fresh native display-topology read, factual reporting
+      // only. Read-only (getDisplayTopology never toggles any
+      // enforcement/overlay state on its own — see
+      // apps/lockdown/src/displayEnforcement.ts's own doc comment).
+      if (securePreflight.requireDisplayCheck) {
+        if (typeof window.sesLockdown?.getDisplayTopology === "function") {
+          const topology = await window.sesLockdown.getDisplayTopology();
+          const issue = resolveDisplayPreflightIssue(topology.electronDisplayCount, topology.classification);
+          if (issue) {
+            setPrecheckIssue(issue);
+            return false;
+          }
+        }
+        // getDisplayTopology missing entirely (a build old enough to
+        // predate it) fails OPEN here, exactly like every other optional
+        // bridge method above — Phase 2's fresh native check and the
+        // server-side content gate remain the real, non-bypassable
+        // enforcement for the display requirement.
+      }
+
+      setPrecheckIssue(null);
       return true;
     } finally {
-      setLockdownChecking(false);
+      setPrecheckChecking(false);
     }
   }
 
-  function checkLockdownAgain() {
-    void checkLockdownPreflight(pendingLaunchCodeRef.current, pendingIsFinalExamRef.current).then((ok) => {
-      if (ok) void runLaunchSequence(pendingLaunchCodeRef.current);
+  function recheckPrecheck() {
+    void runPrecheck(pendingLaunchCodeRef.current, pendingIsFinalExamRef.current, pendingSecurePreflightRef.current!).then((ok) => {
+      if (ok) setPrecheckPassed(true);
     });
   }
 
@@ -374,7 +501,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       .then(async (data: AccessCheckResult) => {
         setResult(data);
         // Already has a submission — no need to show the acknowledgement
-        // screen again; go straight into the start/launch sequence,
+        // screen again; go straight into the precheck/relaunch sequence,
         // unless the authoritative recovery state says this attempt
         // requires manual review first.
         if (data.ok && data.existingSubmission?.status === "IN_PROGRESS" && !autoAttemptedRef.current) {
@@ -384,10 +511,16 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
             setManualReview(true);
             return;
           }
-          const preflightOk = await checkLockdownPreflight(null, data.exam.assessmentType === "FINAL_EXAMINATION");
-          if (!preflightOk) return;
+          const precheckOk = await runPrecheck(null, data.exam.assessmentType === "FINAL_EXAMINATION", data.securePreflight);
+          if (!precheckOk) return;
           if (unmountedRef.current) return;
           autoAttemptedRef.current = true;
+          // A RESUME never shows the explicit "Ready to begin" screen —
+          // it goes straight back into the (already-consented-to) attempt.
+          // Phase 2's fresh native check + activation handshake inside
+          // runLaunchSequence still runs unconditionally (Part 6: native
+          // lockdown must be restored/confirmed before content is
+          // exposed again after a reload/restart).
           void runLaunchSequence(null);
         }
       })
@@ -422,25 +555,27 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
    * submission or creates a fresh one), then, only if the exam actually
    * requires it, issues and consumes a signed launch manifest — reusing
    * the exact same endpoints and sequence as
-   * src/app/dev/mock-secure-client/[id]/page.tsx.
+   * src/app/dev/mock-secure-client/[id]/page.tsx — then (v1.7.4) runs
+   * the full Phase 2 secure-activation handshake before ever navigating
+   * into content.
+   *
+   * v1.7.4 pre-exam readiness — this function NO LONGER covers the exam
+   * window the instant it starts running (the pre-v1.7.4
+   * setSecureClientEnforcementState({active:true,ready:false}) call is
+   * gone). That old mechanism existed because content used to become
+   * reachable the moment this page navigated to it; now content is
+   * genuinely unreachable server-side (isSubmissionContentAccessible)
+   * until POST /activate succeeds, and native lockdown itself only ever
+   * activates atomically, inside ensureSecureActivation, once every
+   * fresh check has already passed — there is no longer a "loading"
+   * window that needs a temporary cover, and removing it also removes
+   * the confirmed BLOCKED==ADDITIONAL_DISPLAY_PRESENT false-positive
+   * this whole pass fixes (POLICY_NOT_READY can no longer appear on this
+   * page's own transition into the exam).
    */
   async function runLaunchSequence(code: string | null) {
     setBusy(true);
     setError(null);
-    // Corrective pass v1.2.2, Tasks 2/3 — activate the fail-closed
-    // enforcement gate the MOMENT the student enters a secured exam
-    // (clicking Start/Continue, or this page's own auto-resume of an
-    // existing IN_PROGRESS submission below), not merely once the exam
-    // CONTENT page later mounts. The acknowledgement screen itself is
-    // deliberately left uncovered (the student must be able to read it
-    // and type an access code) — this only covers the LOADING transition
-    // from here into verified exam content. Un-covered again below on
-    // any failure, so the error/retry UI stays visible and usable; a
-    // successful run leaves this active — the exam page's own mount
-    // effect then carries it through to ready:true once policy/session
-    // are confirmed, with no gap across the SPA navigation.
-    window.sesLockdown?.setSecureClientEnforcementState?.({ active: true, ready: false, requireSingleDisplay: false });
-    logClientTetherDiagnostic("exam_entry_cover_activated", { examId });
     try {
       const startRes = await fetch(`/api/exams/${examId}/start`, {
         method: "POST",
@@ -450,7 +585,6 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       if (!startRes.ok) {
         const body = await startRes.json().catch(() => null);
         setError(typeof body?.error === "string" ? body.error : "Failed to start exam.");
-        uncoverOnFailure();
         return;
       }
       const submission: StartResponse = await startRes.json();
@@ -464,127 +598,86 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         secureClientLaunchKind: submission.secureClientLaunch?.required ? submission.secureClientLaunch.kind : null,
       });
 
-      if (!submission.secureClientLaunch?.required || submission.secureClientLaunch.kind === "ALLOW") {
-        // Either this exam doesn't require Tether after all (shouldn't
-        // normally reach this page in that case, but harmless), or a
-        // verified session already exists (resuming after an earlier
-        // successful launch) — either way, POST /start has ALREADY made
-        // the authoritative eligibility decision here (kind: "ALLOW" is
-        // only ever returned once the server itself has confirmed a
-        // verified session exists) — proceed straight into the exam,
-        // exactly like the join page does.
+      if (!submission.secureClientLaunch?.required) {
+        // This exam doesn't require Tether after all (shouldn't normally
+        // reach this page in that case, but harmless) — nothing to
+        // activate; proceed straight into the exam exactly like the join
+        // page does.
         logClientTetherDiagnostic("NAVIGATION_ALLOWED", { examId, reason: "start_allow" });
         if (unmountedRef.current) return;
         router.replace(`/student/exams/${submission.id}`);
         return;
       }
 
-      const launchRes = await fetch(`/api/submissions/${submission.id}/secure-client/launch`, { method: "POST" });
-      if (!launchRes.ok) {
-        const body = await launchRes.json().catch(() => null);
-        setError(resolveTetherLaunchFailureMessage(typeof body?.code === "string" ? body.code : ""));
-        uncoverOnFailure();
-        return;
-      }
-      const { manifest, signature } = await launchRes.json();
-      // manifestId only — never the nonce, signature, or full manifest
-      // contents (the manifest is the launch token; see
-      // secureLaunchManifest.ts's own doc comment on why the raw nonce
-      // must never be persisted, let alone logged).
-      logClientTetherDiagnostic("MANIFEST_ISSUED", { manifestId: manifest.manifestId, clientType: manifest.clientType });
+      let verified = submission.secureClientLaunch.kind === "ALLOW";
+      if (!verified) {
+        const launchRes = await fetch(`/api/submissions/${submission.id}/secure-client/launch`, { method: "POST" });
+        if (!launchRes.ok) {
+          const body = await launchRes.json().catch(() => null);
+          setError(resolveTetherLaunchFailureMessage(typeof body?.code === "string" ? body.code : ""));
+          return;
+        }
+        const { manifest, signature } = await launchRes.json();
+        // manifestId only — never the nonce, signature, or full manifest
+        // contents (the manifest is the launch token; see
+        // secureLaunchManifest.ts's own doc comment on why the raw nonce
+        // must never be persisted, let alone logged).
+        logClientTetherDiagnostic("MANIFEST_ISSUED", { manifestId: manifest.manifestId, clientType: manifest.clientType });
 
-      const consumeRes = await fetch(`/api/secure-client/launch/${manifest.manifestId}/consume`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ manifest, signature }),
-      });
-      if (!consumeRes.ok) {
-        const body = await consumeRes.json().catch(() => null);
-        setError(resolveTetherLaunchFailureMessage(typeof body?.code === "string" ? body.code : ""));
-        uncoverOnFailure();
-        return;
-      }
-      const consumed: { ok: boolean; sessionId?: string } = await consumeRes.json();
-      logClientTetherDiagnostic("MANIFEST_CONSUMED", {
-        outcome: "CONSUMED",
-        hasSessionId: Boolean(consumed.sessionId),
-      });
-
-      // Corrective pass v1.2.2, Task 1/2 (real root cause) — consuming
-      // the manifest only CREATES a secure-client session with
-      // verificationStatus NOT_CHECKED; it does NOT verify it.
-      // Verification only ever transitions to VERIFIED via
-      // POST /api/secure-client/sessions/[sessionId]/attestation (see
-      // recordAttestation in secureClientRunner.ts) — and nothing in the
-      // real launch flow ever called it. Only the dev mock-client
-      // simulator (src/app/dev/mock-secure-client/[id]/page.tsx) did,
-      // which is why this defect was invisible in every prior automated
-      // test and every dev-simulator smoke check: GET
-      // /api/submissions/[id]'s TETHER_SESSION_REQUIRED gate (and the
-      // identical check in POST /api/exams/[id]/start) both require
-      // verificationStatus === "VERIFIED" — with no attestation ever
-      // submitted, a real physical Tether launch could consume a
-      // manifest successfully and still never pass that gate, bouncing
-      // back to this page indefinitely without ever reaching a state
-      // that reports a real deliveryMode/displayPolicy to the exam page.
-      // Submits the one check this exam type actually implements
-      // (displayCheck, via the already-exposed
-      // window.sesLockdown.getDisplayCount() bridge) so a real launch
-      // establishes verification the same way the mock simulator always
-      // has.
-      if (consumed.sessionId) {
-        const attestationOutcome = await submitInitialAttestation(consumed.sessionId, submission.id);
-        logClientTetherDiagnostic(attestationOutcome.submitted ? "launch_manifest_attestation_submitted" : "LEGACY_ATTESTATION_FAILED", {
-          sessionId: consumed.sessionId,
-          submitted: attestationOutcome.submitted,
+        const consumeRes = await fetch(`/api/secure-client/launch/${manifest.manifestId}/consume`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ manifest, signature }),
         });
-        // Secure Client Attestation v2 — see
-        // docs/tether-system-check-v1.md, "Wiring installation attestation
-        // into real exam sessions". Best-effort and additive: under the
-        // safe default TETHER_EXAM_ATTESTATION_MODE=LEGACY this has zero
-        // effect on whether the student can proceed (the legacy
-        // attestation above remains the sole real gate) — it only records
-        // genuine installation-bound evidence so DUAL/V2_REQUIRED can be
-        // enabled later without every existing session lacking it. Never
-        // blocks or delays entry into the exam on failure.
-        await submitExamSessionAttestationV2(consumed.sessionId, submission.id);
+        if (!consumeRes.ok) {
+          const body = await consumeRes.json().catch(() => null);
+          setError(resolveTetherLaunchFailureMessage(typeof body?.code === "string" ? body.code : ""));
+          return;
+        }
+        const consumed: { ok: boolean; sessionId?: string } = await consumeRes.json();
+        logClientTetherDiagnostic("MANIFEST_CONSUMED", {
+          outcome: "CONSUMED",
+          hasSessionId: Boolean(consumed.sessionId),
+        });
+
+        // Corrective pass v1.2.2, Task 1/2 (real root cause) — consuming
+        // the manifest only CREATES a secure-client session with
+        // verificationStatus NOT_CHECKED; it does NOT verify it.
+        // Verification only ever transitions to VERIFIED via
+        // POST /api/secure-client/sessions/[sessionId]/attestation (see
+        // recordAttestation in secureClientRunner.ts).
+        if (consumed.sessionId) {
+          const attestationOutcome = await submitInitialAttestation(consumed.sessionId, submission.id);
+          logClientTetherDiagnostic(attestationOutcome.submitted ? "launch_manifest_attestation_submitted" : "LEGACY_ATTESTATION_FAILED", {
+            sessionId: consumed.sessionId,
+            submitted: attestationOutcome.submitted,
+          });
+          // Secure Client Attestation v2 — see
+          // docs/tether-system-check-v1.md, "Wiring installation attestation
+          // into real exam sessions". Best-effort and additive.
+          await submitExamSessionAttestationV2(consumed.sessionId, submission.id);
+        }
+
+        verified = await checkAuthoritativeSessionVerified(submission.id);
       }
 
-      // P0 secure-launch redirect loop hotfix — see
-      // docs/tether-secure-launch-loop-hotfix.md. THE FIX: consuming a
-      // manifest and submitting attestation only ever CREATES/ATTEMPTS
-      // verification — it never guarantees the session actually reached
-      // verificationStatus VERIFIED (attestation can fail outright, or
-      // succeed but resolve to ACTION_REQUIRED/CANNOT_START, e.g. a
-      // display-policy violation). Previously this function navigated
-      // into the exam unconditionally at this point; GET
-      // /api/submissions/[id]'s own TETHER_SESSION_REQUIRED gate would
-      // then immediately bounce back here, and this page's mount effect
-      // would auto-retry the exact same broken sequence — an infinite
-      // Loading/Opening-your-exam cycle with no stable error state ever
-      // shown, and the student never reaching camera/screen-share checks
-      // (which only render once the exam page itself loads).
-      //
-      // The fix re-reads the SAME authoritative, already-computed
-      // session state the real gate uses (GET
-      // /api/submissions/[id]/secure-client/status's session.verificationStatus
-      // — server-computed, never re-derived here) and only navigates
-      // when it is exactly "VERIFIED". This never duplicates security
-      // policy client-side: it is a read of the server's own decision,
-      // not a new one.
-      const verified = await checkAuthoritativeSessionVerified(submission.id);
       if (!verified) {
         logClientTetherDiagnostic("AUTHORITATIVE_SESSION_NOT_VERIFIED", { examId, submissionId: submission.id });
         setError('Tether could not verify this secure exam session. Select "Try again" below, or contact support if this continues.');
-        uncoverOnFailure();
         return;
       }
 
-      // Land directly in the exam; the Electron app's own live
-      // display-enforcement (registered from app start, independent of
-      // this page) takes over from here regardless of the one-time
-      // attestation result above.
-      logClientTetherDiagnostic("NAVIGATION_ALLOWED", { examId, reason: "authoritative_session_verified" });
+      // v1.7.4 pre-exam readiness — PHASE 2, steps E-I. Runs
+      // unconditionally once verified, whether verification came from
+      // the fast ALLOW path (a resumed, already-verified session — Part
+      // 6) or the manifest/attestation sequence just above. This is the
+      // ONLY place native lockdown is ever activated, and the ONLY place
+      // the server's authoritative timer/content activation is ever
+      // requested.
+      const activated = await ensureSecureActivation(submission.id);
+      if (!activated) return;
+
+      logClientTetherDiagnostic("NAVIGATION_ALLOWED", { examId, reason: "authoritative_session_verified_and_activated" });
       if (unmountedRef.current) return;
       router.replace(`/student/exams/${submission.id}`);
     } catch {
@@ -593,35 +686,243 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       // student stuck behind a permanent cover with no visible error or
       // retry option.
       setError("Failed to start exam. Check your connection and try again.");
-      uncoverOnFailure();
     } finally {
       setBusy(false);
     }
   }
 
   /**
-   * Corrective pass v1.2.2, Task 1/2 — the missing verification step.
-   * Fetches the same /secure-client/status endpoint the exam page uses
-   * to learn whether this attempt's immutable policy actually requires
-   * a display check, reports the current Electron display count for
-   * that ONE check if so (feature-detected — never fails hard if an
-   * older packaged install doesn't expose getDisplayCount), and submits
-   * the attestation.
+   * PR #22 release-blocking review — the narrow, read-only reconciliation
+   * step for an AMBIGUOUS POST /activate outcome (see
+   * classifyActivatePostOutcome in tetherLaunch.ts): the request may have
+   * reached the server and committed before its response was lost, so
+   * this must never guess. Retries GET /secure-client/status's `activated`
+   * boolean a bounded number of times with backoff — every attempt is a
+   * plain, side-effect-free read, safe to repeat indefinitely, and never
+   * exposes question content. Returns "UNDETERMINED" only after every
+   * attempt itself failed to produce a definitive answer.
+   */
+  async function reconcileServerActivationState(submissionId: string): Promise<"ACTIVATED" | "NOT_ACTIVATED" | "UNDETERMINED"> {
+    const RECONCILIATION_ATTEMPTS = 3;
+    for (let attempt = 0; attempt < RECONCILIATION_ATTEMPTS; attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+      try {
+        const res = await fetch(`/api/submissions/${submissionId}/secure-client/status`);
+        const body = res.ok ? await res.json().catch(() => null) : null;
+        const outcome = classifyReconciliationCheck({ ok: res.ok, activated: body?.activated });
+        if (outcome !== "UNDETERMINED") return outcome;
+      } catch {
+        // Network exception on the read itself — fall through and retry;
+        // never treated as proof of either ACTIVATED or NOT_ACTIVATED.
+      }
+    }
+    return "UNDETERMINED";
+  }
+
+  /**
+   * v1.7.4 pre-exam readiness — PHASE 2, steps E-I (the required
+   * ordering: fresh native checks -> native lockdown ACTIVE confirmed ->
+   * server activates timed attempt). Returns true only once BOTH the
+   * native handshake and the server activation call have genuinely
+   * succeeded. Never trusts a client-side boolean on its own: the native
+   * result comes from window.sesLockdown.activateSecureExamLockdown()
+   * (which itself re-runs fresh checks natively — see
+   * apps/lockdown/src/main.ts), and the server call
+   * (POST /api/submissions/[id]/activate) independently re-derives its
+   * own eligibility from the authoritative VERIFIED secure-client
+   * session — this function's only job is sequencing, never trust.
    *
-   * P0 secure-launch redirect loop hotfix — this used to return
-   * Promise<void> and never told its caller whether the HTTP submission
-   * itself succeeded, let alone whether the resulting overallStatus was
-   * actually READY. `runLaunchSequence` no longer needs that distinction
-   * from THIS function directly (it now separately re-checks the
-   * authoritative session.verificationStatus via
-   * checkAuthoritativeSessionVerified below, which is the single source
-   * of truth the real content gate also uses) — but `submitted` is still
-   * returned so the caller can log a clear LEGACY_ATTESTATION_FAILED
-   * diagnostic specifically for "the request itself never went through"
-   * (network failure), distinct from "it went through but didn't verify"
-   * (which the authoritative check below distinguishes on its own).
-   * Never throws — a request failure here just means the session stays
-   * unverified, which the authoritative check correctly detects.
+   * PR #22 follow-up review — the moment activateSecureExamLockdown
+   * resolves ok:true, native lockdown is ALREADY active in the Electron
+   * main process, before the POST below has even been attempted. Every
+   * branch from here on either (a) confirms genuine success and leaves
+   * native lockdown active, (b) definitively confirms non-activation and
+   * restores native lockdown via the existing restoreLockdownControls
+   * bridge before returning, or (c) cannot be determined at all even
+   * after reconciliation retries — in which case native lockdown is left
+   * exactly as-is (restoring it could be wrong if the server genuinely
+   * did activate) and the student is moved to the dedicated
+   * ACTIVATION_CONFIRMATION_PENDING screen (activationConfirmationPending
+   * state, rendered via ActivationConfirmationPending — never an
+   * ordinary precheckIssue). There is deliberately NO unmount-triggered
+   * restoration anywhere in this component: restoring native lockdown is
+   * never safe based solely on "the renderer unmounted" — see the
+   * removed-effect doc comment near unmountedRef above for the full
+   * reasoning.
+   */
+  async function ensureSecureActivation(submissionId: string): Promise<boolean> {
+    // PR #22 follow-up review, Issue 2 — a missing/failed/malformed
+    // secure-client/status response must NEVER silently resolve to "no
+    // fresh check required". Strictly validated via
+    // parseSecureClientStatusForActivation; null means the frozen
+    // per-attempt policy could not be confirmed, so native activation is
+    // never attempted at all — fail closed, exactly like every other
+    // mandatory-check failure on this page.
+    let statusBody: unknown = null;
+    try {
+      const statusRes = await fetch(`/api/submissions/${submissionId}/secure-client/status`);
+      if (statusRes.ok) statusBody = await statusRes.json().catch(() => null);
+    } catch {
+      statusBody = null;
+    }
+    const validatedStatus = parseSecureClientStatusForActivation(statusBody);
+    if (!validatedStatus) {
+      logClientTetherDiagnostic("secure_client_status_invalid_before_activation", { submissionId });
+      setPrecheckIssue(resolveSecureClientStatusUnavailableIssue());
+      setPrecheckPassed(false);
+      return false;
+    }
+    const { requireSingleDisplay, requireRemoteSessionCheck } = validatedStatus;
+
+    if (typeof window.sesLockdown?.activateSecureExamLockdown !== "function") {
+      // A build old enough to predate the whole v1.7.4 activation
+      // handshake — fail closed. This is the crux of the security
+      // model, unlike the diagnostic/optional bridge methods elsewhere
+      // on this page, so there is no "fail open for an old build" path
+      // here.
+      setError("This version of Tether Secure Browser does not support the required secure activation step. Please update Tether Secure Browser.");
+      return false;
+    }
+
+    const activation = await window.sesLockdown.activateSecureExamLockdown({ requireSingleDisplay, requireRemoteSessionCheck });
+    logClientTetherDiagnostic("secure_activation_native_result", { submissionId, ok: activation.ok });
+    if (!activation.ok) {
+      // A fresh check caught something the earlier calm PRECHECK didn't
+      // (Part 6/E — TeamViewer or a second display appearing in the gap
+      // between PRECHECK and Begin examination). Never navigate; show
+      // the SAME calm remediation screen, and let the student return
+      // through Recheck -> Begin examination again from the top — no
+      // submission timer was ever started for a fresh attempt (an
+      // already-activated resume's timer was already running before
+      // this call, and stays exactly where it was — this failure only
+      // withholds content, it never rewinds or extends anything).
+      const capabilityDisplayNames = lockdownCapabilityInfoRef.current
+        ? new Map([...lockdownCapabilityInfoRef.current].map(([capId, info]) => [capId, info.displayName]))
+        : undefined;
+      const issue = resolveActivationFailureIssue(activation, capabilityDisplayNames);
+      setPrecheckIssue(issue);
+      setPrecheckPassed(false);
+      return false;
+    }
+
+    // Native lockdown is now genuinely ACTIVE.
+    let activateStatus: number | null = null;
+    let activateCode: string | null = null;
+    let activateThrew = false;
+    try {
+      const activateRes = await fetch(`/api/submissions/${submissionId}/activate`, { method: "POST" });
+      activateStatus = activateRes.status;
+      if (activateRes.ok) {
+        logClientTetherDiagnostic("secure_activation_server_result", { submissionId, outcome: "SUCCESS" });
+        return true;
+      }
+      const body = await activateRes.json().catch(() => null);
+      activateCode = typeof body?.code === "string" ? body.code : null;
+    } catch {
+      activateThrew = true;
+    }
+
+    const outcome = classifyActivatePostOutcome({ threw: activateThrew, status: activateStatus, code: activateCode });
+    logClientTetherDiagnostic("secure_activation_server_result", { submissionId, outcome: outcome.kind });
+
+    if (outcome.kind === "AMBIGUOUS") {
+      // Do NOT guess whether the POST committed — ask the server, via a
+      // narrow read that exposes no question content, before deciding
+      // anything about native lockdown.
+      const reconciliation = await reconcileServerActivationState(submissionId);
+      logClientTetherDiagnostic("secure_activation_reconciliation_result", { submissionId, reconciliation });
+
+      if (reconciliation === "ACTIVATED") {
+        // The server genuinely committed — only its response was lost.
+        // Native lockdown is already correctly active; proceed exactly
+        // like a definitive SUCCESS.
+        return true;
+      }
+      if (reconciliation === "UNDETERMINED") {
+        // PR #22 follow-up review, Issue 1 — cannot be determined either
+        // way, even after retrying. Content stays blocked either way
+        // (never navigate below), but this is NOT an ordinary,
+        // known-safe precheckIssue: the exam MAY already be genuinely
+        // ACTIVE server-side, so native lockdown is deliberately left
+        // exactly as-is (restoring could be wrong), and the student is
+        // moved to the dedicated ACTIVATION_CONFIRMATION_PENDING screen
+        // — no ordinary Return-to-dashboard navigation is offered while
+        // this is true (see ActivationConfirmationPending.tsx). The
+        // caller (runLaunchSequence) never navigates on a `false`
+        // return, so content stays withheld regardless.
+        if (!unmountedRef.current) setActivationConfirmationPending({ submissionId });
+        return false;
+      }
+      // reconciliation === "NOT_ACTIVATED" — now definitively known; falls
+      // through to the same restoration path as a DEFINITIVE_REJECTION.
+    }
+
+    // Definitively not activated (a DEFINITIVE_REJECTION, or
+    // reconciliation resolved an AMBIGUOUS outcome to NOT_ACTIVATED) —
+    // restore every native control back to the pre-exam state via the
+    // existing narrow bridge before returning the student to a retryable
+    // screen. The SAME still-unactivated submission is reused on retry
+    // (POST /api/exams/[id]/start's own idempotency, unchanged by this
+    // fix) — no attempt is consumed merely because server activation
+    // failed.
+    window.sesLockdown?.restoreLockdownControls?.("secure-activation-server-not-confirmed");
+    setActivationConfirmationPending(null);
+    setPrecheckIssue(resolveServerActivationNotConfirmedIssue());
+    setPrecheckPassed(false);
+    return false;
+  }
+
+  /**
+   * PR #22 follow-up review, Issue 1 — the ONLY action available on the
+   * ACTIVATION_CONFIRMATION_PENDING screen. Re-runs JUST the read-only
+   * reconciliation check (never re-attempts native activation or POST
+   * /activate — both already ran; this only asks the server, again,
+   * whether the earlier one committed). Safe to call any number of
+   * times. Resolves the same three ways ensureSecureActivation's own
+   * AMBIGUOUS branch does: ACTIVATED navigates into the exam,
+   * NOT_ACTIVATED restores native lockdown and returns to the ordinary
+   * retryable precheckIssue screen, UNDETERMINED stays on this same
+   * screen for another Retry.
+   */
+  async function retryActivationConfirmation() {
+    if (!activationConfirmationPending) return;
+    const { submissionId } = activationConfirmationPending;
+    setActivationConfirmationChecking(true);
+    try {
+      const reconciliation = await reconcileServerActivationState(submissionId);
+      logClientTetherDiagnostic("secure_activation_reconciliation_retry_result", { submissionId, reconciliation });
+      if (unmountedRef.current) return;
+
+      if (reconciliation === "ACTIVATED") {
+        setActivationConfirmationPending(null);
+        logClientTetherDiagnostic("NAVIGATION_ALLOWED", { examId, reason: "activation_confirmation_retry_activated" });
+        router.replace(`/student/exams/${submissionId}`);
+        return;
+      }
+      if (reconciliation === "NOT_ACTIVATED") {
+        window.sesLockdown?.restoreLockdownControls?.("secure-activation-server-not-confirmed");
+        setActivationConfirmationPending(null);
+        setPrecheckIssue(resolveServerActivationNotConfirmedIssue());
+        setPrecheckPassed(false);
+        return;
+      }
+      // Still UNDETERMINED — remain on this same screen; the student can
+      // Retry again for as long as needed.
+    } finally {
+      if (!unmountedRef.current) setActivationConfirmationChecking(false);
+    }
+  }
+
+  /**
+   * P0 secure-launch redirect loop hotfix — the missing verification
+   * step. Fetches the same /secure-client/status endpoint the exam page
+   * uses to learn whether this attempt's immutable policy actually
+   * requires a display check, reports the current Electron display count
+   * for that ONE check if so (feature-detected — never fails hard if an
+   * older packaged install doesn't expose getDisplayCount), and submits
+   * the attestation. Never throws — a request failure here just means
+   * the session stays unverified, which the authoritative check below
+   * detects.
    */
   async function submitInitialAttestation(sessionId: string, submissionId: string): Promise<{ submitted: boolean }> {
     try {
@@ -631,18 +932,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
 
       // P0 runtime display-bridge failure capture — see
       // docs/tether-secure-launch-verification-investigation.md. Five
-      // mutually-exclusive, conclusive outcomes (never merely "bridge
-      // unavailable or threw" lumped together, as before): the bridge
-      // object itself missing, the specific method missing, the call
-      // throwing/rejecting (with a bounded, stack-free error name/message
-      // — see buildDisplayInvokeFailedDiagnostic), an invalid resolved
-      // value (validated with the SAME isValidReportedDisplayCount the
-      // server itself uses — never a second, drifting validator), or a
-      // genuinely valid result. `displayDiagnostic` is submitted
-      // alongside the existing attestation request (never a new/separate
-      // security event) — this is evidence only; it never influences
-      // `checks`/`required`, which remain the sole inputs to the real
-      // verification decision.
+      // mutually-exclusive, conclusive outcomes.
       const checks: Record<string, string> = {};
       let resolvedDisplayCount: number | null = null;
       let displayDiagnostic: DisplayDiagnostic | null = null;
@@ -660,9 +950,6 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
               resolvedDisplayCount = rawDisplayCount;
               displayDiagnostic = { outcome: "DISPLAY_COUNT_OK" };
             } else {
-              // Never let an invalid value become PASS — checks.displayCheck
-              // stays unset (NOT_CHECKED server-side), exactly like the
-              // bridge-unavailable paths.
               displayDiagnostic = { outcome: "DISPLAY_COUNT_INVALID_RESULT" };
             }
           } catch (err) {
@@ -705,9 +992,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
    * /api/submissions/[id]'s own TETHER_SESSION_REQUIRED check is based
    * on — never a second, client-derived approximation of that decision.
    * Fails CLOSED (returns false) on any network/parse error or missing
-   * session, matching "NEVER navigate to exam content unless the server
-   * confirms the secure client session satisfies the authoritative entry
-   * gate."
+   * session.
    */
   async function checkAuthoritativeSessionVerified(submissionId: string): Promise<boolean> {
     try {
@@ -789,17 +1074,6 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
     }
   }
 
-  /** Task 3 — un-cover only on a definitive launch failure, so the error/retry UI on this page is visible and usable. There is no exam content to protect yet at this point; re-clicking Start/Continue re-arms the cover from the top of runLaunchSequence. */
-  function uncoverOnFailure() {
-    window.sesLockdown?.setSecureClientEnforcementState?.({ active: false, ready: false, requireSingleDisplay: false });
-    // Part 10 — "failed exam launch" / "failed attestation" is one of
-    // the explicit restoration triggers; safe to call even though
-    // nothing lockdown-specific may have activated yet this attempt (see
-    // lockdownLifecycle.ts's own idempotency doc comment).
-    window.sesLockdown?.restoreLockdownControls?.("launch-failure");
-    logClientTetherDiagnostic("exam_entry_cover_released_on_failure", { examId });
-  }
-
   if (loading || !result) {
     return <p className="mx-auto mt-16 max-w-md text-center text-gray-500">Loading...</p>;
   }
@@ -819,23 +1093,46 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
     );
   }
 
-  // Secure-recovery hardening v1, Part B — takes priority over the
-  // busy/auto-relaunch view below: no relaunch was ever attempted from
-  // this page for this submission (checkManualReviewRequired ran before
-  // runLaunchSequence could be called), so exam content stays blocked
-  // and no further automatic action happens here.
+  // Secure-recovery hardening v1, Part B — takes priority over every
+  // other view below: no relaunch/precheck was ever attempted for this
+  // submission.
   if (manualReview) {
     return <ManualReviewNotice />;
   }
 
-  // Part 3 — takes priority for the same reason as manualReview above:
-  // no launch/relaunch was attempted while a blocking capability was
-  // detected or process inspection could not be verified.
-  if (lockdownBlocked) {
-    return <LockdownApplicationCheck state="BLOCKED" applicationNames={lockdownBlocked} onCheckAgain={checkLockdownAgain} checking={lockdownChecking} />;
+  // PR #22 follow-up review, Issue 1 — takes priority over precheckIssue
+  // below: native lockdown activated and the server's own activation
+  // outcome could not be confirmed, even after retrying. Deliberately a
+  // DIFFERENT component from LockdownApplicationCheck (no Return to
+  // dashboard) — see ActivationConfirmationPending.tsx's own doc comment
+  // for why offering that navigation here would be unsafe.
+  if (activationConfirmationPending) {
+    const copy = resolveActivationConfirmationPendingCopy();
+    return (
+      <ActivationConfirmationPending
+        title={copy.title}
+        message={copy.message}
+        retryLabel={copy.retryLabel}
+        onRetry={() => void retryActivationConfirmation()}
+        checking={activationConfirmationChecking}
+      />
+    );
   }
-  if (lockdownUnavailable) {
-    return <LockdownApplicationCheck state="UNAVAILABLE" onCheckAgain={checkLockdownAgain} checking={lockdownChecking} />;
+
+  // v1.7.4 pre-exam readiness — PHASE 1 remediation screen. Plain page
+  // content: no screen-saver-level overlay, Task Manager/Alt+Tab/Windows
+  // display settings all remain fully usable, no submission/timer exists
+  // yet for a fresh attempt.
+  if (precheckIssue) {
+    return (
+      <LockdownApplicationCheck
+        title={precheckIssue.title}
+        message={precheckIssue.message}
+        applicationNames={precheckIssue.applicationNames}
+        onCheckAgain={recheckPrecheck}
+        checking={precheckChecking}
+      />
+    );
   }
 
   if (result.existingSubmission?.status === "IN_PROGRESS" || busy) {
@@ -860,6 +1157,30 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
             </button>
           </div>
         )}
+      </div>
+    );
+  }
+
+  // v1.7.4 pre-exam readiness — the explicit "Ready to begin" screen.
+  // Precheck becoming clean NEVER auto-starts the exam — the student
+  // must take this one deliberate action, which is what actually kicks
+  // off Phase 2 (secure activation, native lockdown, then content).
+  if (precheckPassed) {
+    return (
+      <div className="mx-auto mt-16 max-w-md rounded border border-gray-200 p-6 text-center">
+        <h1 className="text-lg font-medium">Ready to begin</h1>
+        <p className="mt-3 text-sm text-gray-700">
+          {result.exam.title} — every required check has passed. Selecting Begin examination will activate secure
+          lockdown and start your exam timer.
+        </p>
+        <button
+          onClick={() => void runLaunchSequence(accessCode || null)}
+          disabled={busy}
+          className="mt-5 w-full rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+        >
+          Begin examination
+        </button>
+        {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
       </div>
     );
   }
@@ -929,14 +1250,14 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
 
       <button
         onClick={() =>
-          void checkLockdownPreflight(accessCode || null, result.exam.assessmentType === "FINAL_EXAMINATION").then((ok) => {
-            if (ok) void runLaunchSequence(accessCode || null);
+          void runPrecheck(accessCode || null, result.exam.assessmentType === "FINAL_EXAMINATION", result.securePreflight).then((ok) => {
+            if (ok) setPrecheckPassed(true);
           })
         }
-        disabled={busy || lockdownChecking || !policyAcknowledged || (result.exam.accessCodeRequired && !accessCode.trim())}
+        disabled={busy || precheckChecking || !policyAcknowledged || (result.exam.accessCodeRequired && !accessCode.trim())}
         className="mt-4 w-full rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
       >
-        {busy ? "Starting..." : lockdownChecking ? "Checking…" : "Start exam"}
+        {precheckChecking ? "Checking…" : "Start exam"}
       </button>
       {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
     </div>

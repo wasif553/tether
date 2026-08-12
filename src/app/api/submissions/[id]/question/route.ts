@@ -40,7 +40,7 @@ export async function GET(
     return NextResponse.json(payload);
   } catch (err) {
     if (err instanceof OneQuestionModeError) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
+      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
     }
     throw err;
   }

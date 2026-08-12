@@ -4,6 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 import { parseSecureSettings } from "@/lib/secureExam";
 import { buildStudentExamPolicySummary } from "@/lib/examPolicy";
+import { buildSecureClientPolicySnapshot, deliveryModeRequiresSecureClient } from "@/lib/secureClientPolicy";
+import { secureClientAvailabilityForInstitution } from "@/lib/secureClientAvailability";
 
 /**
  * Safe Exam Deep Link v1 — see docs/course-enrolment-and-exam-assignment.md
@@ -33,7 +35,7 @@ export async function GET(
   const { id } = await params;
   const exam = await prisma.exam.findUnique({
     where: { id },
-    include: { course: { select: { id: true, name: true, code: true } } },
+    include: { course: { select: { id: true, name: true, code: true } }, institution: { select: { slug: true } } },
   });
 
   if (!exam || !exam.published) {
@@ -116,6 +118,46 @@ export async function GET(
     },
   });
 
+  // v1.7.4 pre-exam readiness — Phase 1 PRECHECK (see
+  // src/app/student/exams/[id]/tether-launch/page.tsx) runs entirely
+  // BEFORE POST /api/exams/[id]/start, so no per-attempt frozen policy
+  // snapshot exists yet to read. Built from CURRENT exam settings —
+  // exactly the same "no submission/attempt yet to snapshot" reasoning
+  // examPolicySummary above already documents — never persisted, never
+  // treated as the authoritative per-attempt policy (that remains
+  // secureClientPolicySnapshotJson, frozen at /start). Only used to
+  // decide which native preflight checks the calm readiness screen
+  // should run before Begin examination is even shown.
+  const securePreflightPolicy = buildSecureClientPolicySnapshot(
+    {
+      deliveryMode: settings.deliveryMode,
+      allowedSebPlatforms: settings.allowedSebPlatforms,
+      allowedSebVersions: settings.allowedSebVersions,
+      requireSebBrowserExamKey: settings.requireSebBrowserExamKey,
+      requireSebConfigKey: settings.requireSebConfigKey,
+      allowSebHeaderValidation: settings.allowSebHeaderValidation,
+      allowSebJavascriptApiValidation: settings.allowSebJavascriptApiValidation,
+      secureLaunchTokenTtlSeconds: settings.secureLaunchTokenTtlSeconds,
+      secureClientHeartbeatIntervalSeconds: settings.secureClientHeartbeatIntervalSeconds,
+      secureClientHeartbeatGraceSeconds: settings.secureClientHeartbeatGraceSeconds,
+      requireDisplayCheck: settings.requireDisplayCheck,
+      secureClientMaximumDisplays: settings.secureClientMaximumDisplays,
+      displayPolicy: settings.displayPolicy,
+      requireRemoteSessionCheck: settings.requireRemoteSessionCheck,
+      requireVirtualMachineCheck: settings.requireVirtualMachineCheck,
+      requireProcessCheck: settings.requireProcessCheck,
+      requireCaptureProtectionCheck: settings.requireCaptureProtectionCheck,
+      blockCopyPaste: settings.blockCopyPaste,
+      secureClientAllowPrinting: settings.secureClientAllowPrinting,
+      secureClientAllowExternalNavigation: settings.secureClientAllowExternalNavigation,
+      secureClientAllowApplicationSwitching: settings.secureClientAllowApplicationSwitching,
+      secureClientAllowRecovery: settings.secureClientAllowRecovery,
+      secureClientEventRetentionDays: settings.secureClientEventRetentionDays,
+      secureClientLecturerOverrideAllowed: settings.secureClientLecturerOverrideAllowed,
+    },
+    secureClientAvailabilityForInstitution(exam.institution?.slug ?? null),
+  );
+
   return NextResponse.json({
     ok: true,
     exam: {
@@ -133,6 +175,12 @@ export async function GET(
     },
     existingSubmission,
     examPolicySummary,
+    securePreflight: {
+      requiresSecureClient: deliveryModeRequiresSecureClient(securePreflightPolicy.deliveryMode),
+      requireDisplayCheck: securePreflightPolicy.requireDisplayCheck,
+      displayPolicy: securePreflightPolicy.displayPolicy,
+      requireRemoteSessionCheck: securePreflightPolicy.requireRemoteSessionCheck,
+    },
   });
 }
 

@@ -9,6 +9,14 @@ import {
   classifyDisplayBridgeAvailability,
   buildDisplayInvokeFailedDiagnostic,
   boundedDiagnosticString,
+  resolveDisplayPreflightIssue,
+  resolveActivationFailureIssue,
+  classifyActivatePostOutcome,
+  classifyReconciliationCheck,
+  resolveServerActivationNotConfirmedIssue,
+  resolveActivationConfirmationPendingCopy,
+  parseSecureClientStatusForActivation,
+  resolveSecureClientStatusUnavailableIssue,
 } from "./tetherLaunch";
 import { isValidReportedDisplayCount } from "./secureClient/attestation";
 
@@ -199,5 +207,203 @@ describe("isValidReportedDisplayCount — [4, 5, 6] reused directly by the clien
   it("[5, 6] accepts 1 and 2 — the exact values distinguishing PASS from FAIL", () => {
     expect(isValidReportedDisplayCount(1)).toBe(true);
     expect(isValidReportedDisplayCount(2)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.7.4 pre-exam readiness — Part 13A/B: calm PRECHECK/remediation copy.
+// Mirrors apps/lockdown/src/displayEnforcementLogic.ts's taxonomy on the
+// web side (separate compiled packages, so never literally shared code —
+// see resolveDisplayPreflightIssue's own doc comment).
+// ---------------------------------------------------------------------------
+
+describe("resolveDisplayPreflightIssue — Part 8 factual display PRECHECK reporting", () => {
+  it("[Part 8] reports exactly what Windows observed — genuine multi-display evidence", () => {
+    expect(resolveDisplayPreflightIssue(2, "INTERNAL_ONLY")?.title).toBe("Additional display connected");
+    expect(resolveDisplayPreflightIssue(1, "EXTEND")?.title).toBe("Extended display detected");
+    expect(resolveDisplayPreflightIssue(1, "CLONE_OR_DUPLICATE")?.title).toBe("Mirrored display detected");
+    expect(resolveDisplayPreflightIssue(1, "MULTIPLE_ACTIVE_TARGETS")?.title).toBe("Additional display connected");
+  });
+
+  it("[Part 8] a single physical display with no TeamViewer/virtual-target evidence never shows an issue — the confirmed TEST 2 false positive this fixes", () => {
+    expect(resolveDisplayPreflightIssue(1, "INTERNAL_ONLY")).toBeNull();
+    expect(resolveDisplayPreflightIssue(1, "EXTERNAL_ONLY")).toBeNull();
+  });
+
+  it("[Part 8] ERROR/UNKNOWN uses neutral wording, never claims a display was found", () => {
+    const issue = resolveDisplayPreflightIssue(1, "ERROR");
+    expect(issue?.message).toBe("Tether could not verify the display configuration. Resolve the display check and select Recheck before beginning the examination.");
+    expect(issue?.message.toLowerCase()).not.toContain("additional display connected");
+    expect(resolveDisplayPreflightIssue(1, "UNKNOWN")?.title).toBe("Display configuration could not be verified");
+  });
+});
+
+describe("resolveActivationFailureIssue — Part 6/E: the fresh Phase 2 native check's failure copy matches the calm PRECHECK screen exactly", () => {
+  it("[Part 6 TeamViewer race] PROHIBITED_APPLICATION lists the matched application display names via the SAME capability-id lookup", () => {
+    const names = new Map([["TEAMVIEWER", "TeamViewer"]]);
+    const issue = resolveActivationFailureIssue({ reason: "PROHIBITED_APPLICATION", matchedCapabilityIds: ["TEAMVIEWER"] }, names);
+    expect(issue.title).toBe("Close applications before continuing");
+    expect(issue.applicationNames).toEqual(["TeamViewer"]);
+  });
+
+  it("PROHIBITED_APPLICATION falls back to 'an application' when no display-name map is supplied", () => {
+    const issue = resolveActivationFailureIssue({ reason: "PROHIBITED_APPLICATION", matchedCapabilityIds: ["UNKNOWN_ID"] });
+    expect(issue.applicationNames).toEqual(["an application"]);
+  });
+
+  it("[Part 6 display race] the four genuine display reasons produce the exact same copy as resolveDisplayPreflightIssue", () => {
+    expect(resolveActivationFailureIssue({ reason: "ADDITIONAL_ELECTRON_DISPLAY" })).toEqual(resolveDisplayPreflightIssue(2, "INTERNAL_ONLY"));
+    expect(resolveActivationFailureIssue({ reason: "WINDOWS_TOPOLOGY_EXTEND" })).toEqual(resolveDisplayPreflightIssue(1, "EXTEND"));
+    expect(resolveActivationFailureIssue({ reason: "TOPOLOGY_CHECK_UNAVAILABLE" })).toEqual(resolveDisplayPreflightIssue(1, "ERROR"));
+  });
+
+  it("REMOTE_SESSION_DETECTED and the two *_UNAVAILABLE reasons never claim a clean scan", () => {
+    expect(resolveActivationFailureIssue({ reason: "REMOTE_SESSION_DETECTED" }).title).toContain("Remote Desktop");
+    expect(resolveActivationFailureIssue({ reason: "PROCESS_CHECK_UNAVAILABLE" }).message.toLowerCase()).not.toContain("clean");
+    expect(resolveActivationFailureIssue({ reason: "REMOTE_SESSION_CHECK_UNAVAILABLE" }).message.toLowerCase()).not.toContain("clean");
+  });
+
+  it("an unrecognised reason falls back to a generic, factual, non-alarming message rather than throwing", () => {
+    const issue = resolveActivationFailureIssue({ reason: "SOMETHING_UNEXPECTED" });
+    expect(issue.title.length).toBeGreaterThan(0);
+    expect(issue.message.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #22 release-blocking review — secure-activation failure
+// reconciliation. See tether-launch/page.tsx's ensureSecureActivation.
+// ---------------------------------------------------------------------------
+
+describe("classifyActivatePostOutcome", () => {
+  it("REQUIRED TEST 2 groundwork: a 2xx status is always SUCCESS, regardless of code", () => {
+    expect(classifyActivatePostOutcome({ threw: false, status: 200, code: null })).toEqual({ kind: "SUCCESS" });
+    expect(classifyActivatePostOutcome({ threw: false, status: 201, code: "irrelevant" })).toEqual({ kind: "SUCCESS" });
+  });
+
+  it("REQUIRED TEST 1 groundwork: 401/403/404/409 are trusted as DEFINITIVE_REJECTION — POST /api/submissions/[id]/activate never writes activatedAt before any of these statuses", () => {
+    expect(classifyActivatePostOutcome({ threw: false, status: 401, code: null })).toEqual({ kind: "DEFINITIVE_REJECTION", code: null });
+    expect(classifyActivatePostOutcome({ threw: false, status: 403, code: "SECURE_SESSION_NOT_VERIFIED" })).toEqual({
+      kind: "DEFINITIVE_REJECTION",
+      code: "SECURE_SESSION_NOT_VERIFIED",
+    });
+    expect(classifyActivatePostOutcome({ threw: false, status: 404, code: null })).toEqual({ kind: "DEFINITIVE_REJECTION", code: null });
+    expect(classifyActivatePostOutcome({ threw: false, status: 409, code: "SUBMISSION_NOT_IN_PROGRESS" })).toEqual({
+      kind: "DEFINITIVE_REJECTION",
+      code: "SUBMISSION_NOT_IN_PROGRESS",
+    });
+  });
+
+  it("REQUIRED TEST 3 groundwork: a thrown network exception is AMBIGUOUS, never treated as a rejection", () => {
+    expect(classifyActivatePostOutcome({ threw: true, status: null, code: null })).toEqual({ kind: "AMBIGUOUS" });
+  });
+
+  it("a 500 (or any status this route cannot actually produce) is AMBIGUOUS, never guessed as a rejection — a 500 could occur AFTER the write already committed", () => {
+    expect(classifyActivatePostOutcome({ threw: false, status: 500, code: null })).toEqual({ kind: "AMBIGUOUS" });
+    expect(classifyActivatePostOutcome({ threw: false, status: 502, code: null })).toEqual({ kind: "AMBIGUOUS" });
+    expect(classifyActivatePostOutcome({ threw: false, status: 418, code: null })).toEqual({ kind: "AMBIGUOUS" });
+  });
+
+  it("a null status with no exception (should not normally happen, but defensively) is AMBIGUOUS", () => {
+    expect(classifyActivatePostOutcome({ threw: false, status: null, code: null })).toEqual({ kind: "AMBIGUOUS" });
+  });
+});
+
+describe("classifyReconciliationCheck", () => {
+  it("REQUIRED TEST 3: ok:true + activated:true -> ACTIVATED", () => {
+    expect(classifyReconciliationCheck({ ok: true, activated: true })).toBe("ACTIVATED");
+  });
+
+  it("REQUIRED TEST 4: ok:true + activated:false -> NOT_ACTIVATED", () => {
+    expect(classifyReconciliationCheck({ ok: true, activated: false })).toBe("NOT_ACTIVATED");
+  });
+
+  it("REQUIRED TEST 5: a non-ok response is UNDETERMINED, never guessed as either outcome", () => {
+    expect(classifyReconciliationCheck({ ok: false, activated: true })).toBe("UNDETERMINED");
+    expect(classifyReconciliationCheck({ ok: false, activated: false })).toBe("UNDETERMINED");
+    expect(classifyReconciliationCheck({ ok: false, activated: undefined })).toBe("UNDETERMINED");
+  });
+
+  it("REQUIRED TEST 5: a malformed/missing activated field on an ok response is UNDETERMINED, never coerced to false", () => {
+    expect(classifyReconciliationCheck({ ok: true, activated: undefined })).toBe("UNDETERMINED");
+    expect(classifyReconciliationCheck({ ok: true, activated: null })).toBe("UNDETERMINED");
+    expect(classifyReconciliationCheck({ ok: true, activated: "true" })).toBe("UNDETERMINED");
+  });
+});
+
+describe("resolveServerActivationNotConfirmedIssue — an ordinary, known-safe PreflightIssue", () => {
+  it("REQUIRED TEST 8: states lockdown has been turned off, matching what the caller actually does (restoreLockdownControls first, always, before this is ever shown)", () => {
+    const issue = resolveServerActivationNotConfirmedIssue();
+    expect(issue.title.length).toBeGreaterThan(0);
+    expect(issue.message.toLowerCase()).toContain("turned off");
+  });
+
+  it("is a plain PreflightIssue shape, rendered by the ordinary LockdownApplicationCheck component (Recheck + Return to dashboard both genuinely safe here)", () => {
+    const issue = resolveServerActivationNotConfirmedIssue();
+    expect(typeof issue.title).toBe("string");
+    expect(typeof issue.message).toBe("string");
+  });
+});
+
+// PR #22 follow-up review, Issue 1 — the UNDETERMINED activation
+// state deliberately is NOT a PreflightIssue.
+describe("resolveActivationConfirmationPendingCopy — REQUIRED TEST 7 groundwork: distinct from every PreflightIssue", () => {
+  it("never claims lockdown is off, and never uses the word 'Recheck' — this is a genuinely different screen from LockdownApplicationCheck, with its own Retry action", () => {
+    const copy = resolveActivationConfirmationPendingCopy();
+    expect(copy.message.toLowerCase()).not.toContain("turned off");
+    expect(copy.message.toLowerCase()).not.toContain("recheck");
+  });
+
+  it("honestly warns the exam may already be active and instructs the student not to close Tether", () => {
+    const copy = resolveActivationConfirmationPendingCopy();
+    expect(copy.message.toLowerCase()).toContain("already be active");
+    expect(copy.message.toLowerCase()).toContain("do not close tether");
+  });
+
+  it("is NOT the PreflightIssue shape — it carries its own retryLabel, never applicationNames", () => {
+    const copy = resolveActivationConfirmationPendingCopy();
+    expect(typeof copy.retryLabel).toBe("string");
+    expect(copy.retryLabel.length).toBeGreaterThan(0);
+    expect((copy as Record<string, unknown>).applicationNames).toBeUndefined();
+  });
+});
+
+describe("parseSecureClientStatusForActivation — REQUIRED TESTS 1-5 groundwork: never defaults a required security policy to false", () => {
+  it("REQUIRED TEST 4: a valid ENFORCED_BY_SECURE_CLIENT display requirement parses to requireSingleDisplay:true", () => {
+    const result = parseSecureClientStatusForActivation({
+      displayRequirement: { status: "ENFORCED_BY_SECURE_CLIENT" },
+      requireRemoteSessionCheck: false,
+    });
+    expect(result).toEqual({ requireSingleDisplay: true, requireRemoteSessionCheck: false });
+  });
+
+  it("REQUIRED TEST 5: a valid NOT_APPLICABLE display requirement parses to requireSingleDisplay:false", () => {
+    const result = parseSecureClientStatusForActivation({
+      displayRequirement: { status: "NOT_APPLICABLE" },
+      requireRemoteSessionCheck: true,
+    });
+    expect(result).toEqual({ requireSingleDisplay: false, requireRemoteSessionCheck: true });
+  });
+
+  it("REQUIRED TEST 1 groundwork: null body (network failure / non-ok response) fails validation, never defaults to false", () => {
+    expect(parseSecureClientStatusForActivation(null)).toBeNull();
+  });
+
+  it("REQUIRED TEST 3 groundwork: malformed payloads fail validation, never defaulted to false", () => {
+    expect(parseSecureClientStatusForActivation({})).toBeNull();
+    expect(parseSecureClientStatusForActivation({ displayRequirement: null, requireRemoteSessionCheck: true })).toBeNull();
+    expect(parseSecureClientStatusForActivation({ displayRequirement: { status: "NOT_A_REAL_STATUS" }, requireRemoteSessionCheck: true })).toBeNull();
+    expect(parseSecureClientStatusForActivation({ displayRequirement: { status: "ENFORCED_BY_SECURE_CLIENT" } })).toBeNull(); // requireRemoteSessionCheck missing
+    expect(parseSecureClientStatusForActivation({ displayRequirement: { status: "ENFORCED_BY_SECURE_CLIENT" }, requireRemoteSessionCheck: "true" })).toBeNull(); // wrong type
+    expect(parseSecureClientStatusForActivation("not an object")).toBeNull();
+    expect(parseSecureClientStatusForActivation(42)).toBeNull();
+  });
+});
+
+describe("resolveSecureClientStatusUnavailableIssue", () => {
+  it("is a plain PreflightIssue — native activation is never attempted when this is shown, so Recheck/Return to dashboard are both genuinely safe", () => {
+    const issue = resolveSecureClientStatusUnavailableIssue();
+    expect(typeof issue.title).toBe("string");
+    expect(typeof issue.message).toBe("string");
   });
 });

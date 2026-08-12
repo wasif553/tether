@@ -109,6 +109,150 @@ export function resolveReadinessGatedDisplayEnforcementState(
   return resolveCombinedDisplayEnforcementState(displayCount, enforcementState.requireSingleDisplay, topologyClassification);
 }
 
+// ---------------------------------------------------------------------------
+// v1.7.4 pre-exam readiness — display blocking-reason taxonomy. See
+// docs/tether-secure-launch-verification-investigation.md, "BLOCKED ==
+// ADDITIONAL_DISPLAY_PRESENT" finding. resolveReadinessGatedDisplayEnforcementState
+// above collapses THREE structurally different reasons (a still-loading
+// readiness gate, a genuine extra display, an inconclusive/failed
+// topology query) into one opaque "BLOCKED" — which
+// resolveDisplayEnforcementEventType then unconditionally labels
+// ADDITIONAL_DISPLAY_PRESENT regardless of which one fired. The functions
+// below are a reason-carrying REPLACEMENT decision path (used by
+// displayEnforcement.ts going forward); the plain-state functions above
+// are kept unchanged for backward compatibility with anything still
+// calling them directly (e.g. existing tests), but no longer drive the
+// overlay/event-reporting logic.
+// ---------------------------------------------------------------------------
+
+export const DISPLAY_BLOCKING_REASONS = [
+  /** enforcementState.active && !enforcementState.ready — a normal, transient loading/verification state, NEVER a display fact. Must never be reported as ADDITIONAL_DISPLAY_PRESENT evidence. */
+  "POLICY_NOT_READY",
+  /** Electron's own screen.getAllDisplays().length > 1 — the one case with the strongest possible evidence of a genuine second display. */
+  "ADDITIONAL_ELECTRON_DISPLAY",
+  /** Windows-native topology query classified EXTEND (distinct sources per active path). */
+  "WINDOWS_TOPOLOGY_EXTEND",
+  /** Windows-native topology query classified CLONE_OR_DUPLICATE (one source driving multiple targets). */
+  "WINDOWS_TOPOLOGY_CLONE",
+  /** Windows-native topology query classified MULTIPLE_ACTIVE_TARGETS (more than one source, fewer sources than targets — a topology with no cleaner name). */
+  "MULTIPLE_ACTIVE_TARGETS",
+  /** Windows-native topology query returned ERROR or UNKNOWN — fails closed for SINGLE_DISPLAY_REQUIRED, but this is a TECHNICAL inconclusiveness, never proof an additional display exists. */
+  "TOPOLOGY_CHECK_UNAVAILABLE",
+] as const;
+export type DisplayBlockingReason = (typeof DISPLAY_BLOCKING_REASONS)[number];
+
+export type DisplayDecision = { state: "OK" } | { state: "BLOCKED"; reason: DisplayBlockingReason };
+
+/** Reason-carrying counterpart to resolveCombinedDisplayEnforcementState — same decision, but never discards WHY. */
+export function resolveCombinedDisplayDecision(
+  displayCount: number,
+  requireSingleDisplay: boolean,
+  topologyClassification: WindowsDisplayTopologyClassification,
+): DisplayDecision {
+  if (!requireSingleDisplay) return { state: "OK" };
+  if (displayCount > 1) return { state: "BLOCKED", reason: "ADDITIONAL_ELECTRON_DISPLAY" };
+  if (topologyClassification === "EXTEND") return { state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_EXTEND" };
+  if (topologyClassification === "CLONE_OR_DUPLICATE") return { state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_CLONE" };
+  if (topologyClassification === "MULTIPLE_ACTIVE_TARGETS") return { state: "BLOCKED", reason: "MULTIPLE_ACTIVE_TARGETS" };
+  if (topologyClassification === "ERROR" || topologyClassification === "UNKNOWN") return { state: "BLOCKED", reason: "TOPOLOGY_CHECK_UNAVAILABLE" };
+  return { state: "OK" };
+}
+
+/** Reason-carrying counterpart to resolveReadinessGatedDisplayEnforcementState — the function displayEnforcement.ts's evaluate() now calls to decide BOTH the block/unblock state and, when BLOCKED, exactly which of the six reasons above caused it. */
+export function resolveReadinessGatedDisplayDecision(
+  enforcementState: SecureClientEnforcementState,
+  displayCount: number,
+  topologyClassification: WindowsDisplayTopologyClassification,
+): DisplayDecision {
+  if (!enforcementState.active) return { state: "OK" };
+  if (!enforcementState.ready) return { state: "BLOCKED", reason: "POLICY_NOT_READY" };
+  return resolveCombinedDisplayDecision(displayCount, enforcementState.requireSingleDisplay, topologyClassification);
+}
+
+/**
+ * Student-facing overlay copy per reason — deliberately never claims an
+ * additional display exists unless the reason is genuine display
+ * evidence (ADDITIONAL_ELECTRON_DISPLAY/WINDOWS_TOPOLOGY_EXTEND/
+ * WINDOWS_TOPOLOGY_CLONE/MULTIPLE_ACTIVE_TARGETS). POLICY_NOT_READY and
+ * TOPOLOGY_CHECK_UNAVAILABLE use neutral, factual wording that never
+ * asserts a fact the evidence doesn't support.
+ */
+export function displayBlockingReasonCopy(reason: DisplayBlockingReason): { title: string; message: string } {
+  switch (reason) {
+    case "POLICY_NOT_READY":
+      return { title: "Preparing your secure exam session", message: "Please wait — Tether is preparing your secure exam session." };
+    case "ADDITIONAL_ELECTRON_DISPLAY":
+      return { title: "Additional display connected", message: "Disconnect all additional, mirrored or extended displays to continue." };
+    case "WINDOWS_TOPOLOGY_EXTEND":
+      return { title: "Extended display detected", message: "An extended display was detected. Disconnect it to continue." };
+    case "WINDOWS_TOPOLOGY_CLONE":
+      return { title: "Mirrored display detected", message: "A mirrored or duplicated display was detected. Disconnect it to continue." };
+    case "MULTIPLE_ACTIVE_TARGETS":
+      return { title: "Additional display connected", message: "Disconnect all additional, mirrored or extended displays to continue." };
+    case "TOPOLOGY_CHECK_UNAVAILABLE":
+      return { title: "Display configuration could not be verified", message: "Tether could not verify the display configuration. Resolve the display check before beginning the examination." };
+  }
+}
+
+/**
+ * Only genuine multi-display evidence may ever produce ADDITIONAL_DISPLAY_PRESENT
+ * (or DISPLAY_CONFIGURATION_CHANGED) evidence — POLICY_NOT_READY is not an
+ * integrity signal and must never be recorded at all;
+ * TOPOLOGY_CHECK_UNAVAILABLE is a technical failure, reported (if at all)
+ * as CLIENT_TECHNICAL_FAILURE by the caller — never as a display-presence
+ * claim. Mirrors resolveDisplayEnforcementEventType's transition logic
+ * (first-time-BLOCKED / still-BLOCKED-but-count-changed / restored-to-OK)
+ * but only for reasons backed by real display evidence.
+ */
+export function isGenuineMultiDisplayReason(reason: DisplayBlockingReason): boolean {
+  return (
+    reason === "ADDITIONAL_ELECTRON_DISPLAY" ||
+    reason === "WINDOWS_TOPOLOGY_EXTEND" ||
+    reason === "WINDOWS_TOPOLOGY_CLONE" ||
+    reason === "MULTIPLE_ACTIVE_TARGETS"
+  );
+}
+
+export type DisplayDecisionEventType = "ADDITIONAL_DISPLAY_PRESENT" | "DISPLAY_CONFIGURATION_CHANGED" | "DISPLAY_POLICY_RESTORED" | "DISPLAY_CHECK_TECHNICAL_FAILURE" | null;
+
+/**
+ * Reason-aware replacement for resolveDisplayEnforcementEventType. A
+ * transition into BLOCKED for POLICY_NOT_READY produces no event at all
+ * (not an integrity signal); a transition into BLOCKED for
+ * TOPOLOGY_CHECK_UNAVAILABLE produces DISPLAY_CHECK_TECHNICAL_FAILURE
+ * (mapped by the caller to the existing CLIENT_TECHNICAL_FAILURE server
+ * event type — never ADDITIONAL_DISPLAY_PRESENT); only the four genuine
+ * multi-display reasons ever produce ADDITIONAL_DISPLAY_PRESENT /
+ * DISPLAY_CONFIGURATION_CHANGED, exactly mirroring the previous
+ * (reason-blind) function's transition shape.
+ */
+export function resolveDisplayDecisionEventType(params: {
+  previousDecision: DisplayDecision | null;
+  nextDecision: DisplayDecision;
+  previousDisplayCount: number | null;
+  nextDisplayCount: number;
+}): DisplayDecisionEventType {
+  const { previousDecision, nextDecision, previousDisplayCount, nextDisplayCount } = params;
+  if (nextDecision.state === "BLOCKED") {
+    const wasBlockedSameReason = previousDecision?.state === "BLOCKED" && previousDecision.reason === nextDecision.reason;
+    if (nextDecision.reason === "POLICY_NOT_READY") return null;
+    if (nextDecision.reason === "TOPOLOGY_CHECK_UNAVAILABLE") {
+      return wasBlockedSameReason ? null : "DISPLAY_CHECK_TECHNICAL_FAILURE";
+    }
+    // Genuine multi-display reason.
+    if (!wasBlockedSameReason) return "ADDITIONAL_DISPLAY_PRESENT";
+    if (previousDisplayCount !== nextDisplayCount) return "DISPLAY_CONFIGURATION_CHANGED";
+    return null;
+  }
+  // nextDecision.state === "OK" — only report DISPLAY_POLICY_RESTORED when
+  // recovering from a genuine multi-display block (never from
+  // POLICY_NOT_READY or a technical failure — neither of those were ever
+  // reported as a display-presence problem in the first place, so there
+  // is nothing display-related to report as "restored").
+  if (previousDecision?.state === "BLOCKED" && isGenuineMultiDisplayReason(previousDecision.reason)) return "DISPLAY_POLICY_RESTORED";
+  return null;
+}
+
 export const DEFAULT_DISPLAY_EVENT_DEBOUNCE_MS = 500;
 
 /**

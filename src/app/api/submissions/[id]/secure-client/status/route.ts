@@ -16,7 +16,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   }
   const { id } = await params;
 
-  const submission = await prisma.submission.findUnique({ where: { id }, select: { studentId: true, secureClientPolicySnapshotJson: true } });
+  const submission = await prisma.submission.findUnique({
+    where: { id },
+    select: { studentId: true, secureClientPolicySnapshotJson: true, activatedAt: true },
+  });
   if (!submission || submission.studentId !== session.user.id) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
@@ -37,6 +40,19 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     requireDisplayCheck: policy.requireDisplayCheck,
     maximumDisplays: policy.maximumDisplays,
     displayRequirement: describeDisplayRequirement(policy),
+    // v1.7.4 pre-exam readiness — the Phase 2 native-activation handshake
+    // (tether-launch/page.tsx's ensureSecureActivation) needs this
+    // FROZEN per-attempt value to know whether to ask
+    // activateSecureExamLockdown() to run a fresh remote-session check.
+    requireRemoteSessionCheck: policy.requireRemoteSessionCheck,
+    // PR #22 release-blocking review — the narrow, read-only reconciliation
+    // signal tether-launch/page.tsx's ensureSecureActivation uses when
+    // POST /api/submissions/[id]/activate's own response is ambiguous
+    // (network exception, timeout, or an unrecognized status) — a plain
+    // boolean derived from activatedAt, never the raw timestamp or any
+    // question content. See src/lib/tetherLaunch.ts's
+    // classifyReconciliationCheck.
+    activated: submission.activatedAt !== null,
     session: current
       ? {
           id: current.id,
