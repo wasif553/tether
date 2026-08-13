@@ -91,12 +91,22 @@ function sessionFor(userId: string, role: "LECTURER" | "STUDENT", institutionId:
   };
 }
 
-function jsonRequest(method: string, body?: unknown) {
+function jsonRequest(method: string, body?: unknown, cookie?: string) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (cookie) headers["Cookie"] = cookie;
   return new Request("http://test.local/route", {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+}
+
+/** Release-blocking server content-boundary audit — extracts the lease cookie a real attestation/activation response just issued, so it can be forwarded on the next request exactly like a genuine Tether instance's own cookie jar would. */
+function extractLeaseCookieHeader(res: Response): string | undefined {
+  const setCookie = res.headers.get("set-cookie");
+  if (!setCookie) return undefined;
+  const match = setCookie.match(/tether_content_lease=([^;]+)/);
+  return match ? `tether_content_lease=${match[1]}` : undefined;
 }
 
 const stamp = Date.now();
@@ -1366,15 +1376,16 @@ describe("Freeze timing policy for active exam attempts", () => {
     // verified Tether session for a TETHER_CLIENT_REQUIRED exam — this
     // exam is a FINAL_EXAMINATION, so it's required here too.
     await establishLegacyVerifiedSession(sessionA.id);
+    const leaseA = await establishV2LeaseForSubmission(studentA, submissionA.id);
 
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instId));
-    await activateSubmission(submissionA.id);
+    await activateSubmission(submissionA.id, leaseA);
     // activateSubmission resets startedAt to the activation instant — the
     // expected deadline must be computed from the ACTIVATED submission's
     // startedAt, not the pre-activation value captured at /start.
     const activatedA = await prisma.submission.findUniqueOrThrow({ where: { id: submissionA.id } });
     const expectedDeadlineA = new Date(activatedA.startedAt.getTime() + 30 * 60_000).toISOString();
-    const beforeRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submissionA.id }) });
+    const beforeRes = await submissionRoute.GET(jsonRequest("GET", undefined, leaseA), { params: Promise.resolve({ id: submissionA.id }) });
     expect((await beforeRes.json()).deadline).toBe(expectedDeadlineA);
 
     // Lecturer shortens duration to 5 minutes — AFTER studentA's attempt
@@ -1385,7 +1396,7 @@ describe("Freeze timing policy for active exam attempts", () => {
     // studentA's already-started attempt keeps its ORIGINAL 30-minute
     // deadline, completely unaffected.
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instId));
-    const afterRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submissionA.id }) });
+    const afterRes = await submissionRoute.GET(jsonRequest("GET", undefined, leaseA), { params: Promise.resolve({ id: submissionA.id }) });
     expect((await afterRes.json()).deadline).toBe(expectedDeadlineA);
 
     // A brand-new attempt (a different student) started AFTER the PATCH
@@ -1408,10 +1419,11 @@ describe("Freeze timing policy for active exam attempts", () => {
       },
     });
     await establishLegacyVerifiedSession(sessionB.id);
+    const leaseB = await establishV2LeaseForSubmission(studentB, submissionB.id);
     mockAuth.mockResolvedValue(sessionFor(studentB.id, "STUDENT", instId));
-    await activateSubmission(submissionB.id);
+    await activateSubmission(submissionB.id, leaseB);
     const activatedB = await prisma.submission.findUniqueOrThrow({ where: { id: submissionB.id } });
-    const getResB = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submissionB.id }) });
+    const getResB = await submissionRoute.GET(jsonRequest("GET", undefined, leaseB), { params: Promise.resolve({ id: submissionB.id }) });
     const expectedDeadlineB = new Date(activatedB.startedAt.getTime() + 5 * 60_000).toISOString();
     expect((await getResB.json()).deadline).toBe(expectedDeadlineB);
   });
@@ -1421,8 +1433,9 @@ describe("Freeze timing policy for active exam attempts", () => {
     // allowLateSubmit defaults false — frozen into this attempt's snapshot at start.
     const { exam, submission, session } = await startFinalExamWithSession(s, "freeze-late-submit");
     await establishLegacyVerifiedSession(session.id);
+    const lease = await establishV2LeaseForSubmission(s, submission.id);
     mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-    await activateSubmission(submission.id);
+    await activateSubmission(submission.id, lease);
 
     await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
 
@@ -1433,7 +1446,7 @@ describe("Freeze timing policy for active exam attempts", () => {
     // The already-started attempt's frozen snapshot still says false — a
     // manual late submit must still be rejected.
     mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-    const rejectedRes = await submitRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
+    const rejectedRes = await submitRoute.POST(jsonRequest("POST", {}, lease), { params: Promise.resolve({ id: submission.id }) });
     expect(rejectedRes.status).toBe(409);
     const rejectedBody = await rejectedRes.json();
     expect(rejectedBody.code).toBe("DEADLINE_PASSED");
@@ -1447,8 +1460,9 @@ describe("Freeze timing policy for active exam attempts", () => {
     // autoSubmitOnTimerEnd defaults true — frozen into this attempt's snapshot at start.
     const { exam, submission, session } = await startFinalExamWithSession(s, "freeze-auto-submit");
     await establishLegacyVerifiedSession(session.id);
+    const lease = await establishV2LeaseForSubmission(s, submission.id);
     mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-    await activateSubmission(submission.id);
+    await activateSubmission(submission.id, lease);
 
     await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 60 * 60_000) } });
 
@@ -1459,7 +1473,7 @@ describe("Freeze timing policy for active exam attempts", () => {
     // The already-started attempt's frozen snapshot still says true — a
     // forced system auto-submit past the deadline must still be accepted.
     mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-    const acceptedRes = await submitRoute.POST(jsonRequest("POST", { systemAutoSubmit: true }), { params: Promise.resolve({ id: submission.id }) });
+    const acceptedRes = await submitRoute.POST(jsonRequest("POST", { systemAutoSubmit: true }, lease), { params: Promise.resolve({ id: submission.id }) });
     expect(acceptedRes.status).toBe(200);
     const record = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
     expect(record.status).not.toBe("IN_PROGRESS");
@@ -1471,8 +1485,12 @@ describe("Freeze timing policy for active exam attempts", () => {
     const { installationId } = await reg.registerRes.json();
     const { exam, submission, session } = await startFinalExamWithSession(s, "freeze-revoke-submit-parity");
     await establishLegacyVerifiedSession(session.id);
+    // Reuse the SAME installation just registered above — the whole
+    // point of this test is that revoking THIS installation is blocked
+    // while it is the one actively bound to the session.
+    const lease = await establishV2LeaseForSubmission(s, submission.id, { installationId, privateKeyPem: reg.privateKeyPem });
     mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-    await activateSubmission(submission.id);
+    await activateSubmission(submission.id, lease);
 
     // 20 minutes elapsed against the frozen 30-minute duration.
     await prisma.submission.update({ where: { id: submission.id }, data: { startedAt: new Date(Date.now() - 20 * 60_000) } });
@@ -1487,7 +1505,7 @@ describe("Freeze timing policy for active exam attempts", () => {
     // Still within the FROZEN 30-minute window (only 20 elapsed) — still blocked.
     expect(revokeRes.status).toBe(409);
 
-    const submitRes = await submitRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
+    const submitRes = await submitRoute.POST(jsonRequest("POST", {}, lease), { params: Promise.resolve({ id: submission.id }) });
     // Same frozen window — manual submit is accepted, exactly matching
     // the revoke guard's "still active" verdict (both would have said
     // "expired" if either used the live, shortened duration instead).
@@ -1498,15 +1516,16 @@ describe("Freeze timing policy for active exam attempts", () => {
     const s = await freshStudent("Submit Server Time Authoritative Student");
     const { submission, session } = await startFinalExamWithSession(s, "freeze-submit-server-time-authoritative");
     await establishLegacyVerifiedSession(session.id);
+    const lease = await establishV2LeaseForSubmission(s, submission.id);
     mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-    await activateSubmission(submission.id);
+    await activateSubmission(submission.id, lease);
 
     // Genuinely still within the frozen window — a forged body claiming
     // the deadline has already passed must have no effect. The submit
     // route only ever reads `systemAutoSubmit` from the body; every
     // other field here is inert by construction.
     const res = await submitRoute.POST(
-      jsonRequest("POST", { now: new Date(0).toISOString(), deadline: new Date(0).toISOString(), remainingSeconds: -1, clientTime: 0 }),
+      jsonRequest("POST", { now: new Date(0).toISOString(), deadline: new Date(0).toISOString(), remainingSeconds: -1, clientTime: 0 }, lease),
       { params: Promise.resolve({ id: submission.id }) },
     );
     expect(res.status).toBe(200);
@@ -2086,12 +2105,40 @@ describe("25. DB-backed tests run only through disposable release validation", (
 // the real student-facing behaviour, not just the pure logic.
 // ---------------------------------------------------------------------------
 
-/** Drives the REAL legacy attestation route to a genuine VERIFIED session — checks: {} / required: {} always resolves to overallStatus READY (see overallStatusFromChecks). */
+/** Drives the REAL legacy attestation route to a genuine VERIFIED session — checks: {} / required: {} always resolves to overallStatus READY (see overallStatusFromChecks). Release-blocking follow-up review: this route no longer issues the content-access lease at all — see establishV2LeaseForSubmission below for the only real way to obtain one. */
 async function establishLegacyVerifiedSession(sessionId: string, clientVersion = "1.5.0") {
   return legacyAttestationRoute.POST(
     jsonRequest("POST", { platform: "win32", clientVersion, checks: {}, required: {} }),
     { params: Promise.resolve({ sessionId }) },
   );
+}
+
+/**
+ * Release-blocking follow-up review — the content-access lease can only
+ * ever be minted by a genuine v2 installation-key attestation success
+ * (see requireTetherContentAccess.ts's issueContentAccessLeaseCookie doc
+ * comment). Registers a fresh installation for `s` and drives the real
+ * v2 EXAM_SESSION challenge/verify round trip against `submissionId`'s
+ * CURRENT secure-client session, returning the lease cookie the verify
+ * response issued.
+ */
+async function establishV2LeaseForSubmission(
+  s: { id: string },
+  submissionId: string,
+  existingInstallation?: { installationId: string; privateKeyPem: string },
+): Promise<string | undefined> {
+  let installation = existingInstallation;
+  if (!installation) {
+    const reg = await registerFreshInstallation(s.id, instId);
+    const { installationId } = await reg.registerRes.json();
+    installation = { installationId, privateKeyPem: reg.privateKeyPem };
+  }
+  const v2Res = await attestExamSessionV2(s, installation, submissionId);
+  const body = await v2Res.json();
+  if (!v2Res.ok || body?.verified !== true) {
+    throw new Error(`establishV2LeaseForSubmission(${submissionId}) failed: ${v2Res.status} ${JSON.stringify(body)}`);
+  }
+  return extractLeaseCookieHeader(v2Res);
 }
 
 /**
@@ -2103,8 +2150,8 @@ async function establishLegacyVerifiedSession(sessionId: string, clientVersion =
  * genuinely succeed; a caller testing activation FAILURE itself should
  * call the route directly instead.
  */
-async function activateSubmission(submissionId: string) {
-  const res = await activateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submissionId }) });
+async function activateSubmission(submissionId: string, leaseCookie?: string) {
+  const res = await activateRoute.POST(jsonRequest("POST", undefined, leaseCookie), { params: Promise.resolve({ id: submissionId }) });
   if (res.status !== 200) {
     const body = await res.json().catch(() => null);
     throw new Error(`activateSubmission(${submissionId}) failed: ${res.status} ${JSON.stringify(body)}`);
@@ -2281,14 +2328,32 @@ describe("EXAM_SESSION v2 — additional 20-point checklist mutation coverage", 
 });
 
 describe("TETHER_EXAM_ATTESTATION_MODE — real enforcement wiring (POST /start, GET /submissions/[id])", () => {
-  it("LEGACY (default, unset): a genuine legacy VERIFIED session grants content access with no v2 evidence at all", async () => {
+  it("LEGACY (default, unset): a genuine legacy VERIFIED session satisfies hasVerifiedTetherSession, but content access additionally requires a v2-proven lease — release-blocking follow-up review: legacy attestation carries no installation-key proof, so it must NEVER be sufficient on its own to grant content access, regardless of TETHER_EXAM_ATTESTATION_MODE", async () => {
     const s = await freshStudent("Legacy Mode Student");
     const { submission, session } = await startFinalExamWithSession(s, "legacy-mode-exam");
-    await establishLegacyVerifiedSession(session.id);
+    const legacyAttest = await establishLegacyVerifiedSession(session.id);
+    expect(legacyAttest.status).toBe(201);
+    // No Set-Cookie at all — legacy attestation issues no lease.
+    expect(legacyAttest.headers.get("set-cookie")).toBeNull();
 
     mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-    await activateSubmission(submission.id);
-    const contentRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    const blockedActivate = await activateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
+    expect(blockedActivate.status).toBe(403);
+    expect((await blockedActivate.json()).code).toBe("TETHER_CONTENT_ACCESS_REQUIRED");
+    // activatedAt was never set (activation itself was denied above), so
+    // GET correctly reports EXAM_NOT_ACTIVATED here — the earlier stricter
+    // TETHER_CONTENT_ACCESS_REQUIRED denial on /activate is the real proof
+    // that legacy alone cannot mint the lease.
+    const blockedGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect(blockedGet.status).toBe(403);
+    expect((await blockedGet.json()).code).toBe("EXAM_NOT_ACTIVATED");
+
+    // A genuine v2 installation attestation (the ONLY real issuance
+    // point) restores normal access.
+    const lease = await establishV2LeaseForSubmission(s, submission.id);
+    mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+    await activateSubmission(submission.id, lease);
+    const contentRes = await submissionRoute.GET(jsonRequest("GET", undefined, lease), { params: Promise.resolve({ id: submission.id }) });
     expect(contentRes.status).toBe(200);
   });
 
@@ -2317,10 +2382,11 @@ describe("TETHER_EXAM_ATTESTATION_MODE — real enforcement wiring (POST /start,
       await establishLegacyVerifiedSession(session.id, "1.6.0");
       const v2Res = await attestExamSessionV2(s, { installationId, privateKeyPem: reg.privateKeyPem }, submission.id);
       expect(v2Res.status).toBe(200);
+      const lease = extractLeaseCookieHeader(v2Res);
 
       mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-      await activateSubmission(submission.id);
-      const contentRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+      await activateSubmission(submission.id, lease);
+      const contentRes = await submissionRoute.GET(jsonRequest("GET", undefined, lease), { params: Promise.resolve({ id: submission.id }) });
       expect(contentRes.status).toBe(200);
     } finally {
       vi.unstubAllEnvs();
@@ -2386,22 +2452,34 @@ describe("TETHER_EXAM_ATTESTATION_MODE — real enforcement wiring (POST /start,
     }
   });
 
-  it("5. a LEGACY-snapshotted session remains LEGACY (grants access on legacy alone) even after the environment later changes to DUAL", async () => {
+  it("5. a LEGACY-snapshotted session's attestationRequirement immutably stays LEGACY even after the environment later changes to DUAL — but release-blocking follow-up review: this immutable LEGACY snapshot governs hasVerifiedTetherSession only, never the separate v2-proven content-access lease, which legacy alone still can never mint", async () => {
     const s = await freshStudent("Snapshot Stays Legacy Student");
     // Session created while the environment is (implicitly) LEGACY.
     const { submission, session } = await startFinalExamWithSession(s, "snapshot-stays-legacy");
-    await establishLegacyVerifiedSession(session.id);
+    const legacyAttest = await establishLegacyVerifiedSession(session.id);
+    expect(legacyAttest.headers.get("set-cookie")).toBeNull();
     const stored = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: session.id } });
     expect(stored.attestationRequirement).toBe("LEGACY");
 
     vi.stubEnv("TETHER_EXAM_ATTESTATION_MODE", "DUAL");
     try {
       mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-      await activateSubmission(submission.id);
-      const contentRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
-      // Still 200 — the environment changing to DUAL AFTER this session
-      // was created must never retroactively demand v2 evidence it was
-      // never told to collect.
+      // Content access without a lease is denied regardless of the
+      // immutable LEGACY snapshot and regardless of the environment
+      // change — legacy alone was never, and is still never, sufficient.
+      const blockedActivate = await activateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
+      expect(blockedActivate.status).toBe(403);
+      expect((await blockedActivate.json()).code).toBe("TETHER_CONTENT_ACCESS_REQUIRED");
+
+      // A genuine v2 attestation still restores access even on a
+      // LEGACY-snapshotted session — the snapshot only governs whether
+      // hasVerifiedTetherSession requires v2 EVIDENCE for the legacy
+      // truth-table decision, never whether v2 proof is honoured when
+      // volunteered.
+      const lease = await establishV2LeaseForSubmission(s, submission.id);
+      mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
+      await activateSubmission(submission.id, lease);
+      const contentRes = await submissionRoute.GET(jsonRequest("GET", undefined, lease), { params: Promise.resolve({ id: submission.id }) });
       expect(contentRes.status).toBe(200);
     } finally {
       vi.unstubAllEnvs();
@@ -2454,10 +2532,11 @@ describe("TETHER_EXAM_ATTESTATION_MODE — real enforcement wiring (POST /start,
       const { submission } = await startFinalExamWithSession(s, "v2-required-v2-only");
       const v2Res = await attestExamSessionV2(s, { installationId, privateKeyPem: reg.privateKeyPem }, submission.id);
       expect(v2Res.status).toBe(200);
+      const lease = extractLeaseCookieHeader(v2Res);
 
       mockAuth.mockResolvedValue(sessionFor(s.id, "STUDENT", instId));
-      await activateSubmission(submission.id);
-      const contentRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+      await activateSubmission(submission.id, lease);
+      const contentRes = await submissionRoute.GET(jsonRequest("GET", undefined, lease), { params: Promise.resolve({ id: submission.id }) });
       expect(contentRes.status).toBe(200);
     } finally {
       vi.unstubAllEnvs();

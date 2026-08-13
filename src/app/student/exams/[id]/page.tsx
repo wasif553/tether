@@ -111,6 +111,8 @@ import {
   reportRemoteSessionMonitorTransition,
   type LockdownCapabilityInfo,
 } from "@/lib/lockdownClient";
+import { resolveNativeLockdownConfirmation, shouldBlockExamContentRendering, type ContentGateState } from "@/lib/secureExamNativeLockdown";
+import { buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
 
 /**
  * Strengthened phone detection (Part 3/4) — converts raw detector output
@@ -807,25 +809,43 @@ export default function TakeExamPage({
   }, [aiCameraViolationOverlay]);
 
   const [inLockdownBrowser, setInLockdownBrowser] = useState(false);
+  // v1.7.5 P0 — see src/lib/secureExamNativeLockdown.ts. Defaults to
+  // PENDING; the effect below (fetching /secure-client/status) resolves
+  // it to NOT_APPLICABLE (non-gated exam), CONFIRMED (native lockdown
+  // already ACTIVE+READY — the normal Phase 2 handoff), REACTIVATION_REQUIRED
+  // (redirecting to tether-launch for a fresh secure-reactivation
+  // handshake), UNSUPPORTED_BUILD (installed client predates the
+  // required query bridge), or STATUS_UNAVAILABLE (the policy fetch
+  // itself failed). shouldBlockExamContentRendering derives the actual
+  // render gate from this — see the render-time check near `if (!data)`.
+  const [contentGateState, setContentGateState] = useState<ContentGateState>("PENDING");
 
-  // Corrective pass v1.2.1, Task C — the actual reported root cause: the
-  // old code only told Electron about the display policy AFTER `data`
-  // and /secure-client/status both resolved (see the effect below),
-  // leaving a fail-open window from window-creation through that entire
-  // fetch chain during which a second display would not be covered even
-  // for a TETHER_CLIENT_REQUIRED exam. Fixed by calling
-  // setSecureClientEnforcementState({active:true, ready:false, ...}) in
-  // THIS SAME mount-time effect, synchronously with detection — before
-  // `data` has even started loading — so Electron covers the window from
-  // the earliest possible moment and only uncovers once the effect below
-  // confirms the real policy. Harmless for a non-gated (STANDARD_WEB)
-  // exam opened inside Tether: it clears again as soon as that effect's
-  // fetch resolves, below.
+  // v1.7.5 P0 — REMOVED the old Corrective-pass-v1.2.1/Task-C blind
+  // mount-time cover (setSecureClientEnforcementState({active:true,
+  // ready:false, ...}), called unconditionally on every mount). That
+  // call downgraded an ALREADY ACTIVE+READY native state — set moments
+  // earlier by a successful Phase 2 handoff in tether-launch/page.tsx —
+  // back to POLICY_NOT_READY, which produced the screen-saver-level,
+  // non-closable native overlay ("Preparing your secure exam session")
+  // with no Recheck/Exit route, requiring a Windows restart. See
+  // docs/tether-preflight-lifecycle-v1.7.5-policy-not-ready.md for the
+  // full root-cause writeup.
+  //
+  // The fail-open gap Task C originally existed to close (a second
+  // display connected during the window-creation-to-policy-fetch gap
+  // going unblocked) no longer exists for the v1.7.4+ Phase 1/Phase 2
+  // architecture: native lockdown is established BEFORE this page is
+  // ever navigated to (see tether-launch/page.tsx's ensureSecureActivation),
+  // so by the time this page mounts, a genuinely gated attempt's native
+  // enforcement is either already ACTIVE+READY (the normal case) or was
+  // never established at all (a direct load / reload / Tether restart) —
+  // the effect below now queries which of those is true via the new
+  // read-only getSecureClientEnforcementState bridge, and routes to a
+  // real secure-reactivation handshake in the latter case, rather than
+  // asserting a speculative cover flag that (as this P0 proved) can
+  // itself become an unrecoverable trap.
   useEffect(() => {
     const detected = isRunningInLockdownBrowser();
-    if (detected) {
-      window.sesLockdown?.setSecureClientEnforcementState?.({ active: true, ready: false, requireSingleDisplay: false });
-    }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setInLockdownBrowser(detected);
   }, []);
@@ -940,10 +960,124 @@ export default function TakeExamPage({
   const oneQuestionAtATime = data?.exam.secureSettings.oneQuestionAtATime ?? false;
   const allowBackNavigation = data?.exam.secureSettings.allowBackNavigation ?? true;
 
+  // Release-blocking follow-up review — a React render gate alone is NOT
+  // sufficient: `loadSubmission()` fetches GET /api/submissions/[id],
+  // which returns FULL question text/options the instant this attempt
+  // is server-activated (activatedAt != null) — regardless of whether
+  // native lockdown has ever been established in THIS Electron process
+  // (a direct load, reload, or Tether restart could all reach this page
+  // with native lockdown never confirmed here). Calling loadSubmission()
+  // unconditionally on mount — even if the JSX render was gated — would
+  // still let protected content enter renderer/browser memory before
+  // native lockdown is confirmed. This effect is what decides WHETHER
+  // AND WHEN loadSubmission() is ever called at all, for a Tether-gated
+  // attempt: Tether detection, then the frozen per-attempt policy (via
+  // the narrow, no-question-content /secure-client/status endpoint),
+  // then — only for a gated attempt — a fresh native-state query, all
+  // BEFORE the one fetch that can return question content. See
+  // src/lib/secureExamNativeLockdown.ts's resolveNativeLockdownConfirmation.
+  //
+  // Deliberately a SEPARATE, EARLIER effect from the policy-resolution
+  // effect below (which still runs its own independent re-check once
+  // `data` exists, keyed on `data?.id`) — that effect cannot run first
+  // because it depends on `data`, which does not exist until THIS effect
+  // decides it is safe to fetch it. The later effect's redundant re-check
+  // is intentional defense in depth, not dead code.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    loadSubmission();
-  }, [loadSubmission]);
+    let cancelled = false;
+
+    async function resolveAndMaybeLoad() {
+      const detected = isRunningInLockdownBrowser();
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setInLockdownBrowser(detected);
+
+      if (!detected) {
+        // Ordinary, non-Tether browser session — no native-lockdown
+        // concept applies. Exactly the pre-v1.7.5 behaviour for
+        // STANDARD_WEB / ordinary access: no added latency, no extra
+        // fetch.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setContentGateState("NOT_APPLICABLE");
+        void loadSubmission();
+        return;
+      }
+
+      type PreLoadStatusResponse = {
+        deliveryMode?: unknown;
+        displayRequirement?: { status?: unknown } | null;
+        examId?: unknown;
+      };
+      let statusBody: PreLoadStatusResponse | null = null;
+      try {
+        const res = await fetch(`/api/submissions/${id}/secure-client/status`);
+        if (res.ok) statusBody = await res.json().catch(() => null);
+      } catch {
+        statusBody = null;
+      }
+      if (cancelled) return;
+
+      if (
+        !statusBody ||
+        typeof statusBody.deliveryMode !== "string" ||
+        typeof statusBody.displayRequirement?.status !== "string" ||
+        typeof statusBody.examId !== "string"
+      ) {
+        // Fail closed WITHOUT ever calling loadSubmission() — content is
+        // withheld via contentGateState (see the render-time gate), never
+        // via a native cover flag.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setContentGateState("STATUS_UNAVAILABLE");
+        return;
+      }
+
+      const gated = statusBody.deliveryMode === "TETHER_CLIENT_REQUIRED";
+      if (!gated) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setContentGateState("NOT_APPLICABLE");
+        void loadSubmission();
+        return;
+      }
+
+      const requireSingleDisplay = statusBody.displayRequirement?.status === "ENFORCED_BY_SECURE_CLIENT";
+      const bridgeAvailable = typeof window.sesLockdown?.getSecureClientEnforcementState === "function";
+      let nativeState: { active: boolean; ready: boolean; requireSingleDisplay: boolean } | null = null;
+      if (bridgeAvailable) {
+        try {
+          nativeState = (await window.sesLockdown!.getSecureClientEnforcementState!()) ?? null;
+        } catch {
+          nativeState = null;
+        }
+      }
+      if (cancelled) return;
+
+      const confirmation = resolveNativeLockdownConfirmation({ gated, bridgeAvailable, nativeState, requireSingleDisplay });
+      logClientTetherDiagnostic("native_lockdown_preload_confirmation", { submissionId: id, confirmation, nativeState, requireSingleDisplay });
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setContentGateState(confirmation);
+
+      if (confirmation === "CONFIRMED") {
+        // Native lockdown verified BEFORE this fetch — safe now.
+        void loadSubmission();
+        return;
+      }
+      if (confirmation === "REACTIVATION_REQUIRED") {
+        // loadSubmission() is NEVER called on this path — zero
+        // question-bearing requests. Route back through tether-launch's
+        // own already-tested Phase 1/Phase 2 machinery.
+        logClientTetherDiagnostic("NATIVE_REACTIVATION_REDIRECT_PRELOAD", { examId: statusBody.examId, submissionId: id });
+        router.replace(buildTetherLaunchPagePath(statusBody.examId));
+        return;
+      }
+      // UNSUPPORTED_BUILD — fail closed, no redirect (an old build would
+      // fail this exact check again on return, looping forever), no
+      // loadSubmission() call.
+    }
+
+    void resolveAndMaybeLoad();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, loadSubmission, router]);
 
   // Exam Session Binding v1 — see docs/exam-session-binding-v1.md. Sends
   // a lightweight heartbeat every 25s while the attempt is in progress.
@@ -1295,20 +1429,34 @@ export default function TakeExamPage({
   }, [data]);
 
   // Tether launch/install flow v1 — see apps/lockdown/src/displayEnforcement.ts.
-  // Only relevant inside Tether Secure Browser. Resolves the readiness
-  // gate the mount-time effect above opened with {active:true,
-  // ready:false} — the Electron main process has no policy awareness of
-  // its own and never trusts anything from this page except this one
-  // state object (corrective pass v1.2.1, Task C). Depends on data?.id
-  // (stable for the lifetime of one attempt) rather than the whole
-  // `data` object, so this registers exactly once per submission even if
-  // `data` is re-fetched/replaced by polling elsewhere on this page —
-  // window.sesLockdown.onDisplayEnforcementEvent has no remove-listener
-  // API, so re-registering on every re-fetch would leak duplicate
-  // listeners and duplicate event reports.
+  // Only relevant inside Tether Secure Browser.
+  //
+  // v1.7.5 P0 — this effect now ALSO owns the native-lockdown
+  // reconciliation gate (see src/lib/secureExamNativeLockdown.ts): for a
+  // gated attempt, it queries the Electron main process's own live
+  // enforcement state (never a client-held boolean) via the new
+  // read-only getSecureClientEnforcementState bridge BEFORE ever
+  // confirming content is safe to render. If native lockdown is already
+  // ACTIVE+READY (the normal Phase 2 handoff, completed moments earlier
+  // by tether-launch/page.tsx), it is preserved — never re-asserted with
+  // a downgrading {active:true, ready:false} the way the old removed
+  // mount-time cover did. If it is NOT confirmed (a direct load, reload,
+  // or Tether restart that never went through Phase 2 in this Electron
+  // process), content stays withheld and the student is routed back to
+  // the tether-launch page for a fresh secure-reactivation handshake —
+  // reusing that page's own already-tested precheck/native-activation
+  // machinery rather than inventing a second one here.
+  //
+  // Depends on data?.id (stable for the lifetime of one attempt) rather
+  // than the whole `data` object, so this registers exactly once per
+  // submission even if `data` is re-fetched/replaced by polling
+  // elsewhere on this page — window.sesLockdown.onDisplayEnforcementEvent
+  // has no remove-listener API, so re-registering on every re-fetch
+  // would leak duplicate listeners and duplicate event reports.
   useEffect(() => {
     if (!data?.id || !inLockdownBrowser) return;
     const submissionId = data.id;
+    const examId = data.exam.id;
     let cancelled = false;
     let sessionId: string | null = null;
 
@@ -1322,11 +1470,10 @@ export default function TakeExamPage({
 
     fetch(`/api/submissions/${submissionId}/secure-client/status`)
       .then((res) => (res.ok ? res.json() : null))
-      .then((status: StatusResponse | null) => {
+      .then(async (status: StatusResponse | null) => {
         if (cancelled) return;
-        // Task C: "if displayPolicy is missing or invalid, cover the
-        // exam" — a non-ok response or an unexpectedly shaped body both
-        // land here as a rejection, matching the .catch below.
+        // A non-ok response or an unexpectedly shaped body both land
+        // here as a rejection, matching the .catch below.
         if (!status || typeof status.deliveryMode !== "string" || typeof status.displayRequirement?.status !== "string") {
           throw new Error("malformed_status_response");
         }
@@ -1348,6 +1495,47 @@ export default function TakeExamPage({
           requireDisplayCheck: typeof status.requireDisplayCheck === "boolean" ? status.requireDisplayCheck : null,
           verified,
         });
+
+        // v1.7.5 P0 — query the FRESH native state before deciding
+        // anything; never assume, never trust a stale client-side value.
+        const bridgeAvailable = typeof window.sesLockdown?.getSecureClientEnforcementState === "function";
+        let nativeState: { active: boolean; ready: boolean; requireSingleDisplay: boolean } | null = null;
+        if (gated && bridgeAvailable) {
+          try {
+            nativeState = (await window.sesLockdown!.getSecureClientEnforcementState!()) ?? null;
+          } catch {
+            nativeState = null;
+          }
+        }
+        if (cancelled) return;
+        const confirmation = resolveNativeLockdownConfirmation({ gated, bridgeAvailable, nativeState, requireSingleDisplay: enforced });
+        logClientTetherDiagnostic("native_lockdown_confirmation", { submissionId, confirmation, nativeState });
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setContentGateState(confirmation);
+
+        if (confirmation === "REACTIVATION_REQUIRED") {
+          // Content stays withheld (see the render-time gate below) —
+          // route back through tether-launch's own Phase 1/Phase 2
+          // machinery rather than asserting any native state here. That
+          // page's POST /api/exams/[id]/start (idempotent — resumes this
+          // SAME IN_PROGRESS submission) and POST /activate (idempotent —
+          // already-activated returns ok without moving activatedAt) make
+          // this round trip safe to repeat any number of times.
+          logClientTetherDiagnostic("NATIVE_REACTIVATION_REDIRECT", { examId, submissionId });
+          router.replace(buildTetherLaunchPagePath(examId));
+          return;
+        }
+        if (confirmation === "UNSUPPORTED_BUILD") {
+          // Fail closed, no redirect — a build old enough to lack this
+          // v1.7.5 query bridge cannot be asked to reconcile, and routing
+          // it through tether-launch would only loop (that page's own
+          // Phase 2 handshake could genuinely succeed there, but this
+          // exact check would fail again on return, forever). See the
+          // render-time gate below for the calm, non-looping message
+          // shown instead.
+          return;
+        }
+
         const nextEnforcementState = { active: gated, ready: !gated || verified, requireSingleDisplay: enforced };
         logClientTetherDiagnostic("ipc_enforcement_state_sent", nextEnforcementState);
         window.sesLockdown?.setSecureClientEnforcementState?.(nextEnforcementState);
@@ -1372,14 +1560,17 @@ export default function TakeExamPage({
       })
       .catch(() => {
         if (cancelled) return;
-        // Fail closed: never silently leave the previous (or default)
-        // state in place on a failed/malformed status fetch — explicitly
-        // re-assert the covering state so the exam stays covered until a
-        // genuinely successful determination is made.
+        // v1.7.5 P0 — fail closed WITHOUT asserting a native cover flag:
+        // the old {active:true, ready:false} re-assertion here is exactly
+        // the anti-pattern this whole pass removes (see the removed
+        // mount-time-cover doc comment above `inLockdownBrowser`).
+        // Content-side withholding (STATUS_UNAVAILABLE, via the
+        // render-time gate below — a plain in-page message, never a
+        // native overlay) is now the ONLY enforcement for "the policy
+        // fetch itself failed"; native state is left untouched.
         logClientTetherDiagnostic("attempt_policy_load_failed", {});
-        const coveringState = { active: true, ready: false, requireSingleDisplay: false };
-        logClientTetherDiagnostic("ipc_enforcement_state_sent", coveringState);
-        window.sesLockdown?.setSecureClientEnforcementState?.(coveringState);
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setContentGateState("STATUS_UNAVAILABLE");
         window.sesLockdown?.setLockdownExamActive?.(false);
         window.sesLockdown?.reportDiagnosticContext?.({
           submissionIdPresent: true,
@@ -3291,6 +3482,49 @@ export default function TakeExamPage({
   // redirect loop must never re-enter from here either.
   if (manualReviewRequired) {
     return <ManualReviewNotice pendingCount={resilientAutosave.pendingCount} />;
+  }
+
+  // v1.7.5 P0 / release-blocking follow-up review — checked BEFORE the
+  // `!data` checks below, on purpose: for a gated attempt whose native
+  // lockdown is not yet confirmed, `data` may legitimately stay null
+  // indefinitely (loadSubmission() is never called at all — see the
+  // pre-fetch gate effect above) — falling through to the generic
+  // "Loading..." `!data` branch would still be harmless, but would mask
+  // the specific, actionable STATUS_UNAVAILABLE/UNSUPPORTED_BUILD
+  // messages below. See src/lib/secureExamNativeLockdown.ts. Question
+  // content is never even FETCHED, let alone rendered, for a gated
+  // attempt until native lockdown is confirmed ACTIVE+READY and
+  // policy-compatible in THIS Electron process — a plain in-page
+  // message, never a native overlay, covers every non-confirmed state.
+  if (shouldBlockExamContentRendering(inLockdownBrowser, contentGateState)) {
+    if (contentGateState === "UNSUPPORTED_BUILD") {
+      return (
+        <div className="mx-auto mt-16 max-w-md rounded border border-gray-200 p-6 text-center">
+          <h1 className="text-lg font-medium">Update required</h1>
+          <p className="mt-3 text-sm text-gray-700">
+            This version of Tether Secure Browser does not support a required security verification step. Please update Tether Secure Browser to
+            continue.
+          </p>
+        </div>
+      );
+    }
+    if (contentGateState === "STATUS_UNAVAILABLE") {
+      return (
+        <div className="mx-auto mt-16 max-w-md rounded border border-gray-200 p-6 text-center">
+          <h1 className="text-lg font-medium">Tether could not verify this examination&apos;s secure policy</h1>
+          <p className="mt-3 text-sm text-gray-700">Select Try again to retry.</p>
+          <button onClick={() => window.location.reload()} className="mt-4 rounded bg-black px-4 py-2 text-sm text-white">
+            Try again
+          </button>
+        </div>
+      );
+    }
+    // PENDING (still determining) or REACTIVATION_REQUIRED (a redirect to
+    // tether-launch is already in flight, issued by the effect above) —
+    // both are brief, ordinary loading states; no overlay, no content,
+    // and (for REACTIVATION_REQUIRED) no question-bearing request was
+    // ever made in the first place.
+    return <p className="text-gray-500">Loading...</p>;
   }
 
   if (!data && loadError) {

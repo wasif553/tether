@@ -16,9 +16,10 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { buildOneQuestionPayload, loadOneQuestionSubmission, OneQuestionModeError } from "@/lib/submissionQuestionPayload";
 import { markQuestionVisited } from "@/lib/questionNavigatorRunner";
+import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const session = await auth();
@@ -29,7 +30,7 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id);
+    const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id, req);
     const payload = buildOneQuestionPayload(submission, settings, submission.currentQuestionIndex);
     if (!payload) {
       return NextResponse.json({ error: "This exam has no questions" }, { status: 404 });
@@ -37,7 +38,13 @@ export async function GET(
     // Question Navigator v1 — covers "the attempt initially opens on the
     // first question" and every subsequent refresh. Best-effort.
     markQuestionVisited(id, payload.question.id).catch(() => {});
-    return NextResponse.json(payload);
+    const response = NextResponse.json(payload);
+    // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's
+    // own doc comment. Question polling/reload is a frequent, low-latency
+    // content read during an active attempt, so this also helps keep a
+    // long exam's lease alive past its fixed 30-minute TTL.
+    await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: submission.id, studentId: submission.studentId });
+    return response;
   } catch (err) {
     if (err instanceof OneQuestionModeError) {
       return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });

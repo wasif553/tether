@@ -38,6 +38,13 @@ import {
 } from "@/lib/answerDevelopment";
 import { computePasteRetention, diffAnswerText } from "@/lib/answerDevelopmentDiff";
 import { ARTIFACT_MAX_CHARACTERS, EVENT_METADATA_MAX_CHARS } from "@/lib/answerDevelopmentThresholds";
+import { isSubmissionContentAccessible } from "@/lib/secureClientActivation";
+import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import {
+  checkTetherContentAccessLease,
+  readContentAccessLeaseCookieFromRequest,
+  TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+} from "@/lib/secureClient/requireTetherContentAccess";
 
 /**
  * Any Prisma client capable of running `<model>.<method>()` calls —
@@ -99,7 +106,8 @@ export type StudentSubmissionContext = {
 export async function loadValidatedStudentContext(
   submissionId: string,
   studentId: string,
-  questionId?: string,
+  questionId: string | undefined,
+  req: Request,
 ): Promise<StudentSubmissionContext> {
   const submission = await prisma.submission.findUnique({
     where: { id: submissionId },
@@ -110,6 +118,29 @@ export async function loadValidatedStudentContext(
   }
   if (submission.status !== "IN_PROGRESS") {
     throw new AnswerDevelopmentError(409, "This submission is no longer active");
+  }
+
+  // Release-blocking server content-boundary audit — see
+  // tetherContentAccessLease.ts. This route accepts the student's own
+  // question-linked development work (checkpoints, code runs, artifacts)
+  // during an active secure attempt — same write-integrity concern as
+  // the answers PATCH route: without this, an ordinary, separately-
+  // authenticated Chrome/Edge request could inject fabricated
+  // provenance data into an active TETHER_CLIENT_REQUIRED/SEB_REQUIRED
+  // attempt merely because a verified, activated submission exists
+  // somewhere.
+  if (!isSubmissionContentAccessible(submission)) {
+    throw new AnswerDevelopmentError(403, "This examination has not been activated yet. Return to Tether Secure Browser and complete the secure activation step.");
+  }
+  const developmentClientPolicy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
+  if (developmentClientPolicy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
+    const leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
+      submissionId: submission.id,
+      studentId,
+    });
+    if (!leaseDecision.ok) {
+      throw new AnswerDevelopmentError(403, TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE);
+    }
   }
 
   const policy = parseAnswerProvenancePolicy(submission.answerProvenancePolicySnapshotJson);

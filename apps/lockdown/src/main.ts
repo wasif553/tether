@@ -776,6 +776,20 @@ ipcMain.on("lockdown:set-secure-client-enforcement-state", (_event, state: unkno
   maybeEmitDiagnostics();
 });
 
+// v1.7.5 P0 — the narrow, read-only counterpart to the setter above. The
+// exam content page uses this to distinguish "I just arrived via the
+// Phase 2 handoff, native lockdown is already ACTIVE+READY — preserve
+// it" from "native lockdown was never established in this process (a
+// direct load, reload, or Tether restart) — a secure reactivation
+// handshake is required before any content is shown". This is the SAME
+// live state setSecureClientEnforcementState itself writes and
+// displayEnforcement's own overlay decision reads — never a second,
+// independently-tracked copy that could drift from it. Deliberately
+// returns only {active, ready, requireSingleDisplay} — no topology,
+// overlay, or diagnostic detail — so the page can never treat this as
+// anything more than the one narrow signal it needs.
+ipcMain.handle("lockdown:get-secure-client-enforcement-state", () => displayEnforcement.getDiagnosticsSnapshot().enforcementState);
+
 ipcMain.handle("lockdown:get-display-count", () => displayEnforcement.getCurrentDisplayCount());
 
 // Tether System Check and Exam Readiness v1 — see

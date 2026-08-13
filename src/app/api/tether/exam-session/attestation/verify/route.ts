@@ -21,6 +21,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { verifyExamSessionAttestation } from "@/lib/systemCheck/tetherAttestationRunner";
 import { recordSecureResumeCompleted } from "@/lib/tetherRecoveryRunner";
+import { issueContentAccessLeaseCookie } from "@/lib/secureClient/requireTetherContentAccess";
 
 const challengeSchema = z.object({
   schemaVersion: z.number().int(),
@@ -137,7 +138,25 @@ export async function POST(req: Request) {
     await recordSecureResumeCompleted(result.sessionId).catch(() => {});
   }
 
-  return NextResponse.json({ verified: true, sessionId: result.sessionId });
+  const response = NextResponse.json({ verified: true, sessionId: result.sessionId });
+
+  // Release-blocking server content-boundary audit — see
+  // tetherContentAccessLease.ts. This is the SOLE initial issuance point
+  // for the Tether Content Access Lease: `result` here is VERIFIED only
+  // after the installation's own private-key signature has been checked
+  // over THIS exact examId/submissionId/policyHash for THIS request —
+  // genuine native possession proof, unlike legacy attestation (see that
+  // route's own doc comment for why it must never issue this lease).
+  // Binds the lease to the exact key material just proven
+  // (installationPublicKeyFingerprint), not merely to a mutable row id.
+  issueContentAccessLeaseCookie(response, {
+    submissionId: body.challenge.submissionId,
+    secureClientSessionId: result.sessionId,
+    installationKeyFingerprint: result.installationPublicKeyFingerprint,
+    studentId: session.user.id,
+  });
+
+  return response;
 }
 
 export const dynamic = "force-dynamic";

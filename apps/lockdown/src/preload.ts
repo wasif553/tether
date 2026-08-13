@@ -120,17 +120,25 @@ contextBridge.exposeInMainWorld("sesLockdown", {
   },
 
   /**
-   * Corrective pass v1.2.1, Task C — the hosted page calls this as soon
-   * as it knows enough to say so: `active: true` the instant the exam
-   * page mounts (before any fetch has resolved — this is what closes the
-   * fail-open gap that let a real second display go unblocked), then
-   * `ready`/`requireSingleDisplay` filled in once the authoritative
-   * per-attempt policy and secure-client verification are both
-   * confirmed via GET /api/submissions/[id]/secure-client/status. Main
-   * has no policy awareness of its own; this is the one input it accepts
-   * from the page. Replaces the old plain-boolean
-   * setDisplayPolicyEnforced, which defaulted to "not enforcing" and had
-   * no way to represent "we don't know yet, cover the exam".
+   * Corrective pass v1.2.1, Task C (original rationale) / v1.7.5 P0
+   * (current call sites) — the hosted page calls this once it has
+   * determined the real, authoritative per-attempt policy via
+   * GET /api/submissions/[id]/secure-client/status. Main has no policy
+   * awareness of its own; this is the one input it accepts from the
+   * page. Replaces the old plain-boolean setDisplayPolicyEnforced, which
+   * defaulted to "not enforcing" and had no way to represent "we don't
+   * know yet, cover the exam".
+   *
+   * v1.7.5 P0 — the exam content page no longer calls this speculatively
+   * with `{active:true, ready:false}` the instant it mounts (the
+   * original Task C fail-open-gap fix): that call downgraded an already
+   * ACTIVE+READY native state from a successful Phase 2 handoff back to
+   * POLICY_NOT_READY, producing the exact P0 this version fixes (see
+   * docs/tether-preflight-lifecycle-v1.7.5-policy-not-ready.md). The
+   * page now queries getSecureClientEnforcementState (below) first, and
+   * only ever calls this setter once it has confirmed either the real
+   * policy (non-gated) or that native lockdown is already correctly
+   * ACTIVE+READY (gated) — never as a blind, downgrading cover.
    */
   setSecureClientEnforcementState(state: { active: boolean; ready: boolean; requireSingleDisplay: boolean }): void {
     if (typeof state !== "object" || state === null) return;
@@ -139,6 +147,20 @@ contextBridge.exposeInMainWorld("sesLockdown", {
       ready: Boolean(state.ready),
       requireSingleDisplay: Boolean(state.requireSingleDisplay),
     });
+  },
+
+  /**
+   * v1.7.5 P0 — the narrow, read-only counterpart to
+   * setSecureClientEnforcementState above. See that IPC handler's own doc
+   * comment in main.ts for why the exam content page needs this: to tell
+   * a genuine Phase 2 handoff (native lockdown already ACTIVE+READY —
+   * never re-assert/downgrade it) apart from a direct load/reload/Tether
+   * restart (native lockdown was never established in this process — a
+   * secure reactivation handshake is required before any content is
+   * shown). Never trust a client-held boolean for this; always re-query.
+   */
+  async getSecureClientEnforcementState(): Promise<{ active: boolean; ready: boolean; requireSingleDisplay: boolean }> {
+    return ipcRenderer.invoke("lockdown:get-secure-client-enforcement-state");
   },
 
   async getDisplayCount(): Promise<number> {

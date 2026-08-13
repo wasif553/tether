@@ -213,6 +213,26 @@ export function isGenuineMultiDisplayReason(reason: DisplayBlockingReason): bool
   );
 }
 
+// ---------------------------------------------------------------------------
+// v1.7.5 P0 — physical-test failure: a student's exam-content page mount
+// re-asserted {active:true, ready:false} on top of an already
+// ACTIVE+READY native state (see the exam content page's own fix,
+// src/lib/secureExamNativeLockdown.ts), producing a POLICY_NOT_READY
+// BLOCKED decision that showOverlay() then rendered as the screen-saver-
+// level, non-closable native overlay ("Preparing your secure exam
+// session") — with no Recheck/Exit route, requiring a Windows restart.
+// POLICY_NOT_READY is a normal, transient loading/verification state,
+// NEVER a misconduct condition, and must NEVER be capable of producing
+// that overlay, regardless of what caused the readiness gate to reopen.
+// This is enforced at the overlay-eligibility layer (not just fixed at
+// its one currently-known call site) so no future readiness-gate
+// transition can reintroduce this failure mode by a different path.
+// ---------------------------------------------------------------------------
+
+export function isOverlayEligibleBlockingReason(reason: DisplayBlockingReason): boolean {
+  return reason !== "POLICY_NOT_READY";
+}
+
 export type DisplayDecisionEventType = "ADDITIONAL_DISPLAY_PRESENT" | "DISPLAY_CONFIGURATION_CHANGED" | "DISPLAY_POLICY_RESTORED" | "DISPLAY_CHECK_TECHNICAL_FAILURE" | null;
 
 /**

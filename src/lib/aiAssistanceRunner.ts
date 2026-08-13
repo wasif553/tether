@@ -55,6 +55,13 @@ import {
   type BrainstormQuestionType,
 } from "@/lib/aiAssistanceGenerator";
 import { verifyBrainstormResponse, type RiskCode } from "@/lib/aiAssistanceVerifier";
+import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
+import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import {
+  checkTetherContentAccessLease,
+  readContentAccessLeaseCookieFromRequest,
+  TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+} from "@/lib/secureClient/requireTetherContentAccess";
 
 export class AiAssistanceError extends Error {
   status: number;
@@ -68,7 +75,7 @@ export class AiAssistanceError extends Error {
 // Load + validate
 // ---------------------------------------------------------------------------
 
-async function loadValidatedContext(submissionId: string, studentId: string, questionId: string) {
+async function loadValidatedContext(submissionId: string, studentId: string, questionId: string, req: Request) {
   const submission = await prisma.submission.findUnique({
     where: { id: submissionId },
     include: { exam: { include: { questions: { orderBy: { order: "asc" } } } } },
@@ -78,6 +85,30 @@ async function loadValidatedContext(submissionId: string, studentId: string, que
   }
   if (submission.status !== "IN_PROGRESS") {
     throw new AiAssistanceError(409, "This submission is no longer active");
+  }
+
+  // Release-blocking server content-boundary audit — see
+  // tetherContentAccessLease.ts. This route was found to have NO
+  // activation gate at all: a TETHER_CLIENT_REQUIRED/SEB_REQUIRED
+  // submission that has never been server-activated (native lockdown
+  // never confirmed) could still receive AI brainstorming assistance
+  // tied to real question content. Same two-layer gate as every other
+  // content-bearing route: isSubmissionContentAccessible (submission-
+  // bound) plus the request-bound lease (proves THIS request actually
+  // comes from the Tether/SEB instance, not a separately-authenticated
+  // ordinary browser).
+  if (!isSubmissionContentAccessible(submission)) {
+    throw new AiAssistanceError(403, EXAM_NOT_ACTIVATED_MESSAGE);
+  }
+  const aiAssistanceClientPolicy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
+  if (aiAssistanceClientPolicy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
+    const leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
+      submissionId: submission.id,
+      studentId,
+    });
+    if (!leaseDecision.ok) {
+      throw new AiAssistanceError(403, TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE);
+    }
   }
 
   const settings = parseSecureSettings(submission.exam.secureSettings);
@@ -382,11 +413,13 @@ export async function runAiAssistanceRequest(params: {
   studentPrompt: string;
   studentCurrentReasoning?: string | null;
   clientRequestId?: string | null;
+  req: Request;
 }): Promise<AiAssistanceRunResult> {
   const { submission, question, policy, settings } = await loadValidatedContext(
     params.submissionId,
     params.studentId,
     params.questionId,
+    params.req,
   );
 
   if (!isStudentPromptLengthValid(params.studentPrompt)) {

@@ -17,6 +17,7 @@ import { prisma } from "@/lib/prisma";
 import { isValidArtifactType, ATTEMPT_LEVEL_ARTIFACT_TYPES, type DevelopmentEventType } from "@/lib/answerDevelopment";
 import { ARTIFACT_MAX_CHARACTERS } from "@/lib/answerDevelopmentThresholds";
 import { AnswerDevelopmentError, loadValidatedStudentContext, upsertAnswerDevelopmentArtifact, recordDevelopmentEvent } from "@/lib/answerDevelopmentRunner";
+import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
 
 const bodySchema = z.object({
   content: z.string(),
@@ -62,7 +63,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 
   let context;
   try {
-    context = await loadValidatedStudentContext(id, session.user.id, isAttemptLevel ? undefined : parsed.data.questionId);
+    context = await loadValidatedStudentContext(id, session.user.id, isAttemptLevel ? undefined : parsed.data.questionId, req);
   } catch (err) {
     if (err instanceof AnswerDevelopmentError) {
       return NextResponse.json({ error: err.message }, { status: err.status });
@@ -117,7 +118,10 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
     }).catch(() => {});
   }
 
-  return NextResponse.json({ ok: true, artifactId: outcome.artifactId, version: outcome.version, changed: outcome.kind !== "unchanged" });
+  const response = NextResponse.json({ ok: true, artifactId: outcome.artifactId, version: outcome.version, changed: outcome.kind !== "unchanged" });
+  // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own doc comment.
+  await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: id, studentId: session.user.id });
+  return response;
 }
 
 export const dynamic = "force-dynamic";

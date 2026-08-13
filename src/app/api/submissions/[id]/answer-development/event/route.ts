@@ -20,6 +20,7 @@ import { DEVELOPMENT_EVENT_RATE_LIMIT_WINDOW_MS } from "@/lib/answerDevelopmentT
 import { isWithinDevelopmentEventRateLimit } from "@/lib/answerProvenancePolicy";
 import { findMostRecentSessionId } from "@/lib/examAttemptSessionRunner";
 import { AnswerDevelopmentError, loadValidatedStudentContext, recordDevelopmentEvent } from "@/lib/answerDevelopmentRunner";
+import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
 
 // The outer envelope only validates shape/type — `metadata`'s actual
 // permitted fields are enforced per-eventType by
@@ -55,7 +56,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   let context;
   try {
-    context = await loadValidatedStudentContext(id, session.user.id, parsed.data.questionId);
+    context = await loadValidatedStudentContext(id, session.user.id, parsed.data.questionId, req);
   } catch (err) {
     if (err instanceof AnswerDevelopmentError) {
       return NextResponse.json({ error: err.message }, { status: err.status });
@@ -93,7 +94,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     metadata: metadataValidation.data,
   });
 
-  return NextResponse.json({ ok: true, eventId: result.id, replay: "replay" in result }, { status: "replay" in result ? 200 : 201 });
+  const response = NextResponse.json({ ok: true, eventId: result.id, replay: "replay" in result }, { status: "replay" in result ? 200 : 201 });
+  // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own doc comment.
+  await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: id, studentId: session.user.id });
+  return response;
 }
 
 export const dynamic = "force-dynamic";

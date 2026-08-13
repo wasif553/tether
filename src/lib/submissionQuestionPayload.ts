@@ -18,6 +18,13 @@ import {
   resolveOptionOrder,
 } from "@/lib/questionDelivery";
 import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_CODE, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
+import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import {
+  checkTetherContentAccessLease,
+  readContentAccessLeaseCookieFromRequest,
+  TETHER_CONTENT_ACCESS_REQUIRED_CODE,
+  TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+} from "@/lib/secureClient/requireTetherContentAccess";
 
 export class OneQuestionModeError extends Error {
   status: number;
@@ -38,8 +45,14 @@ type SubmissionWithQuestions = NonNullable<Awaited<ReturnType<typeof loadOneQues
  * student, still IN_PROGRESS, and the exam actually has
  * oneQuestionAtATime enabled. Throws OneQuestionModeError with the
  * correct HTTP status for the caller to return directly.
+ *
+ * `req` is required so this can also enforce the release-blocking
+ * server content-boundary lease (see tetherContentAccessLease.ts) for a
+ * TETHER_CLIENT_REQUIRED/SEB_REQUIRED submission — isSubmissionContentAccessible
+ * above only proves the submission itself is activated, never that THIS
+ * request originates from the Tether/SEB instance that activated it.
  */
-export async function loadOneQuestionSubmission(submissionId: string, studentId: string) {
+export async function loadOneQuestionSubmission(submissionId: string, studentId: string, req: Request) {
   const submission = await prisma.submission.findUnique({
     where: { id: submissionId },
     include: {
@@ -60,6 +73,25 @@ export async function loadOneQuestionSubmission(submissionId: string, studentId:
   // path, even though the main submission GET already blocks it too.
   if (!isSubmissionContentAccessible(submission)) {
     throw new OneQuestionModeError(403, EXAM_NOT_ACTIVATED_MESSAGE, EXAM_NOT_ACTIVATED_CODE);
+  }
+  // Release-blocking server content-boundary audit — see
+  // tetherContentAccessLease.ts. Additive to isSubmissionContentAccessible
+  // above, never a replacement: closes the gap where an ordinary,
+  // separately-authenticated Chrome/Edge request could otherwise receive
+  // question text/options merely because a verified, activated
+  // TETHER_CLIENT_REQUIRED submission exists somewhere. Scoped to
+  // TETHER_CLIENT_REQUIRED only — a lease is only ever mintable via
+  // native Tether installation-key proof, which SAFE_EXAM_BROWSER has no
+  // equivalent of; see requireTetherContentAccess.ts's own doc comment.
+  const clientPolicy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
+  if (clientPolicy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
+    const leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
+      submissionId: submission.id,
+      studentId,
+    });
+    if (!leaseDecision.ok) {
+      throw new OneQuestionModeError(403, TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE, TETHER_CONTENT_ACCESS_REQUIRED_CODE);
+    }
   }
   const settings = parseSecureSettings(submission.exam.secureSettings);
   if (!settings.oneQuestionAtATime) {

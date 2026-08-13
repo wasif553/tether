@@ -27,28 +27,57 @@ const tetherLaunchSource = fs.readFileSync(
 const dashboardSource = fs.readFileSync(path.join(REPO_ROOT, "src", "app", "student", "page.tsx"), "utf8");
 
 describe("IPC chain hop 1: the web exam page calls setSecureClientEnforcementState", () => {
-  it("the mount-time effect calls it with active:true as soon as the Tether browser is detected (the Task C fix)", () => {
-    expect(pageTsxSource).toMatch(/window\.sesLockdown\?\.setSecureClientEnforcementState\?\.\(\{\s*active:\s*true,\s*ready:\s*false/);
+  // v1.7.5 P0 — the old Task C mount-time cover (unconditionally calling
+  // setSecureClientEnforcementState({active:true, ready:false, ...}) the
+  // instant the exam page mounted, before any policy fetch) is REMOVED —
+  // it downgraded an already ACTIVE+READY native state from a
+  // successful Phase 2 handoff back to POLICY_NOT_READY, producing the
+  // screen-saver-level, non-closable native overlay with no Recheck/Exit
+  // route. See docs/tether-preflight-lifecycle-v1.7.5-policy-not-ready.md.
+  it("v1.7.5 P0: the mount-time effect no longer calls setSecureClientEnforcementState at all — only the status-resolution effect below ever does, and only after native state has been reconciled", () => {
+    const detectedIdx = pageTsxSource.indexOf("const detected = isRunningInLockdownBrowser();");
+    expect(detectedIdx).toBeGreaterThan(-1);
+    const mountEffectStart = pageTsxSource.lastIndexOf("useEffect(() => {", detectedIdx);
+    const mountEffectEnd = pageTsxSource.indexOf("}, []);", detectedIdx) + "}, []);".length;
+    const mountEffect = pageTsxSource.slice(mountEffectStart, mountEffectEnd);
+    // A CALL site, not merely the identifier appearing in this effect's
+    // own doc comment (which legitimately names the removed pattern for
+    // documentation purposes).
+    expect(mountEffect).not.toMatch(/sesLockdown\?\.setSecureClientEnforcementState\?\.\(/);
   });
 
-  it("the status-resolution effect calls it again with the real ready/requireSingleDisplay values once the authoritative policy is known", () => {
+  it("the status-resolution effect queries the FRESH native state via getSecureClientEnforcementState before ever deciding anything, and only calls setSecureClientEnforcementState once native lockdown is confirmed (or the exam is non-gated)", () => {
     const statusEffect = pageTsxSource.slice(pageTsxSource.indexOf("fetch(`/api/submissions/${submissionId}/secure-client/status`)"));
-    const window = statusEffect.slice(0, 3000);
-    // Corrective pass v1.2.2, Task 6 — the enforcement state is now built
-    // into a named variable (so it can be reused for the
-    // ipc_enforcement_state_sent diagnostic log line) before being
-    // passed to setSecureClientEnforcementState, rather than an inline
-    // object literal — assert both the computation and the call.
-    expect(window).toMatch(/const nextEnforcementState = \{\s*active:\s*gated,\s*ready:\s*!gated \|\| verified,\s*requireSingleDisplay:\s*enforced\s*\}/);
-    expect(window).toMatch(/setSecureClientEnforcementState\?\.\(nextEnforcementState\)/);
+    const window = statusEffect.slice(0, 6000);
+    expect(window).toMatch(/getSecureClientEnforcementState\!\(\)/);
+    expect(window).toMatch(/resolveNativeLockdownConfirmation\(\{ gated, bridgeAvailable, nativeState, requireSingleDisplay: enforced \}\)/);
+    // The reactivation and unsupported-build branches both return BEFORE
+    // ever reaching the setSecureClientEnforcementState call below them.
+    const reactivationIdx = window.indexOf('confirmation === "REACTIVATION_REQUIRED"');
+    const unsupportedIdx = window.indexOf('confirmation === "UNSUPPORTED_BUILD"');
+    const setterIdx = window.indexOf("setSecureClientEnforcementState?.(nextEnforcementState)");
+    expect(reactivationIdx).toBeGreaterThan(-1);
+    expect(unsupportedIdx).toBeGreaterThan(reactivationIdx);
+    expect(setterIdx).toBeGreaterThan(unsupportedIdx);
   });
 
-  it("a failed/malformed status fetch explicitly re-asserts the covering state rather than leaving the previous state in place (Task C: displayPolicy missing/invalid -> cover)", () => {
-    const catchStart = pageTsxSource.indexOf("Fail closed: never silently leave the previous");
+  it("v1.7.5 P0: a gated attempt whose native state is NOT already active+ready redirects to tether-launch for a fresh reactivation handshake — it never re-asserts a downgrading cover", () => {
+    const statusEffect = pageTsxSource.slice(pageTsxSource.indexOf("fetch(`/api/submissions/${submissionId}/secure-client/status`)"));
+    const window = statusEffect.slice(0, 4000);
+    const reactivationBranchMatch = window.match(/if \(confirmation === "REACTIVATION_REQUIRED"\) \{([\s\S]*?)\n\s*\}/);
+    expect(reactivationBranchMatch).not.toBeNull();
+    expect(reactivationBranchMatch![1]).toContain("router.replace(buildTetherLaunchPagePath(examId));");
+    expect(reactivationBranchMatch![1]).not.toContain("setSecureClientEnforcementState");
+    expect(reactivationBranchMatch![1]).not.toMatch(/active:\s*true,\s*ready:\s*false/);
+  });
+
+  it("v1.7.5 P0: a failed/malformed status fetch sets contentGateState to STATUS_UNAVAILABLE — it no longer re-asserts any native cover flag (the removed Task C anti-pattern)", () => {
+    const catchStart = pageTsxSource.indexOf("fail closed WITHOUT asserting a native cover flag");
     expect(catchStart).toBeGreaterThan(-1);
     const catchBlock = pageTsxSource.slice(catchStart, catchStart + 800);
-    expect(catchBlock).toMatch(/const coveringState = \{\s*active:\s*true,\s*ready:\s*false,\s*requireSingleDisplay:\s*false\s*\}/);
-    expect(catchBlock).toMatch(/setSecureClientEnforcementState\?\.\(coveringState\)/);
+    expect(catchBlock).toContain('setContentGateState("STATUS_UNAVAILABLE")');
+    expect(catchBlock).not.toContain("coveringState");
+    expect(catchBlock).not.toContain("setSecureClientEnforcementState");
   });
 });
 
@@ -56,6 +85,11 @@ describe("IPC chain hop 2: preload exposes the expected bridge", () => {
   it("exposes setSecureClientEnforcementState on window.sesLockdown, sending lockdown:set-secure-client-enforcement-state", () => {
     expect(preloadSource).toMatch(/setSecureClientEnforcementState\(state:/);
     expect(preloadSource).toMatch(/ipcRenderer\.send\("lockdown:set-secure-client-enforcement-state"/);
+  });
+
+  it("v1.7.5 P0: exposes the narrow, read-only getSecureClientEnforcementState via ipcRenderer.invoke — never a generic ipcRenderer passthrough", () => {
+    expect(preloadSource).toMatch(/async getSecureClientEnforcementState\(\): Promise</);
+    expect(preloadSource).toMatch(/ipcRenderer\.invoke\("lockdown:get-secure-client-enforcement-state"\)/);
   });
 
   it("also exposes the Task A/B diagnostic bridge methods: reportDiagnosticContext, isDiagnosticsPanelEnabled, onDiagnosticsSnapshot", () => {
@@ -80,6 +114,12 @@ describe("IPC chain hop 3: main.ts receives the IPC message", () => {
     expect(mainSource).toMatch(/ipcMain\.handle\("lockdown:get-diagnostics-enabled"/);
     expect(mainSource).toMatch(/ipcMain\.handle\("lockdown:get-diagnostics-snapshot"/);
   });
+
+  it("v1.7.5 P0 — registers a read-only lockdown:get-secure-client-enforcement-state handler returning ONLY displayEnforcement's own live enforcementState — never a second, independently-tracked copy", () => {
+    expect(mainSource).toMatch(
+      /ipcMain\.handle\("lockdown:get-secure-client-enforcement-state",\s*\(\)\s*=>\s*displayEnforcement\.getDiagnosticsSnapshot\(\)\.enforcementState\);/,
+    );
+  });
 });
 
 describe("IPC chain hop 4: displayEnforcement stores the policy and evaluate() runs immediately", () => {
@@ -101,14 +141,20 @@ describe("IPC chain hop 4: displayEnforcement stores the policy and evaluate() r
 });
 
 describe("IPC chain hop 5: the overlay BrowserWindow is created and shown", () => {
-  it("evaluateNow shows the overlay on BLOCKED and hides it otherwise", () => {
+  it("evaluateNow shows the overlay on BLOCKED (except POLICY_NOT_READY) and hides it otherwise", () => {
     const evaluateNow = displayEnforcementSource.slice(
       displayEnforcementSource.indexOf("private async evaluateNow"),
       displayEnforcementSource.indexOf("private showOverlay"),
     );
     // v1.7.4 pre-exam readiness — showOverlay now takes the specific
     // DisplayBlockingReason (never a hardcoded, reason-blind overlay).
-    expect(evaluateNow).toMatch(/if \(nextDecision\.state === "BLOCKED"\) this\.showOverlay\(nextDecision\.reason\);/);
+    // v1.7.5 P0 — isOverlayEligibleBlockingReason additionally excludes
+    // POLICY_NOT_READY from ever reaching showOverlay at all (see
+    // displayEnforcementLogic.test.ts / displayEnforcement.test.ts for
+    // the full regression coverage).
+    expect(evaluateNow).toMatch(
+      /if \(nextDecision\.state === "BLOCKED" && isOverlayEligibleBlockingReason\(nextDecision\.reason\)\) this\.showOverlay\(nextDecision\.reason\);/,
+    );
     expect(evaluateNow).toMatch(/else this\.hideOverlay\(\);/);
   });
 

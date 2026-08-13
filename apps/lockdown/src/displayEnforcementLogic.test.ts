@@ -14,6 +14,7 @@ import {
   resolveDisplayDecisionEventType,
   isGenuineMultiDisplayReason,
   displayBlockingReasonCopy,
+  isOverlayEligibleBlockingReason,
 } from "./displayEnforcementLogic";
 
 // ---------------------------------------------------------------------------
@@ -442,6 +443,25 @@ describe("isGenuineMultiDisplayReason", () => {
   it("false for POLICY_NOT_READY and TOPOLOGY_CHECK_UNAVAILABLE — neither is display evidence", () => {
     expect(isGenuineMultiDisplayReason("POLICY_NOT_READY")).toBe(false);
     expect(isGenuineMultiDisplayReason("TOPOLOGY_CHECK_UNAVAILABLE")).toBe(false);
+  });
+});
+
+// v1.7.5 P0 — physical-test failure: POLICY_NOT_READY produced the
+// screen-saver-level, non-closable native overlay ("Preparing your
+// secure exam session") with no Recheck/Exit route, requiring a Windows
+// restart. See displayEnforcement.test.ts for the class-level runtime
+// proof that the overlay is never actually constructed.
+describe("isOverlayEligibleBlockingReason — REQUIRED TEST E: POLICY_NOT_READY can never construct/show the native overlay", () => {
+  it("false only for POLICY_NOT_READY", () => {
+    expect(isOverlayEligibleBlockingReason("POLICY_NOT_READY")).toBe(false);
+  });
+
+  it("true for every other blocking reason — genuine display evidence AND technical-failure reasons both still show the overlay, unchanged", () => {
+    expect(isOverlayEligibleBlockingReason("ADDITIONAL_ELECTRON_DISPLAY")).toBe(true);
+    expect(isOverlayEligibleBlockingReason("WINDOWS_TOPOLOGY_EXTEND")).toBe(true);
+    expect(isOverlayEligibleBlockingReason("WINDOWS_TOPOLOGY_CLONE")).toBe(true);
+    expect(isOverlayEligibleBlockingReason("MULTIPLE_ACTIVE_TARGETS")).toBe(true);
+    expect(isOverlayEligibleBlockingReason("TOPOLOGY_CHECK_UNAVAILABLE")).toBe(true);
   });
 });
 

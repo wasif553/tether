@@ -24,6 +24,7 @@ import {
 } from "@/lib/sessionBinding";
 import { getCurrentSessionForSubmission, recordHeartbeat, recordSecureClientEvent } from "@/lib/secureClientRunner";
 import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
 
 const bodySchema = z.object({
   timezone: z.string().max(100).optional(),
@@ -129,6 +130,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     response.cookies.set(DEVICE_TOKEN_COOKIE_NAME, result.deviceToken, deviceTokenCookieOptions());
   }
 
+  // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own
+  // doc comment. This heartbeat is the ONE guaranteed periodic request
+  // during an active attempt (fired every ~25s purely on submissionStatus
+  // === "IN_PROGRESS" — see the student exam page's sendHeartbeat effect —
+  // never gated on the student actually saving an answer or navigating).
+  // Without renewing here too, a student who legitimately reads/thinks for
+  // >30 minutes without an autosave or navigation event would still lose
+  // content access mid-attempt even though this heartbeat kept native
+  // lockdown/session trust alive the whole time. Self-gating and a no-op
+  // for STANDARD_WEB/SEB_REQUIRED (no lease cookie ever sent) and for any
+  // lease that does not independently re-validate right now — this can
+  // never bootstrap a missing/expired lease, only extend one that is
+  // already good.
+  await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: submission.id, studentId: submission.studentId });
   return response;
 }
 

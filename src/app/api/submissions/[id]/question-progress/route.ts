@@ -25,6 +25,7 @@ import { isBlockedBackNavigation, nextAllowedIndex, resolveEffectiveQuestionIds 
 import { buildOneQuestionPayload, loadOneQuestionSubmission, OneQuestionModeError } from "@/lib/submissionQuestionPayload";
 import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { authoriseDirectNavigation, markQuestionVisited, QuestionNavigatorError } from "@/lib/questionNavigatorRunner";
+import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
 
 // Question Navigator v1 — see docs/question-navigator-v1.md. The GOTO
 // action is a DISTINCT navigation surface from the plain `currentIndex`
@@ -65,10 +66,13 @@ export async function POST(
   if (parsed.data.action === "GOTO") {
     try {
       const { finalIndex } = await authoriseDirectNavigation(id, session.user.id, parsed.data.targetIndex!);
-      const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id);
+      const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id, req);
       const payload = buildOneQuestionPayload(submission, settings, finalIndex);
       if (!payload) return NextResponse.json({ error: "This exam has no questions" }, { status: 404 });
-      return NextResponse.json(payload);
+      const response = NextResponse.json(payload);
+      // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own doc comment.
+      await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: submission.id, studentId: submission.studentId });
+      return response;
     } catch (err) {
       if (err instanceof QuestionNavigatorError) {
         return NextResponse.json({ error: err.message }, { status: err.status });
@@ -83,7 +87,7 @@ export async function POST(
   const requestedIndex = parsed.data.currentIndex!;
 
   try {
-    const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id);
+    const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id, req);
     const storedIndex = submission.currentQuestionIndex;
     // Question Pools v1 — total is the SELECTED question count for this
     // submission when pools are active, never the full exam question
@@ -162,7 +166,10 @@ export async function POST(
     if (!payload) {
       return NextResponse.json({ error: "This exam has no questions" }, { status: 404 });
     }
-    return NextResponse.json(payload);
+    const response = NextResponse.json(payload);
+    // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own doc comment.
+    await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: submission.id, studentId: submission.studentId });
+    return response;
   } catch (err) {
     if (err instanceof OneQuestionModeError) {
       return NextResponse.json({ error: err.message }, { status: err.status });

@@ -18,7 +18,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   const submission = await prisma.submission.findUnique({
     where: { id },
-    select: { studentId: true, secureClientPolicySnapshotJson: true, activatedAt: true },
+    select: { studentId: true, secureClientPolicySnapshotJson: true, activatedAt: true, examId: true },
   });
   if (!submission || submission.studentId !== session.user.id) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -31,6 +31,14 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   });
 
   return NextResponse.json({
+    // v1.7.5 P0 follow-up — the exam CONTENT page needs to build the
+    // tether-launch redirect URL (/student/exams/[examId]/tether-launch)
+    // BEFORE it is ever safe to fetch GET /api/submissions/[id] (which
+    // returns full question text/options once the submission is
+    // server-activated) — this is the one thing this narrow, no-content
+    // endpoint was missing to make that possible. A bare opaque id, no
+    // more sensitive than the submissionId already in the URL.
+    examId: submission.examId,
     deliveryMode: policy.deliveryMode,
     studentPreflightRequired: policy.studentPreflightRequired,
     // Corrective pass v1.2.1, Task A — bounded, non-secret policy fields

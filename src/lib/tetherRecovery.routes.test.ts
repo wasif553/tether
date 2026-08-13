@@ -53,10 +53,23 @@ function sessionFor(userId: string, role: "LECTURER" | "STUDENT") {
   return { user: { id: userId, role, email: `${userId}@test.local`, name: userId, institutionId: testInstitution.id } };
 }
 
-function jsonRequest(method: string, body?: unknown) {
+/** Release-blocking follow-up review — a lease is only ever valid when it matches the session's CURRENT clientInstallationIdHash; any SecureClientSession row this file creates directly (bypassing real v2 attestation) must set this to the SAME fixed test fingerprint. */
+const TEST_INSTALLATION_FINGERPRINT = "test-installation-fingerprint";
+
+/** Release-blocking server content-boundary audit — extracts the lease cookie a real attestation/activation response just issued, so it can be forwarded on the next request exactly like a genuine Tether instance's own cookie jar would. */
+function extractLeaseCookieHeader(res: Response): string | undefined {
+  const setCookie = res.headers.get("set-cookie");
+  if (!setCookie) return undefined;
+  const match = setCookie.match(/tether_content_lease=([^;]+)/);
+  return match ? `tether_content_lease=${match[1]}` : undefined;
+}
+
+function jsonRequest(method: string, body?: unknown, cookie?: string) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (cookie) headers["Cookie"] = cookie;
   return new Request("http://test.local/route", {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 }
@@ -144,11 +157,44 @@ async function startAsStudent(examId: string, studentUser: { id: string } = stud
  * verification/activation call the real routes directly instead (see
  * launchAndConsume/attestExamSessionV2 and the recovery-flow tests
  * below).
+ *
+ * Release-blocking server content-boundary audit — see
+ * tetherContentAccessLease.ts. Content routes now ALSO require a
+ * request-bound lease, not just activatedAt/a verified session — this
+ * bypass mints one directly (no HTTP round trip needed, since the whole
+ * point of this helper is to skip the real attestation dance) and
+ * returns it as `leaseCookie` so callers can attach it to their PATCH/
+ * GET/submit requests, exactly like a genuine Tether instance would.
  */
 async function startAsStudentAndActivate(examId: string, studentUser: { id: string } = student) {
   const submission = await startAsStudent(examId, studentUser);
   await prisma.submission.update({ where: { id: submission.id }, data: { activatedAt: new Date() } });
-  return submission;
+  const secureClientSession = await prisma.secureClientSession.create({
+    data: {
+      institutionId: testInstitution.id,
+      examId,
+      submissionId: submission.id,
+      studentId: studentUser.id,
+      clientType: "TETHER_SECURE_CLIENT",
+      status: "ACTIVE",
+      verificationStatus: "VERIFIED",
+      clientInstallationIdHash: TEST_INSTALLATION_FINGERPRINT,
+    },
+  });
+  const { getSigningPrivateKey, getSigningKeyId } = await import("./secureClientRunner");
+  const { buildContentAccessLeaseClaims, encodeContentAccessLeaseCookieValue, CONTENT_ACCESS_LEASE_COOKIE_NAME } = await import(
+    "./secureClient/tetherContentAccessLease"
+  );
+  const claims = buildContentAccessLeaseClaims({
+    keyId: getSigningKeyId(),
+    submissionId: submission.id,
+    secureClientSessionId: secureClientSession.id,
+    installationKeyFingerprint: TEST_INSTALLATION_FINGERPRINT,
+    studentId: studentUser.id,
+  });
+  const leaseToken = encodeContentAccessLeaseCookieValue(claims, getSigningPrivateKey());
+  const leaseCookie = `${CONTENT_ACCESS_LEASE_COOKIE_NAME}=${leaseToken}`;
+  return { ...submission, leaseCookie };
 }
 
 /**
@@ -158,9 +204,9 @@ async function startAsStudentAndActivate(examId: string, studentUser: { id: stri
  * attestExamSessionV2) and to have set mockAuth to the owning student —
  * exactly mirroring the real tether-launch client's own sequencing.
  */
-async function activateSubmission(studentUser: { id: string }, submissionId: string) {
+async function activateSubmission(studentUser: { id: string }, submissionId: string, leaseCookie?: string) {
   mockAuth.mockResolvedValue(sessionFor(studentUser.id, "STUDENT"));
-  const res = await activateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submissionId }) });
+  const res = await activateRoute.POST(jsonRequest("POST", undefined, leaseCookie), { params: Promise.resolve({ id: submissionId }) });
   if (res.status !== 200) {
     const body = await res.json().catch(() => null);
     throw new Error(`activateSubmission(${submissionId}) failed: ${res.status} ${JSON.stringify(body)}`);
@@ -202,7 +248,7 @@ async function registerInstallation(studentUser: { id: string }, tag: string) {
 async function attestExamSessionV2(studentUser: { id: string }, submissionId: string, installation: { installationId: string; privateKeyPem: string }) {
   mockAuth.mockResolvedValue(sessionFor(studentUser.id, "STUDENT"));
   const challengeRes = await examSessionChallengeRoute.POST(jsonRequest("POST", { installationId: installation.installationId, submissionId }));
-  if (challengeRes.status !== 200) return { status: challengeRes.status, body: await challengeRes.json() };
+  if (challengeRes.status !== 200) return { status: challengeRes.status, body: await challengeRes.json(), leaseCookie: undefined };
   const { challenge, signature: challengeSignature } = await challengeRes.json();
 
   // Signed ONCE and reused verbatim in the request body below — the
@@ -240,7 +286,7 @@ async function attestExamSessionV2(studentUser: { id: string }, submissionId: st
       timestamp,
     }),
   );
-  return { status: verifyRes.status, body: await verifyRes.json() };
+  return { status: verifyRes.status, body: await verifyRes.json(), leaseCookie: extractLeaseCookieHeader(verifyRes) };
 }
 
 /** Real launch -> consume sequence, exactly like the tether-launch page — each call may create a fresh session (superseding any existing non-terminal one). */
@@ -265,12 +311,12 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
     const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
     const payload = { questionId: question.id, response: "first answer", clientRequestId: "req-A", clientRevision: 1 };
 
-    const first = await answersRoute.PATCH(jsonRequest("PATCH", payload), { params: Promise.resolve({ id: submission.id }) });
+    const first = await answersRoute.PATCH(jsonRequest("PATCH", payload, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
     expect(first.status).toBe(200);
     const firstBody = await first.json();
     expect(firstBody.acknowledgedRevision).toBe(1);
 
-    const retry = await answersRoute.PATCH(jsonRequest("PATCH", payload), { params: Promise.resolve({ id: submission.id }) });
+    const retry = await answersRoute.PATCH(jsonRequest("PATCH", payload, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
     expect(retry.status).toBe(200);
     const retryBody = await retry.json();
     expect(retryBody.response).toBe("first answer");
@@ -288,8 +334,8 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
     const payload = { questionId: question.id, response: "concurrent answer", clientRequestId: "req-concurrent", clientRevision: 1 };
 
     const [a, b] = await Promise.all([
-      answersRoute.PATCH(jsonRequest("PATCH", payload), { params: Promise.resolve({ id: submission.id }) }),
-      answersRoute.PATCH(jsonRequest("PATCH", payload), { params: Promise.resolve({ id: submission.id }) }),
+      answersRoute.PATCH(jsonRequest("PATCH", payload, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) }),
+      answersRoute.PATCH(jsonRequest("PATCH", payload, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) }),
     ]);
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
@@ -306,14 +352,14 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
     const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
 
     const newer = await answersRoute.PATCH(
-      jsonRequest("PATCH", { questionId: question.id, response: "revision two", clientRequestId: "req-2", clientRevision: 2 }),
+      jsonRequest("PATCH", { questionId: question.id, response: "revision two", clientRequestId: "req-2", clientRevision: 2 }, submission.leaseCookie),
       { params: Promise.resolve({ id: submission.id }) },
     );
     expect(newer.status).toBe(200);
 
     // A stale/late arrival of an OLDER revision under a DIFFERENT request id.
     const stale = await answersRoute.PATCH(
-      jsonRequest("PATCH", { questionId: question.id, response: "revision one (stale)", clientRequestId: "req-1", clientRevision: 1 }),
+      jsonRequest("PATCH", { questionId: question.id, response: "revision one (stale)", clientRequestId: "req-1", clientRevision: 1 }, submission.leaseCookie),
       { params: Promise.resolve({ id: submission.id }) },
     );
     expect(stale.status).toBe(200);
@@ -352,11 +398,11 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
 
       const [low, high] = await Promise.all([
         answersRoute.PATCH(
-          jsonRequest("PATCH", { questionId: question.id, response: "LOW", clientRequestId: `race-low-${i}`, clientRevision: 1 }),
+          jsonRequest("PATCH", { questionId: question.id, response: "LOW", clientRequestId: `race-low-${i}`, clientRevision: 1 }, submission.leaseCookie),
           { params: Promise.resolve({ id: submission.id }) },
         ),
         answersRoute.PATCH(
-          jsonRequest("PATCH", { questionId: question.id, response: "HIGH", clientRequestId: `race-high-${i}`, clientRevision: 5 }),
+          jsonRequest("PATCH", { questionId: question.id, response: "HIGH", clientRequestId: `race-high-${i}`, clientRevision: 5 }, submission.leaseCookie),
           { params: Promise.resolve({ id: submission.id }) },
         ),
       ]);
@@ -378,11 +424,11 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
     const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
 
-    await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "v1", clientRequestId: "req-1", clientRevision: 1 }), {
+    await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "v1", clientRequestId: "req-1", clientRevision: 1 }, submission.leaseCookie), {
       params: Promise.resolve({ id: submission.id }),
     });
     const second = await answersRoute.PATCH(
-      jsonRequest("PATCH", { questionId: question.id, response: "v2", clientRequestId: "req-2", clientRevision: 2 }),
+      jsonRequest("PATCH", { questionId: question.id, response: "v2", clientRequestId: "req-2", clientRevision: 2 }, submission.leaseCookie),
       { params: Promise.resolve({ id: submission.id }) },
     );
     const body = await second.json();
@@ -404,12 +450,12 @@ describe("Autosave idempotency and revision control (Part 2)", () => {
     // affect the other's answer.
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
     await answersRoute.PATCH(
-      jsonRequest("PATCH", { questionId: questionA.id, response: "student A's answer", clientRequestId: "shared-id", clientRevision: 1 }),
+      jsonRequest("PATCH", { questionId: questionA.id, response: "student A's answer", clientRequestId: "shared-id", clientRevision: 1 }, submissionA.leaseCookie),
       { params: Promise.resolve({ id: submissionA.id }) },
     );
     mockAuth.mockResolvedValue(sessionFor(otherStudent.id, "STUDENT"));
     await answersRoute.PATCH(
-      jsonRequest("PATCH", { questionId: questionB.id, response: "student B's answer", clientRequestId: "shared-id", clientRevision: 1 }),
+      jsonRequest("PATCH", { questionId: questionB.id, response: "student B's answer", clientRequestId: "shared-id", clientRevision: 1 }, submissionB.leaseCookie),
       { params: Promise.resolve({ id: submissionB.id }) },
     );
 
@@ -434,9 +480,9 @@ describe("Final submission idempotency (Part 9)", () => {
     const submission = await startAsStudentAndActivate(exam.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
     const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
-    await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "ok" }), { params: Promise.resolve({ id: submission.id }) });
+    await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "ok" }, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
 
-    const first = await submitRoute.POST(jsonRequest("POST", { submissionRequestId: "submit-req-1" }), { params: Promise.resolve({ id: submission.id }) });
+    const first = await submitRoute.POST(jsonRequest("POST", { submissionRequestId: "submit-req-1" }, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
     expect(first.status).toBe(200);
     const firstBody = await first.json();
     expect(firstBody.status).toBe("GRADED");
@@ -459,7 +505,7 @@ describe("Final submission idempotency (Part 9)", () => {
     const exam = await createTetherExam("Confirm Prior Acceptance");
     const submission = await startAsStudentAndActivate(exam.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
-    await submitRoute.POST(jsonRequest("POST", { submissionRequestId: "submit-req-timeout" }), { params: Promise.resolve({ id: submission.id }) });
+    await submitRoute.POST(jsonRequest("POST", { submissionRequestId: "submit-req-timeout" }, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
 
     // The client never saw the response (simulated network loss) — GET is
     // the authoritative way to resolve the ambiguity.
@@ -601,17 +647,26 @@ describe("Crash, relaunch and Windows-restart recovery (Parts 6-8)", () => {
     expect(after.startedAt.getTime()).toBe(before.startedAt.getTime());
     expect(after.examPolicySnapshotJson).toEqual(before.examPolicySnapshotJson);
 
-    // Legacy attestation on the CURRENT (post-relaunch) session, so GET's
-    // content-exposure gate allows this read through — content gating
-    // itself is covered by its own describe block below; here it's just
-    // the means to read back the server-computed deadline.
+    // Legacy attestation on the CURRENT (post-relaunch) session —
+    // required under the default LEGACY compatibility mode for
+    // hasVerifiedTetherSession itself to be satisfied at all.
     const attestationRoute = await import("../app/api/secure-client/sessions/[sessionId]/attestation/route");
     await attestationRoute.POST(jsonRequest("POST", { clientType: "TETHER_SECURE_CLIENT", checks: {}, required: {} }), {
       params: Promise.resolve({ sessionId: finalSessionId }),
     });
-    await activateSubmission(student, submission.id);
+    // Release-blocking follow-up review — legacy attestation can no
+    // longer mint the content-access lease (see that route's own doc
+    // comment), so a genuine v2 installation attestation is ADDITIONALLY
+    // required to obtain one — this is purely the means to read back the
+    // server-computed deadline; content gating itself is covered by its
+    // own describe block below.
+    const installation = await registerInstallation(student, "timing-never-resets");
+    const v2Res = await attestExamSessionV2(student, submission.id, installation);
+    expect(v2Res.body.verified).toBe(true);
+    const leaseCookie = v2Res.leaseCookie;
+    await activateSubmission(student, submission.id, leaseCookie);
 
-    const getRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    const getRes = await submissionRoute.GET(jsonRequest("GET", undefined, leaseCookie), { params: Promise.resolve({ id: submission.id }) });
     expect(getRes.status).toBe(200);
     const getBody = await getRes.json();
     // v1.7.4 pre-exam readiness — activation resets startedAt to the
@@ -635,6 +690,13 @@ describe("Freshness-gated verification (Part 6) — 'a previously verified sessi
       const sessionId = await launchAndConsume(student, submission.id);
 
       // Legacy attestation — simplest path to a genuinely VERIFIED session.
+      // Release-blocking follow-up review: legacy attestation can no
+      // longer mint the content-access lease (no installation-key proof
+      // anywhere in that flow), so a genuine v2 installation attestation
+      // is also required here purely to obtain a valid lease — the
+      // staleness behaviour this test actually proves is unrelated to
+      // that, and still driven entirely by verificationStatus/
+      // lastHeartbeatAt below.
       mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
       const attestationRoute = await import("../app/api/secure-client/sessions/[sessionId]/attestation/route");
       const attestRes = await attestationRoute.POST(jsonRequest("POST", { clientType: "TETHER_SECURE_CLIENT", checks: {}, required: {} }), {
@@ -644,10 +706,14 @@ describe("Freshness-gated verification (Part 6) — 'a previously verified sessi
 
       const verified = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: sessionId } });
       expect(verified.verificationStatus).toBe("VERIFIED");
-      await activateSubmission(student, submission.id);
+      const installation = await registerInstallation(student, "staleness-blocks-content");
+      const v2Res = await attestExamSessionV2(student, submission.id, installation);
+      expect(v2Res.body.verified).toBe(true);
+      const leaseCookie = v2Res.leaseCookie;
+      await activateSubmission(student, submission.id, leaseCookie);
 
       // Content is accessible immediately after verification (+ activation).
-      const freshGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+      const freshGet = await submissionRoute.GET(jsonRequest("GET", undefined, leaseCookie), { params: Promise.resolve({ id: submission.id }) });
       expect(freshGet.status).toBe(200);
 
       // Simulate a long-dead process: backdate contact far beyond the
@@ -719,7 +785,7 @@ describe("Recovery-status endpoint authorization and non-final-assessment regres
     const exam = await createTetherExam("Recovery Status Submitted");
     const submission = await startAsStudentAndActivate(exam.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
-    await submitRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
+    await submitRoute.POST(jsonRequest("POST", {}, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
     const res = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     const body = await res.json();
     expect(body.state).toBe("SUBMITTED");
@@ -777,8 +843,8 @@ describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", ()
     const statusRes = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect((await statusRes.json()).state).toBe("ACTIVE");
 
-    await activateSubmission(testStudent, submission.id);
-    const getRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    await activateSubmission(testStudent, submission.id, attest2.leaseCookie);
+    const getRes = await submissionRoute.GET(jsonRequest("GET", undefined, attest2.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
     expect(getRes.status).toBe(200);
   });
 
@@ -823,7 +889,7 @@ describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", ()
   // (see resolveTrustedTetherVerification's own doc comment) — a
   // relaunch here must resolve exactly like an ordinary first launch:
   // retryable, and restored once the retry itself re-verifies.
-  it("URGENT fix (was 3/4/10/14): an unbound LEGACY-only original attempt can retry normally — a fresh LEGACY re-attestation on the relaunch restores content, never MANUAL_REVIEW_REQUIRED", async () => {
+  it("URGENT fix (was 3/4/10/14): an unbound LEGACY-only original attempt can retry normally — a fresh LEGACY re-attestation on the relaunch restores VERIFIED status, never MANUAL_REVIEW_REQUIRED. Release-blocking follow-up review: LEGACY-only verification (no installation binding at all) now correctly NEVER grants content access on its own — that requires the separate v2-proven lease — but the ORIGINAL recovery-state-machine bug this test guards (an unbound retry wrongly trapped behind MANUAL_REVIEW_REQUIRED) remains fixed and is asserted independently of content access.", async () => {
     const testStudent = await makeStudent("matrix-3");
     const exam = await createTetherExam("Matrix 3 Legacy Unbound");
     const submission = await startAsStudent(exam.id, testStudent);
@@ -839,10 +905,17 @@ describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", ()
     expect(session1.verificationStatus).toBe("VERIFIED");
     expect(session1.clientInstallationId).toBeNull();
 
-    // Content is accessible on the ORIGINAL attempt — ordinary LEGACY-mode behaviour, completely unaffected (requirement 4).
-    await activateSubmission(testStudent, submission.id);
+    // Release-blocking follow-up review — legacy attestation issues NO
+    // lease at all (see that route's own doc comment), so it carries no
+    // Cookie header here. Both activation and content access must now
+    // fail closed for this genuinely unbound, v2-less session — this is
+    // the DELIBERATE, corrected behaviour, not the old bug.
+    expect(legacyAttest1.headers.get("set-cookie")).toBeNull();
+    const blockedActivate = await activateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
+    expect(blockedActivate.status).toBe(403);
+    expect((await blockedActivate.json()).code).toBe("TETHER_CONTENT_ACCESS_REQUIRED");
     const originalGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
-    expect(originalGet.status).toBe(200);
+    expect(originalGet.status).toBe(403);
 
     // Simulated crash/relaunch (or, the confirmed production scenario, a
     // retry after a failed mandatory pre-exam readiness gate) — session1
@@ -854,6 +927,8 @@ describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", ()
     // Not yet MANUAL_REVIEW_REQUIRED, and not yet ACTIVE either — the
     // retry session hasn't presented ITS OWN fresh attestation yet, so it
     // correctly needs one, exactly like an ordinary first launch would.
+    // THIS is the actual regression this test guards: an unbound retry
+    // must never get permanently trapped behind MANUAL_REVIEW_REQUIRED.
     mockAuth.mockResolvedValue(sessionFor(testStudent.id, "STUDENT"));
     const statusRes = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect((await statusRes.json()).state).toBe("RESUME_REQUIRES_FRESH_ATTESTATION");
@@ -862,25 +937,37 @@ describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", ()
     expect(blockedGet.status).toBe(403);
 
     // A fresh LEGACY attestation on the RECOVERY session — the same real
-    // device simply re-verifying — now DOES restore content, matching
-    // ordinary first-launch behaviour under LEGACY mode.
+    // device simply re-verifying — restores VERIFIED status/recovery
+    // state exactly like an ordinary first launch would under LEGACY
+    // mode, proving the state-machine trap stays fixed. It still never
+    // mints a lease (unaffected by this fix's correction), so genuine
+    // content access additionally requires the v2 step below.
     const legacyAttest2 = await attestationRoute.POST(jsonRequest("POST", { clientType: "TETHER_SECURE_CLIENT", checks: {}, required: {} }), {
       params: Promise.resolve({ sessionId: session2Id }),
     });
     expect(legacyAttest2.status).toBe(201);
+    expect(legacyAttest2.headers.get("set-cookie")).toBeNull();
     const session2After = await prisma.secureClientSession.findUniqueOrThrow({ where: { id: session2Id } });
     expect(session2After.verificationStatus).toBe("VERIFIED");
-    const restoredGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
-    expect(restoredGet.status).toBe(200);
 
     const statusAfter = await recoveryStatusRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect((await statusAfter.json()).state).toBe("ACTIVE");
 
-    // resumeCount is only ever incremented by a genuine V2 recovery
-    // completion (recordSecureResumeCompleted, wired to the exam-session
-    // attestation verify route) — unrelated to this fix, and unaffected:
-    // a plain LEGACY re-attestation was never the trigger for it, before
-    // or after this fix.
+    // Genuine content access now additionally requires the v2-proven
+    // lease — the same student's real device completing installation
+    // registration + v2 attestation restores it.
+    const installation = await registerInstallation(testStudent, "matrix-3-recovery");
+    const v2Res = await attestExamSessionV2(testStudent, submission.id, installation);
+    expect(v2Res.body.verified).toBe(true);
+    await activateSubmission(testStudent, submission.id, v2Res.leaseCookie);
+    const restoredGet = await submissionRoute.GET(jsonRequest("GET", undefined, v2Res.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
+    expect(restoredGet.status).toBe(200);
+
+    // resumeCount stays 0 here — session1 (the prior session this v2
+    // attestation supersedes) was never itself installation-bound, so
+    // this does not register as a genuine device-verified recovery
+    // completion (recordSecureResumeCompleted's own condition), unrelated
+    // to and unaffected by this fix.
     const finalSubmission = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
     expect(finalSubmission.resumeCount).toBe(0);
 

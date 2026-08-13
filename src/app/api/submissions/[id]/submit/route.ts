@@ -13,6 +13,14 @@ import { parseAnswerProvenancePolicy, isAnswerProvenanceEnabled } from "@/lib/an
 import { isSourceDeclarationSatisfied, createFinalDevelopmentRecordsWithTx } from "@/lib/answerDevelopmentRunner";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_CODE, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
+import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import {
+  checkTetherContentAccessLease,
+  readContentAccessLeaseCookieFromRequest,
+  renewTetherContentAccessLeaseIfValid,
+  TETHER_CONTENT_ACCESS_REQUIRED_CODE,
+  TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+} from "@/lib/secureClient/requireTetherContentAccess";
 
 function studentSubmitResponse(submission: {
   id: string;
@@ -119,6 +127,22 @@ export async function POST(
     // content to submit; see src/lib/secureClientActivation.ts.
     if (!isSubmissionContentAccessible(submission)) {
       return NextResponse.json({ error: EXAM_NOT_ACTIVATED_MESSAGE, code: EXAM_NOT_ACTIVATED_CODE }, { status: 403 });
+    }
+
+    // Release-blocking server content-boundary audit — see
+    // tetherContentAccessLease.ts. Additive to isSubmissionContentAccessible
+    // above: without this, an ordinary, separately-authenticated
+    // Chrome/Edge request could finalize (grade and lock) an active
+    // secure attempt on the student's behalf.
+    const submitClientPolicy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
+    if (submitClientPolicy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
+      const leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
+        submissionId: submission.id,
+        studentId: session.user.id,
+      });
+      if (!leaseDecision.ok) {
+        return NextResponse.json({ error: TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE, code: TETHER_CONTENT_ACCESS_REQUIRED_CODE }, { status: 403 });
+      }
     }
 
     const settings = parseSecureSettings(submission.exam.secureSettings);
@@ -356,7 +380,13 @@ export async function POST(
       }).catch(() => {/* never block submit */});
     }
 
-    return NextResponse.json(studentSubmitResponse({ ...finalizedSubmission, exam: submission.exam }));
+    const response = NextResponse.json(studentSubmitResponse({ ...finalizedSubmission, exam: submission.exam }));
+    // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's
+    // own doc comment. Harmless here (the attempt is now finalized either
+    // way) but kept for consistency with every other lease-gated route,
+    // and covers a legitimate late/retried final submit for a long exam.
+    await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: submission.id, studentId: submission.studentId });
+    return response;
   } catch (error) {
     console.error("[submit] error:", error);
     // A P2025 here means another concurrent request already finalized

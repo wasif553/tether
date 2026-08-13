@@ -13,6 +13,16 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
+
+// Release-blocking server content-boundary audit — see
+// tetherContentAccessLease.ts. A self-contained signing keypair for THIS
+// file only (mirrors tetherRecovery.routes.test.ts's own pattern) — this
+// file is DB-isolated from other route test files and cannot assume a
+// signing key is already configured in the ambient test environment.
+const { publicKey: serverPublicKey, privateKey: serverPrivateKey } = crypto.generateKeyPairSync("ed25519");
+vi.stubEnv("TETHER_SECURE_CLIENT_SIGNING_PUBLIC_KEY", serverPublicKey.export({ type: "spki", format: "pem" }).toString());
+vi.stubEnv("TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY", serverPrivateKey.export({ type: "pkcs8", format: "pem" }).toString());
 
 const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
@@ -22,6 +32,26 @@ const { getOrCreateTestInstitution } = await import("./testInstitution");
 const startRoute = await import("../app/api/exams/[id]/start/route");
 const activateRoute = await import("../app/api/submissions/[id]/activate/route");
 const statusRoute = await import("../app/api/submissions/[id]/secure-client/status/route");
+const { getSigningPrivateKey, getSigningKeyId } = await import("./secureClientRunner");
+const { buildContentAccessLeaseClaims, encodeContentAccessLeaseCookieValue, CONTENT_ACCESS_LEASE_COOKIE_NAME } = await import(
+  "./secureClient/tetherContentAccessLease"
+);
+
+/** Release-blocking follow-up review — a lease is only ever valid when it matches the session's CURRENT clientInstallationIdHash; any SecureClientSession row this file creates directly (bypassing real v2 attestation) must set this to the SAME fixed test fingerprint. */
+const TEST_INSTALLATION_FINGERPRINT = "test-installation-fingerprint";
+
+/** Mints a real, validly-signed lease directly (no HTTP round trip needed) for a SecureClientSession created directly in the DB, exactly mirroring what a genuine v2 attestation success would have issued. */
+function mintLeaseCookie(params: { submissionId: string; secureClientSessionId: string; studentId: string }): string {
+  const claims = buildContentAccessLeaseClaims({
+    keyId: getSigningKeyId(),
+    submissionId: params.submissionId,
+    secureClientSessionId: params.secureClientSessionId,
+    installationKeyFingerprint: TEST_INSTALLATION_FINGERPRINT,
+    studentId: params.studentId,
+  });
+  const token = encodeContentAccessLeaseCookieValue(claims, getSigningPrivateKey());
+  return `${CONTENT_ACCESS_LEASE_COOKIE_NAME}=${token}`;
+}
 
 const stamp = Date.now();
 const cleanupUserIds: string[] = [];
@@ -34,10 +64,12 @@ function sessionFor(userId: string, institutionId: string) {
   };
 }
 
-function jsonRequest(method: string, body?: unknown) {
+function jsonRequest(method: string, body?: unknown, cookie?: string) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (cookie) headers["Cookie"] = cookie;
   return new Request("http://test.local/route", {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 }
@@ -100,6 +132,11 @@ describe("GET /api/submissions/[id]/secure-client/status — the `activated` rec
     expect(statusRes.status).toBe(200);
     const body = await statusRes.json();
     expect(body.activated).toBe(false);
+    // Release-blocking follow-up review — a bare opaque examId, needed
+    // by the exam content page's pre-fetch native-lockdown gate to build
+    // the tether-launch redirect URL WITHOUT ever fetching full
+    // submission/question content first.
+    expect(body.examId).toBe(exam.id);
     // Narrow — never exposes the raw timestamp or any question content.
     expect(body.activatedAt).toBeUndefined();
     expect(body.questions).toBeUndefined();
@@ -121,7 +158,7 @@ describe("GET /api/submissions/[id]/secure-client/status — the `activated` rec
     const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
     const submission = await startRes.json();
 
-    await prisma.secureClientSession.create({
+    const secureClientSession = await prisma.secureClientSession.create({
       data: {
         institutionId,
         examId: exam.id,
@@ -130,9 +167,11 @@ describe("GET /api/submissions/[id]/secure-client/status — the `activated` rec
         clientType: "TETHER_SECURE_CLIENT",
         status: "ACTIVE",
         verificationStatus: "VERIFIED",
+        clientInstallationIdHash: TEST_INSTALLATION_FINGERPRINT,
       },
     });
-    const activateRes = await activateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
+    const leaseCookie = mintLeaseCookie({ submissionId: submission.id, secureClientSessionId: secureClientSession.id, studentId: student.id });
+    const activateRes = await activateRoute.POST(jsonRequest("POST", undefined, leaseCookie), { params: Promise.resolve({ id: submission.id }) });
     expect(activateRes.status).toBe(200);
 
     // Simulate the renderer's response being lost — it never sees the 200
