@@ -25,7 +25,8 @@ import { isBlockedBackNavigation, nextAllowedIndex, resolveEffectiveQuestionIds 
 import { buildOneQuestionPayload, loadOneQuestionSubmission, OneQuestionModeError } from "@/lib/submissionQuestionPayload";
 import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { authoriseDirectNavigation, markQuestionVisited, QuestionNavigatorError } from "@/lib/questionNavigatorRunner";
-import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
+import { renewContentAccessLeaseFromValidatedDecision } from "@/lib/secureClient/requireTetherContentAccess";
+import { logServerTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 
 // Question Navigator v1 — see docs/question-navigator-v1.md. The GOTO
 // action is a DISTINCT navigation surface from the plain `currentIndex`
@@ -66,12 +67,16 @@ export async function POST(
   if (parsed.data.action === "GOTO") {
     try {
       const { finalIndex } = await authoriseDirectNavigation(id, session.user.id, parsed.data.targetIndex!);
-      const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id, req);
+      const { submission, settings, leaseDecision } = await loadOneQuestionSubmission(id, session.user.id, req);
       const payload = buildOneQuestionPayload(submission, settings, finalIndex);
       if (!payload) return NextResponse.json({ error: "This exam has no questions" }, { status: 404 });
       const response = NextResponse.json(payload);
-      // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own doc comment.
-      await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: submission.id, studentId: submission.studentId });
+      // Rolling lease renewal, from the SAME decision loadOneQuestionSubmission
+      // already computed — no second decode/verify/DB read (see
+      // renewContentAccessLeaseFromValidatedDecision's own doc comment).
+      if (leaseDecision) {
+        renewContentAccessLeaseFromValidatedDecision(response, leaseDecision, { submissionId: submission.id, studentId: submission.studentId });
+      }
       return response;
     } catch (err) {
       if (err instanceof QuestionNavigatorError) {
@@ -86,8 +91,15 @@ export async function POST(
 
   const requestedIndex = parsed.data.currentIndex!;
 
+  // Latency profiling (physical acceptance follow-up — question
+  // navigation latency audit). Bounded, opt-in server-side timing — see
+  // logServerTetherDiagnostic's own doc comment.
+  const timingStartMs = performance.now();
+
   try {
-    const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id, req);
+    const loadStartMs = performance.now();
+    const { submission, settings, leaseDecision } = await loadOneQuestionSubmission(id, session.user.id, req);
+    const loadMs = performance.now() - loadStartMs;
     const storedIndex = submission.currentQuestionIndex;
     // Question Pools v1 — total is the SELECTED question count for this
     // submission when pools are active, never the full exam question
@@ -101,6 +113,7 @@ export async function POST(
     const blocked = isBlockedBackNavigation(requestedIndex, storedIndex, settings.allowBackNavigation);
     const finalIndex = nextAllowedIndex(requestedIndex, storedIndex, settings.allowBackNavigation, total);
 
+    const indexUpdateStartMs = performance.now();
     if (finalIndex !== storedIndex) {
       await prisma.submission.update({
         where: { id: submission.id },
@@ -108,6 +121,7 @@ export async function POST(
       });
       submission.currentQuestionIndex = finalIndex;
     }
+    const indexUpdateMs = performance.now() - indexUpdateStartMs;
 
     // Lightweight navigation logging — INFO/LOW severity (see
     // severityFor in secureExam.ts), never blocks the response.
@@ -167,8 +181,17 @@ export async function POST(
       return NextResponse.json({ error: "This exam has no questions" }, { status: 404 });
     }
     const response = NextResponse.json(payload);
-    // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own doc comment.
-    await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: submission.id, studentId: submission.studentId });
+    // Rolling lease renewal, from the SAME decision loadOneQuestionSubmission
+    // already computed — no second decode/verify/DB read (see
+    // renewContentAccessLeaseFromValidatedDecision's own doc comment).
+    if (leaseDecision) {
+      renewContentAccessLeaseFromValidatedDecision(response, leaseDecision, { submissionId: submission.id, studentId: submission.studentId });
+    }
+    logServerTetherDiagnostic("QUESTION_PROGRESS_TIMING", {
+      loadMs: Math.round(loadMs),
+      indexUpdateMs: Math.round(indexUpdateMs),
+      totalMs: Math.round(performance.now() - timingStartMs),
+    });
     return response;
   } catch (err) {
     if (err instanceof OneQuestionModeError) {

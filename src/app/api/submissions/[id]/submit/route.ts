@@ -17,9 +17,10 @@ import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 import {
   checkTetherContentAccessLease,
   readContentAccessLeaseCookieFromRequest,
-  renewTetherContentAccessLeaseIfValid,
+  renewContentAccessLeaseFromValidatedDecision,
   TETHER_CONTENT_ACCESS_REQUIRED_CODE,
   TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+  type ContentAccessDecision,
 } from "@/lib/secureClient/requireTetherContentAccess";
 
 function studentSubmitResponse(submission: {
@@ -84,6 +85,9 @@ export async function POST(
   // already-finalized catch and the outer defensive P2025 fallback catch
   // below can audit an idempotent replay by the same request id.
   let submissionRequestId: string | null = null;
+  // Performance follow-up (physical acceptance review) — see
+  // renewContentAccessLeaseFromValidatedDecision's own doc comment.
+  let leaseDecisionForRenewal: ContentAccessDecision | null = null;
 
   try {
     const body = await req.json().catch(() => ({}));
@@ -140,6 +144,7 @@ export async function POST(
         submissionId: submission.id,
         studentId: session.user.id,
       });
+      leaseDecisionForRenewal = leaseDecision;
       if (!leaseDecision.ok) {
         return NextResponse.json({ error: TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE, code: TETHER_CONTENT_ACCESS_REQUIRED_CODE }, { status: 403 });
       }
@@ -381,11 +386,13 @@ export async function POST(
     }
 
     const response = NextResponse.json(studentSubmitResponse({ ...finalizedSubmission, exam: submission.exam }));
-    // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's
-    // own doc comment. Harmless here (the attempt is now finalized either
-    // way) but kept for consistency with every other lease-gated route,
-    // and covers a legitimate late/retried final submit for a long exam.
-    await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: submission.id, studentId: submission.studentId });
+    // Rolling lease renewal, from the SAME decision computed above — no
+    // second decode/verify/DB read. Harmless either way (the attempt is
+    // now finalized) but kept for consistency, and covers a legitimate
+    // late/retried final submit for a long exam.
+    if (leaseDecisionForRenewal) {
+      renewContentAccessLeaseFromValidatedDecision(response, leaseDecisionForRenewal, { submissionId: submission.id, studentId: submission.studentId });
+    }
     return response;
   } catch (error) {
     console.error("[submit] error:", error);

@@ -212,3 +212,122 @@ describe("REQUIRED TESTS: active-exam enforcement (genuine display/process viola
     expect(source).toContain('window.sesLockdown?.setLockdownExamActive?.(gated && verified);');
   });
 });
+
+/**
+ * Physical acceptance follow-up ("answer could not be saved" / question-
+ * navigation latency review). This component is too large/stateful to
+ * render directly (see this file's own doc comment) — these are the same
+ * kind of source-level structural assertions used throughout this file,
+ * proving the actual control flow rather than guessing from a rendered
+ * DOM this repo has no harness for.
+ */
+function extractFunctionBody(startMarker: string): string {
+  const start = source.indexOf(startMarker);
+  if (start === -1) throw new Error(`Could not locate "${startMarker}" in page.tsx`);
+  const braceStart = source.indexOf("{", start + startMarker.length - 1);
+  let depth = 0;
+  for (let i = braceStart; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    if (source[i] === "}") {
+      depth--;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error(`Unbalanced braces extracting "${startMarker}"`);
+}
+
+describe("PART 1 — navigation only ever proceeds after the server has acknowledged the save, never before", () => {
+  it("navigateQuestion awaits flushAnswerNow and returns BEFORE ever calling question-progress when the save was not acknowledged", () => {
+    const fn = extractFunctionBody("async function navigateQuestion(requestedIndex: number) {");
+    const savedIdx = fn.indexOf("const saved = await flushAnswerNow(oneQuestion.payload.question.id);");
+    const notSavedIdx = fn.indexOf("if (!saved) {");
+    const fetchIdx = fn.indexOf("fetch(`/api/submissions/${id}/question-progress`");
+    expect(savedIdx).toBeGreaterThan(-1);
+    expect(notSavedIdx).toBeGreaterThan(savedIdx);
+    // The failure branch itself must return before the question-progress
+    // fetch — never fall through to it regardless of what state gets set.
+    const failureBranch = fn.slice(notSavedIdx, fn.indexOf("return;", notSavedIdx) + "return;".length);
+    expect(failureBranch).toContain("setNavigatingQuestion(false);");
+    expect(failureBranch).toContain("return;");
+    expect(fetchIdx).toBeGreaterThan(notSavedIdx); // the fetch is genuinely gated behind (i.e. textually after) the failure return, not run unconditionally first
+  });
+
+  it("navigateQuestionDirect has the exact same save-before-navigate ordering as the sequential path", () => {
+    const fn = extractFunctionBody("async function navigateQuestionDirect(targetIndex: number) {");
+    const savedIdx = fn.indexOf("const saved = await flushAnswerNow(oneQuestion.payload.question.id);");
+    const notSavedIdx = fn.indexOf("if (!saved) {");
+    const fetchIdx = fn.indexOf("fetch(`/api/submissions/${id}/question-progress`");
+    expect(savedIdx).toBeGreaterThan(-1);
+    expect(notSavedIdx).toBeGreaterThan(savedIdx);
+    expect(fetchIdx).toBeGreaterThan(notSavedIdx);
+  });
+
+  it("flushAnswerNow's own external contract: returns false (never throws) on a non-acknowledged save, and the caller treats false as failure to navigate", () => {
+    const fn = extractFunctionBody("async function flushAnswerNow(questionId: string): Promise<boolean> {");
+    expect(fn).toContain("const acknowledged = await resilientAutosave.save(questionId, response);");
+    expect(fn).toContain("if (!acknowledged) {");
+    expect(fn).toMatch(/if \(!acknowledged\) \{[\s\S]*?return false;/);
+  });
+});
+
+describe("PART 4 — phone-detection calibration logging is bounded, metadata-only, and gated behind the existing sesAiCameraDebug opt-in flag", () => {
+  it("the calibration candidate log runs AFTER second-stage verification, so a demoted candidate's rejectedReason can reflect it", () => {
+    const verificationCallIdx = source.indexOf('tracker.applyVerification(track.id, verifyPhone != null, verifyPhone?.score ?? 0);');
+    const calibrationLogIdx = source.indexOf('logAiCameraDebug("tick: phone calibration candidates"');
+    expect(verificationCallIdx).toBeGreaterThan(-1);
+    expect(calibrationLogIdx).toBeGreaterThan(verificationCallIdx);
+  });
+
+  it("geometry-rejected candidates are captured from BOTH the full-frame and crop detection passes, via the same sink array", () => {
+    // Scoped to the tick handler (well after the function's own
+    // definition, which the naive regex below would otherwise also match
+    // against — its body contains unrelated "...);" occurrences).
+    const tickScope = source.slice(source.indexOf('logAiCameraDebug("tick: start"'));
+    const calls = [...tickScope.matchAll(/phoneObservationsFromDetections\(([\s\S]*?)\);/g)];
+    expect(calls.length).toBe(2);
+    for (const call of calls) {
+      expect(call[1]).toContain("geometryRejectedPhoneCandidates");
+    }
+  });
+
+  it("logAiCameraDebug (and therefore this calibration log) is a no-op unless shouldLogAiCameraDebug's opt-in flag is set — never fires in production, never fires without the explicit local debug flag", () => {
+    const fn = extractFunctionBody('function logAiCameraDebug(message: string, data: Record<string, unknown>) {');
+    expect(fn).toContain("shouldLogAiCameraDebug(");
+  });
+
+  it("PhoneCalibrationCandidate never carries image/frame/video data — every field is a plain number, string, boolean, or bounded box", () => {
+    const typeIdx = source.indexOf("type PhoneCalibrationCandidate = {");
+    expect(typeIdx).toBeGreaterThan(-1);
+    const typeBlock = source.slice(typeIdx, source.indexOf("};", typeIdx));
+    expect(typeBlock).not.toMatch(/image|frame(?!Quality)|dataUrl|base64|video/i);
+  });
+});
+
+describe("PART 1/2 — a slow response cannot cause duplicate navigation: navigateQuestion is guarded against re-entrancy for its entire duration", () => {
+  it("navigateQuestion bails out immediately if a previous call is still in flight, and sets the in-flight flag BEFORE its first await", () => {
+    const fn = extractFunctionBody("async function navigateQuestion(requestedIndex: number) {");
+    const guardIdx = fn.indexOf("if (!oneQuestion.payload || navigatingQuestion) return;");
+    const setTrueIdx = fn.indexOf("setNavigatingQuestion(true);");
+    const firstAwaitIdx = fn.indexOf("await flushAnswerNow(");
+    // The re-entrancy guard is the first STATEMENT in the function body —
+    // only the opening brace/whitespace and this file's own added latency-
+    // timing comment (never another await or state check) precede it.
+    const bodyOpenIdx = fn.indexOf("{");
+    const betweenOpenAndGuard = fn.slice(bodyOpenIdx + 1, guardIdx);
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(betweenOpenAndGuard).not.toMatch(/await |setNavigatingQuestion|setOneQuestion/);
+    expect(setTrueIdx).toBeGreaterThan(guardIdx);
+    expect(setTrueIdx).toBeLessThan(firstAwaitIdx); // flag flips to true before any async gap a second click could race into
+  });
+
+  it("navigateQuestion always clears the in-flight flag on every exit path — the early failure return, the success path, and the catch/finally around question-progress", () => {
+    const fn = extractFunctionBody("async function navigateQuestion(requestedIndex: number) {");
+    const setNavigatingQuestionCalls = fn.match(/setNavigatingQuestion\((true|false)\)/g) ?? [];
+    // true once at entry, false on the early failure-to-save return, and
+    // false again in the try/finally around question-progress — a slow
+    // OR failed request can never leave the flag permanently stuck true.
+    expect(setNavigatingQuestionCalls.filter((c) => c.includes("true")).length).toBe(1);
+    expect(setNavigatingQuestionCalls.filter((c) => c.includes("false")).length).toBeGreaterThanOrEqual(2);
+    expect(fn).toMatch(/\}\s*finally\s*\{\s*setNavigatingQuestion\(false\);\s*\}/);
+  });
+});

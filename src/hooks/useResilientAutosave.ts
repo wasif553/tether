@@ -26,24 +26,41 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type PendingSaveEntry,
   type LocalSaveStatus,
+  type SaveAttemptDiagnostics,
   nextRevision,
   classifyAcknowledgement,
   computeBackoffDelayMs,
+  buildSaveAttemptDiagnostics,
   AUTOSAVE_RETRY_MAX_SECONDS,
   PENDING_SAVE_RETENTION_MS,
 } from "@/lib/pendingSaveQueue";
 import { putEntry, deleteEntry, getAllEntriesForUser, clearAllForSubmission as clearAllForSubmissionInStore, pruneExpired } from "@/lib/pendingSaveQueueStore";
 import { consumeFault } from "@/lib/tetherFaultInjection";
+import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 
 function generateRequestId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 }
+
+/** Bounded client-side ceiling on one PATCH /answers attempt (physical acceptance follow-up — the "answer could not be saved" diagnostic gap). Without this, a hung connection would never resolve `attemptSend` at all, leaving `save()` (and therefore navigation, which awaits it) stuck indefinitely with no error and no retry — worse than a clean, retryable FAILED. 15s is generous for a same-origin JSON PATCH; a genuinely healthy request resolves in well under a second. */
+const SAVE_ATTEMPT_TIMEOUT_MS = 15_000;
 
 export type ResilientAutosaveOptions = {
   userId: string | null | undefined;
   examId: string;
   submissionId: string;
   enabled: boolean;
+  /**
+   * Bounded, answer-content-free diagnostics for a FAILED save attempt —
+   * see SaveAttemptDiagnostics's own doc comment for the exact field list
+   * and the guarantee that answer text, question text, cookies, lease
+   * contents, and credentials never flow through this callback. Optional
+   * and best-effort: never awaited, never allowed to affect save()'s own
+   * result.
+   */
+  onSaveDiagnostics?: (questionId: string, diagnostics: SaveAttemptDiagnostics) => void;
+  /** Fired once a retry succeeds for an entry that had previously failed at least once (retryCount > 0 at the time it resolved) — lets a caller confirm "the local queue held onto it and a later attempt got it through" without guessing from status/pendingCount alone. */
+  onRetrySucceeded?: (questionId: string, attemptsBeforeSuccess: number) => void;
 };
 
 export type ResilientAutosave = {
@@ -57,11 +74,23 @@ export type ResilientAutosave = {
   clearAll: () => Promise<void>;
 };
 
-export function useResilientAutosave({ userId, examId, submissionId, enabled }: ResilientAutosaveOptions): ResilientAutosave {
+export function useResilientAutosave({ userId, examId, submissionId, enabled, onSaveDiagnostics, onRetrySucceeded }: ResilientAutosaveOptions): ResilientAutosave {
   const enabledRef = useRef(enabled);
   useEffect(() => {
     enabledRef.current = enabled;
   }, [enabled]);
+
+  // Refs so a diagnostics/retry callback identity change never needs to
+  // re-run the effects below or invalidate attemptSend's own useCallback
+  // identity — mirrors userIdRef/enabledRef's existing convention.
+  const onSaveDiagnosticsRef = useRef(onSaveDiagnostics);
+  useEffect(() => {
+    onSaveDiagnosticsRef.current = onSaveDiagnostics;
+  }, [onSaveDiagnostics]);
+  const onRetrySucceededRef = useRef(onRetrySucceeded);
+  useEffect(() => {
+    onRetrySucceededRef.current = onRetrySucceeded;
+  }, [onRetrySucceeded]);
 
   const userIdRef = useRef(userId);
   useEffect(() => {
@@ -75,11 +104,38 @@ export function useResilientAutosave({ userId, examId, submissionId, enabled }: 
 
   const syncCount = useCallback(() => setPendingCount(queueRef.current.size), []);
 
-  const attemptSend = useCallback(async (entry: PendingSaveEntry): Promise<"SAVED" | "CONFLICT" | "FAILED"> => {
-    if (consumeFault("CONNECTION_OFFLINE")) return "FAILED";
-    if (typeof navigator !== "undefined" && navigator.onLine === false) return "FAILED";
+  const attemptSend = useCallback(async (entry: PendingSaveEntry): Promise<{ outcome: "SAVED" | "CONFLICT" | "FAILED"; diagnostics: SaveAttemptDiagnostics | null }> => {
+    // Diagnostic classification (physical acceptance follow-up) — every
+    // early-return path below builds a real SaveAttemptDiagnostics object
+    // instead of the previous bare "FAILED", so a caller can tell "never
+    // even attempted (offline)" apart from "server rejected it" apart
+    // from "timed out" apart from "the fetch itself threw" — all from
+    // safe operational facts only, never answer/question content.
+    const startedAtMs = Date.now();
+    const failed = (params: { threw: boolean; timedOut: boolean; httpStatus: number | null; serverErrorCode: string | null }) => ({
+      outcome: "FAILED" as const,
+      diagnostics: buildSaveAttemptDiagnostics({
+        threw: params.threw,
+        timedOut: params.timedOut,
+        httpStatus: params.httpStatus,
+        serverErrorCode: params.serverErrorCode,
+        durationMs: Date.now() - startedAtMs,
+        clientRevision: entry.revision,
+        retryCount: entry.retryCount,
+        queueRetained: true, // putEntry() in save()/the retry loop always persists BEFORE this ever runs.
+      }),
+    });
+
+    if (consumeFault("CONNECTION_OFFLINE") || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+      return failed({ threw: true, timedOut: false, httpStatus: null, serverErrorCode: null });
+    }
+
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timeoutHandle = controller ? setTimeout(() => controller.abort(), SAVE_ATTEMPT_TIMEOUT_MS) : null;
     try {
-      if (consumeFault("AUTOSAVE_TIMEOUT")) throw new Error("simulated autosave timeout (fault injection)");
+      if (consumeFault("AUTOSAVE_TIMEOUT")) {
+        return failed({ threw: false, timedOut: true, httpStatus: null, serverErrorCode: null });
+      }
       const res = await fetch(`/api/submissions/${entry.submissionId}/answers`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -89,20 +145,34 @@ export function useResilientAutosave({ userId, examId, submissionId, enabled }: 
           clientRequestId: entry.clientRequestId,
           clientRevision: entry.revision,
         }),
+        signal: controller?.signal,
       });
-      if (consumeFault("AUTOSAVE_HTTP_500") || !res.ok) return "FAILED";
+      const httpStatus = consumeFault("AUTOSAVE_HTTP_500") ? 500 : res.status;
+      if (httpStatus >= 400) {
+        // Only ever the route's own short `code` field, never the free-text
+        // `error` message and never the raw body — see
+        // SaveAttemptDiagnostics's own doc comment.
+        const errorBody: { code?: unknown } = res.ok ? {} : await res.json().catch(() => ({}));
+        const serverErrorCode = typeof errorBody.code === "string" ? errorBody.code : null;
+        return failed({ threw: false, timedOut: false, httpStatus, serverErrorCode });
+      }
       const body: { acknowledgedRevision?: number | null } = await res.json().catch(() => ({}));
-      return classifyAcknowledgement(entry.revision, consumeFault("STALE_AUTOSAVE_RESPONSE") ? entry.revision - 1 : (body.acknowledgedRevision ?? null)) === "CONFLICT"
-        ? "CONFLICT"
-        : "SAVED";
-    } catch {
-      return "FAILED";
+      const outcome =
+        classifyAcknowledgement(entry.revision, consumeFault("STALE_AUTOSAVE_RESPONSE") ? entry.revision - 1 : (body.acknowledgedRevision ?? null)) === "CONFLICT"
+          ? ("CONFLICT" as const)
+          : ("SAVED" as const);
+      return { outcome, diagnostics: null };
+    } catch (err) {
+      const timedOut = err instanceof DOMException && err.name === "AbortError";
+      return failed({ threw: !timedOut, timedOut, httpStatus: null, serverErrorCode: null });
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     }
   }, []);
 
   const resolveOneEntry = useCallback(
     async (entry: PendingSaveEntry): Promise<boolean> => {
-      const outcome = await attemptSend(entry);
+      const { outcome, diagnostics } = await attemptSend(entry);
       // Only act if THIS is still the current entry for the question — a
       // newer save may have superseded it while this attempt was in
       // flight (Part 2: "a stale response arriving after a newer save
@@ -111,6 +181,15 @@ export function useResilientAutosave({ userId, examId, submissionId, enabled }: 
       const isStillCurrent = current?.clientRequestId === entry.clientRequestId;
 
       if (outcome === "SAVED" || outcome === "CONFLICT") {
+        // Physical acceptance follow-up — a retry that succeeds after at
+        // least one prior FAILED attempt for this same entry is exactly
+        // the "local queue held onto it, and a later attempt got it
+        // through" signal callers need; entry.retryCount is only ever
+        // bumped on a FAILED resolution below, so >0 here means this
+        // exact attempt is a genuine retry, not the first try.
+        if (isStillCurrent && entry.retryCount > 0) {
+          onRetrySucceededRef.current?.(entry.questionId, entry.retryCount);
+        }
         // Correctness pass (post-merge review) — deleteEntry is keyed
         // only by (userId, submissionId, questionId), not by revision or
         // clientRequestId (see pendingSaveQueueStore.ts). If a NEWER
@@ -130,9 +209,12 @@ export function useResilientAutosave({ userId, examId, submissionId, enabled }: 
         return true;
       }
 
-      // FAILED — bump retryCount (bounded backoff on the NEXT attempt)
-      // and re-persist, but only if still current.
+      // FAILED — surface bounded diagnostics (best-effort, never allowed
+      // to affect the return value below), bump retryCount (bounded
+      // backoff on the NEXT attempt), and re-persist, but only if still
+      // current.
       if (isStillCurrent) {
+        if (diagnostics) onSaveDiagnosticsRef.current?.(entry.questionId, diagnostics);
         const retried = { ...entry, retryCount: entry.retryCount + 1 };
         queueRef.current.set(entry.questionId, retried);
         await putEntry(retried);
@@ -165,8 +247,17 @@ export function useResilientAutosave({ userId, examId, submissionId, enabled }: 
       queueRef.current.set(questionId, entry);
       syncCount();
       setStatus("SENDING");
+      // Latency profiling (physical acceptance follow-up) — bounded,
+      // dev-only timing for the local IndexedDB write specifically, so a
+      // slow browser/disk (rather than the network/server) can be told
+      // apart from the rest of the click-to-next-question path.
+      const putStartedAtMs = performance.now();
       await putEntry(entry);
-      return resolveOneEntry(entry);
+      logClientTetherDiagnostic("AUTOSAVE_INDEXEDDB_PUT_TIMING", { indexedDbPutMs: Math.round(performance.now() - putStartedAtMs) });
+      const patchStartedAtMs = performance.now();
+      const acknowledged = await resolveOneEntry(entry);
+      logClientTetherDiagnostic("AUTOSAVE_PATCH_TIMING", { patchTotalMs: Math.round(performance.now() - patchStartedAtMs), acknowledged });
+      return acknowledged;
     },
     [examId, submissionId, resolveOneEntry, syncCount],
   );

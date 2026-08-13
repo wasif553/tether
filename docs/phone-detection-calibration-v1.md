@@ -290,3 +290,135 @@ verification — runs the same on-device `@tensorflow-models/coco-ssd`
 model already shipped in this repo, entirely in the student's browser. No
 frame, crop, or verification image is ever sent to Anthropic, OpenAI,
 Microsoft, or any other external service; nothing here changes that.
+
+## Physical acceptance follow-up — calibration mode (v1.7.5+)
+
+Closes part of the "Test-fixture requirements" / "Known limitations" gap
+above: a bounded, metadata-only calibration log now exists, so the next
+physical test session can actually produce a detection-rate/confidence-
+distribution table instead of reasoning from design alone.
+
+### Enabling it
+
+Same opt-in flag every other on-device AI debug log in this file already
+uses — no separate feature flag was added:
+
+1. Run a non-production build (`shouldLogAiCameraDebug` hard-disables in
+   production regardless of the flag).
+2. In the browser devtools console, on the exam page: `localStorage.sesAiCameraDebug = "true"`.
+3. Reload. Every detection tick now logs (among the existing debug lines)
+   `[tether-diagnostic]... "tick: phone calibration candidates"` — grep
+   the devtools console output for that string during a calibration run.
+
+### What each candidate record contains
+
+One record per phone-class candidate the detector produced that tick
+(full-frame pass, plus any lower/edge crop passes that ran on their own
+adaptive schedule that tick), **before or after rejection** — nothing is
+silently dropped from the log the way it is from the tracker itself:
+
+| field | meaning |
+| --- | --- |
+| `timestampMs` | tick time (`performance`-relative, not wall-clock PII) |
+| `inferenceMs` | this tick's full-frame inference duration |
+| `source` | `full_frame` / `lower_crop` / `edge_crop` |
+| `confidence` | raw model score for this candidate |
+| `band` | `strong` / `moderate` / `weak` / `none` (see `phoneConfidenceBand`) |
+| `box` | normalized `{x, y, width, height}` bounding box, original-frame space |
+| `retained` | true only if it passed geometry, met at least WEAK confidence, and survived cross-source dedup |
+| `rejectedReason` | `null` if retained; otherwise one of `"geometry"` (failed `isPlausiblePhoneGeometry`) / `"confidence"` (below WEAK) / `"tracking"` (deduped away by a higher-scoring overlapping candidate, or not yet enough temporal confirmations) / `"verification"` (second-stage crop demoted it) |
+| `trackId` | the matching `PhoneCandidateTracker` track id, if any |
+| `localWarningTriggered` | whether that track was `confirmedLocalWarning` this tick |
+
+No image, frame, or video data is ever included — see
+`buildPhoneCalibrationCandidates`'s own doc comment in
+`src/app/student/exams/[id]/page.tsx`. This does not add any new evidence
+capture; the existing `captureAiViolationEvidence` consent path is
+untouched.
+
+### Suggested physical test matrix
+
+For each row: hold/position a real phone as described, run for the exam
+page's normal detection cadence (~1s fast / ~1.5s slow), and read off the
+calibration log. Repeat each row **at least 3 times** (angle/lighting
+varies naturally between repeats even with the "same" position) before
+recording a rate.
+
+| # | Condition | Repeats | What to record |
+| --- | --- | --- | --- |
+| 1 | Centered, portrait, screen on, ~45cm | 3+ | detected? which tick (latency to first `retained:true`)? band? confirmed? |
+| 2 | Centered, landscape, screen on, ~45cm | 3+ | same |
+| 3 | Tilted ~30-45°, screen on, ~45cm | 3+ | same |
+| 4 | Bottom third of frame, screen on | 3+ | `source` at first retention — does a crop pass catch it before/instead of full-frame? |
+| 5 | Left edge of frame | 3+ | `source: edge_crop` expected to matter here |
+| 6 | Right edge of frame | 3+ | same |
+| 7 | Partially occluded by a hand (~50% visible) | 3+ | confidence distribution — expect lower/more `moderate`-band |
+| 8 | Screen OFF (phone face-down or asleep) | 3+ | does detection rate drop materially vs. screen-on? |
+| 9 | ~30cm from camera | 3+ | box size/geometry — still within `MAX_CANDIDATE_AREA_RATIO`? |
+| 10 | ~60cm from camera | 3+ | baseline distance |
+| 11 | ~90cm from camera | 3+ | does confidence/geometry drop it below WEAK or fail `isPlausiblePhoneGeometry` (too small)? |
+| 12 | Shown briefly, ~1 second, then hidden | 5+ | does a single-tick glimpse ever reach `localWarningTriggered:true`? (expected: rarely/never for MODERATE — only a lucky STRONG single-frame hit would) |
+| 13 | Shown continuously, 3-5 seconds | 3+ | time-to-confirm (ticks from first `retained:true` to first `localWarningTriggered:true`) |
+| 14 (negative) | Calculator, same positions as 1-3 | 3+ | false-positive rate — any `retained:true` at all? any `localWarningTriggered:true`? |
+| 15 (negative) | Empty hand / fist, same positions | 3+ | same |
+| 16 (negative) | Dark book/notebook | 3+ | same |
+
+### What to report from a real run
+
+- **Detection rate** per row: `confirmed / attempts` (i.e.
+  `localWarningTriggered:true` reached at least once during the hold).
+- **Confidence distribution**: min/median/max `confidence` among
+  `retained:true` records per row — this is what future threshold/band
+  tuning should be based on, not guesswork.
+- **Time-to-confirm** for rows 12-13 — ticks or milliseconds from first
+  `retained:true` to first `localWarningTriggered:true`.
+- **False-positive rate** for rows 14-16 — should be at or near 0; any
+  non-zero result is the strongest signal for retuning
+  `PHONE_CONFIDENCE_MODERATE`/`STRONG` or the crop schedule.
+
+### Deciding what to tune next (only after a real run)
+
+Do **not** lower `PHONE_CONFIDENCE_THRESHOLD`/`PHONE_CONFIDENCE_MODERATE`
+globally without this data — see this file's own "Confidence bands"
+section for why a single global threshold already failed to distinguish
+edge/angled phones from calculators/hands. Once real detection-rate and
+confidence-distribution numbers exist, prioritize in this order (cheapest
+and most reversible first):
+
+1. **Cadence tuning** (`fastIntervalMs`/`slowIntervalMs` in
+   `cameraIntegrityDetection.ts`) — if rows 12 (brief ~1s shows) have a
+   low detection rate but rows 1-3 (held steady) are high, the gap is
+   sampling frequency, not model accuracy.
+2. **Crop schedule tuning** (`computeCropSchedule`,
+   `PHONE_CROP_REGIONS` in `phoneMultiScaleCrops.ts`) — if rows 4-6
+   (bottom/edge positions) under-perform rows 1-2 and their `retained`
+   records show `source: full_frame` rarely appearing at those positions,
+   the crop regions or their run frequency need adjusting, not the
+   thresholds.
+3. **Candidate persistence tuning** (`TRACK_CONFIRM_WINDOW`,
+   `TRACK_CONFIRM_MODERATE_COUNT`/`_EDGE_COUNT` in
+   `phoneDetectionTracking.ts`) — if MODERATE candidates are being
+   observed (`retained:true`, `band:"moderate"`) but rarely reach
+   `localWarningTriggered:true`, and rows 14-16 show no false positives,
+   the confirmation bar can likely come down slightly.
+4. **Threshold tuning** (`PHONE_CONFIDENCE_STRONG`/`MODERATE`/`WEAK`) —
+   only once cadence/crop/persistence are already tuned and the
+   confidence *distribution* itself (not just presence/absence) shows a
+   real gap — e.g. real phones consistently landing at 0.28-0.31, just
+   under the current 0.32 MODERATE floor.
+5. **Stronger second-stage crop verification** — if `verification`
+   shows up as a common `rejectedReason` for what a human reviewer
+   confirms were real phones (i.e. the verification crop pass itself is
+   under-detecting), consider a larger `marginRatio` in
+   `expandCandidateBoxForVerification` or running verification for WEAK
+   candidates too (currently MODERATE-only, see
+   `shouldRunSecondStageVerification`).
+6. **Replacing COCO-SSD Lite with a phone-specialized on-device model**
+   — the largest-effort, largest-risk option (new model file, new
+   inference wiring, its own accuracy/latency tradeoffs); only worth it
+   if 1-5 together still leave an unacceptable gap, and should be scoped
+   as its own release, not bundled into a hotfix.
+
+Whatever is tuned, phone detections remain integrity **review signals**,
+never automatic misconduct findings — this calibration work changes
+detection recall/precision, not that downstream handling.

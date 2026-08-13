@@ -986,3 +986,111 @@ describe("Tether Content Access Lease — rolling renewal keeps a long exam aliv
     expect(res.status).toBe(403);
   });
 });
+
+/**
+ * Physical acceptance follow-up — question-navigation latency audit.
+ * PATCH /api/submissions/[id]/answers, GET /api/submissions/[id], and the
+ * one-question-mode routes were refactored to renew the lease straight
+ * from the SAME ContentAccessDecision their own access gate already
+ * computed (renewContentAccessLeaseFromValidatedDecision), instead of
+ * checkTetherContentAccessLease running a SECOND time per request. These
+ * tests prove that optimization changed nothing about WHEN a lease can be
+ * renewed — only removed the redundant re-verification work — by
+ * exercising the answers PATCH route (the route this optimization matters
+ * most for) against every failure mode a renewal must still reject.
+ */
+describe("Tether Content Access Lease — the single-check renewal optimization is exactly as fail-closed as the original two-check version", () => {
+  it("a valid, near-expiry lease is both ACCEPTED and RENEWED by the optimized PATCH /answers path, and the renewed cookie is itself genuinely usable afterward", async () => {
+    const student = await makeStudent("opt-answers-valid");
+    const exam = await createTetherExam("OptAnswersValid");
+    const { submissionId } = await activateViaLegitimateTetherFlow(student, exam);
+    const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
+    const session = await currentSessionFor(submissionId);
+    const nearExpiry = await buildLeaseCookieAtAge({
+      submissionId,
+      studentId: student.id,
+      secureClientSessionId: session.id,
+      installationKeyFingerprint: session.clientInstallationIdHash,
+      ageMs: 29 * 60_000,
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, institutionId));
+    const res = await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "answer" }, nearExpiry), {
+      params: Promise.resolve({ id: submissionId }),
+    });
+    expect(res.status).toBe(200);
+    const renewedToken = extractSetCookieToken(res, CONTENT_ACCESS_LEASE_COOKIE_NAME);
+    expect(renewedToken).toBeTruthy();
+
+    // The renewed cookie must be a genuinely fresh, independently valid
+    // lease — not a copy of the (still near-expiry) presented one.
+    const renewedCookie = `${CONTENT_ACCESS_LEASE_COOKIE_NAME}=${renewedToken}`;
+    const followUp = await submissionRoute.GET(jsonRequest("GET", undefined, renewedCookie), { params: Promise.resolve({ id: submissionId }) });
+    expect(followUp.status).toBe(200);
+  });
+
+  it("an EXPIRED lease is REJECTED and NOT renewed by the optimized PATCH /answers path", async () => {
+    const student = await makeStudent("opt-answers-expired");
+    const exam = await createTetherExam("OptAnswersExpired");
+    const { submissionId } = await activateViaLegitimateTetherFlow(student, exam);
+    const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
+    const session = await currentSessionFor(submissionId);
+    const expiredCookie = await buildLeaseCookieAtAge({
+      submissionId,
+      studentId: student.id,
+      secureClientSessionId: session.id,
+      installationKeyFingerprint: session.clientInstallationIdHash,
+      ageMs: 31 * 60_000,
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, institutionId));
+    const res = await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "fabricated" }, expiredCookie), {
+      params: Promise.resolve({ id: submissionId }),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe(TETHER_CONTENT_ACCESS_REQUIRED_CODE);
+    expect(extractSetCookieToken(res, CONTENT_ACCESS_LEASE_COOKIE_NAME)).toBeNull();
+    const stored = await prisma.answer.findUnique({ where: { submissionId_questionId: { submissionId, questionId: question.id } } });
+    expect(stored).toBeNull();
+  });
+
+  it("a lease bound to a SUPERSEDED SecureClientSession is REJECTED and NOT renewed by the optimized PATCH /answers path", async () => {
+    const student = await makeStudent("opt-answers-superseded");
+    const exam = await createTetherExam("OptAnswersSuperseded");
+    const { submissionId, leaseCookie: oldLease, installation } = await activateViaLegitimateTetherFlow(student, exam);
+    const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
+
+    const priorSession = await currentSessionFor(submissionId);
+    await prisma.secureClientSession.update({ where: { id: priorSession.id }, data: { status: "ENDED" } });
+    await prisma.secureClientSession.create({
+      data: { institutionId, examId: exam.id, submissionId, studentId: student.id, clientType: "TETHER_SECURE_CLIENT", status: "ACTIVE", verificationStatus: "VERIFIED" },
+    });
+    await attestExamSessionV2(student, submissionId, installation);
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, institutionId));
+    const res = await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "fabricated" }, oldLease), {
+      params: Promise.resolve({ id: submissionId }),
+    });
+    expect(res.status).toBe(403);
+    expect(extractSetCookieToken(res, CONTENT_ACCESS_LEASE_COOKIE_NAME)).toBeNull();
+  });
+
+  it("a lease with a REVOKED/WRONG installation fingerprint is REJECTED and NOT renewed by the optimized PATCH /answers path", async () => {
+    const student = await makeStudent("opt-answers-wrong-install");
+    const exam = await createTetherExam("OptAnswersWrongInstall");
+    const { submissionId, leaseCookie } = await activateViaLegitimateTetherFlow(student, exam);
+    const question = await prisma.question.findFirstOrThrow({ where: { examId: exam.id } });
+
+    const otherInstallation = await registerInstallation(student, "opt-answers-different-installation");
+    const otherRow = await prisma.tetherClientInstallation.findUniqueOrThrow({ where: { id: otherInstallation.installationId } });
+    const currentSession = await currentSessionFor(submissionId);
+    await prisma.secureClientSession.update({ where: { id: currentSession.id }, data: { clientInstallationIdHash: otherRow.publicKeyFingerprint } });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, institutionId));
+    const res = await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "fabricated" }, leaseCookie), {
+      params: Promise.resolve({ id: submissionId }),
+    });
+    expect(res.status).toBe(403);
+    expect(extractSetCookieToken(res, CONTENT_ACCESS_LEASE_COOKIE_NAME)).toBeNull();
+  });
+});

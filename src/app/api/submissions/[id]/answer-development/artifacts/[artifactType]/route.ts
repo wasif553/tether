@@ -17,7 +17,7 @@ import { prisma } from "@/lib/prisma";
 import { isValidArtifactType, ATTEMPT_LEVEL_ARTIFACT_TYPES, type DevelopmentEventType } from "@/lib/answerDevelopment";
 import { ARTIFACT_MAX_CHARACTERS } from "@/lib/answerDevelopmentThresholds";
 import { AnswerDevelopmentError, loadValidatedStudentContext, upsertAnswerDevelopmentArtifact, recordDevelopmentEvent } from "@/lib/answerDevelopmentRunner";
-import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
+import { renewContentAccessLeaseFromValidatedDecision } from "@/lib/secureClient/requireTetherContentAccess";
 
 const bodySchema = z.object({
   content: z.string(),
@@ -119,8 +119,11 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   }
 
   const response = NextResponse.json({ ok: true, artifactId: outcome.artifactId, version: outcome.version, changed: outcome.kind !== "unchanged" });
-  // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own doc comment.
-  await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: id, studentId: session.user.id });
+  // Rolling lease renewal, from the SAME decision loadValidatedStudentContext
+  // already computed — see renewContentAccessLeaseFromValidatedDecision's own doc comment.
+  if (context.leaseDecision) {
+    renewContentAccessLeaseFromValidatedDecision(response, context.leaseDecision, { submissionId: id, studentId: session.user.id });
+  }
   return response;
 }
 
