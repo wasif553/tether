@@ -95,3 +95,66 @@ export function summarizeQueue(entries: ReadonlyArray<{ retryCount: number }>): 
     hasFailedRetries: entries.some((e) => e.retryCount > 0),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Bounded save-failure diagnostics (physical acceptance follow-up —
+// "answer could not be saved" symptom). Before this, attemptSend in
+// useResilientAutosave.ts collapsed every non-2xx response, timeout, and
+// thrown network exception into the SAME generic FAILED outcome, with
+// nothing retained to tell them apart — making the physical symptom
+// impossible to diagnose after the fact. These are pure, DOM-free, and
+// operate ONLY on already-safe operational facts about the request
+// (status code, timing, a short server-provided error code) — NEVER the
+// answer text, question text, cookies, lease contents, or credentials,
+// none of which are ever passed into this module at all.
+// ---------------------------------------------------------------------------
+
+export type SaveFailureCategory = "TIMEOUT" | "NETWORK_ERROR" | "HTTP_CLIENT_ERROR" | "HTTP_SERVER_ERROR" | "UNKNOWN";
+
+/** Bounded, answer-content-free record of why one save attempt failed. Every field is either a small number, a boolean, or a short enum-like string — safe to log or send as integrity-event metadata as-is. */
+export type SaveAttemptDiagnostics = {
+  category: SaveFailureCategory;
+  httpStatus: number | null;
+  /** The route's own short `code` field (e.g. TETHER_CONTENT_ACCESS_REQUIRED, EXAM_NOT_ACTIVATED) when the response body included one — never the free-text `error` message, and never the raw body. */
+  serverErrorCode: string | null;
+  durationMs: number;
+  threw: boolean;
+  timedOut: boolean;
+  clientRevision: number;
+  retryCount: number;
+  /** Always true in practice — the entry is persisted to IndexedDB before every network attempt (Part 3) — retained here as an explicit, independently-checkable fact rather than an assumption baked silently into the caller. */
+  queueRetained: boolean;
+};
+
+/** Pure classification — never re-derives anything from a response body beyond the plain facts the caller already extracted (status/threw/timedOut). */
+export function classifySaveFailureCategory(params: { threw: boolean; timedOut: boolean; httpStatus: number | null }): SaveFailureCategory {
+  if (params.timedOut) return "TIMEOUT";
+  if (params.threw) return "NETWORK_ERROR";
+  if (params.httpStatus == null) return "UNKNOWN";
+  if (params.httpStatus >= 500) return "HTTP_SERVER_ERROR";
+  if (params.httpStatus >= 400) return "HTTP_CLIENT_ERROR";
+  return "UNKNOWN";
+}
+
+export function buildSaveAttemptDiagnostics(params: {
+  threw: boolean;
+  timedOut: boolean;
+  httpStatus: number | null;
+  serverErrorCode: string | null;
+  durationMs: number;
+  clientRevision: number;
+  retryCount: number;
+  queueRetained: boolean;
+}): SaveAttemptDiagnostics {
+  return {
+    category: classifySaveFailureCategory({ threw: params.threw, timedOut: params.timedOut, httpStatus: params.httpStatus }),
+    httpStatus: params.httpStatus,
+    serverErrorCode: params.serverErrorCode,
+    durationMs: params.durationMs,
+    threw: params.threw,
+    timedOut: params.timedOut,
+    clientRevision: params.clientRevision,
+    retryCount: params.retryCount,
+    queueRetained: params.queueRetained,
+  };
+}

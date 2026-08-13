@@ -7,6 +7,8 @@ import {
   classifyAcknowledgement,
   summarizeQueue,
   scopedKey,
+  classifySaveFailureCategory,
+  buildSaveAttemptDiagnostics,
   PENDING_SAVE_RETENTION_MS,
 } from "./pendingSaveQueue";
 
@@ -63,5 +65,63 @@ describe("pendingSaveQueue — pure logic (Part 2/3)", () => {
     expect(summarizeQueue([])).toEqual({ pendingCount: 0, hasFailedRetries: false });
     expect(summarizeQueue([{ retryCount: 0 }, { retryCount: 0 }])).toEqual({ pendingCount: 2, hasFailedRetries: false });
     expect(summarizeQueue([{ retryCount: 0 }, { retryCount: 2 }])).toEqual({ pendingCount: 2, hasFailedRetries: true });
+  });
+});
+
+// Physical acceptance follow-up ("answer could not be saved" symptom) —
+// bounded save-failure diagnostic classification. See
+// SaveAttemptDiagnostics's own doc comment: these must never see (and
+// therefore can never leak) answer text, question text, cookies, lease
+// contents, or credentials — every input here is already a plain
+// operational fact (a status code, a duration, a couple of booleans).
+describe("pendingSaveQueue — bounded save-failure diagnostics", () => {
+  it("classifySaveFailureCategory: timeout takes priority, then thrown network error, then HTTP status bands", () => {
+    expect(classifySaveFailureCategory({ threw: true, timedOut: true, httpStatus: null })).toBe("TIMEOUT");
+    expect(classifySaveFailureCategory({ threw: true, timedOut: false, httpStatus: null })).toBe("NETWORK_ERROR");
+    expect(classifySaveFailureCategory({ threw: false, timedOut: false, httpStatus: null })).toBe("UNKNOWN");
+    expect(classifySaveFailureCategory({ threw: false, timedOut: false, httpStatus: 403 })).toBe("HTTP_CLIENT_ERROR");
+    expect(classifySaveFailureCategory({ threw: false, timedOut: false, httpStatus: 409 })).toBe("HTTP_CLIENT_ERROR");
+    expect(classifySaveFailureCategory({ threw: false, timedOut: false, httpStatus: 500 })).toBe("HTTP_SERVER_ERROR");
+    expect(classifySaveFailureCategory({ threw: false, timedOut: false, httpStatus: 503 })).toBe("HTTP_SERVER_ERROR");
+  });
+
+  it("buildSaveAttemptDiagnostics carries through every safe field unchanged and derives the right category", () => {
+    const d = buildSaveAttemptDiagnostics({
+      threw: false,
+      timedOut: false,
+      httpStatus: 403,
+      serverErrorCode: "TETHER_CONTENT_ACCESS_REQUIRED",
+      durationMs: 842,
+      clientRevision: 7,
+      retryCount: 2,
+      queueRetained: true,
+    });
+    expect(d).toEqual({
+      category: "HTTP_CLIENT_ERROR",
+      httpStatus: 403,
+      serverErrorCode: "TETHER_CONTENT_ACCESS_REQUIRED",
+      durationMs: 842,
+      threw: false,
+      timedOut: false,
+      clientRevision: 7,
+      retryCount: 2,
+      queueRetained: true,
+    });
+  });
+
+  it("diagnostics for a timeout never carry an HTTP status or server error code", () => {
+    const d = buildSaveAttemptDiagnostics({
+      threw: false,
+      timedOut: true,
+      httpStatus: null,
+      serverErrorCode: null,
+      durationMs: 15_000,
+      clientRevision: 1,
+      retryCount: 0,
+      queueRetained: true,
+    });
+    expect(d.category).toBe("TIMEOUT");
+    expect(d.httpStatus).toBeNull();
+    expect(d.serverErrorCode).toBeNull();
   });
 });

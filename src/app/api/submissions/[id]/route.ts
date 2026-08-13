@@ -15,9 +15,10 @@ import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_CODE, EXAM_NOT_ACTIVA
 import {
   checkTetherContentAccessLease,
   readContentAccessLeaseCookieFromRequest,
-  renewTetherContentAccessLeaseIfValid,
+  renewContentAccessLeaseFromValidatedDecision,
   TETHER_CONTENT_ACCESS_REQUIRED_CODE,
   TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+  type ContentAccessDecision,
 } from "@/lib/secureClient/requireTetherContentAccess";
 
 export async function GET(
@@ -62,6 +63,15 @@ export async function GET(
   // still review normally. Only ever triggers for TETHER_CLIENT_REQUIRED
   // (resolveSecureClientStartGate) — every SEB/STANDARD_WEB/MONITORED_WEB
   // submission is completely unaffected.
+  // Performance follow-up (physical acceptance review) — captured here so
+  // the eventual success response can renew straight from THIS decision
+  // (see renewContentAccessLeaseFromValidatedDecision's own doc comment)
+  // instead of re-running the whole check a second time. Stays null for
+  // every path that never computes one (non-owner/non-in-progress views,
+  // non-TETHER_CLIENT_REQUIRED submissions) — the renewal call at the
+  // bottom is a no-op in that case, exactly like before.
+  let leaseDecisionForRenewal: ContentAccessDecision | null = null;
+
   if (isOwner && !isExamOwner && submission.status === "IN_PROGRESS") {
     const policy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
     if (policy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
@@ -146,6 +156,7 @@ export async function GET(
         submissionId: submission.id,
         studentId: session.user.id,
       });
+      leaseDecisionForRenewal = leaseDecision;
       if (!leaseDecision.ok) {
         return NextResponse.json(
           {
@@ -280,12 +291,15 @@ export async function GET(
     })),
   });
 
-  // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own
-  // doc comment. Unconditional and self-gating: a no-op for
-  // STANDARD_WEB/SEB_REQUIRED and for the lecturer's own grading view
-  // (no matching lease cookie either way), and only ever extends a lease
-  // that independently re-validates against live state right now.
-  await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: submission.id, studentId: submission.studentId });
+  // Rolling lease renewal, from the SAME decision already computed above
+  // (see renewContentAccessLeaseFromValidatedDecision's own doc comment)
+  // — no second decode/verify/DB read. A no-op for STANDARD_WEB/
+  // SEB_REQUIRED and for the lecturer's own grading view (leaseDecisionForRenewal
+  // stays null there), and only ever extends a lease that already
+  // independently re-validated against live state moments ago.
+  if (leaseDecisionForRenewal) {
+    renewContentAccessLeaseFromValidatedDecision(response, leaseDecisionForRenewal, { submissionId: submission.id, studentId: submission.studentId });
+  }
   return response;
 }
 

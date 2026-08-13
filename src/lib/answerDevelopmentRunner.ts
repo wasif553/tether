@@ -44,6 +44,7 @@ import {
   checkTetherContentAccessLease,
   readContentAccessLeaseCookieFromRequest,
   TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+  type ContentAccessDecision,
 } from "@/lib/secureClient/requireTetherContentAccess";
 
 /**
@@ -93,6 +94,8 @@ export type StudentSubmissionContext = {
   policy: AnswerProvenancePolicy;
   effectiveQuestionIds: string[];
   oneQuestionAtATime: boolean;
+  /** Performance follow-up (physical acceptance review) — see renewContentAccessLeaseFromValidatedDecision's own doc comment. */
+  leaseDecision: ContentAccessDecision | null;
 };
 
 /**
@@ -132,9 +135,10 @@ export async function loadValidatedStudentContext(
   if (!isSubmissionContentAccessible(submission)) {
     throw new AnswerDevelopmentError(403, "This examination has not been activated yet. Return to Tether Secure Browser and complete the secure activation step.");
   }
+  let leaseDecision: ContentAccessDecision | null = null;
   const developmentClientPolicy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
   if (developmentClientPolicy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
-    const leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
+    leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
       submissionId: submission.id,
       studentId,
     });
@@ -177,6 +181,7 @@ export async function loadValidatedStudentContext(
     policy,
     effectiveQuestionIds,
     oneQuestionAtATime: settings.oneQuestionAtATime,
+    leaseDecision,
   };
 }
 

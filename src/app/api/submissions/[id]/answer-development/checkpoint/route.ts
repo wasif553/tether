@@ -24,7 +24,7 @@ import {
   reserveAndCreateCheckpoint,
   checkPasteRetentionAfterCheckpoint,
 } from "@/lib/answerDevelopmentRunner";
-import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
+import { renewContentAccessLeaseFromValidatedDecision } from "@/lib/secureClient/requireTetherContentAccess";
 
 const checkpointSchema = z.object({
   questionId: z.string(),
@@ -84,11 +84,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     isManualCheckpoint: parsed.data.isManualCheckpoint,
   });
 
-  // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own
-  // doc comment. One shared closure since this route has several success
-  // return points below, all equally eligible for renewal.
-  const renew = (response: NextResponse) =>
-    renewTetherContentAccessLeaseIfValid(req, response, { submissionId: id, studentId: session.user.id });
+  // Rolling lease renewal, from the SAME decision loadValidatedStudentContext
+  // already computed — no second decode/verify/DB read (see
+  // renewContentAccessLeaseFromValidatedDecision's own doc comment). One
+  // shared closure since this route has several success return points
+  // below, all equally eligible for renewal.
+  const renew = (response: NextResponse) => {
+    if (context.leaseDecision) {
+      renewContentAccessLeaseFromValidatedDecision(response, context.leaseDecision, { submissionId: id, studentId: session.user.id });
+    }
+  };
 
   if (outcome.kind === "created") {
     checkPasteRetentionAfterCheckpoint(id, parsed.data.questionId).catch(() => {});
@@ -106,21 +111,21 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       },
       { status: 201 },
     );
-    await renew(response);
+    renew(response);
     return response;
   }
   if (outcome.kind === "replay") {
     const response = NextResponse.json({ ok: true, replay: true, versionId: outcome.versionId }, { status: 200 });
-    await renew(response);
+    renew(response);
     return response;
   }
   if (outcome.kind === "suppressed_for_capacity") {
     const response = NextResponse.json({ ok: true, created: false, reason: "MAX_CHECKPOINTS_REACHED" }, { status: 200 });
-    await renew(response);
+    renew(response);
     return response;
   }
   const response = NextResponse.json({ ok: true, created: false, reason: outcome.reasonCode }, { status: 200 });
-  await renew(response);
+  renew(response);
   return response;
 }
 

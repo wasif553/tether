@@ -16,7 +16,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { buildOneQuestionPayload, loadOneQuestionSubmission, OneQuestionModeError } from "@/lib/submissionQuestionPayload";
 import { markQuestionVisited } from "@/lib/questionNavigatorRunner";
-import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
+import { renewContentAccessLeaseFromValidatedDecision } from "@/lib/secureClient/requireTetherContentAccess";
 
 export async function GET(
   req: Request,
@@ -30,7 +30,7 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const { submission, settings } = await loadOneQuestionSubmission(id, session.user.id, req);
+    const { submission, settings, leaseDecision } = await loadOneQuestionSubmission(id, session.user.id, req);
     const payload = buildOneQuestionPayload(submission, settings, submission.currentQuestionIndex);
     if (!payload) {
       return NextResponse.json({ error: "This exam has no questions" }, { status: 404 });
@@ -39,11 +39,12 @@ export async function GET(
     // first question" and every subsequent refresh. Best-effort.
     markQuestionVisited(id, payload.question.id).catch(() => {});
     const response = NextResponse.json(payload);
-    // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's
-    // own doc comment. Question polling/reload is a frequent, low-latency
-    // content read during an active attempt, so this also helps keep a
-    // long exam's lease alive past its fixed 30-minute TTL.
-    await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: submission.id, studentId: submission.studentId });
+    // Rolling lease renewal, from the SAME decision loadOneQuestionSubmission
+    // already computed — no second decode/verify/DB read (see
+    // renewContentAccessLeaseFromValidatedDecision's own doc comment).
+    if (leaseDecision) {
+      renewContentAccessLeaseFromValidatedDecision(response, leaseDecision, { submissionId: submission.id, studentId: submission.studentId });
+    }
     return response;
   } catch (err) {
     if (err instanceof OneQuestionModeError) {

@@ -24,6 +24,7 @@ import {
   readContentAccessLeaseCookieFromRequest,
   TETHER_CONTENT_ACCESS_REQUIRED_CODE,
   TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+  type ContentAccessDecision,
 } from "@/lib/secureClient/requireTetherContentAccess";
 
 export class OneQuestionModeError extends Error {
@@ -83,9 +84,16 @@ export async function loadOneQuestionSubmission(submissionId: string, studentId:
   // TETHER_CLIENT_REQUIRED only — a lease is only ever mintable via
   // native Tether installation-key proof, which SAFE_EXAM_BROWSER has no
   // equivalent of; see requireTetherContentAccess.ts's own doc comment.
+  // Performance follow-up (physical acceptance review) — surfaced to the
+  // caller so its success response can renew straight from THIS decision
+  // (see renewContentAccessLeaseFromValidatedDecision's own doc comment)
+  // instead of re-running the whole check a second time. This backs every
+  // one-question-mode navigation, so avoiding a redundant Ed25519 verify +
+  // DB read here matters for click-to-next-question latency.
+  let leaseDecision: ContentAccessDecision | null = null;
   const clientPolicy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
   if (clientPolicy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
-    const leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
+    leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
       submissionId: submission.id,
       studentId,
     });
@@ -100,7 +108,7 @@ export async function loadOneQuestionSubmission(submissionId: string, studentId:
       "One-question-at-a-time delivery is not enabled for this exam",
     );
   }
-  return { submission, settings };
+  return { submission, settings, leaseDecision };
 }
 
 export type OneQuestionPayload = {

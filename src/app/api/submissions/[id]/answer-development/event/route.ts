@@ -20,7 +20,7 @@ import { DEVELOPMENT_EVENT_RATE_LIMIT_WINDOW_MS } from "@/lib/answerDevelopmentT
 import { isWithinDevelopmentEventRateLimit } from "@/lib/answerProvenancePolicy";
 import { findMostRecentSessionId } from "@/lib/examAttemptSessionRunner";
 import { AnswerDevelopmentError, loadValidatedStudentContext, recordDevelopmentEvent } from "@/lib/answerDevelopmentRunner";
-import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
+import { renewContentAccessLeaseFromValidatedDecision } from "@/lib/secureClient/requireTetherContentAccess";
 
 // The outer envelope only validates shape/type — `metadata`'s actual
 // permitted fields are enforced per-eventType by
@@ -63,7 +63,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
     throw err;
   }
-  void context;
 
   const recentTimestamps = (
     await prisma.answerDevelopmentEvent.findMany({
@@ -95,8 +94,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   });
 
   const response = NextResponse.json({ ok: true, eventId: result.id, replay: "replay" in result }, { status: "replay" in result ? 200 : 201 });
-  // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own doc comment.
-  await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: id, studentId: session.user.id });
+  // Rolling lease renewal, from the SAME decision loadValidatedStudentContext
+  // already computed — no second decode/verify/DB read (see
+  // renewContentAccessLeaseFromValidatedDecision's own doc comment).
+  if (context.leaseDecision) {
+    renewContentAccessLeaseFromValidatedDecision(response, context.leaseDecision, { submissionId: id, studentId: session.user.id });
+  }
   return response;
 }
 

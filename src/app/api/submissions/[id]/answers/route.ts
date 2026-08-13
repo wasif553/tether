@@ -11,10 +11,12 @@ import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 import {
   checkTetherContentAccessLease,
   readContentAccessLeaseCookieFromRequest,
-  renewTetherContentAccessLeaseIfValid,
+  renewContentAccessLeaseFromValidatedDecision,
   TETHER_CONTENT_ACCESS_REQUIRED_CODE,
   TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+  type ContentAccessDecision,
 } from "@/lib/secureClient/requireTetherContentAccess";
+import { logServerTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 
 // Tether Secure Exam Recovery and Resilient Autosave v1 (Part 2) — see
 // docs/tether-secure-resume-recovery-v1.md, "Autosave idempotency and
@@ -38,16 +40,26 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  // Latency profiling (physical acceptance follow-up — question-navigation
+  // latency audit). Bounded, opt-in (TETHER_DIAGNOSTIC_LOGGING_ENABLED),
+  // never enabled in production — see logServerTetherDiagnostic's own doc
+  // comment. Only ever logs plain millisecond durations, never request/
+  // response content.
+  const timingStartMs = performance.now();
+  const authStartMs = timingStartMs;
   const session = await auth();
+  const authMs = performance.now() - authStartMs;
   if (!session || session.user.role !== "STUDENT") {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const { id } = await params;
+  const submissionLookupStartMs = performance.now();
   const submission = await prisma.submission.findUnique({
     where: { id },
     include: { exam: true },
   });
+  const submissionLookupMs = performance.now() - submissionLookupStartMs;
 
   if (!submission || submission.studentId !== session.user.id) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -75,12 +87,23 @@ export async function PATCH(
   // record fabricated answers into an active secure attempt merely
   // because it knows/guesses a questionId — no question content needs to
   // leak for this write-side gap to matter.
+  // Performance follow-up (physical acceptance review) — captured so the
+  // success response below can renew straight from THIS decision (see
+  // renewContentAccessLeaseFromValidatedDecision's own doc comment)
+  // instead of re-running the whole check a second time. This is the
+  // highest-frequency content-bound write during an attempt, so avoiding
+  // a redundant Ed25519 verify + DB read here matters most.
+  let leaseDecisionForRenewal: ContentAccessDecision | null = null;
+  let leaseCheckMs = 0;
   const answerClientPolicy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
   if (answerClientPolicy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
+    const leaseCheckStartMs = performance.now();
     const leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
       submissionId: submission.id,
       studentId: session.user.id,
     });
+    leaseCheckMs = performance.now() - leaseCheckStartMs;
+    leaseDecisionForRenewal = leaseDecision;
     if (!leaseDecision.ok) {
       return NextResponse.json({ error: TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE, code: TETHER_CONTENT_ACCESS_REQUIRED_CODE }, { status: 403 });
     }
@@ -111,6 +134,7 @@ export async function PATCH(
   // One transaction instead of two sequential queries — holds a single
   // pooled connection for the whole autosave instead of two checkouts,
   // which matters under concurrent autosave traffic with a small pool.
+  const transactionStartMs = performance.now();
   const result = await prisma.$transaction(async (tx) => {
     // Correctness pass (post-merge review) — an advisory lock scoped to
     // THIS (submission, question) pair, mirroring the existing
@@ -170,6 +194,7 @@ export async function PATCH(
     });
     return { answer, applied: true as const };
   });
+  const transactionMs = performance.now() - transactionStartMs;
 
   if (!result) return NextResponse.json({ error: "Invalid question" }, { status: 400 });
   const { answer, applied } = result;
@@ -200,11 +225,24 @@ export async function PATCH(
     acknowledgedRequestId: answer.lastClientRequestId ?? null,
   });
 
-  // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own
-  // doc comment. Autosave is the highest-frequency content-bound write
-  // during an attempt, so this is the primary mechanism keeping a long
-  // exam's lease alive well past its fixed 30-minute TTL.
-  await renewTetherContentAccessLeaseIfValid(req, jsonResponse, { submissionId: submission.id, studentId: submission.studentId });
+  // Rolling lease renewal, from the SAME decision computed above — no
+  // second decode/verify/DB read (see
+  // renewContentAccessLeaseFromValidatedDecision's own doc comment).
+  const leaseRenewalStartMs = performance.now();
+  if (leaseDecisionForRenewal) {
+    renewContentAccessLeaseFromValidatedDecision(jsonResponse, leaseDecisionForRenewal, { submissionId: submission.id, studentId: submission.studentId });
+  }
+  const leaseRenewalMs = performance.now() - leaseRenewalStartMs;
+
+  logServerTetherDiagnostic("ANSWERS_PATCH_TIMING", {
+    authMs: Math.round(authMs),
+    submissionLookupMs: Math.round(submissionLookupMs),
+    leaseCheckMs: Math.round(leaseCheckMs),
+    transactionMs: Math.round(transactionMs),
+    leaseRenewalMs: Math.round(leaseRenewalMs * 100) / 100, // synchronous now (no DB/crypto work) — sub-millisecond, kept at 2dp rather than rounding to 0
+    totalMs: Math.round(performance.now() - timingStartMs),
+  });
+
   return jsonResponse;
 }
 

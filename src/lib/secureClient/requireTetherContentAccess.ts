@@ -187,6 +187,51 @@ export async function renewTetherContentAccessLeaseIfValid(
   params: { submissionId: string; studentId: string },
 ): Promise<void> {
   const decision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), params);
+  renewContentAccessLeaseFromValidatedDecision(response, decision, params);
+}
+
+/**
+ * Performance follow-up (physical acceptance review — answer-save/
+ * navigation latency audit): every route that already gates on the lease
+ * calls checkTetherContentAccessLease once as that gate, then previously
+ * called renewTetherContentAccessLeaseIfValid on its success path, which
+ * ran the ENTIRE check a SECOND time — a second Ed25519 decode+verify and
+ * a second getCurrentSessionForSubmission database read, both fully
+ * redundant, since a request that already has `decision.ok === true` from
+ * the gate cannot meaningfully re-decide anything by re-running the exact
+ * same check against the exact same live state microseconds later.
+ *
+ * Use this instead of renewTetherContentAccessLeaseIfValid whenever the
+ * route already computed a ContentAccessDecision earlier in the SAME
+ * request (as its own access gate) — it reissues the lease straight from
+ * that already-validated decision's `renewal` payload, doing no
+ * additional decoding, signature verification, or database work at all.
+ * Exactly as fail-closed as the original: `decision.ok` can only be true
+ * if checkTetherContentAccessLease's full chain (decode, signature,
+ * expiry, live-current-session match, installation-fingerprint match)
+ * already passed at the point that decision was produced, so this can
+ * never renew — let alone bootstrap — a lease that didn't independently
+ * earn it.
+ *
+ * `decision` MUST be a genuine ContentAccessDecision value returned by
+ * checkTetherContentAccessLease earlier in THIS SAME request/route
+ * execution — never a value reconstructed from client input, cached
+ * across requests, or passed through a network boundary. There is
+ * nothing in this function's own logic that re-derives or re-checks that
+ * fact, so callers are the enforcement point for it — exactly like every
+ * other "trust the caller already did the gate check" helper in this
+ * codebase (see e.g. isSubmissionContentAccessible's own callers).
+ *
+ * renewTetherContentAccessLeaseIfValid remains the right choice for a
+ * route that does NOT already gate on the lease and only wants to
+ * opportunistically extend one if present (its one legitimate use today:
+ * session-heartbeat, which is not itself lease-gated).
+ */
+export function renewContentAccessLeaseFromValidatedDecision(
+  response: NextResponse,
+  decision: ContentAccessDecision,
+  params: { submissionId: string; studentId: string },
+): void {
   if (!decision.ok) return;
   issueContentAccessLeaseCookie(response, {
     submissionId: params.submissionId,

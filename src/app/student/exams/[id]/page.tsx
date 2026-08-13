@@ -68,9 +68,11 @@ import {
   phoneEvidenceTier,
   shouldRunSecondStageVerification,
   expandCandidateBoxForVerification,
+  phoneConfidenceBand,
   PHONE_DETECTION_ALGORITHM_VERSION,
   type PhoneObservation,
   type PhoneDetectionSource,
+  type PhoneConfidenceBand,
   type NormalizedBox,
 } from "@/lib/phoneDetectionTracking";
 import {
@@ -126,12 +128,22 @@ const PHONE_CLASS_NAMES = new Set(["cell phone", "mobile phone", "phone"]);
 /** Crop canvases are resized up to this before a second detector pass (Part 4) — matches coco-ssd's own internal input scale, so a small edge/lower-frame candidate occupies far more model pixels than it would in the full, uniformly-downscaled frame. */
 const PHONE_CROP_INPUT_SIZE = 300;
 
+/** Physical acceptance follow-up (phone-detection calibration) — a candidate rejected purely on geometry (isPlausiblePhoneGeometry), captured ONLY for the calibration log below; never persisted, never sent anywhere. */
+type GeometryRejectedPhoneCandidate = { source: PhoneDetectionSource; confidence: number; box: NormalizedBox };
+
 function phoneObservationsFromDetections(
   detections: DetectedObject[],
   sourceWidth: number,
   sourceHeight: number,
   source: PhoneDetectionSource,
   cropRegionBox?: NormalizedBox,
+  // Optional out-param (physical acceptance follow-up — phone-detection
+  // calibration mode): when provided, every geometry-rejected candidate is
+  // ALSO appended here, purely for the bounded local calibration log
+  // (buildPhoneCalibrationCandidates below) — never changes this
+  // function's own return value or filtering behaviour for the real
+  // detection path, which is untouched.
+  geometryRejectedSink?: GeometryRejectedPhoneCandidate[],
 ): PhoneObservation[] {
   const observations: PhoneObservation[] = [];
   for (const d of detections) {
@@ -140,10 +152,98 @@ function phoneObservationsFromDetections(
     const [x, y, width, height] = d.bbox;
     const normalizedLocal = pixelBoxToNormalized({ x, y, width, height }, sourceWidth, sourceHeight);
     const box = cropRegionBox ? mapCropDetectionToOriginalFrame(cropRegionBox, normalizedLocal) : normalizedLocal;
-    if (!isPlausiblePhoneGeometry(box)) continue;
+    if (!isPlausiblePhoneGeometry(box)) {
+      geometryRejectedSink?.push({ source, confidence: d.score, box });
+      continue;
+    }
     observations.push({ box, score: d.score, source });
   }
   return observations;
+}
+
+/**
+ * Physical acceptance follow-up — bounded, metadata-only phone-detection
+ * calibration record. See docs/phone-detection-calibration-v1.md, "Known
+ * limitations": this repo has no labelled fixture/hardware evaluation
+ * harness yet — this is exactly that harness's data-collection side,
+ * gated behind the SAME existing sesAiCameraDebug opt-in dev-only flag
+ * every other on-device AI debug log already uses (shouldLogAiCameraDebug
+ * in cameraIntegrityDetection.ts). Deliberately metadata-only: no image,
+ * frame, or video data is ever captured here — only the plain numbers/
+ * strings/booleans a real physical calibration session needs to compute a
+ * detection-rate/confidence-distribution table per docs/phone-detection-
+ * calibration-v1.md's test matrix.
+ */
+type PhoneCalibrationCandidate = {
+  timestampMs: number;
+  inferenceMs: number;
+  source: PhoneDetectionSource;
+  confidence: number;
+  band: PhoneConfidenceBand;
+  box: NormalizedBox;
+  retained: boolean;
+  rejectedReason: "confidence" | "geometry" | "tracking" | "verification" | null;
+  trackId: string | null;
+  localWarningTriggered: boolean;
+};
+
+function buildPhoneCalibrationCandidates(params: {
+  nowMs: number;
+  inferenceMs: number;
+  observations: PhoneObservation[];
+  dedupedObservations: PhoneObservation[];
+  geometryRejected: GeometryRejectedPhoneCandidate[];
+  tracks: PhoneCandidateTracker["getTracks"] extends () => infer T ? T : never;
+}): PhoneCalibrationCandidate[] {
+  const { nowMs, inferenceMs, observations, dedupedObservations, geometryRejected, tracks } = params;
+
+  const fromObservations: PhoneCalibrationCandidate[] = observations.map((obs) => {
+    const band = phoneConfidenceBand(obs.score);
+    // A track's own box/score/source are overwritten to the LATEST
+    // matching observation on every tracker.update() call (see
+    // PhoneCandidateTracker.update in phoneDetectionTracking.ts) — an
+    // exact triple match is therefore a reliable (if not perfectly
+    // formal) correlation for calibration-logging purposes only.
+    const matchedTrack = tracks.find((t) => t.latestSource === obs.source && t.latestScore === obs.score && t.box.x === obs.box.x && t.box.y === obs.box.y);
+    const survivedDedup = dedupedObservations.includes(obs);
+    const rejectedReason: PhoneCalibrationCandidate["rejectedReason"] =
+      band === "none"
+        ? "confidence"
+        : !survivedDedup
+          ? "tracking"
+          : matchedTrack && matchedTrack.verificationOutcome === "lowered" && !matchedTrack.confirmedLocalWarning
+            ? "verification"
+            : matchedTrack && !matchedTrack.confirmedLocalWarning
+              ? "tracking" // observed and retained, but not yet enough temporal confirmations
+              : null;
+    return {
+      timestampMs: nowMs,
+      inferenceMs,
+      source: obs.source,
+      confidence: obs.score,
+      band,
+      box: obs.box,
+      retained: survivedDedup && band !== "none",
+      rejectedReason,
+      trackId: matchedTrack?.id ?? null,
+      localWarningTriggered: matchedTrack?.confirmedLocalWarning ?? false,
+    };
+  });
+
+  const fromGeometryRejected: PhoneCalibrationCandidate[] = geometryRejected.map((g) => ({
+    timestampMs: nowMs,
+    inferenceMs,
+    source: g.source,
+    confidence: g.confidence,
+    band: phoneConfidenceBand(g.confidence),
+    box: g.box,
+    retained: false,
+    rejectedReason: "geometry",
+    trackId: null,
+    localWarningTriggered: false,
+  }));
+
+  return [...fromObservations, ...fromGeometryRejected];
 }
 
 type Question = {
@@ -1102,6 +1202,41 @@ export default function TakeExamPage({
     examId: data?.exam.id ?? "",
     submissionId: submissionId ?? "",
     enabled: Boolean(submissionId) && submissionStatus === "IN_PROGRESS",
+    // Physical acceptance follow-up ("answer could not be saved" symptom,
+    // v1.7.5 physical test) — bounded, answer-content-free diagnostics for
+    // a failed autosave attempt, routed onto the SAME AUTOSAVE_FAILED
+    // integrity event this page already reports (see reportIntegrityEvent
+    // below and its own metadata contract) so a lecturer/investigator
+    // reviewing an attempt afterward can see WHY a save failed (timeout /
+    // network error / which HTTP status / which short server error code /
+    // how long it took) instead of a bare, undiagnosable event. Deliberately
+    // referenced by closure rather than useCallback here — reportIntegrityEvent
+    // itself is declared further below in this component, and the hook
+    // only ever reads this via a ref it re-syncs every render (see
+    // onSaveDiagnosticsRef in useResilientAutosave.ts), so a fresh
+    // closure each render is the intended usage, not a missed memoization.
+    onSaveDiagnostics: (questionId, diagnostics) => {
+      if (!secureModeEnabled) return;
+      reportIntegrityEvent("AUTOSAVE_FAILED", {
+        questionIdPresent: Boolean(questionId),
+        category: diagnostics.category,
+        httpStatus: diagnostics.httpStatus,
+        serverErrorCode: diagnostics.serverErrorCode,
+        durationMs: diagnostics.durationMs,
+        threw: diagnostics.threw,
+        timedOut: diagnostics.timedOut,
+        clientRevision: diagnostics.clientRevision,
+        retryCount: diagnostics.retryCount,
+        queueRetained: diagnostics.queueRetained,
+      });
+    },
+    // Local diagnostic signal only (never sent to the server) — confirms
+    // the local IndexedDB-backed queue did its job for a save that
+    // initially failed. Deliberately not a new integrity event: this is
+    // reassuring, not integrity-relevant, information.
+    onRetrySucceeded: (questionId, attemptsBeforeSuccess) => {
+      logClientTetherDiagnostic("AUTOSAVE_RETRY_SUCCEEDED", { questionIdPresent: Boolean(questionId), attemptsBeforeSuccess });
+    },
   });
   // Ref mirror so the heartbeat closure below (created once per
   // effect run, not re-run on every pendingCount change) always reads the
@@ -1301,6 +1436,12 @@ export default function TakeExamPage({
   // source of truth.
   async function navigateQuestion(requestedIndex: number) {
     if (!oneQuestion.payload || navigatingQuestion) return;
+    // Latency profiling (physical acceptance follow-up — question
+    // navigation latency audit). Bounded, dev-only timing for the whole
+    // click-to-next-question-visible path, plus the question-progress leg
+    // specifically — see logClientTetherDiagnostic's own doc comment
+    // (never logs answer/question content, only durations/booleans).
+    const navigationStartedAtMs = performance.now();
     setNavigatingQuestion(true);
     setOneQuestion((prev) => ({ ...prev, error: null }));
     const saved = await flushAnswerNow(oneQuestion.payload.question.id);
@@ -1313,11 +1454,13 @@ export default function TakeExamPage({
       return;
     }
     try {
+      const questionProgressStartedAtMs = performance.now();
       const res = await fetch(`/api/submissions/${id}/question-progress`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ currentIndex: requestedIndex }),
       });
+      const questionProgressMs = Math.round(performance.now() - questionProgressStartedAtMs);
       if (!res.ok) throw new Error("navigation failed");
       const payload: OneQuestionPayload = await res.json();
       setOneQuestion({ loading: false, error: null, payload });
@@ -1328,6 +1471,10 @@ export default function TakeExamPage({
             : { ...prev, [payload.question.id]: payload.existingResponse! },
         );
       }
+      logClientTetherDiagnostic("QUESTION_NAVIGATION_TIMING", {
+        questionProgressMs,
+        totalClickToVisibleMs: Math.round(performance.now() - navigationStartedAtMs),
+      });
     } catch {
       setOneQuestion((prev) => ({
         ...prev,
@@ -3175,11 +3322,19 @@ export default function TakeExamPage({
               }
             };
 
+            // Physical acceptance follow-up (phone-detection calibration) —
+            // populated only by phoneObservationsFromDetections's optional
+            // geometry-rejection sink; empty (and free) whenever calibration
+            // logging isn't consumed below.
+            const geometryRejectedPhoneCandidates: GeometryRejectedPhoneCandidate[] = [];
+
             let phoneObservations = phoneObservationsFromDetections(
               detections,
               video.videoWidth,
               video.videoHeight,
               "full_frame",
+              undefined,
+              geometryRejectedPhoneCandidates,
             );
 
             if (!suppressStartup) {
@@ -3198,6 +3353,7 @@ export default function TakeExamPage({
                     PHONE_CROP_INPUT_SIZE,
                     cropSource,
                     region.box,
+                    geometryRejectedPhoneCandidates,
                   ),
                 );
               }
@@ -3237,6 +3393,26 @@ export default function TakeExamPage({
                 });
               }
             }
+
+            // Physical acceptance follow-up — bounded, metadata-only
+            // calibration log (see buildPhoneCalibrationCandidates's own
+            // doc comment), positioned AFTER second-stage verification so
+            // a candidate's rejectedReason can correctly reflect a
+            // "verification" demotion, not just "confidence"/"tracking".
+            // Gated behind the same sesAiCameraDebug opt-in flag as every
+            // other on-device AI debug log — logAiCameraDebug itself
+            // no-ops entirely outside that, so this is free in every other
+            // build.
+            logAiCameraDebug("tick: phone calibration candidates", {
+              candidates: buildPhoneCalibrationCandidates({
+                nowMs: now,
+                inferenceMs,
+                observations: phoneObservations,
+                dedupedObservations: dedupedPhoneObservations,
+                geometryRejected: geometryRejectedPhoneCandidates,
+                tracks: phoneTrackerResult.tracks,
+              }),
+            });
 
             const bestConfirmedPhoneTrack = phoneTrackerResult.tracks
               .filter((t) => t.confirmedLocalWarning)
