@@ -450,16 +450,21 @@ describe("unrelated flows left untouched by this hotfix", () => {
     expect(source).toContain("shouldShowInstallerFallback(");
   });
 
-  it("V2 attestation remains best-effort and is never used to gate navigation (LEGACY mode policy unchanged)", () => {
+  it("release-blocking follow-up review: v2 attestation is now REQUIRED (fail-closed) for a genuine TETHER_SECURE_CLIENT launch — legacy attestation can no longer mint the content-access lease, so v2's outcome IS inspected and gates navigation", () => {
     const v2CallIndex = runLaunchSequenceBody.indexOf("submitExamSessionAttestationV2(");
     expect(v2CallIndex).toBeGreaterThan(-1);
-    // No `if` branching on its return value anywhere nearby — it's
-    // called and awaited only for its side effect (recording evidence),
-    // never inspected. The doc comment immediately preceding the
-    // function (not the body itself) documents this design intent.
+    // Its return value IS now captured and branched on, scoped to a real
+    // TETHER_SECURE_CLIENT launch — never SAFE_EXAM_BROWSER/
+    // MOCK_TETHER_CLIENT, which have no installation key to prove
+    // possession with.
+    expect(runLaunchSequenceBody).toContain("const v2Outcome = await submitExamSessionAttestationV2(");
+    expect(runLaunchSequenceBody).toContain('manifest.clientType === "TETHER_SECURE_CLIENT" && v2Outcome.kind !== "VERIFIED"');
+    // The doc comment immediately preceding the function documents this
+    // deliberate behavioural change from the old best-effort design.
     const docCommentStart = source.lastIndexOf("/**", source.indexOf("async function submitExamSessionAttestationV2("));
     const docComment = source.slice(docCommentStart, source.indexOf("async function submitExamSessionAttestationV2("));
-    expect(docComment).toContain("Every failure path here is silent by");
+    expect(docComment).toContain("is now the ONLY way a");
+    expect(docComment).toContain('TETHER_SECURE_CLIENT"');
   });
 });
 

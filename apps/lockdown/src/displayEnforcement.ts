@@ -46,6 +46,7 @@ import {
   debounceDisplayEvent,
   resolveDisplayDecisionEventType,
   displayBlockingReasonCopy,
+  isOverlayEligibleBlockingReason,
   DEFAULT_DISPLAY_EVENT_DEBOUNCE_MS,
   INITIAL_SECURE_CLIENT_ENFORCEMENT_STATE,
   type DisplayEnforcementState,
@@ -342,7 +343,12 @@ export class DisplayEnforcement {
       previousDecision: this.previousDecision,
     });
 
-    if (nextDecision.state === "BLOCKED") this.showOverlay(nextDecision.reason);
+    // v1.7.5 P0 — POLICY_NOT_READY must never produce the screen-saver-
+    // level native overlay (see isOverlayEligibleBlockingReason's own doc
+    // comment). The decision itself is still recorded as BLOCKED for
+    // diagnostics/event-suppression purposes below — only the VISIBLE
+    // overlay is suppressed for this one reason.
+    if (nextDecision.state === "BLOCKED" && isOverlayEligibleBlockingReason(nextDecision.reason)) this.showOverlay(nextDecision.reason);
     else this.hideOverlay();
 
     if (eventType) this.callbacks.onEventType?.(eventType, displayCount);

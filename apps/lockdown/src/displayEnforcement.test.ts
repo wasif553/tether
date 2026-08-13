@@ -248,3 +248,66 @@ describe("DisplayEnforcement — poll serialization (the fixed .finally()-identi
     expect((enforcement as unknown as { evaluateInFlight: unknown }).evaluateInFlight).toBeNull();
   });
 });
+
+// v1.7.5 P0 — physical-test failure: an exam-content-page mount effect
+// re-asserted {active:true, ready:false} on top of an already
+// ACTIVE+READY state, producing POLICY_NOT_READY, which then showed the
+// screen-saver-level, non-closable native overlay with no Recheck/Exit
+// route. These tests prove the overlay itself is now structurally
+// unreachable for this one reason, regardless of what caused the
+// readiness gate to reopen.
+describe("DisplayEnforcement — v1.7.5 P0: POLICY_NOT_READY never shows the native overlay", () => {
+  it("REQUIRED TEST E: active&&!ready (POLICY_NOT_READY) is still BLOCKED for diagnostics purposes, but overlayVisible stays false", async () => {
+    const enforcement = new DisplayEnforcement();
+    enforcement.setEnforcementState({ active: true, ready: false, requireSingleDisplay: false });
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+
+    const snapshot = enforcement.getDiagnosticsSnapshot();
+    expect(snapshot.currentDecision).toBe("BLOCKED");
+    expect(snapshot.blockingReason).toBe("POLICY_NOT_READY");
+    expect(snapshot.overlayVisible).toBe(false);
+  });
+
+  it("REQUIRED TEST A: a genuine ACTIVE+READY state that later drops to ready:false (the exact downgrade the old mount-time cover used to cause) never shows the overlay either — it simply hides any overlay that happened to be showing", async () => {
+    const enforcement = new DisplayEnforcement();
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enforcement.getDiagnosticsSnapshot().overlayVisible).toBe(false);
+
+    // Simulate the bug scenario directly: something re-asserts
+    // {active:true, ready:false} on top of an already-active state.
+    enforcement.setEnforcementState({ active: true, ready: false, requireSingleDisplay: false });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const snapshot = enforcement.getDiagnosticsSnapshot();
+    expect(snapshot.blockingReason).toBe("POLICY_NOT_READY");
+    expect(snapshot.overlayVisible).toBe(false);
+  });
+
+  it("a genuine EXTEND topology still shows the overlay while active&&ready — POLICY_NOT_READY suppression never weakens real display enforcement", async () => {
+    setDisplayCount(2);
+    getWindowsDisplayTopology.mockResolvedValue(EXTEND_TOPOLOGY);
+    const enforcement = new DisplayEnforcement();
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+
+    const snapshot = enforcement.getDiagnosticsSnapshot();
+    expect(snapshot.blockingReason).toBe("ADDITIONAL_ELECTRON_DISPLAY");
+    expect(snapshot.overlayVisible).toBe(true);
+  });
+
+  it("TOPOLOGY_CHECK_UNAVAILABLE during an active exam still shows the overlay, unchanged — only POLICY_NOT_READY is suppressed", async () => {
+    getWindowsDisplayTopology.mockResolvedValue({ ok: false as const, reason: "timeout" as const });
+    const enforcement = new DisplayEnforcement();
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+
+    const snapshot = enforcement.getDiagnosticsSnapshot();
+    expect(snapshot.blockingReason).toBe("TOPOLOGY_CHECK_UNAVAILABLE");
+    expect(snapshot.overlayVisible).toBe(true);
+  });
+});

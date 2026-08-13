@@ -7,6 +7,14 @@ import { resolveSubmissionTimingPolicy, submissionDeadline } from "@/lib/assessm
 import { recordAnswerSavedActivity } from "@/lib/answerActivityTelemetry";
 import { findMostRecentSessionId } from "@/lib/examAttemptSessionRunner";
 import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_CODE, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
+import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import {
+  checkTetherContentAccessLease,
+  readContentAccessLeaseCookieFromRequest,
+  renewTetherContentAccessLeaseIfValid,
+  TETHER_CONTENT_ACCESS_REQUIRED_CODE,
+  TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+} from "@/lib/secureClient/requireTetherContentAccess";
 
 // Tether Secure Exam Recovery and Resilient Autosave v1 (Part 2) — see
 // docs/tether-secure-resume-recovery-v1.md, "Autosave idempotency and
@@ -57,6 +65,25 @@ export async function PATCH(
   // answer before the student ever passed native lockdown activation.
   if (!isSubmissionContentAccessible(submission)) {
     return NextResponse.json({ error: EXAM_NOT_ACTIVATED_MESSAGE, code: EXAM_NOT_ACTIVATED_CODE }, { status: 403 });
+  }
+
+  // Release-blocking server content-boundary audit — see
+  // tetherContentAccessLease.ts. isSubmissionContentAccessible above only
+  // proves the submission itself is activated, never that THIS request
+  // originates from the Tether/SEB instance that activated it. Without
+  // this, an ordinary, separately-authenticated Chrome/Edge request could
+  // record fabricated answers into an active secure attempt merely
+  // because it knows/guesses a questionId — no question content needs to
+  // leak for this write-side gap to matter.
+  const answerClientPolicy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
+  if (answerClientPolicy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
+    const leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
+      submissionId: submission.id,
+      studentId: session.user.id,
+    });
+    if (!leaseDecision.ok) {
+      return NextResponse.json({ error: TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE, code: TETHER_CONTENT_ACCESS_REQUIRED_CODE }, { status: 403 });
+    }
   }
 
   // Freeze timing policy for active exam attempts — see
@@ -166,12 +193,19 @@ export async function PATCH(
       .catch(() => {});
   }
 
-  return NextResponse.json({
+  const jsonResponse = NextResponse.json({
     questionId: answer.questionId,
     response: answer.response,
     acknowledgedRevision: answer.clientRevision ?? null,
     acknowledgedRequestId: answer.lastClientRequestId ?? null,
   });
+
+  // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own
+  // doc comment. Autosave is the highest-frequency content-bound write
+  // during an attempt, so this is the primary mechanism keeping a long
+  // exam's lease alive well past its fixed 30-minute TTL.
+  await renewTetherContentAccessLeaseIfValid(req, jsonResponse, { submissionId: submission.id, studentId: submission.studentId });
+  return jsonResponse;
 }
 
 export const dynamic = "force-dynamic";

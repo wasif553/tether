@@ -19,6 +19,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { CODE_WORKING_MAX_CHARACTERS } from "@/lib/answerDevelopmentThresholds";
 import { AnswerDevelopmentError, loadValidatedStudentContext, recordDevelopmentEvent } from "@/lib/answerDevelopmentRunner";
+import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
 
 const bodySchema = z.object({
   questionId: z.string(),
@@ -45,7 +46,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   let context;
   try {
-    context = await loadValidatedStudentContext(id, session.user.id, parsed.data.questionId);
+    context = await loadValidatedStudentContext(id, session.user.id, parsed.data.questionId, req);
   } catch (err) {
     if (err instanceof AnswerDevelopmentError) {
       return NextResponse.json({ error: err.message }, { status: err.status });
@@ -69,7 +70,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       select: { id: true },
     });
     if (existing) {
-      return NextResponse.json({ ok: true, replay: true, executed: false, message: CODE_EXECUTION_UNAVAILABLE_MESSAGE }, { status: 200 });
+      const replayResponse = NextResponse.json({ ok: true, replay: true, executed: false, message: CODE_EXECUTION_UNAVAILABLE_MESSAGE }, { status: 200 });
+      // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own doc comment.
+      await renewTetherContentAccessLeaseIfValid(req, replayResponse, { submissionId: id, studentId: session.user.id });
+      return replayResponse;
     }
   }
 
@@ -99,7 +103,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     metadata: { exitStatus: "NOT_CONFIGURED" },
   }).catch(() => {});
 
-  return NextResponse.json({ ok: true, executed: false, message: CODE_EXECUTION_UNAVAILABLE_MESSAGE }, { status: 200 });
+  const response = NextResponse.json({ ok: true, executed: false, message: CODE_EXECUTION_UNAVAILABLE_MESSAGE }, { status: 200 });
+  // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own doc comment.
+  await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: id, studentId: session.user.id });
+  return response;
 }
 
 export const dynamic = "force-dynamic";

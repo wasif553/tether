@@ -21,6 +21,14 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
+
+// Release-blocking server content-boundary audit — see
+// tetherContentAccessLease.ts. A self-contained signing keypair for THIS
+// file only (mirrors tetherRecovery.routes.test.ts's own pattern).
+const { publicKey: serverPublicKey, privateKey: serverPrivateKey } = crypto.generateKeyPairSync("ed25519");
+vi.stubEnv("TETHER_SECURE_CLIENT_SIGNING_PUBLIC_KEY", serverPublicKey.export({ type: "spki", format: "pem" }).toString());
+vi.stubEnv("TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY", serverPrivateKey.export({ type: "pkcs8", format: "pem" }).toString());
 
 const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
@@ -29,6 +37,26 @@ const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
 const startRoute = await import("../app/api/exams/[id]/start/route");
 const activateRoute = await import("../app/api/submissions/[id]/activate/route");
+const { getSigningPrivateKey, getSigningKeyId } = await import("./secureClientRunner");
+const { buildContentAccessLeaseClaims, encodeContentAccessLeaseCookieValue, CONTENT_ACCESS_LEASE_COOKIE_NAME } = await import(
+  "./secureClient/tetherContentAccessLease"
+);
+
+/** Release-blocking follow-up review — a lease is only ever valid when it matches the session's CURRENT clientInstallationIdHash; any SecureClientSession row this file creates directly (bypassing real v2 attestation) must set this to the SAME fixed test fingerprint. */
+const TEST_INSTALLATION_FINGERPRINT = "test-installation-fingerprint";
+
+/** Mints a real, validly-signed lease directly (no HTTP round trip needed) for a SecureClientSession created directly in the DB, exactly mirroring what a genuine v2 attestation success would have issued. */
+function mintLeaseCookie(params: { submissionId: string; secureClientSessionId: string; studentId: string }): string {
+  const claims = buildContentAccessLeaseClaims({
+    keyId: getSigningKeyId(),
+    submissionId: params.submissionId,
+    secureClientSessionId: params.secureClientSessionId,
+    installationKeyFingerprint: TEST_INSTALLATION_FINGERPRINT,
+    studentId: params.studentId,
+  });
+  const token = encodeContentAccessLeaseCookieValue(claims, getSigningPrivateKey());
+  return `${CONTENT_ACCESS_LEASE_COOKIE_NAME}=${token}`;
+}
 
 const stamp = Date.now();
 const cleanupUserIds: string[] = [];
@@ -41,10 +69,12 @@ function sessionFor(userId: string, institutionId: string) {
   };
 }
 
-function jsonRequest(method: string, body?: unknown) {
+function jsonRequest(method: string, body?: unknown, cookie?: string) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (cookie) headers["Cookie"] = cookie;
   return new Request("http://test.local/route", {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 }
@@ -170,7 +200,7 @@ describe("Zero-downtime cutover — Submission.activatedAt DB default vs. explic
     // already covered end-to-end in tetherAttemptAccounting.test.ts —
     // re-asserted here in the same DB-default schema context for
     // completeness).
-    await prisma.secureClientSession.create({
+    const verifiedSession = await prisma.secureClientSession.create({
       data: {
         institutionId,
         examId: exam.id,
@@ -179,10 +209,12 @@ describe("Zero-downtime cutover — Submission.activatedAt DB default vs. explic
         clientType: "TETHER_SECURE_CLIENT",
         status: "ACTIVE",
         verificationStatus: "VERIFIED",
+        clientInstallationIdHash: TEST_INSTALLATION_FINGERPRINT,
       },
     });
+    const leaseCookie = mintLeaseCookie({ submissionId: row.id, secureClientSessionId: verifiedSession.id, studentId: student.id });
     mockAuth.mockResolvedValue(sessionFor(student.id, institutionId));
-    const activateRes = await activateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: row.id }) });
+    const activateRes = await activateRoute.POST(jsonRequest("POST", undefined, leaseCookie), { params: Promise.resolve({ id: row.id }) });
     expect(activateRes.status).toBe(200);
     const activated = await prisma.submission.findUniqueOrThrow({ where: { id: row.id } });
     expect(activated.activatedAt).not.toBeNull();

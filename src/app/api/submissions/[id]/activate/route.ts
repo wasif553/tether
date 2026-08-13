@@ -23,6 +23,21 @@
  * verified secure-client session legitimately allows — this endpoint
  * cannot be tricked into activating a submission whose secure-client
  * session was never actually verified server-side.
+ *
+ * Release-blocking server content-boundary audit — see
+ * tetherContentAccessLease.ts. hasVerifiedTetherSession above is a plain
+ * submission-keyed database read: it proves a verified session exists
+ * SOMEWHERE, not that THIS request comes from the Tether/SEB instance
+ * that established it. Without the additional lease check below, an
+ * ordinary Chrome/Edge tab — separately authenticated as the same
+ * student via their own normal login, which requires no Tether-specific
+ * proof at all — could call this endpoint directly and activate the
+ * submission (starting the timer, unlocking content) the moment
+ * verification completes, without ever going through native lockdown.
+ * The lease closes this: it is issued only by an attestation success
+ * that already proved genuine native/installation-backed proof for THIS
+ * request, and is physically absent from any browser whose cookie jar
+ * isn't the same Electron/SEB instance.
  */
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
@@ -33,9 +48,16 @@ import { getCurrentSessionForSubmission, resolvePriorSessionTrust } from "@/lib/
 import { parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
 import { resolveTrustedTetherVerification } from "@/lib/tetherRecovery";
 import { resolveOfflineContinueMs } from "@/lib/tetherRecoveryConfig";
+import {
+  issueContentAccessLeaseCookie,
+  checkTetherContentAccessLease,
+  readContentAccessLeaseCookieFromRequest,
+  TETHER_CONTENT_ACCESS_REQUIRED_CODE,
+  TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+} from "@/lib/secureClient/requireTetherContentAccess";
 
 export async function POST(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const session = await auth();
@@ -101,6 +123,34 @@ export async function POST(
     );
   }
 
+  // Release-blocking server content-boundary audit — see this route's
+  // own updated doc comment above and tetherContentAccessLease.ts. The
+  // REQUEST-bound half of activation eligibility: a verified session
+  // existing for this submission is necessary but not sufficient — THIS
+  // request must also carry the lease that only a genuine native-backed
+  // attestation success (for this student, this submission) could have
+  // produced. An ordinary separately-authenticated Chrome/Edge request
+  // never has this cookie.
+  //
+  // Scoped to TETHER_CLIENT_REQUIRED only — a lease is only ever mintable
+  // via native Tether installation-key proof (see
+  // tetherContentAccessLease.ts's own doc comment), which SAFE_EXAM_BROWSER
+  // has no equivalent of. Requiring it for SEB_REQUIRED would permanently
+  // lock every SEB attempt out of activation; that gap is unchanged by
+  // this fix and out of scope here.
+  if (policy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
+    const leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
+      submissionId: submission.id,
+      studentId: session.user.id,
+    });
+    if (!leaseDecision.ok) {
+      return NextResponse.json(
+        { error: TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE, code: TETHER_CONTENT_ACCESS_REQUIRED_CODE },
+        { status: 403 },
+      );
+    }
+  }
+
   // Atomic, race-safe first activation: the WHERE clause (id AND
   // activatedAt IS NULL) means at most one concurrent caller's UPDATE
   // can ever match this row — a second, near-simultaneous POST (e.g. a
@@ -121,10 +171,32 @@ export async function POST(
     // return that one's result, never our own now/now (which never
     // actually got written).
     const winner = await prisma.submission.findUnique({ where: { id: submission.id }, select: { activatedAt: true, startedAt: true } });
-    return NextResponse.json({ ok: true, activatedAt: winner?.activatedAt ?? now, startedAt: winner?.startedAt ?? now, alreadyActivated: true });
+    const raceResponse = NextResponse.json({ ok: true, activatedAt: winner?.activatedAt ?? now, startedAt: winner?.startedAt ?? now, alreadyActivated: true });
+    if (currentSession && policy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
+      issueContentAccessLeaseCookie(raceResponse, {
+        submissionId: submission.id,
+        secureClientSessionId: currentSession.id,
+        installationKeyFingerprint: currentSession.clientInstallationIdHash ?? null,
+        studentId: session.user.id,
+      });
+    }
+    return raceResponse;
   }
 
-  return NextResponse.json({ ok: true, activatedAt: now, startedAt: now, alreadyActivated: false });
+  const response = NextResponse.json({ ok: true, activatedAt: now, startedAt: now, alreadyActivated: false });
+  // Refresh the lease here too — activation is itself further genuine,
+  // server-verified proof this request is legitimate, and this keeps the
+  // lease's TTL from expiring partway through a long exam attempt. Never
+  // for SEB_REQUIRED — see the requirement check above.
+  if (currentSession && policy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
+    issueContentAccessLeaseCookie(response, {
+      submissionId: submission.id,
+      secureClientSessionId: currentSession.id,
+      installationKeyFingerprint: currentSession.clientInstallationIdHash ?? null,
+      studentId: session.user.id,
+    });
+  }
+  return response;
 }
 
 export const dynamic = "force-dynamic";

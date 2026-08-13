@@ -92,6 +92,25 @@ export async function POST(req: Request, { params }: { params: Promise<{ session
     displayDiagnostic: parsed.data.displayDiagnostic ?? null,
   });
 
+  // Release-blocking server content-boundary audit, follow-up fix — see
+  // tetherContentAccessLease.ts. This endpoint MUST NEVER issue the
+  // protected-content lease: the request body above (checks, required,
+  // displayCount, clientVersion, ...) is entirely client-self-reported —
+  // there is no installation private-key signature or any other native
+  // possession proof anywhere in this flow. An ordinary authenticated
+  // browser can POST a fabricated body straight to this endpoint (e.g.
+  // { checks: {}, required: {} }, which always resolves to overallStatus
+  // READY — see overallStatusFromChecks) and would otherwise be able to
+  // manufacture the lease itself, defeating the entire request-binding
+  // guarantee. This route continues to exist ONLY for the legacy
+  // SecureClientSession.verificationStatus compatibility decision (see
+  // tetherAttestationConfig.ts's LEGACY/DUAL/V2_REQUIRED truth table) —
+  // never as a source of proof for protected content access. See
+  // src/app/api/tether/exam-session/attestation/verify/route.ts for the
+  // ONE place a lease is ever issued (genuine installation-key signature
+  // verification), and tether-launch/page.tsx's submitExamSessionAttestationV2
+  // for why that v2 step is now REQUIRED (not best-effort) for a real
+  // TETHER_SECURE_CLIENT launch.
   return NextResponse.json({ ok: true, overallStatus: result.overallStatus, attestationId: result.attestation.id }, { status: 201 });
 }
 

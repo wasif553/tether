@@ -31,6 +31,12 @@ type SesLockdownBridge = {
   // back-compat shim is carried). See
   // apps/lockdown/src/displayEnforcementLogic.ts's SecureClientEnforcementState.
   setSecureClientEnforcementState?(state: { active: boolean; ready: boolean; requireSingleDisplay: boolean }): void;
+  // v1.7.5 P0 — the narrow, read-only counterpart above. Optional: only
+  // present in a v1.7.5+ packaged build; every caller must feature-detect
+  // first, exactly like every other optional method here. See
+  // apps/lockdown/src/main.ts's lockdown:get-secure-client-enforcement-state
+  // handler and src/lib/secureExamNativeLockdown.ts for how this is used.
+  getSecureClientEnforcementState?(): Promise<{ active: boolean; ready: boolean; requireSingleDisplay: boolean }>;
   // Tasks A/B — bounded, non-secret diagnostic surface. Optional: only
   // meaningfully present in a v1.2.1+ packaged build with
   // TETHER_SECURE_CLIENT_DIAGNOSTICS_ENABLED=true; harmless no-op calls

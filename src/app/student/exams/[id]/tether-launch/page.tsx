@@ -652,10 +652,28 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
             sessionId: consumed.sessionId,
             submitted: attestationOutcome.submitted,
           });
-          // Secure Client Attestation v2 — see
-          // docs/tether-system-check-v1.md, "Wiring installation attestation
-          // into real exam sessions". Best-effort and additive.
-          await submitExamSessionAttestationV2(consumed.sessionId, submission.id);
+          // Release-blocking server content-boundary audit, follow-up fix
+          // — see submitExamSessionAttestationV2's own doc comment. Legacy
+          // attestation above establishes LEGACY compatibility semantics
+          // only — it can no longer mint the protected-content lease.
+          // For a genuine TETHER_SECURE_CLIENT launch, native v2
+          // installation-signature verification is now REQUIRED before
+          // this student can ever reach native lockdown activation or
+          // POST /activate: anything other than VERIFIED fails closed
+          // here, never silently falls back to legacy-only trust.
+          const v2Outcome = await submitExamSessionAttestationV2(consumed.sessionId, submission.id);
+          if (manifest.clientType === "TETHER_SECURE_CLIENT" && v2Outcome.kind !== "VERIFIED") {
+            logClientTetherDiagnostic("EXAM_SESSION_ATTESTATION_V2_REQUIRED_BUT_FAILED", {
+              examId,
+              submissionId: submission.id,
+              outcomeKind: v2Outcome.kind,
+              reason: v2Outcome.reason,
+            });
+            setError(
+              "Tether could not complete required secure device verification for this exam. Please make sure Tether Secure Browser is up to date, then select \"Try again\" below, or contact support if this continues.",
+            );
+            return;
+          }
         }
 
         verified = await checkAuthoritativeSessionVerified(submission.id);
@@ -1009,24 +1027,35 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
   }
 
   /**
-   * Secure Client Attestation v2 — see docs/tether-system-check-v1.md,
-   * "Wiring installation attestation into real exam sessions". Registers
-   * (if needed) this installation, requests a purpose=EXAM_SESSION
-   * challenge bound to this exact session/exam/submission/policy, asks
-   * Tether's main process to sign a canonical response over facts it
-   * gathers itself (never a value this page supplies independently), and
-   * submits it for verification. Every failure path here is silent by
-   * design — an older packaged install simply won't expose
-   * attestExamSession yet, and under the default LEGACY compatibility
-   * mode this evidence has no bearing on whether the student can start
-   * their exam.
+   * Release-blocking server content-boundary audit, follow-up fix — see
+   * tetherContentAccessLease.ts. Legacy attestation (submitInitialAttestation
+   * above) can no longer mint the protected-content lease: it carries no
+   * native installation-key proof, only client-self-reported booleans, so
+   * an ordinary authenticated browser could otherwise manufacture it. THIS
+   * function's successful outcome — genuine native installation-key
+   * possession, verified server-side — is now the ONLY way a
+   * TETHER_CLIENT_REQUIRED attempt can obtain that lease. The caller below
+   * therefore fails closed on anything other than VERIFIED for a real
+   * TETHER_SECURE_CLIENT launch — this is a deliberate behavioural change
+   * from the old "silent/best-effort, LEGACY alone is enough" design: an
+   * older packaged Tether build without v2 support can no longer start a
+   * TETHER_CLIENT_REQUIRED exam and must be updated first. Not required
+   * for SAFE_EXAM_BROWSER or MOCK_TETHER_CLIENT launches — neither has
+   * (or needs) a native installation key; the caller only enforces this
+   * for clientType === "TETHER_SECURE_CLIENT".
    */
-  async function submitExamSessionAttestationV2(sessionId: string, submissionId: string): Promise<void> {
+  type ExamSessionAttestationV2Outcome =
+    | { kind: "VERIFIED" }
+    | { kind: "CAPABILITY_UNAVAILABLE"; reason: string }
+    | { kind: "FAILED"; reason: string };
+
+  async function submitExamSessionAttestationV2(sessionId: string, submissionId: string): Promise<ExamSessionAttestationV2Outcome> {
     try {
       const installationId = await ensureRegisteredInstallation();
       if (!installationId || typeof window.sesLockdown?.attestExamSession !== "function") {
-        logClientTetherDiagnostic("exam_session_attestation_v2_skipped", { reason: !installationId ? "INSTALLATION_UNAVAILABLE" : "ATTESTATION_UNAVAILABLE" });
-        return;
+        const reason = !installationId ? "INSTALLATION_UNAVAILABLE" : "ATTESTATION_UNAVAILABLE";
+        logClientTetherDiagnostic("exam_session_attestation_v2_skipped", { reason });
+        return { kind: "CAPABILITY_UNAVAILABLE", reason };
       }
 
       const challengeRes = await fetch("/api/tether/exam-session/attestation/challenge", {
@@ -1036,7 +1065,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       });
       if (!challengeRes.ok) {
         logClientTetherDiagnostic("exam_session_attestation_v2_skipped", { reason: "CHALLENGE_FAILED" });
-        return;
+        return { kind: "FAILED", reason: "CHALLENGE_FAILED" };
       }
       const { challenge, signature: challengeSignature } = await challengeRes.json();
 
@@ -1049,7 +1078,7 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
       });
       if (!attestation) {
         logClientTetherDiagnostic("exam_session_attestation_v2_skipped", { reason: "ATTESTATION_FAILED" });
-        return;
+        return { kind: "FAILED", reason: "ATTESTATION_FAILED" };
       }
 
       const verifyRes = await fetch("/api/tether/exam-session/attestation/verify", {
@@ -1068,9 +1097,12 @@ function InsideTetherLaunchFlow({ examId }: { examId: string }) {
         }),
       });
       const body = await verifyRes.json().catch(() => null);
-      logClientTetherDiagnostic("exam_session_attestation_v2_result", { sessionId, verified: verifyRes.ok && body?.verified === true });
+      const verified = verifyRes.ok && body?.verified === true;
+      logClientTetherDiagnostic("exam_session_attestation_v2_result", { sessionId, verified });
+      return verified ? { kind: "VERIFIED" } : { kind: "FAILED", reason: typeof body?.reason === "string" ? body.reason : "NOT_VERIFIED" };
     } catch {
       logClientTetherDiagnostic("exam_session_attestation_v2_skipped", { reason: "EXCEPTION" });
+      return { kind: "FAILED", reason: "EXCEPTION" };
     }
   }
 

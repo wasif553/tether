@@ -17,6 +17,14 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
+
+// Release-blocking server content-boundary audit — see
+// tetherContentAccessLease.ts. A self-contained signing keypair for THIS
+// file only (mirrors tetherRecovery.routes.test.ts's own pattern).
+const { publicKey: serverPublicKey, privateKey: serverPrivateKey } = crypto.generateKeyPairSync("ed25519");
+vi.stubEnv("TETHER_SECURE_CLIENT_SIGNING_PUBLIC_KEY", serverPublicKey.export({ type: "spki", format: "pem" }).toString());
+vi.stubEnv("TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY", serverPrivateKey.export({ type: "pkcs8", format: "pem" }).toString());
 
 const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
@@ -26,6 +34,10 @@ const { getOrCreateTestInstitution } = await import("./testInstitution");
 const startRoute = await import("../app/api/exams/[id]/start/route");
 const activateRoute = await import("../app/api/submissions/[id]/activate/route");
 const submissionRoute = await import("../app/api/submissions/[id]/route");
+const { getSigningPrivateKey, getSigningKeyId } = await import("./secureClientRunner");
+const { buildContentAccessLeaseClaims, encodeContentAccessLeaseCookieValue, CONTENT_ACCESS_LEASE_COOKIE_NAME } = await import(
+  "./secureClient/tetherContentAccessLease"
+);
 
 const stamp = Date.now();
 const cleanupUserIds: string[] = [];
@@ -38,12 +50,30 @@ function sessionFor(userId: string, institutionId: string) {
   };
 }
 
-function jsonRequest(method: string, body?: unknown) {
+function jsonRequest(method: string, body?: unknown, cookie?: string) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (cookie) headers["Cookie"] = cookie;
   return new Request("http://test.local/route", {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+}
+
+/** Release-blocking follow-up review — a lease is only ever valid when it matches the session's CURRENT clientInstallationIdHash; any SecureClientSession row this file creates directly (bypassing real v2 attestation) must set this to the SAME fixed test fingerprint. */
+const TEST_INSTALLATION_FINGERPRINT = "test-installation-fingerprint";
+
+/** Mints a real, validly-signed lease directly (no HTTP round trip needed) for a SecureClientSession created directly in the DB, exactly mirroring what a genuine v2 attestation success would have issued. */
+function mintLeaseCookie(params: { submissionId: string; secureClientSessionId: string; studentId: string }): string {
+  const claims = buildContentAccessLeaseClaims({
+    keyId: getSigningKeyId(),
+    submissionId: params.submissionId,
+    secureClientSessionId: params.secureClientSessionId,
+    installationKeyFingerprint: TEST_INSTALLATION_FINGERPRINT,
+    studentId: params.studentId,
+  });
+  const token = encodeContentAccessLeaseCookieValue(claims, getSigningPrivateKey());
+  return `${CONTENT_ACCESS_LEASE_COOKIE_NAME}=${token}`;
 }
 
 let institutionId: string;
@@ -109,6 +139,7 @@ async function establishVerifiedSession(exam: { id: string }, submissionId: stri
       clientType: "TETHER_SECURE_CLIENT",
       status: "ACTIVE",
       verificationStatus: "VERIFIED",
+      clientInstallationIdHash: TEST_INSTALLATION_FINGERPRINT,
     },
   });
 }
@@ -158,9 +189,10 @@ describe("CHECK 1 — unactivated (PREPARING) attempt accounting", () => {
 
     // 6: after a successful retry (establish verification, then
     // activate), that SAME submission activates exactly once.
-    await establishVerifiedSession(exam, submission1.id, student);
+    const verifiedSession = await establishVerifiedSession(exam, submission1.id, student);
+    const leaseCookie = mintLeaseCookie({ submissionId: submission1.id, secureClientSessionId: verifiedSession.id, studentId: student.id });
     mockAuth.mockResolvedValue(sessionFor(student.id, institutionId));
-    const activateRes = await activateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission1.id }) });
+    const activateRes = await activateRoute.POST(jsonRequest("POST", undefined, leaseCookie), { params: Promise.resolve({ id: submission1.id }) });
     expect(activateRes.status).toBe(200);
     const activateBody = await activateRes.json();
     expect(activateBody.alreadyActivated).toBe(false);
@@ -170,7 +202,7 @@ describe("CHECK 1 — unactivated (PREPARING) attempt accounting", () => {
     expect(activated.attemptNumber).toBe(1);
 
     // Content now accessible for the same, single submission.
-    const contentGet = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission1.id }) });
+    const contentGet = await submissionRoute.GET(jsonRequest("GET", undefined, leaseCookie), { params: Promise.resolve({ id: submission1.id }) });
     expect(contentGet.status).toBe(200);
 
     // maxAttempts=1 correctly refuses a genuinely NEW attempt while this
@@ -229,10 +261,11 @@ describe("CHECK 4 — idempotent /activate does not change activatedAt on repeat
     const student = await makeStudent("idempotent-activate");
     const exam = await createTetherExam("Idempotent Activate", 1);
     const submission = await startAsStudent(exam.id, student);
-    await establishVerifiedSession(exam, submission.id, student);
+    const verifiedSession = await establishVerifiedSession(exam, submission.id, student);
+    const leaseCookie = mintLeaseCookie({ submissionId: submission.id, secureClientSessionId: verifiedSession.id, studentId: student.id });
 
     mockAuth.mockResolvedValue(sessionFor(student.id, institutionId));
-    const first = await activateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
+    const first = await activateRoute.POST(jsonRequest("POST", undefined, leaseCookie), { params: Promise.resolve({ id: submission.id }) });
     expect(first.status).toBe(200);
     const firstBody = await first.json();
 
@@ -318,7 +351,7 @@ describe("CHECK 4 — migration backfill semantics", () => {
         status: "IN_PROGRESS",
       },
     });
-    await prisma.secureClientSession.create({
+    const verifiedSession = await prisma.secureClientSession.create({
       data: {
         institutionId,
         examId: exam.id,
@@ -327,15 +360,17 @@ describe("CHECK 4 — migration backfill semantics", () => {
         clientType: "TETHER_SECURE_CLIENT",
         status: "ACTIVE",
         verificationStatus: "VERIFIED",
+        clientInstallationIdHash: TEST_INSTALLATION_FINGERPRINT,
       },
     });
+    const leaseCookie = mintLeaseCookie({ submissionId: legacyRow.id, secureClientSessionId: verifiedSession.id, studentId: student.id });
 
     // Before backfill: the v1.7.4 content gate WOULD incorrectly block
     // this genuinely-in-progress historical attempt — exactly the
     // regression the migration's backfill (applied before the v1.7.4
     // code deploy) prevents in production.
     mockAuth.mockResolvedValue(sessionFor(student.id, institutionId));
-    const beforeBackfill = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: legacyRow.id }) });
+    const beforeBackfill = await submissionRoute.GET(jsonRequest("GET", undefined, leaseCookie), { params: Promise.resolve({ id: legacyRow.id }) });
     expect(beforeBackfill.status).toBe(403);
     const beforeBody = await beforeBackfill.json();
     expect(beforeBody.code).toBe("EXAM_NOT_ACTIVATED");
@@ -346,7 +381,7 @@ describe("CHECK 4 — migration backfill semantics", () => {
     // After backfill: fully readable again, exactly like this attempt
     // always was before v1.7.4 — same startedAt, same status, same
     // content-access outcome, no student ever notices the schema change.
-    const afterBackfill = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: legacyRow.id }) });
+    const afterBackfill = await submissionRoute.GET(jsonRequest("GET", undefined, leaseCookie), { params: Promise.resolve({ id: legacyRow.id }) });
     expect(afterBackfill.status).toBe(200);
     const body = await afterBackfill.json();
     expect(body.status).toBe("IN_PROGRESS");

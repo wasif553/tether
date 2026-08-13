@@ -12,9 +12,16 @@ import { parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
 import { resolveTrustedTetherVerification } from "@/lib/tetherRecovery";
 import { resolveOfflineContinueMs } from "@/lib/tetherRecoveryConfig";
 import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_CODE, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
+import {
+  checkTetherContentAccessLease,
+  readContentAccessLeaseCookieFromRequest,
+  renewTetherContentAccessLeaseIfValid,
+  TETHER_CONTENT_ACCESS_REQUIRED_CODE,
+  TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+} from "@/lib/secureClient/requireTetherContentAccess";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const session = await auth();
@@ -123,6 +130,32 @@ export async function GET(
           { status: 403 },
         );
       }
+
+      // Release-blocking server content-boundary audit — see
+      // tetherContentAccessLease.ts. hasVerifiedTetherSession and
+      // isSubmissionContentAccessible above are both plain submission-
+      // keyed database reads — they prove a verified, activated
+      // submission exists, never that THIS request actually originates
+      // from the Tether instance that established it. An ordinary
+      // Chrome/Edge tab, separately authenticated as the same student via
+      // their own normal login, could otherwise satisfy both checks and
+      // receive full question content merely because a valid Tether
+      // session exists elsewhere. Additive — never a replacement for
+      // either check above.
+      const leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
+        submissionId: submission.id,
+        studentId: session.user.id,
+      });
+      if (!leaseDecision.ok) {
+        return NextResponse.json(
+          {
+            error: TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
+            code: TETHER_CONTENT_ACCESS_REQUIRED_CODE,
+            action: { redirectTo: buildTetherLaunchPagePath(submission.examId) },
+          },
+          { status: 403 },
+        );
+      }
     }
   }
 
@@ -201,7 +234,7 @@ export async function GET(
         }
       : null;
 
-  return NextResponse.json({
+  const response = NextResponse.json({
     id: submission.id,
     status: submission.status,
     attemptNumber: submission.attemptNumber,
@@ -246,6 +279,14 @@ export async function GET(
       aiReasoning: isExamOwner ? a.aiReasoning : undefined,
     })),
   });
+
+  // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own
+  // doc comment. Unconditional and self-gating: a no-op for
+  // STANDARD_WEB/SEB_REQUIRED and for the lecturer's own grading view
+  // (no matching lease cookie either way), and only ever extends a lease
+  // that independently re-validates against live state right now.
+  await renewTetherContentAccessLeaseIfValid(req, response, { submissionId: submission.id, studentId: submission.studentId });
+  return response;
 }
 
 export const dynamic = "force-dynamic";

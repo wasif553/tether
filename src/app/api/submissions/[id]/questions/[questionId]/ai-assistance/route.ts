@@ -21,6 +21,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { AiAssistanceError, runAiAssistanceRequest } from "@/lib/aiAssistanceRunner";
 import { MAX_STUDENT_PROMPT_CHARACTERS } from "@/lib/aiAssistancePolicy";
+import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
 
 const bodySchema = z.object({
   studentPrompt: z.string().min(1).max(MAX_STUDENT_PROMPT_CHARACTERS),
@@ -62,8 +63,12 @@ export async function POST(
       studentPrompt: parsed.data.studentPrompt,
       studentCurrentReasoning: parsed.data.studentCurrentReasoning ?? null,
       clientRequestId: parsed.data.clientRequestId ?? null,
+      req,
     });
-    return NextResponse.json(result);
+    const response = NextResponse.json(result);
+    // Rolling lease renewal — see renewTetherContentAccessLeaseIfValid's own doc comment.
+    await renewTetherContentAccessLeaseIfValid(req, response, { submissionId, studentId: session.user.id });
+    return response;
   } catch (err) {
     if (err instanceof AiAssistanceError) {
       return NextResponse.json({ error: err.message }, { status: err.status });

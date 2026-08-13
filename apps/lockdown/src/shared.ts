@@ -195,7 +195,34 @@
 // route). No change to sandbox, contextIsolation, nodeIntegration,
 // active-exam display/process enforcement, or fail-closed server
 // verification.
-export const LOCKDOWN_VERSION = "1.7.4";
+//
+// v1.7.5 — POLICY_NOT_READY P0 fix. Physical testing of v1.7.4 against
+// the new production deployment still left the Windows laptop unusable,
+// requiring a restart — this time the overlay said "Preparing your
+// secure exam session" (POLICY_NOT_READY), not "Extended display
+// detected". Root cause: the exam CONTENT page's mount-time effect
+// (a leftover pre-v1.7.4 fail-open-gap cover) still unconditionally
+// called setSecureClientEnforcementState({active:true, ready:false,
+// ...}) on every mount — downgrading an already ACTIVE+READY native
+// state from a successful Phase 2 handoff back to POLICY_NOT_READY,
+// which showOverlay() then rendered as the same screen-saver-level,
+// non-closable overlay, with no Recheck/Exit route. Fixed in three
+// layers: (1) the blind mount-time cover is removed entirely; (2)
+// POLICY_NOT_READY can never construct the native overlay at all, at
+// the overlay-eligibility layer itself (isOverlayEligibleBlockingReason
+// in displayEnforcementLogic.ts) — defense in depth, so no future
+// readiness-gate transition can reintroduce this by a different path;
+// (3) a new narrow, read-only IPC method (getSecureClientEnforcementState)
+// lets the content page query the Electron process's own live
+// enforcement state before rendering — already ACTIVE+READY is
+// preserved (never re-asserted/downgraded); not confirmed routes back
+// through tether-launch's own already-tested secure-reactivation
+// handshake (see the main repo's src/lib/secureExamNativeLockdown.ts),
+// never a speculative cover flag. Genuine active-exam violations
+// (a real second display, a real prohibited application, a remote-
+// session violation) remain fully strict and unweakened. See the main
+// repo's docs/tether-preflight-lifecycle-v1.7.5-policy-not-ready.md.
+export const LOCKDOWN_VERSION = "1.7.5";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

@@ -12,12 +12,39 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
+
+// Release-blocking server content-boundary audit — see
+// tetherContentAccessLease.ts. A self-contained signing keypair for THIS
+// file only (mirrors tetherRecovery.routes.test.ts's own pattern).
+const { publicKey: serverPublicKey, privateKey: serverPrivateKey } = crypto.generateKeyPairSync("ed25519");
+vi.stubEnv("TETHER_SECURE_CLIENT_SIGNING_PUBLIC_KEY", serverPublicKey.export({ type: "spki", format: "pem" }).toString());
+vi.stubEnv("TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY", serverPrivateKey.export({ type: "pkcs8", format: "pem" }).toString());
 
 const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
 
 const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
+const { getSigningPrivateKey, getSigningKeyId } = await import("./secureClientRunner");
+const { buildContentAccessLeaseClaims, encodeContentAccessLeaseCookieValue, CONTENT_ACCESS_LEASE_COOKIE_NAME } = await import(
+  "./secureClient/tetherContentAccessLease"
+);
+
+/** Mints a real, validly-signed lease directly (no HTTP round trip needed) for a SecureClientSession created directly in the DB, exactly mirroring what a genuine attestation success would have issued. */
+const TEST_INSTALLATION_FINGERPRINT = "test-installation-fingerprint";
+
+function mintLeaseCookie(params: { submissionId: string; secureClientSessionId: string; studentId: string }): string {
+  const claims = buildContentAccessLeaseClaims({
+    keyId: getSigningKeyId(),
+    submissionId: params.submissionId,
+    secureClientSessionId: params.secureClientSessionId,
+    installationKeyFingerprint: TEST_INSTALLATION_FINGERPRINT,
+    studentId: params.studentId,
+  });
+  const token = encodeContentAccessLeaseCookieValue(claims, getSigningPrivateKey());
+  return `${CONTENT_ACCESS_LEASE_COOKIE_NAME}=${token}`;
+}
 
 const stamp = Date.now();
 const cleanupUserIds: string[] = [];
@@ -132,7 +159,7 @@ describe("v1.7.4 pre-exam readiness — timer/content gate (Part 13C/D)", () => 
       data: { examId: exam.id, studentId, secureClientPolicySnapshotJson: TETHER_REQUIRED_POLICY, activatedAt: null },
     });
     const originalStartedAt = submission.startedAt;
-    await prisma.secureClientSession.create({
+    const secureClientSession = await prisma.secureClientSession.create({
       data: {
         institutionId,
         examId: exam.id,
@@ -141,12 +168,14 @@ describe("v1.7.4 pre-exam readiness — timer/content gate (Part 13C/D)", () => 
         clientType: "TETHER_SECURE_CLIENT",
         status: "ACTIVE",
         verificationStatus: "VERIFIED",
+        clientInstallationIdHash: TEST_INSTALLATION_FINGERPRINT,
       },
     });
+    const leaseCookie = mintLeaseCookie({ submissionId: submission.id, secureClientSessionId: secureClientSession.id, studentId });
 
     mockAuth.mockResolvedValue(sessionFor(studentId, institutionId));
     const { POST } = await import("@/app/api/submissions/[id]/activate/route");
-    const res = await POST(new Request(`http://localhost/api/submissions/${submission.id}/activate`, { method: "POST" }), {
+    const res = await POST(new Request(`http://localhost/api/submissions/${submission.id}/activate`, { method: "POST", headers: { Cookie: leaseCookie } }), {
       params: Promise.resolve({ id: submission.id }),
     });
     expect(res.status).toBe(200);
@@ -177,7 +206,7 @@ describe("v1.7.4 pre-exam readiness — timer/content gate (Part 13C/D)", () => 
 
     // [Part D] content is now accessible via the real GET route.
     const { GET } = await import("@/app/api/submissions/[id]/route");
-    const getRes = await GET(new Request(`http://localhost/api/submissions/${submission.id}`), { params: Promise.resolve({ id: submission.id }) });
+    const getRes = await GET(new Request(`http://localhost/api/submissions/${submission.id}`, { headers: { Cookie: leaseCookie } }), { params: Promise.resolve({ id: submission.id }) });
     expect(getRes.status).toBe(200);
     const getBody = await getRes.json();
     expect(getBody.id).toBe(submission.id);
