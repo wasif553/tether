@@ -237,19 +237,44 @@ function extractFunctionBody(startMarker: string): string {
 }
 
 describe("PART 1 — navigation only ever proceeds after the server has acknowledged the save, never before", () => {
-  it("navigateQuestion awaits flushAnswerNow and returns BEFORE ever calling question-progress when the save was not acknowledged", () => {
+  // Question-navigation performance follow-up — navigateQuestion now
+  // branches into two save paths (a combined save-and-navigate for a
+  // DIRTY answer, or a plain flushAnswerNow + navigation-only request for
+  // an already-acknowledged/in-flight one) — both must still return on
+  // failure before ever applying a payload or calling the navigation
+  // request, exactly like the single pre-refactor path did.
+  it("the DIRTY path returns on a failed saveAndNavigate BEFORE ever applying the next-question payload", () => {
     const fn = extractFunctionBody("async function navigateQuestion(requestedIndex: number) {");
-    const savedIdx = fn.indexOf("const saved = await flushAnswerNow(oneQuestion.payload.question.id);");
-    const notSavedIdx = fn.indexOf("if (!saved) {");
-    const fetchIdx = fn.indexOf("fetch(`/api/submissions/${id}/question-progress`");
+    const callIdx = fn.indexOf("const result = await resilientAutosave.saveAndNavigate(questionId, response, requestedIndex);");
+    const notOkIdx = fn.indexOf("if (!result.ok) {", callIdx);
+    const applyIdx = fn.indexOf("applyOneQuestionPayload(result.payload);");
+    expect(callIdx).toBeGreaterThan(-1);
+    expect(notOkIdx).toBeGreaterThan(callIdx);
+    const failureBranch = fn.slice(notOkIdx, fn.indexOf("return;", notOkIdx) + "return;".length);
+    expect(failureBranch).toContain("setNavigatingQuestion(false);");
+    expect(failureBranch).toContain("return;");
+    expect(applyIdx).toBeGreaterThan(notOkIdx); // applying the payload is textually AFTER (gated behind) the failure return, never run unconditionally first
+  });
+
+  it("the CLEAN/in-flight path returns on a failed flushAnswerNow BEFORE ever calling the navigation-only request", () => {
+    const fn = extractFunctionBody("async function navigateQuestion(requestedIndex: number) {");
+    const savedIdx = fn.indexOf("const saved = await flushAnswerNow(questionId);");
+    const notSavedIdx = fn.indexOf("if (!saved) {", savedIdx);
+    const requestOnlyIdx = fn.indexOf("await requestNavigationOnly(requestedIndex, navigationStartedAtMs);");
     expect(savedIdx).toBeGreaterThan(-1);
     expect(notSavedIdx).toBeGreaterThan(savedIdx);
-    // The failure branch itself must return before the question-progress
-    // fetch — never fall through to it regardless of what state gets set.
     const failureBranch = fn.slice(notSavedIdx, fn.indexOf("return;", notSavedIdx) + "return;".length);
     expect(failureBranch).toContain("setNavigatingQuestion(false);");
     expect(failureBranch).toContain("return;");
-    expect(fetchIdx).toBeGreaterThan(notSavedIdx); // the fetch is genuinely gated behind (i.e. textually after) the failure return, not run unconditionally first
+    expect(requestOnlyIdx).toBeGreaterThan(notSavedIdx);
+  });
+
+  it("requestNavigationOnly (the shared navigation-only leg) never applies a payload unless the fetch itself succeeded", () => {
+    const fn = extractFunctionBody("async function requestNavigationOnly(requestedIndex: number, navigationStartedAtMs: number) {");
+    const throwIdx = fn.indexOf('if (!res.ok) throw new Error("navigation failed");');
+    const applyIdx = fn.indexOf("applyOneQuestionPayload(payload);");
+    expect(throwIdx).toBeGreaterThan(-1);
+    expect(applyIdx).toBeGreaterThan(throwIdx);
   });
 
   it("navigateQuestionDirect has the exact same save-before-navigate ordering as the sequential path", () => {
@@ -320,14 +345,19 @@ describe("PART 1/2 — a slow response cannot cause duplicate navigation: naviga
     expect(setTrueIdx).toBeLessThan(firstAwaitIdx); // flag flips to true before any async gap a second click could race into
   });
 
-  it("navigateQuestion always clears the in-flight flag on every exit path — the early failure return, the success path, and the catch/finally around question-progress", () => {
+  it("navigateQuestion always clears the in-flight flag on every exit path — the dirty-path failure/success returns, the clean-path failure return, and (via requestNavigationOnly) the catch/finally around the navigation-only request", () => {
     const fn = extractFunctionBody("async function navigateQuestion(requestedIndex: number) {");
     const setNavigatingQuestionCalls = fn.match(/setNavigatingQuestion\((true|false)\)/g) ?? [];
-    // true once at entry, false on the early failure-to-save return, and
-    // false again in the try/finally around question-progress — a slow
-    // OR failed request can never leave the flag permanently stuck true.
+    // true once at entry, false on every one of navigateQuestion's OWN
+    // return points (dirty-path failure, dirty-path success, clean-path
+    // failure) — a slow or failed request can never leave the flag
+    // permanently stuck true.
     expect(setNavigatingQuestionCalls.filter((c) => c.includes("true")).length).toBe(1);
-    expect(setNavigatingQuestionCalls.filter((c) => c.includes("false")).length).toBeGreaterThanOrEqual(2);
-    expect(fn).toMatch(/\}\s*finally\s*\{\s*setNavigatingQuestion\(false\);\s*\}/);
+    expect(setNavigatingQuestionCalls.filter((c) => c.includes("false")).length).toBeGreaterThanOrEqual(3);
+    // The remaining exit path — a clean/in-flight navigation-only request
+    // — delegates to requestNavigationOnly, which has its OWN try/finally
+    // clearing the flag no matter how the fetch resolves.
+    const requestOnlyFn = extractFunctionBody("async function requestNavigationOnly(requestedIndex: number, navigationStartedAtMs: number) {");
+    expect(requestOnlyFn).toMatch(/\}\s*finally\s*\{\s*setNavigatingQuestion\(false\);\s*\}/);
   });
 });

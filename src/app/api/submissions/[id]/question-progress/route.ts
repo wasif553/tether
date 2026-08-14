@@ -20,9 +20,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { questionPoolsActive, severityFor } from "@/lib/secureExam";
-import { isBlockedBackNavigation, nextAllowedIndex, resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
-import { buildOneQuestionPayload, loadOneQuestionSubmission, OneQuestionModeError } from "@/lib/submissionQuestionPayload";
+import { severityFor } from "@/lib/secureExam";
+import { buildOneQuestionPayload, loadOneQuestionSubmission, resolveSequentialQuestionNavigation, OneQuestionModeError } from "@/lib/submissionQuestionPayload";
 import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { authoriseDirectNavigation, markQuestionVisited, QuestionNavigatorError } from "@/lib/questionNavigatorRunner";
 import { renewContentAccessLeaseFromValidatedDecision } from "@/lib/secureClient/requireTetherContentAccess";
@@ -100,38 +99,20 @@ export async function POST(
     const loadStartMs = performance.now();
     const { submission, settings, leaseDecision } = await loadOneQuestionSubmission(id, session.user.id, req);
     const loadMs = performance.now() - loadStartMs;
-    const storedIndex = submission.currentQuestionIndex;
-    // Question Pools v1 — total is the SELECTED question count for this
-    // submission when pools are active, never the full exam question
-    // count. See docs/question-pools-v1.md.
-    const total = resolveEffectiveQuestionIds({
-      examQuestionIds: submission.exam.questions.map((q) => q.id),
-      stored: submission.questionOrderJson,
-      questionPoolsActive: questionPoolsActive(settings),
-    }).length;
 
-    const blocked = isBlockedBackNavigation(requestedIndex, storedIndex, settings.allowBackNavigation);
-    const finalIndex = nextAllowedIndex(requestedIndex, storedIndex, settings.allowBackNavigation, total);
-
+    // Question-navigation performance follow-up — the index-resolution/
+    // clamping/update logic now lives in resolveSequentialQuestionNavigation
+    // (src/lib/submissionQuestionPayload.ts), shared with POST
+    // save-and-navigate. Called here with the plain `prisma` singleton —
+    // this route's own currentQuestionIndex update was never
+    // transactional, and stays exactly that way.
     const indexUpdateStartMs = performance.now();
-    if (finalIndex !== storedIndex) {
-      await prisma.submission.update({
-        where: { id: submission.id },
-        data: { currentQuestionIndex: finalIndex },
-      });
-      submission.currentQuestionIndex = finalIndex;
-    }
+    const nav = await resolveSequentialQuestionNavigation(prisma, { submission, settings, requestedIndex });
     const indexUpdateMs = performance.now() - indexUpdateStartMs;
+    const { finalIndex, eventType } = nav;
 
     // Lightweight navigation logging — INFO/LOW severity (see
     // severityFor in secureExam.ts), never blocks the response.
-    const eventType = blocked
-      ? "QUESTION_BACK_NAVIGATION_BLOCKED"
-      : finalIndex > storedIndex
-        ? "QUESTION_NAVIGATED_NEXT"
-        : finalIndex < storedIndex
-          ? "QUESTION_NAVIGATED_PREVIOUS"
-          : null;
     if (eventType) {
       prisma.integrityEvent
         .create({
@@ -168,13 +149,7 @@ export async function POST(
     // Question Navigator v1 — mark the resolved question visited
     // whenever a sequential move actually lands on a (possibly new)
     // question. Best-effort; never blocks the response.
-    const orderedIds = resolveEffectiveQuestionIds({
-      examQuestionIds: submission.exam.questions.map((q) => q.id),
-      stored: submission.questionOrderJson,
-      questionPoolsActive: questionPoolsActive(settings),
-    });
-    const visitedQuestionId = orderedIds[finalIndex];
-    if (visitedQuestionId) markQuestionVisited(submission.id, visitedQuestionId).catch(() => {});
+    if (nav.visitedQuestionId) markQuestionVisited(submission.id, nav.visitedQuestionId).catch(() => {});
 
     const payload = buildOneQuestionPayload(submission, settings, finalIndex);
     if (!payload) {

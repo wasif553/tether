@@ -51,7 +51,7 @@ describe("PART 3 — a failed immediate save never loses the answer: IndexedDB p
   it("save() persists the entry to IndexedDB (putEntry) BEFORE ever attempting the network send (resolveOneEntry/attemptSend)", () => {
     const fn = extractFunctionBody("const save = useCallback(");
     const putIdx = fn.indexOf("await putEntry(entry);");
-    const resolveIdx = fn.indexOf("await resolveOneEntry(entry);");
+    const resolveIdx = fn.indexOf("const promise = resolveOneEntry(entry);");
     expect(putIdx).toBeGreaterThan(-1);
     expect(resolveIdx).toBeGreaterThan(putIdx);
   });
@@ -84,27 +84,102 @@ describe("PART 3 — a failed immediate save never loses the answer: IndexedDB p
 });
 
 describe("physical acceptance follow-up — a hung request cannot leave save() unresolved forever", () => {
-  it("attemptSend uses a bounded AbortController timeout on the fetch, not an unbounded await", () => {
-    const fn = extractFunctionBody("const attemptSend = useCallback(async (entry: PendingSaveEntry)");
-    expect(fn).toContain("new AbortController()");
-    expect(fn).toContain("controller.abort()");
-    expect(fn).toContain("signal: controller?.signal");
+  // sendJsonWithTimeout is a plain `async function`, not an arrow
+  // function — extractFunctionBody's brace-matching (anchored on `=> {`)
+  // is built for the useCallback arrow functions elsewhere in this file
+  // and doesn't apply here, and its own parameter list is itself an
+  // object type (braces that would confuse a naive "first brace after
+  // the marker" search). These search the whole source instead — safe
+  // because every string checked below is unique to this one function.
+  it("sendJsonWithTimeout uses a bounded AbortController timeout on the fetch, not an unbounded await", () => {
+    expect(source).toContain("new AbortController()");
+    expect(source).toContain("controller.abort()");
+    expect(source).toContain("signal: controller?.signal");
     expect(source).toMatch(/const SAVE_ATTEMPT_TIMEOUT_MS = \d+/);
   });
 
-  it("every early-return path in attemptSend builds real diagnostics instead of a bare FAILED — offline, timeout, thrown exception, and HTTP >=400 are all distinguishable", () => {
-    const fn = extractFunctionBody("const attemptSend = useCallback(async (entry: PendingSaveEntry)");
-    expect(fn).toContain('failed({ threw: true, timedOut: false, httpStatus: null, serverErrorCode: null })'); // offline
-    expect(fn).toContain('failed({ threw: false, timedOut: true, httpStatus: null, serverErrorCode: null })'); // simulated timeout fault
-    expect(fn).toContain("const timedOut = err instanceof DOMException && err.name === \"AbortError\";");
-    expect(fn).toContain("failed({ threw: !timedOut, timedOut, httpStatus: null, serverErrorCode: null })");
-    expect(fn).toMatch(/if \(httpStatus >= 400\) \{/);
+  it("every early-return path in sendJsonWithTimeout builds real diagnostics instead of a bare failure — offline, timeout, thrown exception, and HTTP >=400 are all distinguishable", () => {
+    expect(source).toContain('failed({ threw: true, timedOut: false, httpStatus: null, serverErrorCode: null })'); // offline
+    expect(source).toContain('failed({ threw: false, timedOut: true, httpStatus: null, serverErrorCode: null })'); // simulated timeout fault
+    expect(source).toContain("const timedOut = err instanceof DOMException && err.name === \"AbortError\";");
+    expect(source).toContain("failed({ threw: !timedOut, timedOut, httpStatus: null, serverErrorCode: null })");
+    expect(source).toMatch(/if \(httpStatus >= 400\) \{/);
   });
 
   it("diagnostics are never derived from the answer/question text — only status/timing/booleans/a short server code ever reach buildSaveAttemptDiagnostics", () => {
-    const fn = extractFunctionBody("const attemptSend = useCallback(async (entry: PendingSaveEntry)");
-    expect(fn).not.toMatch(/buildSaveAttemptDiagnostics\([^)]*response/);
-    expect(fn).not.toMatch(/buildSaveAttemptDiagnostics\([^)]*entry\.response/);
-    expect(fn).toContain('typeof errorBody.code === "string" ? errorBody.code : null'); // only the short `code` field, never the free-text `error` message
+    expect(source).not.toMatch(/buildSaveAttemptDiagnostics\(\s*\{[^}]*\bresponse\s*:/);
+    expect(source).toContain('typeof errorBody.code === "string" ? errorBody.code : null'); // only the short `code` field, never the free-text `error` message
+  });
+
+  it("Question-navigation performance follow-up — attemptSend (PATCH /answers) and saveAndNavigate (POST /save-and-navigate) both DELEGATE to the SAME sendJsonWithTimeout, never a second independent copy of the offline/timeout/diagnostics logic", () => {
+    const attemptSendFn = extractFunctionBody("const attemptSend = useCallback(async (entry: PendingSaveEntry)");
+    expect(attemptSendFn).toContain("await sendJsonWithTimeout<");
+    expect(attemptSendFn).toContain('method: "PATCH"');
+    expect(attemptSendFn).toContain("/answers`");
+
+    const saveAndNavigateFn = extractFunctionBody("const saveAndNavigate = useCallback(");
+    expect(saveAndNavigateFn).toContain("await sendJsonWithTimeout<");
+    expect(saveAndNavigateFn).toContain('method: "POST"');
+    expect(saveAndNavigateFn).toContain("/save-and-navigate`");
+  });
+});
+
+describe("PART 2 — skip a redundant save when the current content is already server-acknowledged, and reuse an in-flight save instead of duplicating it", () => {
+  it("save() checks isAcknowledged() and short-circuits BEFORE ever touching IndexedDB or the network", () => {
+    const fn = extractFunctionBody("const save = useCallback(");
+    const ackCheckIdx = fn.indexOf("if (isAcknowledged(questionId, response)) return true;");
+    const putIdx = fn.indexOf("await putEntry(entry);");
+    expect(ackCheckIdx).toBeGreaterThan(-1);
+    expect(putIdx).toBeGreaterThan(ackCheckIdx);
+  });
+
+  it("save() checks for an in-flight save with identical content and reuses it, BEFORE creating a new entry", () => {
+    const fn = extractFunctionBody("const save = useCallback(");
+    const inFlightCheckIdx = fn.indexOf("if (inFlight && inFlight.response === response) return inFlight.promise;");
+    const newEntryIdx = fn.indexOf("const entry: PendingSaveEntry = {");
+    expect(inFlightCheckIdx).toBeGreaterThan(-1);
+    expect(newEntryIdx).toBeGreaterThan(inFlightCheckIdx);
+  });
+
+  it("isAcknowledged is never true merely because React state says so — it requires nothing queued AND an exact match against a value that came from a genuine server acknowledgement", () => {
+    const fn = extractFunctionBody("const isAcknowledged = useCallback(");
+    expect(fn).toContain("!queueRef.current.has(questionId)");
+    expect(fn).toContain("acknowledgedResponseRef.current[questionId] === response");
+  });
+
+  it("the resolveOneEntry (PATCH) success path only caches the acknowledged response for a genuine SAVED outcome, never for CONFLICT (a newer save elsewhere already won, so its real text is unknown)", () => {
+    const resolveOneEntryFn = extractFunctionBody("const resolveOneEntry = useCallback(");
+    expect(resolveOneEntryFn).toContain('if (outcome === "SAVED") acknowledgedResponseRef.current[entry.questionId] = entry.response;');
+  });
+});
+
+describe("PART 3/5 — a failed/timed-out save-and-navigate leaves the answer queued in IndexedDB and never advances", () => {
+  it("saveAndNavigate persists to IndexedDB BEFORE the network attempt, exactly like save()", () => {
+    const fn = extractFunctionBody("const saveAndNavigate = useCallback(");
+    const putIdx = fn.indexOf("await putEntry(entry);");
+    const requestIdx = fn.indexOf("await sendJsonWithTimeout<SaveAndNavigateBody>(");
+    expect(putIdx).toBeGreaterThan(-1);
+    expect(requestIdx).toBeGreaterThan(putIdx);
+  });
+
+  it("a FAILED saveAndNavigate re-persists the entry (bumped retryCount) for the existing background retry loop, and never calls deleteEntry", () => {
+    const fn = extractFunctionBody("const saveAndNavigate = useCallback(");
+    const failedBranchIdx = fn.indexOf("if (!result.ok) {");
+    const failedReturnIdx = fn.indexOf("return { ok: false };", failedBranchIdx);
+    expect(failedBranchIdx).toBeGreaterThan(-1);
+    expect(failedReturnIdx).toBeGreaterThan(failedBranchIdx);
+    const failedBranch = fn.slice(failedBranchIdx, failedReturnIdx + "return { ok: false };".length);
+    expect(failedBranch).toContain("retryCount: entry.retryCount + 1");
+    expect(failedBranch).toContain("await putEntry(retried);");
+    expect(failedBranch).not.toContain("deleteEntry(");
+  });
+
+  it("saveAndNavigate only ever deletes the local entry and returns ok:true AFTER a successful (2xx) server response — never before", () => {
+    const fn = extractFunctionBody("const saveAndNavigate = useCallback(");
+    const okReturnIdx = fn.lastIndexOf("return { ok: true, payload: result.body.navigation };");
+    const deleteIdx = fn.indexOf("await deleteEntry(entry.userId, entry.submissionId, entry.questionId);");
+    expect(okReturnIdx).toBeGreaterThan(-1);
+    expect(deleteIdx).toBeGreaterThan(-1);
+    expect(okReturnIdx).toBeGreaterThan(deleteIdx);
   });
 });

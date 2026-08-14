@@ -46,6 +46,12 @@ const examSessionVerifyRoute = await import("../app/api/tether/exam-session/atte
 // longer grants content access; see src/lib/secureClientActivation.ts
 // and startAsStudentAndActivate's own doc comment below.
 const activateRoute = await import("../app/api/submissions/[id]/activate/route");
+// Question-navigation performance follow-up — single-round-trip
+// save+navigate.
+const saveAndNavigateRoute = await import("../app/api/submissions/[id]/save-and-navigate/route");
+const questionProgressRoute = await import("../app/api/submissions/[id]/question-progress/route");
+const { buildContentAccessLeaseClaims, encodeContentAccessLeaseCookieValue, CONTENT_ACCESS_LEASE_COOKIE_NAME } = await import("./secureClient/tetherContentAccessLease");
+const { getSigningPrivateKey, getSigningKeyId } = await import("./secureClientRunner");
 
 const { signRegistrationProofOfPossession, buildExamSessionAttestationCanonicalString } = await import("./secureClient/tetherAttestation");
 
@@ -212,6 +218,35 @@ async function activateSubmission(studentUser: { id: string }, submissionId: str
     throw new Error(`activateSubmission(${submissionId}) failed: ${res.status} ${JSON.stringify(body)}`);
   }
   return res;
+}
+
+/**
+ * Question-navigation performance follow-up — builds a genuinely,
+ * cryptographically valid lease cookie (signed with the SAME server key
+ * every real route verifies against) bound to a SPECIFIC session/
+ * installation fingerprint, and optionally backdated by `ageMs` — lets
+ * tests exercise "a lease minted N minutes ago" or "a lease bound to a
+ * session/installation that is no longer current" deterministically. See
+ * tetherContentAccessLease.routes.test.ts's own buildLeaseCookieAtAge for
+ * the identical technique.
+ */
+async function buildLeaseCookieForSession(params: {
+  submissionId: string;
+  studentId: string;
+  secureClientSessionId: string;
+  installationKeyFingerprint: string | null;
+  ageMs?: number;
+}) {
+  const claims = buildContentAccessLeaseClaims({
+    keyId: getSigningKeyId(),
+    submissionId: params.submissionId,
+    secureClientSessionId: params.secureClientSessionId,
+    installationKeyFingerprint: params.installationKeyFingerprint,
+    studentId: params.studentId,
+    nowMs: Date.now() - (params.ageMs ?? 0),
+  });
+  const value = encodeContentAccessLeaseCookieValue(claims, getSigningPrivateKey());
+  return `${CONTENT_ACCESS_LEASE_COOKIE_NAME}=${value}`;
 }
 
 /** Registers a fresh Tether installation for the given student, returning the id and keypair for signing exam-session attestations. */
@@ -1098,5 +1133,315 @@ describe("Secure-recovery hardening v1, Part A/B/C — required test matrix", ()
 
     const completedAudit = await prisma.platformAuditLog.count({ where: { action: "TETHER_SECURE_RESUME_COMPLETED", targetId: submission.id } });
     expect(completedAudit).toBe(1);
+  });
+});
+
+/**
+ * Question-navigation performance follow-up — POST /save-and-navigate.
+ * See src/app/api/submissions/[id]/save-and-navigate/route.ts's own doc
+ * comment. Reuses this file's existing startAsStudentAndActivate/
+ * createTetherExam/jsonRequest helpers rather than duplicating them.
+ */
+async function createOneQuestionModeExam(title: string, questionCount = 2, extraSettings: Record<string, unknown> = {}) {
+  const exam = await createTetherExam(title, { oneQuestionAtATime: true, ...extraSettings });
+  // createTetherExam already created ONE question ("Q1") — add the rest.
+  for (let i = 2; i <= questionCount; i++) {
+    await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: `Q${i}`, points: 1, correctAnswer: "ok" } });
+  }
+  return exam;
+}
+
+describe("Question-navigation performance follow-up — POST /save-and-navigate", () => {
+  it("1: a dirty answer save succeeds, the index advances, and exactly the next question is returned — one request", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav Dirty", 2);
+    const submission = await startAsStudentAndActivate(exam.id);
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const res = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "my answer", clientRequestId: "sn-1", clientRevision: 1, currentIndex: 1 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.answer.response).toBe("my answer");
+    expect(body.answer.acknowledgedRevision).toBe(1);
+    expect(body.navigation.currentIndex).toBe(1);
+    expect(body.navigation.question.id).toBe(questions[1].id);
+    const stored = await prisma.answer.findUnique({ where: { submissionId_questionId: { submissionId: submission.id, questionId: questions[0].id } } });
+    expect(stored?.response).toBe("my answer");
+    const fresh = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(fresh.currentQuestionIndex).toBe(1);
+  });
+
+  it("2: an invalid question fails the save atomically — the index does NOT advance and no next question is returned", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav InvalidQuestion", 2);
+    const submission = await startAsStudentAndActivate(exam.id);
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const res = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: "nonexistent-question-id", response: "x", clientRequestId: "sn-2", clientRevision: 1, currentIndex: 1 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.navigation).toBeUndefined();
+    const fresh = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(fresh.currentQuestionIndex).toBe(0);
+  });
+
+  it("3: a stale (older) revision arriving via save-and-navigate never overwrites a newer stored answer, but navigation still proceeds — because the server already holds a NEWER acknowledged answer for that exact question, not because the stale write itself succeeded", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav StaleRevision", 2);
+    const submission = await startAsStudentAndActivate(exam.id);
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    // A newer revision already acknowledged via the plain PATCH route —
+    // this is the fact that makes navigation-on-stale safe: the answer
+    // REQUIREMENT for this question is already genuinely satisfied by a
+    // later write, so a late-arriving older revision is a harmless no-op
+    // to accept, never a data-loss risk.
+    await answersRoute.PATCH(
+      jsonRequest("PATCH", { questionId: questions[0].id, response: "revision two", clientRequestId: "sn-3-newer", clientRevision: 2 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    // A stale, older revision arrives via save-and-navigate under a DIFFERENT clientRequestId.
+    const res = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "revision one (stale)", clientRequestId: "sn-3-stale", clientRevision: 1, currentIndex: 1 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.answer.response).toBe("revision two"); // never regressed
+    expect(body.answer.acknowledgedRevision).toBe(2);
+    expect(body.navigation.currentIndex).toBe(1); // a stale/no-op save is still an acknowledged state — navigation proceeds
+    // Confirm directly against the database, not just the response body —
+    // the stored row is genuinely the newer content, never the stale one.
+    const stored = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submission.id, questionId: questions[0].id } } });
+    expect(stored.response).toBe("revision two");
+    expect(stored.clientRevision).toBe(2);
+  });
+
+  it("contrast with test 2 — a stale-but-already-acknowledged revision (safe, navigates) is NOT the same thing as a genuinely failed/unacknowledged save (unsafe, must never navigate): an invalid question still blocks navigation even under a DIFFERENT clientRequestId scheme", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav StaleVsFailed", 2);
+    const submission = await startAsStudentAndActivate(exam.id);
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    // No prior answer exists for this question at all — there is no
+    // "already satisfied" fact to fall back on, so an invalid write here
+    // must be treated as a genuine failure, never a safe no-op.
+    const res = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: "does-not-exist", response: "x", clientRequestId: "sn-3b-invalid", clientRevision: 1, currentIndex: 1 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(400);
+    const fresh = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(fresh.currentQuestionIndex).toBe(0); // never advanced
+    const answers = await prisma.answer.findMany({ where: { submissionId: submission.id } });
+    expect(answers).toHaveLength(0); // nothing written
+  });
+
+  it("4: retrying the SAME clientRequestId via save-and-navigate is idempotent — no duplicate row", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav Idempotent", 2);
+    const submission = await startAsStudentAndActivate(exam.id);
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const payload = { questionId: questions[0].id, response: "first answer", clientRequestId: "sn-4-dup", clientRevision: 1, currentIndex: 1 };
+    const first = await saveAndNavigateRoute.POST(jsonRequest("POST", payload, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
+    expect(first.status).toBe(200);
+    const second = await saveAndNavigateRoute.POST(jsonRequest("POST", payload, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
+    expect(second.status).toBe(200);
+    const rows = await prisma.answer.findMany({ where: { submissionId: submission.id, questionId: questions[0].id } });
+    expect(rows).toHaveLength(1);
+  });
+
+  it("8: back-navigation restrictions are still enforced through save-and-navigate", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav BackBlocked", 2, { allowBackNavigation: false });
+    const submission = await startAsStudentAndActivate(exam.id);
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "a1", clientRequestId: "sn-8-fwd", clientRevision: 1, currentIndex: 1 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    const res = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[1].id, response: "a2", clientRequestId: "sn-8-back", clientRevision: 1, currentIndex: 0 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.navigation.currentIndex).toBe(1); // stayed put — back navigation blocked
+    const fresh = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(fresh.currentQuestionIndex).toBe(1);
+  });
+
+  it("9: an EXPIRED or MISSING Tether lease is rejected, with no answer write and no index mutation", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav ExpiredLease", 2);
+    const submission = await startAsStudentAndActivate(exam.id);
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    const session = await prisma.secureClientSession.findFirstOrThrow({ where: { submissionId: submission.id }, orderBy: { createdAt: "desc" } });
+    const expiredCookie = await buildLeaseCookieForSession({
+      submissionId: submission.id,
+      studentId: student.id,
+      secureClientSessionId: session.id,
+      installationKeyFingerprint: TEST_INSTALLATION_FINGERPRINT,
+      ageMs: 31 * 60_000,
+    });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const res = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "x", clientRequestId: "sn-9-expired", clientRevision: 1, currentIndex: 1 }, expiredCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(403);
+
+    const res2 = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "x", clientRequestId: "sn-9-missing", clientRevision: 1, currentIndex: 1 }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res2.status).toBe(403);
+
+    const stored = await prisma.answer.findMany({ where: { submissionId: submission.id } });
+    expect(stored).toHaveLength(0);
+    const fresh = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(fresh.currentQuestionIndex).toBe(0);
+  });
+
+  it("10: a lease bound to a SUPERSEDED session, or a mismatched installation fingerprint, is rejected", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav Superseded", 2);
+    const submission = await startAsStudentAndActivate(exam.id);
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    const oldLease = submission.leaseCookie;
+
+    const priorSession = await prisma.secureClientSession.findFirstOrThrow({ where: { submissionId: submission.id }, orderBy: { createdAt: "desc" } });
+    await prisma.secureClientSession.update({ where: { id: priorSession.id }, data: { status: "ENDED" } });
+    await prisma.secureClientSession.create({
+      data: {
+        institutionId: testInstitution.id,
+        examId: exam.id,
+        submissionId: submission.id,
+        studentId: student.id,
+        clientType: "TETHER_SECURE_CLIENT",
+        status: "ACTIVE",
+        verificationStatus: "VERIFIED",
+        clientInstallationIdHash: TEST_INSTALLATION_FINGERPRINT,
+      },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const res = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "x", clientRequestId: "sn-10-superseded", clientRevision: 1, currentIndex: 1 }, oldLease),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(403);
+
+    const currentSession = await prisma.secureClientSession.findFirstOrThrow({ where: { submissionId: submission.id, status: "ACTIVE" }, orderBy: { createdAt: "desc" } });
+    await prisma.secureClientSession.update({ where: { id: currentSession.id }, data: { clientInstallationIdHash: "sn-10-different-fingerprint" } });
+    const res2 = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "x", clientRequestId: "sn-10-wronginstall", clientRevision: 1, currentIndex: 1 }, oldLease),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res2.status).toBe(403);
+
+    const stored = await prisma.answer.findMany({ where: { submissionId: submission.id } });
+    expect(stored).toHaveLength(0);
+  });
+
+  it("11: STANDARD_WEB submissions can use save-and-navigate normally — never gated on, or issued, any Tether lease", async () => {
+    const exam = await prisma.exam.create({
+      data: {
+        title: `SaveNav StandardWeb ${stamp}-${Math.random()}`,
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: { deliveryMode: "STANDARD_WEB", oneQuestionAtATime: true },
+      },
+    });
+    cleanupExamIds.push(exam.id);
+    await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Q1", points: 1, correctAnswer: "ok" } });
+    await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Q2", points: 1, correctAnswer: "ok" } });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submission = await startRes.json();
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    const res = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "standard web answer", clientRequestId: "sn-11", clientRevision: 1, currentIndex: 1 }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.navigation.currentIndex).toBe(1);
+    expect(res.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("12: the navigation payload contains exactly ONE authorized question — never correctAnswer, never other questions' text", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav OneQuestion", 3);
+    const submission = await startAsStudentAndActivate(exam.id);
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const res = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "a1", clientRequestId: "sn-12", clientRevision: 1, currentIndex: 1 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    const body = await res.json();
+    expect(body.navigation.question.id).toBe(questions[1].id);
+    expect(body.navigation).not.toHaveProperty("questions");
+    expect(JSON.stringify(body.navigation)).not.toContain(questions[2].text);
+    expect(JSON.stringify(body.navigation)).not.toContain("correctAnswer");
+  });
+
+  it("13: save-and-navigate never resets startedAt/activatedAt/attemptNumber", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav TimerUnchanged", 2);
+    const submission = await startAsStudentAndActivate(exam.id);
+    const before = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "a1", clientRequestId: "sn-13", clientRevision: 1, currentIndex: 1 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    const after = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(after.startedAt.getTime()).toBe(before.startedAt.getTime());
+    expect(after.activatedAt?.getTime()).toBe(before.activatedAt!.getTime());
+    expect(after.attemptNumber).toBe(before.attemptNumber);
+  });
+
+  it("14: final submission still works normally for an attempt navigated via save-and-navigate", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav SubmitUnchanged", 2);
+    const submission = await startAsStudentAndActivate(exam.id);
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "ok", clientRequestId: "sn-14", clientRevision: 1, currentIndex: 1 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    const submitRes = await submitRoute.POST(jsonRequest("POST", {}, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
+    expect(submitRes.status).toBe(200);
+    const body = await submitRes.json();
+    expect(["SUBMITTED", "GRADED"]).toContain(body.status);
+  });
+
+  it("the lease is renewed on a successful save-and-navigate, from the single decision already computed — no second decode/verify", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav LeaseRenewal", 2);
+    const submission = await startAsStudentAndActivate(exam.id);
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const res = await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "a1", clientRequestId: "sn-15", clientRevision: 1, currentIndex: 1 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(200);
+    const renewedCookie = res.headers.get("set-cookie");
+    expect(renewedCookie).toContain(CONTENT_ACCESS_LEASE_COOKIE_NAME);
+  });
+
+  it("navigation-only (no answer save) still works via the unchanged question-progress route, for a submission navigated via save-and-navigate", async () => {
+    const exam = await createOneQuestionModeExam("SaveNav ThenPlainNav", 2);
+    const submission = await startAsStudentAndActivate(exam.id);
+    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    await saveAndNavigateRoute.POST(
+      jsonRequest("POST", { questionId: questions[0].id, response: "a1", clientRequestId: "sn-16", clientRevision: 1, currentIndex: 1 }, submission.leaseCookie),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    const res = await questionProgressRoute.POST(jsonRequest("POST", { currentIndex: 0 }, submission.leaseCookie), { params: Promise.resolve({ id: submission.id }) });
+    expect(res.status).toBe(200);
   });
 });
