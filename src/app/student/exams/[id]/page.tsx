@@ -1197,7 +1197,7 @@ export default function TakeExamPage({
   // also ride the existing session-heartbeat call (Part 5 — "pending-save
   // count"). `enabled` mirrors shouldRunExamTimer's own IN_PROGRESS gate —
   // never active for a finalized/not-yet-loaded submission.
-  const resilientAutosave = useResilientAutosave({
+  const resilientAutosave = useResilientAutosave<OneQuestionPayload>({
     userId: data?.student.id,
     examId: data?.exam.id ?? "",
     submissionId: submissionId ?? "",
@@ -1380,6 +1380,11 @@ export default function TakeExamPage({
               ? prev
               : { ...prev, [payload.question.id]: payload.existingResponse! },
           );
+          // Question-navigation performance follow-up (Part 2) — this
+          // came straight from the server, so it's a genuine
+          // acknowledgement: a Next click with no further edits to this
+          // question can skip re-saving it entirely.
+          resilientAutosave.noteAcknowledged(payload.question.id, payload.existingResponse);
         }
       })
       .catch(() => {
@@ -1426,33 +1431,29 @@ export default function TakeExamPage({
     return true;
   }
 
-  // One-Question-At-A-Time Exam Delivery v1 — the only place the current
-  // question index actually changes. Always flushes the current answer
-  // first (per the navigation rules); never advances if that save fails,
-  // so a student is never trapped by a transient autosave failure but
-  // also never silently loses an answer by moving on regardless.
-  // allowBackNavigation is enforced server-side in the question-progress
-  // route regardless of what this sends — this is UX only, not the
-  // source of truth.
-  async function navigateQuestion(requestedIndex: number) {
-    if (!oneQuestion.payload || navigatingQuestion) return;
-    // Latency profiling (physical acceptance follow-up — question
-    // navigation latency audit). Bounded, dev-only timing for the whole
-    // click-to-next-question-visible path, plus the question-progress leg
-    // specifically — see logClientTetherDiagnostic's own doc comment
-    // (never logs answer/question content, only durations/booleans).
-    const navigationStartedAtMs = performance.now();
-    setNavigatingQuestion(true);
-    setOneQuestion((prev) => ({ ...prev, error: null }));
-    const saved = await flushAnswerNow(oneQuestion.payload.question.id);
-    if (!saved) {
-      setOneQuestion((prev) => ({
-        ...prev,
-        error: "Your answer could not be saved. Please try again before moving on.",
-      }));
-      setNavigatingQuestion(false);
-      return;
+  // Applies a freshly loaded one-question payload uniformly — shared by
+  // every navigation path (single-round-trip save+navigate, navigation-
+  // only, and GOTO) so the "seed responses + note server acknowledgement"
+  // step can never drift between them.
+  function applyOneQuestionPayload(payload: OneQuestionPayload) {
+    setOneQuestion({ loading: false, error: null, payload });
+    if (payload.existingResponse != null) {
+      setResponses((prev) =>
+        prev[payload.question.id] !== undefined ? prev : { ...prev, [payload.question.id]: payload.existingResponse! },
+      );
+      // Question-navigation performance follow-up (Part 2) — this came
+      // straight from the server, so it's a genuine acknowledgement: a
+      // Next click with no further edits to this (now current) question
+      // can skip re-saving it entirely.
+      resilientAutosave.noteAcknowledged(payload.question.id, payload.existingResponse);
     }
+  }
+
+  // Question-navigation performance follow-up — the "already
+  // acknowledged, nothing to save" and "an in-flight save just resolved"
+  // cases both end here: a single navigation-only request, reusing the
+  // existing POST /question-progress route unchanged.
+  async function requestNavigationOnly(requestedIndex: number, navigationStartedAtMs: number) {
     try {
       const questionProgressStartedAtMs = performance.now();
       const res = await fetch(`/api/submissions/${id}/question-progress`, {
@@ -1463,17 +1464,11 @@ export default function TakeExamPage({
       const questionProgressMs = Math.round(performance.now() - questionProgressStartedAtMs);
       if (!res.ok) throw new Error("navigation failed");
       const payload: OneQuestionPayload = await res.json();
-      setOneQuestion({ loading: false, error: null, payload });
-      if (payload.existingResponse != null) {
-        setResponses((prev) =>
-          prev[payload.question.id] !== undefined
-            ? prev
-            : { ...prev, [payload.question.id]: payload.existingResponse! },
-        );
-      }
+      applyOneQuestionPayload(payload);
       logClientTetherDiagnostic("QUESTION_NAVIGATION_TIMING", {
         questionProgressMs,
         totalClickToVisibleMs: Math.round(performance.now() - navigationStartedAtMs),
+        combinedRequest: false,
       });
     } catch {
       setOneQuestion((prev) => ({
@@ -1483,6 +1478,95 @@ export default function TakeExamPage({
     } finally {
       setNavigatingQuestion(false);
     }
+  }
+
+  // One-Question-At-A-Time Exam Delivery v1 — the only place the current
+  // question index actually changes. Always saves the current answer
+  // first (per the navigation rules); never advances if that save fails,
+  // so a student is never trapped by a transient autosave failure but
+  // also never silently loses an answer by moving on regardless.
+  // allowBackNavigation is enforced server-side in the question-progress/
+  // save-and-navigate routes regardless of what this sends — this is UX
+  // only, not the source of truth.
+  //
+  // Question-navigation performance follow-up — three cases, exactly one
+  // foreground request each:
+  //  1. Nothing to save (never touched, or already server-acknowledged
+  //     and unchanged) -> navigation-only request.
+  //  2. An identical-content save is already in flight (e.g. the
+  //     debounced autosave just fired) -> await/reuse it, then
+  //     navigation-only (never a duplicate save).
+  //  3. A genuinely dirty answer -> ONE combined save-and-navigate
+  //     request, replacing the previous PATCH-then-POST sequence.
+  // The next question is never rendered before its save (if any) has
+  // been server-acknowledged — no optimistic navigation.
+  async function navigateQuestion(requestedIndex: number) {
+    if (!oneQuestion.payload || navigatingQuestion) return;
+    // Latency profiling (physical acceptance follow-up — question
+    // navigation latency audit). Bounded, dev-only timing for the whole
+    // click-to-next-question-visible path — see
+    // logClientTetherDiagnostic's own doc comment (never logs answer/
+    // question content, only durations/booleans).
+    const navigationStartedAtMs = performance.now();
+    setNavigatingQuestion(true);
+    setOneQuestion((prev) => ({ ...prev, error: null }));
+
+    const questionId = oneQuestion.payload.question.id;
+    clearTimeout(saveTimers.current[questionId]);
+    const response = responses[questionId];
+
+    const dirty = response !== undefined && !resilientAutosave.isAcknowledged(questionId, response) && !resilientAutosave.getInFlightSave(questionId, response);
+
+    if (dirty) {
+      const result = await resilientAutosave.saveAndNavigate(questionId, response, requestedIndex);
+      if (!result.ok) {
+        if (secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
+        setOneQuestion((prev) => ({
+          ...prev,
+          error: "Your answer could not be saved. Please try again before moving on.",
+        }));
+        setNavigatingQuestion(false);
+        return;
+      }
+      // PR #25 review fix — a 200 from save-and-navigate does not always
+      // mean OUR text won: the server may have safely no-opped a stale
+      // revision in favour of an already-newer stored answer. When that
+      // happens (acknowledgement === "CONFLICT"), reconcile this
+      // question's local draft to the server's own authoritative text —
+      // never leave the rejected local text sitting in `responses`,
+      // where navigating back to this question later would otherwise
+      // show it again as if it had been saved.
+      if (result.acknowledgement === "CONFLICT") {
+        setResponses((prev) => ({ ...prev, [result.questionId]: result.authoritativeResponse }));
+      }
+      // Answer-Development Provenance v1 — a navigation-triggered
+      // checkpoint, after the save above has already succeeded.
+      // Best-effort; never blocks navigation.
+      answerDevelopmentCapture.flushNavigation(questionId, response);
+      applyOneQuestionPayload(result.payload);
+      logClientTetherDiagnostic("QUESTION_NAVIGATION_TIMING", {
+        totalClickToVisibleMs: Math.round(performance.now() - navigationStartedAtMs),
+        combinedRequest: true,
+        acknowledgement: result.acknowledgement,
+      });
+      setNavigatingQuestion(false);
+      return;
+    }
+
+    // Clean (nothing to save), or an identical save is already in flight
+    // — flushAnswerNow resolves instantly in the former case and simply
+    // awaits the existing in-flight promise in the latter; either way, no
+    // NEW save request is issued here.
+    const saved = await flushAnswerNow(questionId);
+    if (!saved) {
+      setOneQuestion((prev) => ({
+        ...prev,
+        error: "Your answer could not be saved. Please try again before moving on.",
+      }));
+      setNavigatingQuestion(false);
+      return;
+    }
+    await requestNavigationOnly(requestedIndex, navigationStartedAtMs);
   }
 
   // Question Navigator v1 — see docs/question-navigator-v1.md. Refreshed
@@ -1534,11 +1618,8 @@ export default function TakeExamPage({
         return;
       }
       const payload: OneQuestionPayload = await res.json();
-      setOneQuestion({ loading: false, error: null, payload });
+      applyOneQuestionPayload(payload);
       setNavigatorAnnouncement(`Moved to question ${payload.currentIndex + 1} of ${payload.totalQuestions}.`);
-      if (payload.existingResponse != null) {
-        setResponses((prev) => (prev[payload.question.id] !== undefined ? prev : { ...prev, [payload.question.id]: payload.existingResponse! }));
-      }
     } catch {
       setOneQuestion((prev) => ({ ...prev, error: "Could not reach the server. Please try again." }));
     } finally {

@@ -42,8 +42,125 @@ function generateRequestId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 }
 
-/** Bounded client-side ceiling on one PATCH /answers attempt (physical acceptance follow-up — the "answer could not be saved" diagnostic gap). Without this, a hung connection would never resolve `attemptSend` at all, leaving `save()` (and therefore navigation, which awaits it) stuck indefinitely with no error and no retry — worse than a clean, retryable FAILED. 15s is generous for a same-origin JSON PATCH; a genuinely healthy request resolves in well under a second. */
+/** Bounded client-side ceiling on one save attempt (physical acceptance follow-up — the "answer could not be saved" diagnostic gap). Without this, a hung connection would never resolve, leaving `save()`/`saveAndNavigate()` (and therefore navigation, which awaits them) stuck indefinitely with no error and no retry — worse than a clean, retryable FAILED. 15s is generous for a same-origin JSON request; a genuinely healthy one resolves in well under a second. */
 const SAVE_ATTEMPT_TIMEOUT_MS = 15_000;
+
+type SendJsonOutcome<T> = { ok: true; body: T } | { ok: false; diagnostics: SaveAttemptDiagnostics };
+
+/**
+ * Question-navigation performance follow-up (single-round-trip
+ * save+navigate) — the low-level "POST/PATCH JSON with a bounded timeout,
+ * classify however it fails" logic shared by attemptSend (PATCH
+ * /answers) and attemptSaveAndNavigate (POST /save-and-navigate) below,
+ * so the two never drift into two independently-maintained copies of the
+ * SAME offline/timeout/thrown-exception/HTTP-failure classification.
+ * Module-level (not a useCallback) — pure I/O with no dependency on any
+ * component/hook state.
+ */
+async function sendJsonWithTimeout<T>(params: {
+  url: string;
+  method: "PATCH" | "POST";
+  body: unknown;
+  clientRevision: number;
+  retryCount: number;
+}): Promise<SendJsonOutcome<T>> {
+  const startedAtMs = Date.now();
+  const failed = (p: { threw: boolean; timedOut: boolean; httpStatus: number | null; serverErrorCode: string | null }): SendJsonOutcome<T> => ({
+    ok: false,
+    diagnostics: buildSaveAttemptDiagnostics({
+      threw: p.threw,
+      timedOut: p.timedOut,
+      httpStatus: p.httpStatus,
+      serverErrorCode: p.serverErrorCode,
+      durationMs: Date.now() - startedAtMs,
+      clientRevision: params.clientRevision,
+      retryCount: params.retryCount,
+      queueRetained: true, // putEntry() always persists BEFORE this ever runs — see every caller below.
+    }),
+  });
+
+  if (consumeFault("CONNECTION_OFFLINE") || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+    return failed({ threw: true, timedOut: false, httpStatus: null, serverErrorCode: null });
+  }
+
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timeoutHandle = controller ? setTimeout(() => controller.abort(), SAVE_ATTEMPT_TIMEOUT_MS) : null;
+  try {
+    if (consumeFault("AUTOSAVE_TIMEOUT")) {
+      return failed({ threw: false, timedOut: true, httpStatus: null, serverErrorCode: null });
+    }
+    const res = await fetch(params.url, {
+      method: params.method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params.body),
+      signal: controller?.signal,
+    });
+    const httpStatus = consumeFault("AUTOSAVE_HTTP_500") ? 500 : res.status;
+    if (httpStatus >= 400) {
+      // Only ever the route's own short `code` field, never the free-text
+      // `error` message and never the raw body — see
+      // SaveAttemptDiagnostics's own doc comment.
+      const errorBody: { code?: unknown } = res.ok ? {} : await res.json().catch(() => ({}));
+      const serverErrorCode = typeof errorBody.code === "string" ? errorBody.code : null;
+      return failed({ threw: false, timedOut: false, httpStatus, serverErrorCode });
+    }
+    const body = (await res.json().catch(() => ({}))) as T;
+    return { ok: true, body };
+  } catch (err) {
+    const timedOut = err instanceof DOMException && err.name === "AbortError";
+    return failed({ threw: !timedOut, timedOut, httpStatus: null, serverErrorCode: null });
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+/**
+ * PR #25 review fix — the exact same SAVED-vs-CONFLICT classification
+ * (and STALE_AUTOSAVE_RESPONSE fault-injection hook, for test
+ * determinism) that attemptSend already used, now shared with
+ * saveAndNavigate below so the two can never drift into two different
+ * ideas of what counts as "acknowledged". A 2xx response is not
+ * automatically a win for the text THIS caller sent — the server may
+ * have safely no-opped a stale/duplicate write in favour of an already-
+ * newer stored answer (see classifyAcknowledgement's own doc comment).
+ */
+function classifySaveOutcome(sentRevision: number, acknowledgedRevision: number | null | undefined): "SAVED" | "CONFLICT" {
+  // classifyAcknowledgement's declared return type is the broader
+  // LocalSaveStatus (it's reused for other UI-status purposes elsewhere)
+  // even though it only ever actually returns "SAVED" or "CONFLICT" —
+  // narrow explicitly rather than widening this function's own contract.
+  return classifyAcknowledgement(sentRevision, consumeFault("STALE_AUTOSAVE_RESPONSE") ? sentRevision - 1 : (acknowledgedRevision ?? null)) === "CONFLICT"
+    ? "CONFLICT"
+    : "SAVED";
+}
+
+/**
+ * PR #25 review fix — exported (unlike the rest of this hook's internals)
+ * specifically so this decision is directly, behaviorally unit-testable
+ * without needing a DOM/React-rendering harness this repo doesn't have
+ * (see useResilientAutosave.test.ts's own doc comment): a 2xx response
+ * from POST /save-and-navigate does not always mean the text THIS call
+ * submitted is now authoritative — the server may have safely no-opped a
+ * stale/duplicate write in favour of an already-newer stored answer (see
+ * tetherRecovery.routes.test.ts's save-and-navigate stale-revision test).
+ * On SAVED, the submitted text won and is authoritative. On CONFLICT, the
+ * server's OWN returned answer.response is authoritative — the rejected
+ * local text must never be cached as "acknowledged" or it would make
+ * isAcknowledged() wrongly true for content the server never actually
+ * accepted.
+ */
+export function resolveSaveAndNavigateAcknowledgement(params: {
+  sentRevision: number;
+  submittedResponse: string;
+  serverAcknowledgedRevision: number | null | undefined;
+  serverResponse: string;
+}): { acknowledgement: "SAVED" | "CONFLICT"; authoritativeResponse: string } {
+  const acknowledgement = classifySaveOutcome(params.sentRevision, params.serverAcknowledgedRevision);
+  return {
+    acknowledgement,
+    authoritativeResponse: acknowledgement === "SAVED" ? params.submittedResponse : params.serverResponse,
+  };
+}
 
 export type ResilientAutosaveOptions = {
   userId: string | null | undefined;
@@ -63,9 +180,80 @@ export type ResilientAutosaveOptions = {
   onRetrySucceeded?: (questionId: string, attemptsBeforeSuccess: number) => void;
 };
 
-export type ResilientAutosave = {
-  /** Resolves true only once the server has acknowledged — see this module's own doc comment. */
+/**
+ * The minimal shape this hook itself reads from the save-and-navigate
+ * response (to seed the next question's own acknowledged-response
+ * cache) — deliberately NOT importing the richer OneQuestionPayload type
+ * from src/lib/submissionQuestionPayload.ts (a server-only module): this
+ * hook stays decoupled from that server type's exact shape, and the
+ * caller (which already declares its own client-side OneQuestionPayload
+ * type for the other navigation routes' JSON responses) is responsible
+ * for treating `payload` as that same shape.
+ */
+type NavigationPayloadShape = { question: { id: string }; existingResponse: string | null };
+
+export type SaveAndNavigateResult<TPayload extends NavigationPayloadShape = NavigationPayloadShape> =
+  | {
+      ok: true;
+      payload: TPayload;
+      /**
+       * PR #25 review fix — POST /save-and-navigate can legitimately
+       * return 200 for a safe stale-revision no-op (a newer answer
+       * already won server-side); "acknowledged: SAVED" means the text
+       * the caller just sent is now genuinely authoritative, while
+       * "CONFLICT" means it was NOT — the caller must reconcile against
+       * `authoritativeResponse` instead of trusting its own submitted
+       * text, exactly like resolveOneEntry already does for the plain
+       * PATCH path.
+       */
+      acknowledgement: "SAVED" | "CONFLICT";
+      /** The question the save was FOR (not the newly-navigated-to one) — lets the caller correct its own local draft state on CONFLICT. */
+      questionId: string;
+      /** On SAVED, the same text the caller sent. On CONFLICT, the server's own authoritative stored answer.response for that question — never the rejected local text. */
+      authoritativeResponse: string;
+    }
+  | { ok: false };
+
+export type ResilientAutosave<TPayload extends NavigationPayloadShape = NavigationPayloadShape> = {
+  /** Resolves true only once the server has acknowledged — see this module's own doc comment. Now also short-circuits to `true` with NO network call at all when `response` is already the last genuinely acknowledged content (see isAcknowledged below) — see that field's own doc comment. */
   save: (questionId: string, response: string) => Promise<boolean>;
+  /**
+   * Question-navigation performance follow-up — single-round-trip
+   * save+navigate for a DIRTY (not yet acknowledged) current answer.
+   * POSTs to /save-and-navigate instead of PATCH /answers followed by a
+   * separate question-progress request. Persists to IndexedDB BEFORE the
+   * network attempt exactly like save(), and the local pending entry is
+   * only removed once the server has actually acknowledged this exact
+   * revision — a failure/timeout leaves it queued for the existing
+   * background retry loop, exactly like a plain save() failure.
+   */
+  saveAndNavigate: (questionId: string, response: string, targetIndex: number) => Promise<SaveAndNavigateResult<TPayload>>;
+  /**
+   * True only when `response` is EXACTLY the last genuinely
+   * server-acknowledged content for `questionId` AND nothing is
+   * currently queued/in-flight for it — never a guess from React state
+   * alone (Part 2: "must correspond to a genuine server
+   * acknowledgement"). A caller (e.g. Next/Previous) uses this to skip
+   * an entirely redundant save when nothing has changed.
+   */
+  isAcknowledged: (questionId: string, response: string) => boolean;
+  /**
+   * Seeds the "server-acknowledged" cache from a value the caller
+   * independently knows came from the server — e.g. a freshly loaded
+   * question payload's own `existingResponse` — never from unconfirmed
+   * local edits. Lets isAcknowledged recognise a question the student
+   * never touched THIS session but which already had a stored answer
+   * from a previous one.
+   */
+  noteAcknowledged: (questionId: string, response: string) => void;
+  /**
+   * The in-flight save promise for `questionId`, if one is currently
+   * outstanding for EXACTLY this response text (e.g. the debounced
+   * autosave already fired and is awaiting its server response) — lets a
+   * caller await/reuse it instead of starting a duplicate PATCH. Returns
+   * null when nothing matches.
+   */
+  getInFlightSave: (questionId: string, response: string) => Promise<boolean> | null;
   pendingCount: number;
   status: LocalSaveStatus | "IDLE";
   /** Attempts to send every currently-queued entry right now (e.g. on `online`, or a manual retry click). */
@@ -74,7 +262,14 @@ export type ResilientAutosave = {
   clearAll: () => Promise<void>;
 };
 
-export function useResilientAutosave({ userId, examId, submissionId, enabled, onSaveDiagnostics, onRetrySucceeded }: ResilientAutosaveOptions): ResilientAutosave {
+export function useResilientAutosave<TPayload extends NavigationPayloadShape = NavigationPayloadShape>({
+  userId,
+  examId,
+  submissionId,
+  enabled,
+  onSaveDiagnostics,
+  onRetrySucceeded,
+}: ResilientAutosaveOptions): ResilientAutosave<TPayload> {
   const enabledRef = useRef(enabled);
   useEffect(() => {
     enabledRef.current = enabled;
@@ -99,75 +294,43 @@ export function useResilientAutosave({ userId, examId, submissionId, enabled, on
 
   const queueRef = useRef<Map<string, PendingSaveEntry>>(new Map());
   const revisionsRef = useRef<Record<string, number>>({});
+  // Question-navigation performance follow-up (Part 2 — skip a redundant
+  // save when the current content is already what the server last
+  // genuinely acknowledged).
+  const acknowledgedResponseRef = useRef<Record<string, string>>({});
+  // Question-navigation performance follow-up (Part 2B — reuse rather
+  // than duplicate an in-flight save for the exact same content).
+  const inFlightRef = useRef<Record<string, { response: string; promise: Promise<boolean> }>>({});
   const [pendingCount, setPendingCount] = useState(0);
   const [status, setStatus] = useState<LocalSaveStatus | "IDLE">("IDLE");
 
   const syncCount = useCallback(() => setPendingCount(queueRef.current.size), []);
 
+  const noteAcknowledged = useCallback((questionId: string, response: string) => {
+    acknowledgedResponseRef.current[questionId] = response;
+  }, []);
+
+  const isAcknowledged = useCallback(
+    (questionId: string, response: string) => !queueRef.current.has(questionId) && acknowledgedResponseRef.current[questionId] === response,
+    [],
+  );
+
+  const getInFlightSave = useCallback((questionId: string, response: string): Promise<boolean> | null => {
+    const existing = inFlightRef.current[questionId];
+    return existing && existing.response === response ? existing.promise : null;
+  }, []);
+
   const attemptSend = useCallback(async (entry: PendingSaveEntry): Promise<{ outcome: "SAVED" | "CONFLICT" | "FAILED"; diagnostics: SaveAttemptDiagnostics | null }> => {
-    // Diagnostic classification (physical acceptance follow-up) — every
-    // early-return path below builds a real SaveAttemptDiagnostics object
-    // instead of the previous bare "FAILED", so a caller can tell "never
-    // even attempted (offline)" apart from "server rejected it" apart
-    // from "timed out" apart from "the fetch itself threw" — all from
-    // safe operational facts only, never answer/question content.
-    const startedAtMs = Date.now();
-    const failed = (params: { threw: boolean; timedOut: boolean; httpStatus: number | null; serverErrorCode: string | null }) => ({
-      outcome: "FAILED" as const,
-      diagnostics: buildSaveAttemptDiagnostics({
-        threw: params.threw,
-        timedOut: params.timedOut,
-        httpStatus: params.httpStatus,
-        serverErrorCode: params.serverErrorCode,
-        durationMs: Date.now() - startedAtMs,
-        clientRevision: entry.revision,
-        retryCount: entry.retryCount,
-        queueRetained: true, // putEntry() in save()/the retry loop always persists BEFORE this ever runs.
-      }),
+    const result = await sendJsonWithTimeout<{ acknowledgedRevision?: number | null }>({
+      url: `/api/submissions/${entry.submissionId}/answers`,
+      method: "PATCH",
+      body: { questionId: entry.questionId, response: entry.response, clientRequestId: entry.clientRequestId, clientRevision: entry.revision },
+      clientRevision: entry.revision,
+      retryCount: entry.retryCount,
     });
-
-    if (consumeFault("CONNECTION_OFFLINE") || (typeof navigator !== "undefined" && navigator.onLine === false)) {
-      return failed({ threw: true, timedOut: false, httpStatus: null, serverErrorCode: null });
-    }
-
-    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const timeoutHandle = controller ? setTimeout(() => controller.abort(), SAVE_ATTEMPT_TIMEOUT_MS) : null;
-    try {
-      if (consumeFault("AUTOSAVE_TIMEOUT")) {
-        return failed({ threw: false, timedOut: true, httpStatus: null, serverErrorCode: null });
-      }
-      const res = await fetch(`/api/submissions/${entry.submissionId}/answers`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          questionId: entry.questionId,
-          response: entry.response,
-          clientRequestId: entry.clientRequestId,
-          clientRevision: entry.revision,
-        }),
-        signal: controller?.signal,
-      });
-      const httpStatus = consumeFault("AUTOSAVE_HTTP_500") ? 500 : res.status;
-      if (httpStatus >= 400) {
-        // Only ever the route's own short `code` field, never the free-text
-        // `error` message and never the raw body — see
-        // SaveAttemptDiagnostics's own doc comment.
-        const errorBody: { code?: unknown } = res.ok ? {} : await res.json().catch(() => ({}));
-        const serverErrorCode = typeof errorBody.code === "string" ? errorBody.code : null;
-        return failed({ threw: false, timedOut: false, httpStatus, serverErrorCode });
-      }
-      const body: { acknowledgedRevision?: number | null } = await res.json().catch(() => ({}));
-      const outcome =
-        classifyAcknowledgement(entry.revision, consumeFault("STALE_AUTOSAVE_RESPONSE") ? entry.revision - 1 : (body.acknowledgedRevision ?? null)) === "CONFLICT"
-          ? ("CONFLICT" as const)
-          : ("SAVED" as const);
-      return { outcome, diagnostics: null };
-    } catch (err) {
-      const timedOut = err instanceof DOMException && err.name === "AbortError";
-      return failed({ threw: !timedOut, timedOut, httpStatus: null, serverErrorCode: null });
-    } finally {
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-    }
+    if (!result.ok) return { outcome: "FAILED", diagnostics: result.diagnostics };
+    const outcome = classifySaveOutcome(entry.revision, result.body.acknowledgedRevision);
+    return { outcome, diagnostics: null };
   }, []);
 
   const resolveOneEntry = useCallback(
@@ -201,6 +364,11 @@ export function useResilientAutosave({ userId, examId, submissionId, enabled, on
         // entirely, defeating the whole point of the queue. Only delete
         // when this is still the current entry for the question.
         if (isStillCurrent) {
+          // Part 2 — only SAVED means the content WE sent is what's now
+          // authoritative; CONFLICT means a newer save (another
+          // tab/device) already won, so we don't actually know its text
+          // and must never cache it as "acknowledged".
+          if (outcome === "SAVED") acknowledgedResponseRef.current[entry.questionId] = entry.response;
           queueRef.current.delete(entry.questionId);
           syncCount();
           setStatus(outcome);
@@ -228,6 +396,18 @@ export function useResilientAutosave({ userId, examId, submissionId, enabled, on
   const save = useCallback(
     async (questionId: string, response: string): Promise<boolean> => {
       if (!enabledRef.current || !userIdRef.current) return false;
+
+      // Part 2 — already acknowledged and unchanged: no PATCH, no
+      // IndexedDB write, nothing — the caller can proceed straight to
+      // whatever comes after a successful save (e.g. navigation).
+      if (isAcknowledged(questionId, response)) return true;
+
+      // Part 2B — an identical-content save is already in flight (e.g.
+      // the debounced autosave fired moments before this call): await
+      // and reuse that SAME promise instead of issuing a duplicate PATCH.
+      const inFlight = inFlightRef.current[questionId];
+      if (inFlight && inFlight.response === response) return inFlight.promise;
+
       const revision = nextRevision(revisionsRef.current[questionId]);
       revisionsRef.current[questionId] = revision;
       const entry: PendingSaveEntry = {
@@ -247,19 +427,134 @@ export function useResilientAutosave({ userId, examId, submissionId, enabled, on
       queueRef.current.set(questionId, entry);
       syncCount();
       setStatus("SENDING");
-      // Latency profiling (physical acceptance follow-up) — bounded,
-      // dev-only timing for the local IndexedDB write specifically, so a
-      // slow browser/disk (rather than the network/server) can be told
-      // apart from the rest of the click-to-next-question path.
+
+      // PR #25 review fix (narrow race) — the in-flight promise now
+      // covers IndexedDB persistence AND the network send TOGETHER, and
+      // is registered in inFlightRef synchronously (an async IIFE runs
+      // up to its first `await` before ever yielding control back here,
+      // so the registration below happens with no gap). Without this, a
+      // second save() call for the SAME question+content arriving during
+      // the (usually few-millisecond) window between starting and
+      // finishing putEntry would see nothing registered yet and start a
+      // genuinely duplicate request. Ordering is unchanged: persistence
+      // still always completes before the network attempt — only the
+      // BOOKKEEPING moved earlier, not the sequence itself.
+      const attempt = (async (): Promise<boolean> => {
+        const putStartedAtMs = performance.now();
+        await putEntry(entry);
+        logClientTetherDiagnostic("AUTOSAVE_INDEXEDDB_PUT_TIMING", { indexedDbPutMs: Math.round(performance.now() - putStartedAtMs) });
+        const patchStartedAtMs = performance.now();
+        const acknowledged = await resolveOneEntry(entry);
+        logClientTetherDiagnostic("AUTOSAVE_PATCH_TIMING", { patchTotalMs: Math.round(performance.now() - patchStartedAtMs), acknowledged });
+        return acknowledged;
+      })();
+      inFlightRef.current[questionId] = { response, promise: attempt };
+      try {
+        return await attempt;
+      } finally {
+        if (inFlightRef.current[questionId]?.promise === attempt) delete inFlightRef.current[questionId];
+      }
+    },
+    [examId, submissionId, resolveOneEntry, syncCount, isAcknowledged],
+  );
+
+  const saveAndNavigate = useCallback(
+    async (questionId: string, response: string, targetIndex: number): Promise<SaveAndNavigateResult<TPayload>> => {
+      if (!enabledRef.current || !userIdRef.current) return { ok: false };
+
+      const revision = nextRevision(revisionsRef.current[questionId]);
+      revisionsRef.current[questionId] = revision;
+      const clientRequestId = generateRequestId();
+      const entry: PendingSaveEntry = {
+        userId: userIdRef.current,
+        examId,
+        submissionId,
+        questionId,
+        response,
+        clientRequestId,
+        revision,
+        queuedAtMs: Date.now(),
+        retryCount: 0,
+      };
+      // Part 5 req 1 — persisted to IndexedDB BEFORE the network attempt,
+      // exactly like save() — a crash/reload between here and the
+      // request resolving never loses this draft.
+      queueRef.current.set(questionId, entry);
+      syncCount();
+      setStatus("SENDING");
       const putStartedAtMs = performance.now();
       await putEntry(entry);
       logClientTetherDiagnostic("AUTOSAVE_INDEXEDDB_PUT_TIMING", { indexedDbPutMs: Math.round(performance.now() - putStartedAtMs) });
-      const patchStartedAtMs = performance.now();
-      const acknowledged = await resolveOneEntry(entry);
-      logClientTetherDiagnostic("AUTOSAVE_PATCH_TIMING", { patchTotalMs: Math.round(performance.now() - patchStartedAtMs), acknowledged });
-      return acknowledged;
+
+      type SaveAndNavigateBody = {
+        answer: { questionId: string; response: string; acknowledgedRevision: number | null; acknowledgedRequestId: string | null };
+        navigation: TPayload;
+      };
+
+      const requestStartedAtMs = performance.now();
+      const result = await sendJsonWithTimeout<SaveAndNavigateBody>({
+        url: `/api/submissions/${submissionId}/save-and-navigate`,
+        method: "POST",
+        body: { questionId, response, clientRequestId, clientRevision: revision, currentIndex: targetIndex },
+        clientRevision: revision,
+        retryCount: entry.retryCount,
+      });
+      logClientTetherDiagnostic("SAVE_AND_NAVIGATE_REQUEST_TIMING", {
+        requestMs: Math.round(performance.now() - requestStartedAtMs),
+        acknowledged: result.ok,
+      });
+
+      // Only act if THIS is still the current entry for the question —
+      // same supersession guard resolveOneEntry uses (Part 2: "a stale
+      // response arriving after a newer save must not regress UI state").
+      const current = queueRef.current.get(questionId);
+      const isStillCurrent = current?.clientRequestId === clientRequestId;
+
+      if (!result.ok) {
+        // Part 5 req 4 — leave the answer queued (bumped retryCount for
+        // bounded backoff on the next attempt, exactly like a plain PATCH
+        // failure) so the existing background retry loop and IndexedDB
+        // safety net still apply; the caller never advances.
+        if (isStillCurrent) {
+          onSaveDiagnosticsRef.current?.(questionId, result.diagnostics);
+          const retried = { ...entry, retryCount: entry.retryCount + 1 };
+          queueRef.current.set(questionId, retried);
+          await putEntry(retried);
+          setStatus("FAILED");
+        }
+        return { ok: false };
+      }
+
+      // PR #25 review fix — classify SAVED vs CONFLICT from the server's
+      // own acknowledgedRevision, exactly like resolveOneEntry does for
+      // the plain PATCH path, instead of treating every 2xx as an
+      // automatic win for the text THIS call sent. See
+      // resolveSaveAndNavigateAcknowledgement's own doc comment.
+      const { acknowledgement, authoritativeResponse } = resolveSaveAndNavigateAcknowledgement({
+        sentRevision: revision,
+        submittedResponse: response,
+        serverAcknowledgedRevision: result.body.answer.acknowledgedRevision,
+        serverResponse: result.body.answer.response,
+      });
+
+      if (isStillCurrent) {
+        queueRef.current.delete(questionId);
+        syncCount();
+        setStatus(acknowledgement);
+        await deleteEntry(entry.userId, entry.submissionId, entry.questionId);
+        acknowledgedResponseRef.current[questionId] = authoritativeResponse;
+        // The NEW current question (from the navigation payload) may
+        // already have its own previously-stored answer — seed that as
+        // acknowledged too, exactly like a freshly loaded question
+        // payload would, so an immediate subsequent Next with no edits
+        // skips its save as well.
+        if (result.body.navigation.existingResponse != null) {
+          acknowledgedResponseRef.current[result.body.navigation.question.id] = result.body.navigation.existingResponse;
+        }
+      }
+      return { ok: true, payload: result.body.navigation, acknowledgement, questionId, authoritativeResponse };
     },
-    [examId, submissionId, resolveOneEntry, syncCount],
+    [examId, submissionId, syncCount],
   );
 
   const flushNow = useCallback(async () => {
@@ -324,5 +619,5 @@ export function useResilientAutosave({ userId, examId, submissionId, enabled, on
     };
   }, [enabled, resolveOneEntry, flushNow]);
 
-  return { save, pendingCount, status, flushNow, clearAll };
+  return { save, saveAndNavigate, isAcknowledged, noteAcknowledged, getInFlightSave, pendingCount, status, flushNow, clearAll };
 }

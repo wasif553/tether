@@ -8,6 +8,7 @@ import { recordAnswerSavedActivity } from "@/lib/answerActivityTelemetry";
 import { findMostRecentSessionId } from "@/lib/examAttemptSessionRunner";
 import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_CODE, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
 import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import { saveAnswerWithIdempotency } from "@/lib/answerSaveRunner";
 import {
   checkTetherContentAccessLease,
   readContentAccessLeaseCookieFromRequest,
@@ -134,69 +135,17 @@ export async function PATCH(
   // One transaction instead of two sequential queries — holds a single
   // pooled connection for the whole autosave instead of two checkouts,
   // which matters under concurrent autosave traffic with a small pool.
+  // Question-navigation performance follow-up — the actual idempotency/
+  // revision/concurrency logic now lives in saveAnswerWithIdempotency
+  // (src/lib/answerSaveRunner.ts), shared with POST save-and-navigate,
+  // never duplicated between the two routes.
   const transactionStartMs = performance.now();
-  const result = await prisma.$transaction(async (tx) => {
-    // Correctness pass (post-merge review) — an advisory lock scoped to
-    // THIS (submission, question) pair, mirroring the existing
-    // submission-scoped locks in secureClientRunner.ts/submit/route.ts.
-    // Without this, two concurrent PATCHes for the same question could
-    // both read `existing` before either commits (each sees "no row yet"
-    // or the same stale revision), so the revision-comparison guard below
-    // never actually fires for either — and Prisma's upsert has no
-    // conditional WHERE on its ON CONFLICT DO UPDATE, so whichever
-    // request's write lands LAST at the database always wins, regardless
-    // of which one carries the higher revision. Confirmed empirically
-    // (a scripted 40-iteration concurrent-write test) before this fix: a
-    // lower revision overwrote a higher one in ~25% of runs. The lock
-    // fully serializes the read-decide-write section for this exact
-    // question, so the application-level revision check is no longer
-    // racing a concurrent writer — closing the gap at the transaction
-    // boundary, not merely in application code.
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}), hashtext(${questionId}))`;
-
-    const question = await tx.question.findFirst({
-      where: { id: questionId, examId: submission.examId },
-    });
-    if (!question) return null;
-
-    // Autosave idempotency and revision control (Part 2) — only engages
-    // when the caller actually sends a clientRequestId; a caller that
-    // never does (any client predating this feature) always falls
-    // through to the plain upsert below, unchanged.
-    if (clientRequestId) {
-      const existing = await tx.answer.findUnique({
-        where: { submissionId_questionId: { submissionId: id, questionId } },
-      });
-      if (existing) {
-        // Retrying the SAME request returns the previous successful
-        // acknowledgement — never writes again, never creates a
-        // duplicate row (there is only ever one Answer row per
-        // submission+question, enforced by the existing unique
-        // constraint either way).
-        if (existing.lastClientRequestId === clientRequestId) {
-          return { answer: existing, applied: false as const };
-        }
-        // A revision that is not strictly greater than the currently
-        // acknowledged one is a stale/duplicate arrival (network retry
-        // racing a newer save, or reordering) — accepted as a no-op,
-        // the current row is returned as-is, `response` is never
-        // regressed.
-        if (clientRevision != null && existing.clientRevision != null && clientRevision <= existing.clientRevision) {
-          return { answer: existing, applied: false as const };
-        }
-      }
-    }
-
-    const answer = await tx.answer.upsert({
-      where: { submissionId_questionId: { submissionId: id, questionId } },
-      update: { response, lastClientRequestId: clientRequestId ?? undefined, clientRevision: clientRevision ?? undefined },
-      create: { submissionId: id, questionId, response, lastClientRequestId: clientRequestId ?? null, clientRevision: clientRevision ?? null },
-    });
-    return { answer, applied: true as const };
-  });
+  const result = await prisma.$transaction((tx) =>
+    saveAnswerWithIdempotency(tx, { submissionId: id, examId: submission.examId, questionId, response, clientRequestId, clientRevision }),
+  );
   const transactionMs = performance.now() - transactionStartMs;
 
-  if (!result) return NextResponse.json({ error: "Invalid question" }, { status: 400 });
+  if (result.kind === "invalid_question") return NextResponse.json({ error: "Invalid question" }, { status: 400 });
   const { answer, applied } = result;
 
   // Tether Secure Exam Recovery and Resilient Autosave v1 — best-effort,

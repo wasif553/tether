@@ -9,11 +9,14 @@
  * never be imported from a "use client" component.
  */
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@/generated/prisma/client";
 import { parseSecureSettings, questionPoolsActive, type SecureExamSettings } from "@/lib/secureExam";
 import {
   canNavigateNext,
   canNavigatePrevious,
   clampQuestionIndex,
+  isBlockedBackNavigation,
+  nextAllowedIndex,
   resolveEffectiveQuestionIds,
   resolveOptionOrder,
 } from "@/lib/questionDelivery";
@@ -109,6 +112,76 @@ export async function loadOneQuestionSubmission(submissionId: string, studentId:
     );
   }
   return { submission, settings, leaseDecision };
+}
+
+type DbClient = Prisma.TransactionClient | typeof prisma;
+
+export type SequentialNavigationEventType = "QUESTION_BACK_NAVIGATION_BLOCKED" | "QUESTION_NAVIGATED_NEXT" | "QUESTION_NAVIGATED_PREVIOUS";
+
+export type SequentialNavigationResult = {
+  finalIndex: number;
+  storedIndex: number;
+  blocked: boolean;
+  /** null when the resolved index didn't actually move (e.g. already at index 0 requesting Previous) — the caller logs telemetry only when non-null, exactly matching the pre-extraction behaviour. */
+  eventType: SequentialNavigationEventType | null;
+  /** Unconditional — the question now AT finalIndex, whether or not the position actually changed this call, mirroring the pre-extraction behaviour (Question Navigator "visited" tracking always reflects the resolved position). */
+  visitedQuestionId: string | null;
+};
+
+/**
+ * Question-navigation performance follow-up — single-round-trip
+ * save+navigate. Extracted out of the sequential (non-GOTO) branch of
+ * POST /api/submissions/[id]/question-progress so that route AND POST
+ * /api/submissions/[id]/save-and-navigate share the exact same
+ * back-navigation/question-pool clamping semantics — never two
+ * independently-drifting implementations.
+ *
+ * Accepts a Prisma client OR an interactive-transaction client (mirrors
+ * saveAnswerWithIdempotency in answerSaveRunner.ts) — question-progress
+ * itself calls this with the plain `prisma` singleton (its own
+ * currentQuestionIndex update was never transactional, and stays exactly
+ * that way here), while save-and-navigate calls this from INSIDE the same
+ * transaction as its own answer save, so the two either both commit or
+ * both roll back together.
+ *
+ * Never touches lease/activation/ownership checks — the caller is
+ * responsible for having already validated those (every current/future
+ * caller does, via loadOneQuestionSubmission).
+ */
+export async function resolveSequentialQuestionNavigation(
+  db: DbClient,
+  params: { submission: SubmissionWithQuestions; settings: Pick<SecureExamSettings, "allowBackNavigation" | "enableQuestionPools" | "questionPoolSelectionMode">; requestedIndex: number },
+): Promise<SequentialNavigationResult> {
+  const { submission, settings, requestedIndex } = params;
+  const storedIndex = submission.currentQuestionIndex;
+  // Question Pools v1 — total/order is the SELECTED question set for this
+  // submission when pools are active, never the full exam/pool question
+  // count. See docs/question-pools-v1.md. Computed once and reused for
+  // both `total` and the visited-question lookup below (the
+  // pre-extraction code computed this twice with identical arguments).
+  const orderedIds = resolveEffectiveQuestionIds({
+    examQuestionIds: submission.exam.questions.map((q) => q.id),
+    stored: submission.questionOrderJson,
+    questionPoolsActive: questionPoolsActive(settings),
+  });
+  const total = orderedIds.length;
+
+  const blocked = isBlockedBackNavigation(requestedIndex, storedIndex, settings.allowBackNavigation);
+  const finalIndex = nextAllowedIndex(requestedIndex, storedIndex, settings.allowBackNavigation, total);
+
+  if (finalIndex !== storedIndex) {
+    await db.submission.update({ where: { id: submission.id }, data: { currentQuestionIndex: finalIndex } });
+  }
+
+  const eventType: SequentialNavigationEventType | null = blocked
+    ? "QUESTION_BACK_NAVIGATION_BLOCKED"
+    : finalIndex > storedIndex
+      ? "QUESTION_NAVIGATED_NEXT"
+      : finalIndex < storedIndex
+        ? "QUESTION_NAVIGATED_PREVIOUS"
+        : null;
+
+  return { finalIndex, storedIndex, blocked, eventType, visitedQuestionId: orderedIds[finalIndex] ?? null };
 }
 
 export type OneQuestionPayload = {
