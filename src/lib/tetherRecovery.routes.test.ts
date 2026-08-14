@@ -1222,7 +1222,6 @@ describe("Question-navigation performance follow-up — POST /save-and-navigate"
   it("contrast with test 2 — a stale-but-already-acknowledged revision (safe, navigates) is NOT the same thing as a genuinely failed/unacknowledged save (unsafe, must never navigate): an invalid question still blocks navigation even under a DIFFERENT clientRequestId scheme", async () => {
     const exam = await createOneQuestionModeExam("SaveNav StaleVsFailed", 2);
     const submission = await startAsStudentAndActivate(exam.id);
-    const questions = await prisma.question.findMany({ where: { examId: exam.id }, orderBy: { order: "asc" } });
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
     // No prior answer exists for this question at all — there is no
     // "already satisfied" fact to fall back on, so an invalid write here

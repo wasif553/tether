@@ -17,6 +17,12 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+// PR #25 review fix — resolveSaveAndNavigateAcknowledgement is a plain,
+// side-effect-free function (no React hook invocation, no DOM/browser
+// API at module load time), so — unlike the stateful hook itself — it
+// CAN be imported and genuinely behaviorally tested directly, the same
+// way src/lib/pendingSaveQueue.ts's pure functions already are.
+import { resolveSaveAndNavigateAcknowledgement } from "./useResilientAutosave";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const source = fs.readFileSync(path.join(__dirname, "useResilientAutosave.ts"), "utf8");
@@ -51,7 +57,7 @@ describe("PART 3 — a failed immediate save never loses the answer: IndexedDB p
   it("save() persists the entry to IndexedDB (putEntry) BEFORE ever attempting the network send (resolveOneEntry/attemptSend)", () => {
     const fn = extractFunctionBody("const save = useCallback(");
     const putIdx = fn.indexOf("await putEntry(entry);");
-    const resolveIdx = fn.indexOf("const promise = resolveOneEntry(entry);");
+    const resolveIdx = fn.indexOf("const acknowledged = await resolveOneEntry(entry);");
     expect(putIdx).toBeGreaterThan(-1);
     expect(resolveIdx).toBeGreaterThan(putIdx);
   });
@@ -176,10 +182,98 @@ describe("PART 3/5 — a failed/timed-out save-and-navigate leaves the answer qu
 
   it("saveAndNavigate only ever deletes the local entry and returns ok:true AFTER a successful (2xx) server response — never before", () => {
     const fn = extractFunctionBody("const saveAndNavigate = useCallback(");
-    const okReturnIdx = fn.lastIndexOf("return { ok: true, payload: result.body.navigation };");
+    const okReturnIdx = fn.lastIndexOf("return { ok: true, payload: result.body.navigation, acknowledgement, questionId, authoritativeResponse };");
     const deleteIdx = fn.indexOf("await deleteEntry(entry.userId, entry.submissionId, entry.questionId);");
     expect(okReturnIdx).toBeGreaterThan(-1);
     expect(deleteIdx).toBeGreaterThan(-1);
     expect(okReturnIdx).toBeGreaterThan(deleteIdx);
+  });
+});
+
+/**
+ * PR #25 review fix — POST /save-and-navigate can legitimately return a
+ * 2xx for a safe stale-revision no-op (a newer answer already won
+ * server-side); the hook must not blindly treat every 2xx as an
+ * acknowledgement of the text IT sent. resolveSaveAndNavigateAcknowledgement
+ * is exported specifically so this decision is genuinely,
+ * behaviorally unit-tested (real inputs, real assertions on the output) —
+ * not merely grepped for — without needing a DOM/React-rendering harness.
+ */
+describe("PR #25 review fix — saveAndNavigate correctly distinguishes SAVED from CONFLICT, exactly like the plain PATCH path already does", () => {
+  it("stale revision: the server already holds a NEWER acknowledged answer -> CONFLICT, and the authoritative value is the server's own stored text, never the rejected local stale text", () => {
+    const result = resolveSaveAndNavigateAcknowledgement({
+      sentRevision: 1,
+      submittedResponse: "revision one (stale)",
+      serverAcknowledgedRevision: 2,
+      serverResponse: "revision two",
+    });
+    expect(result.acknowledgement).toBe("CONFLICT");
+    expect(result.authoritativeResponse).toBe("revision two");
+    expect(result.authoritativeResponse).not.toBe("revision one (stale)");
+  });
+
+  it("normal save: the server's acknowledged revision matches what was sent -> SAVED, and the authoritative value is the submitted response", () => {
+    const result = resolveSaveAndNavigateAcknowledgement({
+      sentRevision: 1,
+      submittedResponse: "my answer",
+      serverAcknowledgedRevision: 1,
+      serverResponse: "my answer",
+    });
+    expect(result.acknowledgement).toBe("SAVED");
+    expect(result.authoritativeResponse).toBe("my answer");
+  });
+
+  it("a null/undefined acknowledgedRevision (a caller that predates revision tracking) is treated as SAVED, matching classifyAcknowledgement's own documented default", () => {
+    expect(resolveSaveAndNavigateAcknowledgement({ sentRevision: 1, submittedResponse: "x", serverAcknowledgedRevision: null, serverResponse: "x" }).acknowledgement).toBe("SAVED");
+    expect(resolveSaveAndNavigateAcknowledgement({ sentRevision: 1, submittedResponse: "x", serverAcknowledgedRevision: undefined, serverResponse: "x" }).acknowledgement).toBe("SAVED");
+  });
+
+  it("saveAndNavigate itself calls resolveSaveAndNavigateAcknowledgement (not an inline duplicate of the classification logic) and seeds the acknowledged-response cache with the AUTHORITATIVE value, never the raw submitted response directly", () => {
+    const fn = extractFunctionBody("const saveAndNavigate = useCallback(");
+    expect(fn).toContain("resolveSaveAndNavigateAcknowledgement({");
+    expect(fn).toContain("sentRevision: revision");
+    expect(fn).toContain("submittedResponse: response");
+    expect(fn).toContain("serverAcknowledgedRevision: result.body.answer.acknowledgedRevision");
+    expect(fn).toContain("serverResponse: result.body.answer.response");
+    // The cache write uses the resolved authoritative value, not `response` directly.
+    expect(fn).toContain("acknowledgedResponseRef.current[questionId] = authoritativeResponse;");
+    expect(fn).not.toContain("acknowledgedResponseRef.current[questionId] = response;");
+    // Local status reflects the real classification too, not a hardcoded "SAVED".
+    expect(fn).toContain("setStatus(acknowledgement);");
+  });
+
+  it("attemptSend (the plain PATCH path) and saveAndNavigate both delegate to the SAME classifySaveOutcome/resolveSaveAndNavigateAcknowledgement logic — never two independently-drifting ideas of SAVED vs CONFLICT", () => {
+    const attemptSendFn = extractFunctionBody("const attemptSend = useCallback(async (entry: PendingSaveEntry)");
+    expect(attemptSendFn).toContain("classifySaveOutcome(entry.revision, result.body.acknowledgedRevision)");
+    expect(source).toContain("resolveSaveAndNavigateAcknowledgement(params: {");
+    expect(source).toMatch(/function resolveSaveAndNavigateAcknowledgement[\s\S]*?classifySaveOutcome\(params\.sentRevision, params\.serverAcknowledgedRevision\)/);
+  });
+});
+
+describe("PR #25 review fix — save() registers its in-flight promise with no gap a concurrent call could slip through", () => {
+  it("the in-flight promise covers IndexedDB persistence AND the network send together, and is registered in inFlightRef BEFORE it is ever awaited", () => {
+    const fn = extractFunctionBody("const save = useCallback(");
+    const iifeStartIdx = fn.indexOf("const attempt = (async (): Promise<boolean> => {");
+    const putInsideIifeIdx = fn.indexOf("await putEntry(entry);", iifeStartIdx);
+    const registerIdx = fn.indexOf("inFlightRef.current[questionId] = { response, promise: attempt };");
+    const firstAwaitOnAttemptIdx = fn.indexOf("return await attempt;");
+    expect(iifeStartIdx).toBeGreaterThan(-1);
+    // putEntry is INSIDE the IIFE (still runs before the network attempt).
+    expect(putInsideIifeIdx).toBeGreaterThan(iifeStartIdx);
+    // Registration happens AFTER the IIFE is constructed (so it has a
+    // Promise to store) but the IIFE itself starts running synchronously
+    // up to its first internal `await` — so this registration line is
+    // reached with no `await` of this function's own in between,
+    // meaning no other save() call can interleave before it.
+    expect(registerIdx).toBeGreaterThan(iifeStartIdx);
+    const betweenIifeAndRegister = fn.slice(iifeStartIdx, registerIdx);
+    // The only `await` textually between constructing the IIFE and
+    // registering it must be INSIDE the IIFE's own body (already
+    // confirmed above by putInsideIifeIdx) — there is no top-level
+    // `await` of this function's own execution in that gap.
+    const iifeBodyEndIdx = fn.indexOf("})();", iifeStartIdx) + "})();".length;
+    expect(registerIdx).toBeGreaterThanOrEqual(iifeBodyEndIdx);
+    expect(betweenIifeAndRegister.slice(iifeBodyEndIdx - iifeStartIdx)).not.toMatch(/await /);
+    expect(firstAwaitOnAttemptIdx).toBeGreaterThan(registerIdx);
   });
 });

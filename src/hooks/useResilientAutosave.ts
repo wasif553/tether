@@ -114,6 +114,54 @@ async function sendJsonWithTimeout<T>(params: {
   }
 }
 
+/**
+ * PR #25 review fix — the exact same SAVED-vs-CONFLICT classification
+ * (and STALE_AUTOSAVE_RESPONSE fault-injection hook, for test
+ * determinism) that attemptSend already used, now shared with
+ * saveAndNavigate below so the two can never drift into two different
+ * ideas of what counts as "acknowledged". A 2xx response is not
+ * automatically a win for the text THIS caller sent — the server may
+ * have safely no-opped a stale/duplicate write in favour of an already-
+ * newer stored answer (see classifyAcknowledgement's own doc comment).
+ */
+function classifySaveOutcome(sentRevision: number, acknowledgedRevision: number | null | undefined): "SAVED" | "CONFLICT" {
+  // classifyAcknowledgement's declared return type is the broader
+  // LocalSaveStatus (it's reused for other UI-status purposes elsewhere)
+  // even though it only ever actually returns "SAVED" or "CONFLICT" —
+  // narrow explicitly rather than widening this function's own contract.
+  return classifyAcknowledgement(sentRevision, consumeFault("STALE_AUTOSAVE_RESPONSE") ? sentRevision - 1 : (acknowledgedRevision ?? null)) === "CONFLICT"
+    ? "CONFLICT"
+    : "SAVED";
+}
+
+/**
+ * PR #25 review fix — exported (unlike the rest of this hook's internals)
+ * specifically so this decision is directly, behaviorally unit-testable
+ * without needing a DOM/React-rendering harness this repo doesn't have
+ * (see useResilientAutosave.test.ts's own doc comment): a 2xx response
+ * from POST /save-and-navigate does not always mean the text THIS call
+ * submitted is now authoritative — the server may have safely no-opped a
+ * stale/duplicate write in favour of an already-newer stored answer (see
+ * tetherRecovery.routes.test.ts's save-and-navigate stale-revision test).
+ * On SAVED, the submitted text won and is authoritative. On CONFLICT, the
+ * server's OWN returned answer.response is authoritative — the rejected
+ * local text must never be cached as "acknowledged" or it would make
+ * isAcknowledged() wrongly true for content the server never actually
+ * accepted.
+ */
+export function resolveSaveAndNavigateAcknowledgement(params: {
+  sentRevision: number;
+  submittedResponse: string;
+  serverAcknowledgedRevision: number | null | undefined;
+  serverResponse: string;
+}): { acknowledgement: "SAVED" | "CONFLICT"; authoritativeResponse: string } {
+  const acknowledgement = classifySaveOutcome(params.sentRevision, params.serverAcknowledgedRevision);
+  return {
+    acknowledgement,
+    authoritativeResponse: acknowledgement === "SAVED" ? params.submittedResponse : params.serverResponse,
+  };
+}
+
 export type ResilientAutosaveOptions = {
   userId: string | null | undefined;
   examId: string;
@@ -144,7 +192,27 @@ export type ResilientAutosaveOptions = {
  */
 type NavigationPayloadShape = { question: { id: string }; existingResponse: string | null };
 
-export type SaveAndNavigateResult<TPayload extends NavigationPayloadShape = NavigationPayloadShape> = { ok: true; payload: TPayload } | { ok: false };
+export type SaveAndNavigateResult<TPayload extends NavigationPayloadShape = NavigationPayloadShape> =
+  | {
+      ok: true;
+      payload: TPayload;
+      /**
+       * PR #25 review fix — POST /save-and-navigate can legitimately
+       * return 200 for a safe stale-revision no-op (a newer answer
+       * already won server-side); "acknowledged: SAVED" means the text
+       * the caller just sent is now genuinely authoritative, while
+       * "CONFLICT" means it was NOT — the caller must reconcile against
+       * `authoritativeResponse` instead of trusting its own submitted
+       * text, exactly like resolveOneEntry already does for the plain
+       * PATCH path.
+       */
+      acknowledgement: "SAVED" | "CONFLICT";
+      /** The question the save was FOR (not the newly-navigated-to one) — lets the caller correct its own local draft state on CONFLICT. */
+      questionId: string;
+      /** On SAVED, the same text the caller sent. On CONFLICT, the server's own authoritative stored answer.response for that question — never the rejected local text. */
+      authoritativeResponse: string;
+    }
+  | { ok: false };
 
 export type ResilientAutosave<TPayload extends NavigationPayloadShape = NavigationPayloadShape> = {
   /** Resolves true only once the server has acknowledged — see this module's own doc comment. Now also short-circuits to `true` with NO network call at all when `response` is already the last genuinely acknowledged content (see isAcknowledged below) — see that field's own doc comment. */
@@ -261,10 +329,7 @@ export function useResilientAutosave<TPayload extends NavigationPayloadShape = N
       retryCount: entry.retryCount,
     });
     if (!result.ok) return { outcome: "FAILED", diagnostics: result.diagnostics };
-    const outcome =
-      classifyAcknowledgement(entry.revision, consumeFault("STALE_AUTOSAVE_RESPONSE") ? entry.revision - 1 : (result.body.acknowledgedRevision ?? null)) === "CONFLICT"
-        ? ("CONFLICT" as const)
-        : ("SAVED" as const);
+    const outcome = classifySaveOutcome(entry.revision, result.body.acknowledgedRevision);
     return { outcome, diagnostics: null };
   }, []);
 
@@ -362,22 +427,32 @@ export function useResilientAutosave<TPayload extends NavigationPayloadShape = N
       queueRef.current.set(questionId, entry);
       syncCount();
       setStatus("SENDING");
-      // Latency profiling (physical acceptance follow-up) — bounded,
-      // dev-only timing for the local IndexedDB write specifically, so a
-      // slow browser/disk (rather than the network/server) can be told
-      // apart from the rest of the click-to-next-question path.
-      const putStartedAtMs = performance.now();
-      await putEntry(entry);
-      logClientTetherDiagnostic("AUTOSAVE_INDEXEDDB_PUT_TIMING", { indexedDbPutMs: Math.round(performance.now() - putStartedAtMs) });
-      const patchStartedAtMs = performance.now();
-      const promise = resolveOneEntry(entry);
-      inFlightRef.current[questionId] = { response, promise };
-      try {
-        const acknowledged = await promise;
+
+      // PR #25 review fix (narrow race) — the in-flight promise now
+      // covers IndexedDB persistence AND the network send TOGETHER, and
+      // is registered in inFlightRef synchronously (an async IIFE runs
+      // up to its first `await` before ever yielding control back here,
+      // so the registration below happens with no gap). Without this, a
+      // second save() call for the SAME question+content arriving during
+      // the (usually few-millisecond) window between starting and
+      // finishing putEntry would see nothing registered yet and start a
+      // genuinely duplicate request. Ordering is unchanged: persistence
+      // still always completes before the network attempt — only the
+      // BOOKKEEPING moved earlier, not the sequence itself.
+      const attempt = (async (): Promise<boolean> => {
+        const putStartedAtMs = performance.now();
+        await putEntry(entry);
+        logClientTetherDiagnostic("AUTOSAVE_INDEXEDDB_PUT_TIMING", { indexedDbPutMs: Math.round(performance.now() - putStartedAtMs) });
+        const patchStartedAtMs = performance.now();
+        const acknowledged = await resolveOneEntry(entry);
         logClientTetherDiagnostic("AUTOSAVE_PATCH_TIMING", { patchTotalMs: Math.round(performance.now() - patchStartedAtMs), acknowledged });
         return acknowledged;
+      })();
+      inFlightRef.current[questionId] = { response, promise: attempt };
+      try {
+        return await attempt;
       } finally {
-        if (inFlightRef.current[questionId]?.promise === promise) delete inFlightRef.current[questionId];
+        if (inFlightRef.current[questionId]?.promise === attempt) delete inFlightRef.current[questionId];
       }
     },
     [examId, submissionId, resolveOneEntry, syncCount, isAcknowledged],
@@ -450,12 +525,24 @@ export function useResilientAutosave<TPayload extends NavigationPayloadShape = N
         return { ok: false };
       }
 
+      // PR #25 review fix — classify SAVED vs CONFLICT from the server's
+      // own acknowledgedRevision, exactly like resolveOneEntry does for
+      // the plain PATCH path, instead of treating every 2xx as an
+      // automatic win for the text THIS call sent. See
+      // resolveSaveAndNavigateAcknowledgement's own doc comment.
+      const { acknowledgement, authoritativeResponse } = resolveSaveAndNavigateAcknowledgement({
+        sentRevision: revision,
+        submittedResponse: response,
+        serverAcknowledgedRevision: result.body.answer.acknowledgedRevision,
+        serverResponse: result.body.answer.response,
+      });
+
       if (isStillCurrent) {
         queueRef.current.delete(questionId);
         syncCount();
-        setStatus("SAVED");
+        setStatus(acknowledgement);
         await deleteEntry(entry.userId, entry.submissionId, entry.questionId);
-        acknowledgedResponseRef.current[questionId] = response;
+        acknowledgedResponseRef.current[questionId] = authoritativeResponse;
         // The NEW current question (from the navigation payload) may
         // already have its own previously-stored answer — seed that as
         // acknowledged too, exactly like a freshly loaded question
@@ -465,7 +552,7 @@ export function useResilientAutosave<TPayload extends NavigationPayloadShape = N
           acknowledgedResponseRef.current[result.body.navigation.question.id] = result.body.navigation.existingResponse;
         }
       }
-      return { ok: true, payload: result.body.navigation };
+      return { ok: true, payload: result.body.navigation, acknowledgement, questionId, authoritativeResponse };
     },
     [examId, submissionId, syncCount],
   );

@@ -1528,6 +1528,17 @@ export default function TakeExamPage({
         setNavigatingQuestion(false);
         return;
       }
+      // PR #25 review fix — a 200 from save-and-navigate does not always
+      // mean OUR text won: the server may have safely no-opped a stale
+      // revision in favour of an already-newer stored answer. When that
+      // happens (acknowledgement === "CONFLICT"), reconcile this
+      // question's local draft to the server's own authoritative text —
+      // never leave the rejected local text sitting in `responses`,
+      // where navigating back to this question later would otherwise
+      // show it again as if it had been saved.
+      if (result.acknowledgement === "CONFLICT") {
+        setResponses((prev) => ({ ...prev, [result.questionId]: result.authoritativeResponse }));
+      }
       // Answer-Development Provenance v1 — a navigation-triggered
       // checkpoint, after the save above has already succeeded.
       // Best-effort; never blocks navigation.
@@ -1536,6 +1547,7 @@ export default function TakeExamPage({
       logClientTetherDiagnostic("QUESTION_NAVIGATION_TIMING", {
         totalClickToVisibleMs: Math.round(performance.now() - navigationStartedAtMs),
         combinedRequest: true,
+        acknowledgement: result.acknowledgement,
       });
       setNavigatingQuestion(false);
       return;
