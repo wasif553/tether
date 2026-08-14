@@ -105,3 +105,31 @@ export function computeDisplayViolationModal(status: DisplayEnforcementBridgeSta
 export function isGenuineDisplayViolationReason(reason: string): reason is DisplayEnforcementBridgeReason {
   return GENUINE_DISPLAY_REASONS.has(reason as DisplayEnforcementBridgeReason);
 }
+
+/**
+ * Pre-commit audit fix (PR #26) — the bounded status this module derives
+ * its modal from is only ever as good as window.sesLockdown's own
+ * getDisplayEnforcementStatus() IPC query. If that query itself REJECTS
+ * (rather than resolving with a real status), silently doing nothing
+ * would be a fail-OPEN presentation gap: native state could already be
+ * BLOCKED before this renderer ever mounted, and because live pushes are
+ * deduplicated against the last status, an unchanged BLOCKED state may
+ * never fire another push to recover from — the student would see no
+ * warning at all despite native detection remaining BLOCKED.
+ *
+ * This produces the SAME bounded, neutral status TOPOLOGY_CHECK_UNAVAILABLE
+ * already uses (computeDisplayViolationModal renders it with the exact
+ * same "Display configuration could not be verified" copy) — it never
+ * fabricates a genuine multi-display reason, so it can never claim an
+ * additional display exists without evidence for one. Recovers normally:
+ * a later native state:"OK" push clears it, and a later genuine BLOCKED
+ * push replaces it, exactly like any other status transition.
+ *
+ * `displayCount` defaults to 0 — the query failed before ever returning a
+ * real count, so there is nothing genuinely "already known" to report
+ * here; never worth a second, separately-fallible IPC call just to guess
+ * at one.
+ */
+export function displayStatusOnInitialQueryFailure(displayCount = 0): DisplayEnforcementBridgeStatus {
+  return { state: "BLOCKED", reason: "TOPOLOGY_CHECK_UNAVAILABLE", displayCount };
+}

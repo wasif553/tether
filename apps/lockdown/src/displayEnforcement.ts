@@ -245,6 +245,36 @@ export class DisplayEnforcement {
   }
 
   /**
+   * Pre-commit audit fix (PR #26) — the plain read above returns whatever
+   * this module already happens to know, which can itself be stale, or
+   * (before the very first evaluate() has ever completed) the fail-open
+   * default. The renderer's INITIAL IPC query needs a genuinely fresh
+   * result: because live pushes are deduplicated against the last status
+   * (see evaluateNow()'s displayEnforcementStatusesEqual check), a
+   * state that was already BLOCKED before the renderer mounted may never
+   * produce another push while it remains unchanged — a plain cached (or
+   * fail-open-default) read here would leave a freshly-mounted renderer
+   * showing nothing even though native detection remains BLOCKED.
+   *
+   * Reuses the exact same evaluate() serialization every other caller
+   * already relies on: bypasses the raw-event debounce (an explicit
+   * on-demand check must never be silently dropped for arriving too soon
+   * after an unrelated OS event — see evaluate()'s own doc comment), and
+   * if an evaluation is already in flight (e.g. the periodic timer just
+   * fired), awaits that SAME evaluation rather than starting a second,
+   * competing native topology query. No decision logic, event semantics,
+   * topology classifier, or polling interval is touched — this only
+   * forces the EXISTING pipeline to run once, synchronously with respect
+   * to the caller, before resolving. Never toggles anything (there is no
+   * overlay any more to toggle); read-only from the caller's
+   * perspective, exactly like getOnDemandDisplayTopology() above.
+   */
+  async getFreshDisplayEnforcementStatus(): Promise<DisplayEnforcementStatus> {
+    await this.evaluate({ bypassDebounce: true });
+    return this.previousStatus ?? { state: "OK", reason: null, displayCount: this.getCurrentDisplayCount() };
+  }
+
+  /**
    * `bypassDebounce: false` is used ONLY by the raw `screen.on(...)`
    * listener (rapid-fire duplicate OS events genuinely need debouncing);
    * every other caller (start, setRequireSingleDisplay, the periodic

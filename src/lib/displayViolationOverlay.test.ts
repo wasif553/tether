@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   computeDisplayViolationModal,
   isGenuineDisplayViolationReason,
+  displayStatusOnInitialQueryFailure,
   DISPLAY_VIOLATION_TITLE,
   DISPLAY_VIOLATION_UNAVAILABLE_TITLE,
 } from "./displayViolationOverlay";
@@ -59,6 +60,48 @@ describe("computeDisplayViolationModal", () => {
     expect(modal!.note.toLowerCase()).toContain("not been submitted");
     expect(modal!.note.toLowerCase()).toContain("timer continues");
     expect(modal!.note.toLowerCase()).toContain("not an automatic misconduct finding");
+  });
+});
+
+// Pre-commit audit fix (PR #26) — items 4/5/6/7: a REJECTED
+// getDisplayEnforcementStatus() IPC query must fail closed, never
+// silently do nothing, and never fabricate genuine display evidence.
+describe("displayStatusOnInitialQueryFailure — pre-commit audit fix (PR #26)", () => {
+  it("returns a bounded BLOCKED/TOPOLOGY_CHECK_UNAVAILABLE status, defaulting displayCount to 0", () => {
+    expect(displayStatusOnInitialQueryFailure()).toEqual({ state: "BLOCKED", reason: "TOPOLOGY_CHECK_UNAVAILABLE", displayCount: 0 });
+  });
+
+  it("accepts an explicit displayCount when one is already known", () => {
+    expect(displayStatusOnInitialQueryFailure(2)).toEqual({ state: "BLOCKED", reason: "TOPOLOGY_CHECK_UNAVAILABLE", displayCount: 2 });
+  });
+
+  it("Part 4/5: feeding this into computeDisplayViolationModal produces the neutral 'could not be verified' copy — NEVER 'Additional display detected'", () => {
+    const modal = computeDisplayViolationModal(displayStatusOnInitialQueryFailure());
+    expect(modal).not.toBeNull();
+    expect(modal!.neutral).toBe(true);
+    expect(modal!.title).toBe(DISPLAY_VIOLATION_UNAVAILABLE_TITLE);
+    expect(modal!.title).not.toBe(DISPLAY_VIOLATION_TITLE);
+    expect((modal!.title + modal!.message).toLowerCase()).not.toContain("additional display");
+  });
+
+  it("Part 6: a later state:OK status clears the modal that this failure state produced", () => {
+    const failureModal = computeDisplayViolationModal(displayStatusOnInitialQueryFailure());
+    expect(failureModal).not.toBeNull();
+    const clearedModal = computeDisplayViolationModal({ state: "OK", reason: null, displayCount: 1 });
+    expect(clearedModal).toBeNull();
+  });
+
+  it("Part 7: a later genuine BLOCKED status replaces the neutral failure modal with the specific 'Additional display detected' copy", () => {
+    const failureModal = computeDisplayViolationModal(displayStatusOnInitialQueryFailure());
+    expect(failureModal!.neutral).toBe(true);
+    const genuineModal = computeDisplayViolationModal({ state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_EXTEND", displayCount: 2 });
+    expect(genuineModal!.neutral).toBe(false);
+    expect(genuineModal!.title).toBe(DISPLAY_VIOLATION_TITLE);
+  });
+
+  it("is never locally dismissible — has no button/action field, matching every other displayViolationOverlay modal state", () => {
+    const modal = computeDisplayViolationModal(displayStatusOnInitialQueryFailure());
+    expect(Object.keys(modal!).sort()).toEqual(["message", "neutral", "note", "title"]);
   });
 });
 

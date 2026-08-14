@@ -180,6 +180,18 @@ describe("IPC chain hop 5: the Native Display State Bridge (v1.7.6) replaces the
     );
     expect(evaluateNow).toMatch(/if \(statusChanged\) \{/);
   });
+
+  // v1.7.6 pre-commit audit fix (PR #26) — the IPC handler must call the
+  // FRESH-evaluating method, not a plain cached read, so an already-
+  // BLOCKED native state that predates the renderer's initial query can
+  // never be silently reported as OK. See displayEnforcement.test.ts's
+  // own "getFreshDisplayEnforcementStatus()" describe block for the
+  // behavioral coverage of the method itself.
+  it("lockdown:get-display-enforcement-status calls getFreshDisplayEnforcementStatus(), not the plain cached getDisplayEnforcementStatus()", () => {
+    expect(mainSource).toMatch(
+      /ipcMain\.handle\("lockdown:get-display-enforcement-status",\s*\(\)\s*=>\s*displayEnforcement\.getFreshDisplayEnforcementStatus\(\)\);/,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

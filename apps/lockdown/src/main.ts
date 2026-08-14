@@ -812,7 +812,14 @@ ipcMain.handle("lockdown:get-display-count", () => displayEnforcement.getCurrent
 // changes going forward (the lockdown:display-enforcement-state-changed
 // push, wired from displayEnforcement's onDisplayStateChanged callback
 // near the top of this file, only ever fires on the NEXT transition).
-ipcMain.handle("lockdown:get-display-enforcement-status", () => displayEnforcement.getDisplayEnforcementStatus());
+//
+// Pre-commit audit fix (PR #26) — calls getFreshDisplayEnforcementStatus()
+// (awaits/reuses a real evaluation, serialized with any already-in-flight
+// one) rather than a plain cached read: an already-BLOCKED native state
+// that predates this renderer mounting could otherwise never be observed,
+// since live pushes are deduplicated against the last status and a state
+// that stays BLOCKED unchanged may never fire another one.
+ipcMain.handle("lockdown:get-display-enforcement-status", () => displayEnforcement.getFreshDisplayEnforcementStatus());
 
 // Tether System Check and Exam Readiness v1 — see
 // docs/tether-system-check-v1.md. Four narrowly scoped, read-only

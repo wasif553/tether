@@ -90,7 +90,11 @@ import {
   handleAiCameraIntegrityReport,
   type AiCameraViolationOverlayState,
 } from "@/lib/aiCameraViolationOverlay";
-import { computeDisplayViolationModal, type DisplayEnforcementBridgeStatus } from "@/lib/displayViolationOverlay";
+import {
+  computeDisplayViolationModal,
+  displayStatusOnInitialQueryFailure,
+  type DisplayEnforcementBridgeStatus,
+} from "@/lib/displayViolationOverlay";
 import { applyLocalNavigatorTransition } from "@/lib/navigatorLocalSync";
 import {
   buildEvidenceFrameUploadPath,
@@ -1948,13 +1952,27 @@ export default function TakeExamPage({
     // above, or the render-time content gate. Catches an already-active
     // violation on a fresh mount/reload, since the listener above only
     // ever fires on the NEXT transition.
+    //
+    // Pre-commit audit fix (PR #26) — a REJECTED query must not be
+    // silently ignored: native state could already be BLOCKED before
+    // this renderer mounted, and because live pushes are deduplicated
+    // against the last status, an unchanged BLOCKED state may never fire
+    // another push to recover from — doing nothing here would be a
+    // fail-OPEN presentation gap. On rejection, fail closed with the same
+    // bounded, neutral status TOPOLOGY_CHECK_UNAVAILABLE already uses
+    // (never a fabricated "additional display detected" claim). Still
+    // respects both guards above: a cancelled/unmounted effect, and a
+    // live push that has already superseded this query.
     window.sesLockdown
       ?.getDisplayEnforcementStatus?.()
       .then((status) => {
         if (cancelled || !status || liveDisplayUpdateReceived) return;
         setDisplayEnforcementStatus(status);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (cancelled || liveDisplayUpdateReceived) return;
+        setDisplayEnforcementStatus(displayStatusOnInitialQueryFailure());
+      });
 
     // Tether Windows Lockdown Hardening v1, Part 4/11 — see
     // lockdownClient.ts's own doc comments for exactly what each

@@ -495,3 +495,80 @@ describe("DisplayEnforcement — v1.7.6 Native Display State Bridge: display-rec
     expect(FakeBrowserWindow.instances).toEqual([]);
   });
 });
+
+// v1.7.6 pre-commit audit fix (PR #26) — getFreshDisplayEnforcementStatus()
+// closes the fail-open presentation gap where a plain cached read (the
+// old getDisplayEnforcementStatus()) could report state:"OK" for a
+// display that was already genuinely BLOCKED before the renderer's
+// initial IPC query ran. Reuses the existing evaluate() serialization
+// exactly like evaluateNowAndGetDecision() already does — never starts a
+// second, competing native topology query when one is already in flight.
+describe("DisplayEnforcement — v1.7.6 pre-commit audit fix: getFreshDisplayEnforcementStatus()", () => {
+  it("[1] awaits a FRESH evaluation, not a stale cached value — a topology change that happened after the last evaluate() but before this call is reflected", async () => {
+    const enforcement = new DisplayEnforcement();
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enforcement.getDisplayEnforcementStatus().state).toBe("OK");
+
+    // Topology changes, but neither the periodic timer nor a raw OS event
+    // has fired yet — the CACHED value (getDisplayEnforcementStatus)
+    // would still say OK at this instant.
+    getWindowsDisplayTopology.mockResolvedValue(EXTEND_TOPOLOGY);
+    const freshPromise = enforcement.getFreshDisplayEnforcementStatus();
+    await vi.advanceTimersByTimeAsync(0);
+    const fresh = await freshPromise;
+
+    expect(fresh).toEqual({ state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_EXTEND", displayCount: 1 });
+  });
+
+  it("[2] if an evaluation is already in flight, safely awaits/reuses it — never launches a second, competing native topology query", async () => {
+    let resolveQuery: (value: typeof SINGLE_DISPLAY_TOPOLOGY) => void = () => {};
+    getWindowsDisplayTopology.mockImplementationOnce(() => new Promise((resolve) => { resolveQuery = resolve; }));
+    const enforcement = new DisplayEnforcement();
+    enforcement.start(fakeTargetWindow()); // starts the first, still-pending evaluation
+
+    const freshPromise = enforcement.getFreshDisplayEnforcementStatus();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getWindowsDisplayTopology).toHaveBeenCalledTimes(1); // still just the one in-flight query — no second one started
+
+    resolveQuery(SINGLE_DISPLAY_TOPOLOGY);
+    const fresh = await freshPromise;
+
+    expect(getWindowsDisplayTopology).toHaveBeenCalledTimes(1);
+    expect(fresh.state).toBe("OK");
+  });
+
+  it("[3] an already-BLOCKED native state is returned correctly, not silently reported as OK", async () => {
+    setDisplayCount(2);
+    const enforcement = new DisplayEnforcement();
+    enforcement.setEnforcementState(ENFORCING_STATE);
+
+    const fresh = await enforcement.getFreshDisplayEnforcementStatus();
+
+    expect(fresh).toEqual({ state: "BLOCKED", reason: "ADDITIONAL_ELECTRON_DISPLAY", displayCount: 2 });
+  });
+
+  it("[11] never constructs a native overlay BrowserWindow", async () => {
+    setDisplayCount(2);
+    getWindowsDisplayTopology.mockResolvedValue(EXTEND_TOPOLOGY);
+    const enforcement = new DisplayEnforcement();
+    enforcement.setEnforcementState(ENFORCING_STATE);
+
+    await enforcement.getFreshDisplayEnforcementStatus();
+
+    expect(FakeBrowserWindow.instances).toEqual([]);
+  });
+
+  it("does not alter decision logic, event semantics, or diagnostics — onEventType/onDiagnosticsChanged still fire exactly as they would for any other evaluate() call", async () => {
+    const onEventType = vi.fn();
+    setDisplayCount(2);
+    getWindowsDisplayTopology.mockResolvedValue(EXTEND_TOPOLOGY);
+    const enforcement = new DisplayEnforcement({ onEventType });
+    enforcement.setEnforcementState(ENFORCING_STATE);
+
+    await enforcement.getFreshDisplayEnforcementStatus();
+
+    expect(onEventType).toHaveBeenCalledWith("ADDITIONAL_DISPLAY_PRESENT", 2);
+  });
+});

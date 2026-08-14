@@ -472,7 +472,9 @@ describe("Part 4.D — a stale initial-query result can never overwrite a newer 
   it("the initial query's .then() checks liveDisplayUpdateReceived and bails out before calling setDisplayEnforcementStatus if a live push already arrived", () => {
     const effect = extractDisplayBridgeEffect();
     const queryStart = effect.indexOf("?.getDisplayEnforcementStatus?.()");
-    const queryBlock = effect.slice(queryStart, effect.indexOf(".catch(() => {});", queryStart) + ".catch(() => {});".length);
+    const thenIdx = effect.indexOf(".then((status) => {", queryStart);
+    const catchIdx = effect.indexOf(".catch(() => {", queryStart);
+    const queryBlock = effect.slice(thenIdx, catchIdx);
     const guardIdx = queryBlock.indexOf("if (cancelled || !status || liveDisplayUpdateReceived) return;");
     const applyIdx = queryBlock.indexOf("setDisplayEnforcementStatus(status);");
     expect(guardIdx).toBeGreaterThan(-1);
@@ -502,6 +504,80 @@ describe("Part 4.E/F — cleanup removes exactly the display-state listener; rem
 
   it("this effect's own dependency array is the stable [data?.id, inLockdownBrowser] pair — it does not re-run (and therefore does not re-register the listener) on every unrelated re-render", () => {
     expect(source).toMatch(/\}, \[data\?\.id, inLockdownBrowser\]\);/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pre-commit audit fix (PR #26) — the initial getDisplayEnforcementStatus()
+// IPC query can itself REJECT. Silently doing nothing would be a fail-OPEN
+// presentation gap: native state could already be BLOCKED before this
+// renderer mounted, and because live pushes are deduplicated against the
+// last status, an unchanged BLOCKED state may never fire another push to
+// recover from. See src/lib/displayViolationOverlay.test.ts for the
+// behavioral coverage of displayStatusOnInitialQueryFailure/
+// computeDisplayViolationModal (items 4/5/6/7); these are the structural
+// tests proving the exam page actually wires the failure handler in, and
+// that it never fires for STANDARD_WEB (item 8).
+// ---------------------------------------------------------------------------
+
+describe("Pre-commit audit fix (PR #26), item 4/5 — a rejected initial query fails closed with the neutral status, never silently ignored", () => {
+  it("the query's .catch() sets displayStatusOnInitialQueryFailure() — never an empty/no-op handler", () => {
+    const effect = extractDisplayBridgeEffect();
+    const queryStart = effect.indexOf("?.getDisplayEnforcementStatus?.()");
+    const queryBlock = effect.slice(queryStart);
+    expect(queryBlock).toMatch(/\.catch\(\(\) => \{\s*if \(cancelled \|\| liveDisplayUpdateReceived\) return;\s*setDisplayEnforcementStatus\(displayStatusOnInitialQueryFailure\(\)\);\s*\}\);/);
+  });
+
+  it("imports displayStatusOnInitialQueryFailure from src/lib/displayViolationOverlay", () => {
+    expect(source).toMatch(/import \{\s*computeDisplayViolationModal,\s*displayStatusOnInitialQueryFailure,/);
+  });
+});
+
+describe("Pre-commit audit fix (PR #26), item 6/7 — recovery after a failure state is the SAME mechanism as any other transition", () => {
+  it("the live listener is a single, unconditional registration — never disabled or bypassed by the query's own catch block, so a later OK or genuine BLOCKED push always still applies normally", () => {
+    const effect = extractDisplayBridgeEffect();
+    // Exactly one registration of the listener in this effect — the
+    // catch-block addition did not fork a second, conditional listener
+    // path; recovery/replacement after a failure state goes through the
+    // SAME setDisplayEnforcementStatus(status) call the listener always
+    // used.
+    const registrations = effect.match(/window\.sesLockdown\?\.onDisplayEnforcementStateChanged\?\.\(/g) ?? [];
+    expect(registrations.length).toBe(1);
+  });
+});
+
+describe("Pre-commit audit fix (PR #26), item 8 — STANDARD_WEB (no window.sesLockdown) is never affected", () => {
+  it("the failure handler's .catch() is chained directly off the SAME optional ?.getDisplayEnforcementStatus?.() call — never a separate, unguarded statement that could run without a Tether bridge present", () => {
+    const effect = extractDisplayBridgeEffect();
+    const queryIdx = effect.indexOf("?.getDisplayEnforcementStatus?.()");
+    const thenIdx = effect.indexOf(".then((status) => {", queryIdx);
+    const catchIdx = effect.indexOf(".catch(() => {", queryIdx);
+    expect(queryIdx).toBeGreaterThan(-1);
+    // .then and .catch both appear AFTER the optional ?.() call with no
+    // semicolon (i.e. no statement break) in between — proving they are
+    // part of the SAME expression that short-circuits to undefined
+    // (never even reaching .then/.catch) whenever window.sesLockdown or
+    // getDisplayEnforcementStatus itself is absent, exactly as
+    // STANDARD_WEB/non-Tether exams require.
+    // Between the optional call and .then(...) there is no statement-
+    // terminating semicolon — proving .then is chained directly off the
+    // SAME expression, not a separate statement that would run even when
+    // window.sesLockdown?.getDisplayEnforcementStatus?.() short-circuited
+    // to undefined.
+    const betweenQueryAndThen = effect.slice(queryIdx, thenIdx);
+    expect(betweenQueryAndThen).not.toContain(";");
+    expect(catchIdx).toBeGreaterThan(thenIdx);
+  });
+
+  it("there is no second, separately-invoked display-status fetch/IPC call anywhere in this effect that could bypass the optional chain", () => {
+    const effect = extractDisplayBridgeEffect();
+    const occurrences = effect.match(/getDisplayEnforcementStatus/g) ?? [];
+    // Exactly one call site (?.getDisplayEnforcementStatus?.()) — the
+    // preceding doc comments legitimately name it in prose too, so this
+    // just proves there's a single call, not a duplicated/unguarded one.
+    const callSites = effect.match(/\?\.getDisplayEnforcementStatus\?\.\(\)/g) ?? [];
+    expect(callSites.length).toBe(1);
+    expect(occurrences.length).toBeGreaterThanOrEqual(callSites.length);
   });
 });
 
