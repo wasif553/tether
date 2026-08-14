@@ -271,9 +271,10 @@ describe("Required test 6 — the pre-exam exit route remains available after a 
 });
 
 describe("Required test 7 — a genuine second display DURING an ACTIVE exam still invokes strict enforcement (unchanged, unweakened)", () => {
-  it("with enforcement genuinely activated (active:true, ready:true), a real EXTEND topology still shows the overlay", async () => {
+  it("with enforcement genuinely activated (active:true, ready:true), a real EXTEND topology still blocks — v1.7.6: via the bounded renderer bridge, never a native overlay BrowserWindow", async () => {
     const onEventType = vi.fn();
-    const enforcement = new DisplayEnforcement({ onEventType });
+    const onDisplayStateChanged = vi.fn();
+    const enforcement = new DisplayEnforcement({ onEventType, onDisplayStateChanged });
     enforcement.setEnforcementState(ENFORCING_STATE);
     enforcement.start(fakeTargetWindow());
     await vi.advanceTimersByTimeAsync(0);
@@ -284,7 +285,19 @@ describe("Required test 7 — a genuine second display DURING an ACTIVE exam sti
     await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
 
     expect(enforcement.getDiagnosticsSnapshot().overlayVisible).toBe(true);
-    expect(FakeBrowserWindow.instances.length).toBeGreaterThan(0);
+    // Electron's own displayCount > 1 is checked before topology in
+    // resolveCombinedDisplayDecision, so the reason here is
+    // ADDITIONAL_ELECTRON_DISPLAY (the strongest evidence), not
+    // WINDOWS_TOPOLOGY_EXTEND — matches this same scenario's existing
+    // onEventType assertion below and displayEnforcement.test.ts's own
+    // "[6] connecting a second display" test.
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "BLOCKED", reason: "ADDITIONAL_ELECTRON_DISPLAY", displayCount: 2 });
+    expect(onDisplayStateChanged).toHaveBeenCalledWith({ state: "BLOCKED", reason: "ADDITIONAL_ELECTRON_DISPLAY", displayCount: 2 });
+    // v1.7.6 — no second native overlay BrowserWindow is ever constructed
+    // for a display-policy violation any more (contrast with Required
+    // test 8 below, ProcessDetection's own overlay, deliberately
+    // untouched by this change).
+    expect(FakeBrowserWindow.instances).toHaveLength(0);
     expect(onEventType).toHaveBeenCalledWith("ADDITIONAL_DISPLAY_PRESENT", 2);
   });
 });

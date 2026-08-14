@@ -25,6 +25,21 @@ type SesLockdownBridge = {
   // callers must feature-detect before use, never assume presence.
   getDisplayCount?(): Promise<number>;
   onDisplayEnforcementEvent?(callback: (payload: { eventType: string; displayCount: number }) => void): void;
+  // v1.7.6 — Native Display State Bridge. Optional: only present in a
+  // v1.7.6+ packaged build; every caller must feature-detect first,
+  // exactly like every other optional method here. Distinct from
+  // onDisplayEnforcementEvent above — that one is transition-only
+  // integrity-event-reporting metadata and is unchanged/unweakened by
+  // this addition; these two drive the exam page's own display-violation
+  // blur+modal (see src/lib/displayViolationOverlay.ts). Bounded to
+  // {state, reason, displayCount} — never EDID, monitor serial numbers,
+  // Windows display paths, hardware identifiers, or display names. See
+  // apps/lockdown/src/displayEnforcementLogic.ts's DisplayEnforcementStatus.
+  getDisplayEnforcementStatus?(): Promise<{ state: "OK" | "BLOCKED"; reason: string | null; displayCount: number }>;
+  /** Pre-commit audit fix — returns a narrow unsubscribe function, unlike onDisplayEnforcementEvent above (no removal mechanism at all). Callers MUST call it on effect cleanup — never leave a stale listener registered past unmount/reload. */
+  onDisplayEnforcementStateChanged?(
+    callback: (status: { state: "OK" | "BLOCKED"; reason: string | null; displayCount: number }) => void,
+  ): () => void;
   // Corrective pass v1.2.1, Task C — replaces the old plain-boolean
   // setDisplayPolicyEnforced (removed; no known deployed installs
   // predate this still-unreleased corrective pass, so no dual-method

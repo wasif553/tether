@@ -222,7 +222,70 @@
 // (a real second display, a real prohibited application, a remote-
 // session violation) remain fully strict and unweakened. See the main
 // repo's docs/tether-preflight-lifecycle-v1.7.5-policy-not-ready.md.
-export const LOCKDOWN_VERSION = "1.7.5";
+//
+// v1.7.6 — display-violation UX + question-navigator sync. Physical
+// acceptance testing of v1.7.5 found two remaining issues (everything
+// else — TeamViewer/remote-session detection, phone/second-person
+// detection, answer save, single-round-trip save-and-navigate, the
+// content-access lease — worked correctly).
+//
+// (1) Display recovery defect: an HDMI disconnect/topology-transition
+// test showed correct detection and a correctly-reasoned warning, but on
+// recovery most of the screen stayed covered, requiring a full Windows
+// restart. Physical testing isolated this unrecoverable-screen symptom to
+// the separate native display-overlay recovery path — the precise
+// Windows window/compositor failure mechanism was never independently
+// established, only that removing the overlay entirely removes the
+// symptom. Detection itself was confirmed correct throughout. The
+// PRESENTATION mechanism — the second, screen-saver-level, non-closable
+// overlay BrowserWindow displayEnforcement.ts used to create for a
+// genuine display-policy violation (see showOverlay/hideOverlay, now
+// REMOVED entirely) — is what changed. Detection, decision computation
+// (resolveReadinessGatedDisplayDecision et al. in
+// displayEnforcementLogic.ts) and event reporting (onEventType, the
+// existing ADDITIONAL_DISPLAY_PRESENT/DISPLAY_CONFIGURATION_CHANGED/
+// DISPLAY_POLICY_RESTORED integrity-event semantics) are completely
+// unchanged and unweakened. Student-facing blocking is now entirely
+// renderer-based: a new Native Display State Bridge
+// (getDisplayEnforcementStatus()/onDisplayEnforcementStateChanged(), see
+// displayEnforcement.ts) pushes/serves a bounded, renderer-facing
+// {state, reason, displayCount} status — never EDID, monitor serial
+// numbers, Windows display paths, hardware identifiers, or display names,
+// and POLICY_NOT_READY is folded into state:"OK" before it ever reaches
+// this bridge (the existing secure-activation/content gate owns that
+// state, exactly as v1.7.5 already established; it can never become this
+// modal). The main repo's exam content page renders its own React/DOM
+// blur+modal from this bridge (src/lib/displayViolationOverlay.ts) —
+// title "Additional display detected" for genuine multi-display evidence,
+// neutral "Display configuration could not be verified" wording for
+// TOPOLOGY_CHECK_UNAVAILABLE (never a false claim that a second display
+// exists), no dismiss/Continue button while native state remains BLOCKED,
+// and automatic clearing — no page reload, no Tether restart, no timer
+// reset, no attemptNumber change, no lost local answer state — the
+// instant native state returns to OK.
+//
+// (2) Question navigator visual lag: the top question navigator visibly
+// updated roughly 2-3 seconds AFTER the next question was already on
+// screen, because the navigator only ever refreshed via a separate GET
+// .../question-navigator round trip triggered after the fact. Fixed
+// entirely in the main repo (src/lib/navigatorLocalSync.ts,
+// applyLocalNavigatorTransition): the CURRENT/ANSWERED/SKIPPED tiles and
+// every tile's locked/canNavigate state now update synchronously from
+// save-and-navigate's own response, reusing the existing pure
+// canNavigateToQuestion navigation rule (never approximated, never a new
+// server request) — the existing GET request still runs in the
+// background afterward to reconcile counts/server-only metadata, guarded
+// by a monotonic request-generation token so an older, slow-resolving
+// background refresh can never regress a newer one. The working
+// save-and-navigate architecture itself is unchanged; the navigator
+// remains exactly what it already was — a progress display, never a
+// security source of truth.
+//
+// No native code in this pass touches process detection, remote-session
+// detection, TeamViewer/screen-share detection, camera/phone/second-
+// person detection, the content-access lease, or the secure-activation
+// handshake.
+export const LOCKDOWN_VERSION = "1.7.6";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

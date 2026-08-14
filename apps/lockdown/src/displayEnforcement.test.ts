@@ -62,6 +62,15 @@ vi.mock("./windowsDisplayTopology", () => ({
 }));
 
 import { DisplayEnforcement } from "./displayEnforcement";
+import { BrowserWindow as MockedBrowserWindow } from "electron";
+
+// v1.7.6 — the mocked "electron" module's BrowserWindow IS the
+// FakeBrowserWindow class defined inside the vi.mock factory above (that
+// class itself isn't a named export of this file, so it's accessed
+// through the mocked import instead). Used only by the Part 7
+// display-recovery tests below to prove no second native overlay
+// BrowserWindow is ever constructed.
+const FakeBrowserWindow = MockedBrowserWindow as unknown as { instances: unknown[] };
 
 function fakeTargetWindow() {
   return {
@@ -72,6 +81,8 @@ function fakeTargetWindow() {
 
 const SINGLE_DISPLAY_TOPOLOGY = { ok: true as const, activePathCount: 1, distinctSourceCount: 1 };
 const EXTEND_TOPOLOGY = { ok: true as const, activePathCount: 2, distinctSourceCount: 2 };
+const CLONE_TOPOLOGY = { ok: true as const, activePathCount: 2, distinctSourceCount: 1 };
+const UNAVAILABLE_TOPOLOGY = { ok: false as const, reason: "timeout" as const };
 
 const ENFORCING_STATE = { active: true, ready: true, requireSingleDisplay: true };
 
@@ -84,6 +95,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   fakeDisplays = [{}];
   fakePrimaryInternal = true;
+  FakeBrowserWindow.instances = [];
   getWindowsDisplayTopology.mockReset();
   getWindowsDisplayTopology.mockResolvedValue(SINGLE_DISPLAY_TOPOLOGY);
 });
@@ -309,5 +321,177 @@ describe("DisplayEnforcement — v1.7.5 P0: POLICY_NOT_READY never shows the nat
     const snapshot = enforcement.getDiagnosticsSnapshot();
     expect(snapshot.blockingReason).toBe("TOPOLOGY_CHECK_UNAVAILABLE");
     expect(snapshot.overlayVisible).toBe(true);
+  });
+});
+
+// v1.7.6 — Native Display State Bridge, display-recovery safety. Physical
+// HDMI-disconnect testing isolated an unrecoverable-screen symptom
+// (requiring a full OS restart) to the OLD screen-saver-level overlay
+// BrowserWindow's recovery path — the precise Windows window/compositor
+// failure mechanism was never independently established, only that
+// removing the overlay entirely removes the symptom. Detection itself
+// was confirmed correct throughout. These tests exercise repeated
+// transition cycles
+// against the NEW bridge and prove: no second native overlay
+// BrowserWindow is ever constructed (FakeBrowserWindow.instances stays
+// empty throughout every scenario below — contrast with
+// processDetection.test.ts/remoteSessionMonitor.test.ts, whose own
+// overlays are deliberately untouched by this change); a clear
+// transition always reaches the renderer via onDisplayStateChanged;
+// repeated/duplicate OS events are idempotent and never produce duplicate
+// UI state; and restoration never requires restarting Tether.
+describe("DisplayEnforcement — v1.7.6 Native Display State Bridge: display-recovery safety (Part 7)", () => {
+  it("cycle: OK -> EXTEND BLOCKED -> OK, via genuine Windows-topology evidence alone (Electron displayCount stays 1 throughout — the classic Duplicate/Clone-mode case Electron alone cannot see)", async () => {
+    const onDisplayStateChanged = vi.fn();
+    const enforcement = new DisplayEnforcement({ onDisplayStateChanged });
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "OK", reason: null, displayCount: 1 });
+
+    getWindowsDisplayTopology.mockResolvedValue(EXTEND_TOPOLOGY);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_EXTEND", displayCount: 1 });
+
+    getWindowsDisplayTopology.mockResolvedValue(SINGLE_DISPLAY_TOPOLOGY);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "OK", reason: null, displayCount: 1 });
+
+    expect(onDisplayStateChanged.mock.calls.map((c) => c[0])).toEqual([
+      { state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_EXTEND", displayCount: 1 },
+      { state: "OK", reason: null, displayCount: 1 },
+    ]);
+    expect(FakeBrowserWindow.instances).toEqual([]);
+  });
+
+  it("cycle: OK -> CLONE BLOCKED -> OK", async () => {
+    const onDisplayStateChanged = vi.fn();
+    const enforcement = new DisplayEnforcement({ onDisplayStateChanged });
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enforcement.getDisplayEnforcementStatus().state).toBe("OK");
+
+    getWindowsDisplayTopology.mockResolvedValue(CLONE_TOPOLOGY);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_CLONE", displayCount: 1 });
+
+    getWindowsDisplayTopology.mockResolvedValue(SINGLE_DISPLAY_TOPOLOGY);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "OK", reason: null, displayCount: 1 });
+    expect(FakeBrowserWindow.instances).toEqual([]);
+  });
+
+  it("cycle: OK -> additional Electron display BLOCKED -> OK", async () => {
+    const onDisplayStateChanged = vi.fn();
+    const enforcement = new DisplayEnforcement({ onDisplayStateChanged });
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enforcement.getDisplayEnforcementStatus().state).toBe("OK");
+
+    setDisplayCount(2);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "BLOCKED", reason: "ADDITIONAL_ELECTRON_DISPLAY", displayCount: 2 });
+
+    setDisplayCount(1);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "OK", reason: null, displayCount: 1 });
+    expect(FakeBrowserWindow.instances).toEqual([]);
+  });
+
+  it("cycle: TOPOLOGY_CHECK_UNAVAILABLE -> OK", async () => {
+    const onDisplayStateChanged = vi.fn();
+    getWindowsDisplayTopology.mockResolvedValue(UNAVAILABLE_TOPOLOGY);
+    const enforcement = new DisplayEnforcement({ onDisplayStateChanged });
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "BLOCKED", reason: "TOPOLOGY_CHECK_UNAVAILABLE", displayCount: 1 });
+
+    getWindowsDisplayTopology.mockResolvedValue(SINGLE_DISPLAY_TOPOLOGY);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "OK", reason: null, displayCount: 1 });
+    expect(FakeBrowserWindow.instances).toEqual([]);
+  });
+
+  it("cycle: BLOCKED reason A (EXTEND) -> BLOCKED reason B (CLONE) -> OK — a mid-block reason change is still reported as a real transition, never suppressed by the dedup", async () => {
+    const onDisplayStateChanged = vi.fn();
+    const enforcement = new DisplayEnforcement({ onDisplayStateChanged });
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+
+    getWindowsDisplayTopology.mockResolvedValue(EXTEND_TOPOLOGY);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    expect(enforcement.getDisplayEnforcementStatus().reason).toBe("WINDOWS_TOPOLOGY_EXTEND");
+
+    getWindowsDisplayTopology.mockResolvedValue(CLONE_TOPOLOGY);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    expect(enforcement.getDisplayEnforcementStatus().reason).toBe("WINDOWS_TOPOLOGY_CLONE");
+
+    getWindowsDisplayTopology.mockResolvedValue(SINGLE_DISPLAY_TOPOLOGY);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "OK", reason: null, displayCount: 1 });
+
+    expect(onDisplayStateChanged.mock.calls.map((c) => c[0])).toEqual([
+      { state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_EXTEND", displayCount: 1 },
+      { state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_CLONE", displayCount: 1 },
+      { state: "OK", reason: null, displayCount: 1 },
+    ]);
+    expect(FakeBrowserWindow.instances).toEqual([]);
+  });
+
+  it("repeated/duplicate OS display events resolving to the SAME decision are idempotent — onDisplayStateChanged fires exactly once per real transition, never once per poll tick", async () => {
+    const onDisplayStateChanged = vi.fn();
+    const enforcement = new DisplayEnforcement({ onDisplayStateChanged });
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+
+    getWindowsDisplayTopology.mockResolvedValue(EXTEND_TOPOLOGY);
+    // Several duplicate raw screen events plus several periodic recheck
+    // ticks, all resolving to the identical still-BLOCKED/EXTEND status.
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    for (const cb of screenListeners["display-metrics-changed"] ?? []) cb();
+    for (const cb of screenListeners["display-metrics-changed"] ?? []) cb();
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+
+    expect(onDisplayStateChanged).toHaveBeenCalledTimes(1);
+    expect(onDisplayStateChanged).toHaveBeenCalledWith({ state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_EXTEND", displayCount: 1 });
+    expect(FakeBrowserWindow.instances).toEqual([]);
+  });
+
+  it("getDisplayEnforcementStatus() (the read-only initial query) always matches the last onDisplayStateChanged push — a fresh renderer mount/reload can never miss an already-active violation", async () => {
+    const onDisplayStateChanged = vi.fn();
+    const enforcement = new DisplayEnforcement({ onDisplayStateChanged });
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+
+    getWindowsDisplayTopology.mockResolvedValue(EXTEND_TOPOLOGY);
+    await vi.advanceTimersByTimeAsync(PERIODIC_RECHECK_MS);
+
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual(onDisplayStateChanged.mock.calls.at(-1)?.[0]);
+  });
+
+  it("restoration never requires restarting Tether — setEnforcementState(inactive), the actual restoration action registered in main.ts's lockdownLifecycle, clears the violation without calling stop()/start() again", async () => {
+    const onDisplayStateChanged = vi.fn();
+    getWindowsDisplayTopology.mockResolvedValue(EXTEND_TOPOLOGY);
+    const enforcement = new DisplayEnforcement({ onDisplayStateChanged });
+    enforcement.setEnforcementState(ENFORCING_STATE);
+    enforcement.start(fakeTargetWindow());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enforcement.getDisplayEnforcementStatus().state).toBe("BLOCKED");
+
+    // The exact restoration call site — see main.ts's
+    // lockdownLifecycle.registerRestoreAction("displayEnforcement.setEnforcementState(inactive)", ...).
+    // Never calls stop()/start() again.
+    enforcement.setEnforcementState({ active: false, ready: false, requireSingleDisplay: false });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(enforcement.getDisplayEnforcementStatus()).toEqual({ state: "OK", reason: null, displayCount: 1 });
+    expect(FakeBrowserWindow.instances).toEqual([]);
   });
 });

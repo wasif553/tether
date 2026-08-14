@@ -233,6 +233,56 @@ export function isOverlayEligibleBlockingReason(reason: DisplayBlockingReason): 
   return reason !== "POLICY_NOT_READY";
 }
 
+// ---------------------------------------------------------------------------
+// v1.7.6 — Native Display State Bridge. Physical HDMI-disconnect testing
+// isolated an unrecoverable-screen symptom (a visual remnant requiring a
+// full OS restart to clear) to the second, screen-saver-level
+// BrowserWindow created by isOverlayEligibleBlockingReason's caller
+// (displayEnforcement.ts's showOverlay/hideOverlay) — the precise
+// Windows window/compositor failure mechanism was never independently
+// established, only that removing that overlay removes the symptom.
+// Detection and decision-making (everything above this point in the
+// file) were already correct. The fix replaces that native trapping
+// window with a bounded
+// state pushed to the renderer, which shows its own React/DOM blur+modal
+// instead — see the exam content page's display-violation modal. Nothing
+// above this line changes: decision computation, event semantics
+// (resolveDisplayDecisionEventType), and diagnostics are untouched.
+// ---------------------------------------------------------------------------
+
+/** The renderer-facing reason enum — identical to DisplayBlockingReason minus POLICY_NOT_READY, which this bridge folds into state:"OK" (see toDisplayEnforcementStatus below). */
+export type DisplayEnforcementBlockingReason = Exclude<DisplayBlockingReason, "POLICY_NOT_READY">;
+
+/**
+ * Bounded, renderer-facing display state — the ONE shape pushed over IPC
+ * and returned by the read-only status query. Deliberately excludes
+ * everything the page must never see: EDID, monitor serial numbers,
+ * Windows display paths, hardware identifiers, or display names.
+ * POLICY_NOT_READY is never exposed here — that transient loading/
+ * verification state is handled entirely by the exam page's existing
+ * secure-activation/content-gate flow and must never become a
+ * display-violation modal.
+ */
+export type DisplayEnforcementStatus = {
+  state: "OK" | "BLOCKED";
+  reason: DisplayEnforcementBlockingReason | null;
+  displayCount: number;
+};
+
+export const INITIAL_DISPLAY_ENFORCEMENT_STATUS: DisplayEnforcementStatus = { state: "OK", reason: null, displayCount: 0 };
+
+/** Reshapes a DisplayDecision (+ the display count it was computed from) into the bounded renderer-facing status — the one place POLICY_NOT_READY is folded into OK, via the same isOverlayEligibleBlockingReason test that used to gate the native overlay. */
+export function toDisplayEnforcementStatus(decision: DisplayDecision, displayCount: number): DisplayEnforcementStatus {
+  if (decision.state !== "BLOCKED") return { state: "OK", reason: null, displayCount };
+  if (!isOverlayEligibleBlockingReason(decision.reason)) return { state: "OK", reason: null, displayCount };
+  return { state: "BLOCKED", reason: decision.reason as DisplayEnforcementBlockingReason, displayCount };
+}
+
+/** True when two statuses carry the same student-facing meaning — used to suppress a duplicate push when repeated OS events (or duplicate debounced ticks) resolve to an identical bounded status, so the renderer never sees duplicate UI state for one real transition. */
+export function displayEnforcementStatusesEqual(a: DisplayEnforcementStatus, b: DisplayEnforcementStatus): boolean {
+  return a.state === b.state && a.reason === b.reason && a.displayCount === b.displayCount;
+}
+
 export type DisplayDecisionEventType = "ADDITIONAL_DISPLAY_PRESENT" | "DISPLAY_CONFIGURATION_CHANGED" | "DISPLAY_POLICY_RESTORED" | "DISPLAY_CHECK_TECHNICAL_FAILURE" | null;
 
 /**
