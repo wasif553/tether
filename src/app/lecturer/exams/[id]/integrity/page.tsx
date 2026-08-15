@@ -1,14 +1,21 @@
 "use client";
 
-import { useEffect, useState, use as usePromise } from "react";
+import { useEffect, useMemo, useState, use as usePromise } from "react";
 import Link from "next/link";
+import {
+  categoryForEventType,
+  INTEGRITY_EVENT_CATEGORY_LABELS,
+  type IntegrityEventCategory,
+} from "@/lib/integrityEventLabels";
+
+type Severity = "INFO" | "LOW" | "MEDIUM" | "HIGH";
 
 type IntegrityEventRow = {
   id: string;
   submissionId: string;
   eventType: string;
   eventLabel: string;
-  severity: "INFO" | "LOW" | "MEDIUM" | "HIGH";
+  severity: Severity;
   message: string;
   occurredAt: string;
   resolvedAt: string | null;
@@ -41,41 +48,102 @@ type IntegrityData = {
   unresolvedHighSeverityCount: number;
 };
 
-const RISK_LEVEL_STYLES: Record<RiskLevel, string> = {
-  CLEAN: "bg-gray-100 text-gray-600",
-  LOW: "bg-blue-100 text-blue-700",
-  MEDIUM: "bg-yellow-100 text-yellow-700",
-  HIGH: "bg-red-100 text-red-700",
-};
+// Integrity review commercial UI polish — one shared helper for every
+// "N thing(s)" label, mirroring the equivalent helper on the Lecturer
+// Dashboard (src/app/lecturer/page.tsx). Never abbreviates; safe to call
+// on any count.
+function countLabel(count: number, singular: string, plural: string = `${singular}s`): string {
+  return `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
+}
 
-const RISK_LEVEL_LABELS: Record<RiskLevel, string> = {
+/** Same idea as countLabel, but returns only the WORD form (the caller already renders the number separately, e.g. in a metric tile). */
+function pluralWord(count: number, singular: string, plural: string = `${singular}s`): string {
+  return count === 1 ? singular : plural;
+}
+
+// "Risk" reads too close to a misconduct judgement for lecturer-facing
+// copy — see the terminology-change requirement this pass implements.
+// The underlying RiskLevel VALUES, thresholds, and ordering (from
+// src/lib/integrityRisk.ts, via the API's riskLevelForScore) are
+// completely untouched; only this page's own display strings change.
+const REVIEW_PRIORITY_LABELS: Record<RiskLevel, string> = {
   CLEAN: "Clean",
-  LOW: "Low integrity risk",
-  MEDIUM: "Medium integrity risk",
-  HIGH: "High integrity risk",
+  LOW: "Low review priority",
+  MEDIUM: "Medium review priority",
+  HIGH: "High review priority",
 };
 
-function riskBadge(level: RiskLevel) {
+const REVIEW_PRIORITY_STYLES: Record<RiskLevel, string> = {
+  CLEAN: "bg-[#F2F4F7] text-[#667085]",
+  LOW: "bg-[#EFF6FF] text-[#1D4ED8]",
+  MEDIUM: "bg-[#FEF3C7] text-[#92400E]",
+  HIGH: "bg-[#FEF2F2] text-[#DC2626]",
+};
+
+function ReviewPriorityBadge({ level }: { level: RiskLevel }) {
   return (
-    <span className={`rounded px-2 py-0.5 text-xs ${RISK_LEVEL_STYLES[level]}`}>
-      {RISK_LEVEL_LABELS[level]}
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${REVIEW_PRIORITY_STYLES[level]}`}>
+      {REVIEW_PRIORITY_LABELS[level]}
     </span>
   );
 }
 
-function severityBadge(severity: string) {
-  const styles: Record<string, string> = {
-    HIGH: "bg-red-100 text-red-700",
-    MEDIUM: "bg-yellow-100 text-yellow-700",
-    LOW: "bg-blue-100 text-blue-700",
-    INFO: "bg-gray-100 text-gray-600",
-  };
+const SEVERITY_LABELS: Record<Severity, string> = { HIGH: "High", MEDIUM: "Medium", LOW: "Low", INFO: "Info" };
+const SEVERITY_STYLES: Record<Severity, string> = {
+  HIGH: "bg-[#FEF2F2] text-[#DC2626]",
+  MEDIUM: "bg-[#FEF3C7] text-[#92400E]",
+  LOW: "bg-[#EFF6FF] text-[#1D4ED8]",
+  INFO: "bg-[#F2F4F7] text-[#667085]",
+};
+
+function SeverityBadge({ severity }: { severity: Severity }) {
   return (
-    <span className={`rounded px-2 py-0.5 text-xs ${styles[severity] ?? styles.INFO}`}>
-      {severity}
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${SEVERITY_STYLES[severity]}`}>
+      {SEVERITY_LABELS[severity]}
     </span>
   );
 }
+
+function ReviewStatusBadge({ resolved, resolvedByName }: { resolved: boolean; resolvedByName: string | null }) {
+  if (resolved) {
+    return (
+      <span className="inline-flex items-center rounded-full bg-[#ECFDF3] px-2 py-0.5 text-xs font-medium text-[#067647]">
+        Reviewed{resolvedByName ? ` by ${resolvedByName}` : ""}
+      </span>
+    );
+  }
+  return <span className="inline-flex items-center rounded-full bg-[#F2F4F7] px-2 py-0.5 text-xs font-medium text-[#667085]">Needs review</span>;
+}
+
+// Human-readable event names — presentation mapping only, never touches
+// stored eventType/eventLabel. `labelForEventType` (server-side, see
+// src/lib/integrityEventLabels.ts) already supplies a friendly label for
+// most event types; this ONLY overrides the specific codes called out as
+// still lecturer-unsuitable (WINDOW_BLUR/WINDOW_FOCUS_RETURN fall back to
+// their raw code today) or where the existing label repeats information
+// now shown separately as its own badge (e.g. "— needs review" is
+// dropped since ReviewStatusBadge already conveys that). Anything not
+// listed here keeps using the backend's own eventLabel unchanged.
+const LOCAL_EVENT_LABEL_OVERRIDES: Partial<Record<string, string>> = {
+  WINDOW_BLUR: "Student switched away from exam",
+  WINDOW_FOCUS_RETURN: "Student returned to exam",
+  SCREEN_SHARE_INTERRUPTED: "Screen sharing interrupted",
+  SCREEN_SHARE_EVIDENCE_CAPTURED: "Screen evidence captured",
+  CAMERA_PERMISSION_GRANTED: "Camera access granted",
+  STUDENT_VERIFICATION_CONFIRMED: "Student identity verified",
+};
+
+function displayLabelForEvent(event: IntegrityEventRow): string {
+  return LOCAL_EVENT_LABEL_OVERRIDES[event.eventType] ?? event.eventLabel;
+}
+
+const CATEGORY_FILTER_OPTIONS: IntegrityEventCategory[] = ["evidence", "camera", "screen", "lockdown", "window", "info"];
+
+type ReviewStatusFilterValue = "all" | "needs-review" | "reviewed";
+type SeverityFilterValue = "all" | Severity;
+type CategoryFilterValue = "all" | IntegrityEventCategory;
+
+const STUDENT_REVIEW_QUEUE_INITIAL_LIMIT = 5;
 
 export default function ExamIntegrityPage({
   params,
@@ -91,6 +159,15 @@ export default function ExamIntegrityPage({
   const [activeNoteEventId, setActiveNoteEventId] = useState<string | null>(null);
   const [noteText, setNoteText] = useState("");
   const [saving, setSaving] = useState(false);
+  const [showAllStudents, setShowAllStudents] = useState(false);
+
+  // Presentation-only client-side filters over the ALREADY-loaded event
+  // list — no additional request, never changes what's stored or what
+  // `data.events` itself contains.
+  const [reviewStatusFilter, setReviewStatusFilter] = useState<ReviewStatusFilterValue>("all");
+  const [severityFilter, setSeverityFilter] = useState<SeverityFilterValue>("all");
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilterValue>("all");
+  const [studentFilter, setStudentFilter] = useState<string>("all");
 
   async function load() {
     setLoading(true);
@@ -141,190 +218,471 @@ export default function ExamIntegrityPage({
     }
   }
 
-  if (loading) return <p className="text-gray-500">Loading integrity events...</p>;
-  if (error) return <p className="text-red-600">{error}</p>;
-  if (!data) return <p className="text-red-600">No data available.</p>;
+  const events = useMemo(() => data?.events ?? [], [data]);
+
+  const filteredEvents = useMemo(() => {
+    return events.filter((e) => {
+      if (reviewStatusFilter === "needs-review" && e.resolvedAt) return false;
+      if (reviewStatusFilter === "reviewed" && !e.resolvedAt) return false;
+      if (severityFilter !== "all" && e.severity !== severityFilter) return false;
+      if (categoryFilter !== "all" && categoryForEventType(e.eventType) !== categoryFilter) return false;
+      if (studentFilter !== "all" && e.student.id !== studentFilter) return false;
+      return true;
+    });
+  }, [events, reviewStatusFilter, severityFilter, categoryFilter, studentFilter]);
+
+  const hasActiveFilters =
+    reviewStatusFilter !== "all" || severityFilter !== "all" || categoryFilter !== "all" || studentFilter !== "all";
+
+  function clearFilters() {
+    setReviewStatusFilter("all");
+    setSeverityFilter("all");
+    setCategoryFilter("all");
+    setStudentFilter("all");
+  }
+
+  if (loading) return <p className="mx-auto max-w-7xl text-sm text-[#667085]">Loading integrity events…</p>;
+  if (error) return <p className="mx-auto max-w-7xl text-sm text-[#DC2626]">{error}</p>;
+  if (!data) return <p className="mx-auto max-w-7xl text-sm text-[#DC2626]">No data available.</p>;
 
   const totalEvents = data.events.length;
   const highSeverityEvents = data.severityCounts.HIGH ?? 0;
   const studentsWithEvents = data.studentGroups.length;
   const unresolvedEvents = data.events.filter((e) => !e.resolvedAt).length;
+  const visibleStudents = showAllStudents ? data.studentGroups : data.studentGroups.slice(0, STUDENT_REVIEW_QUEUE_INITIAL_LIMIT);
+  const hasMoreStudents = data.studentGroups.length > STUDENT_REVIEW_QUEUE_INITIAL_LIMIT;
 
   return (
-    <div className="mx-auto max-w-4xl">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">{examTitle ?? "Exam"} — Integrity events</h1>
-        <div className="flex gap-2">
-          <a
-            href={`/api/lecturer/exams/${id}/integrity-events/export.csv`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            Export CSV
-          </a>
-          <Link
-            href={`/lecturer/exams/${id}/analytics`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            View analytics
-          </Link>
-          <Link
-            href={`/lecturer/exams/${id}`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            Back to exam
-          </Link>
-        </div>
-      </div>
-
-      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <SummaryCard label="Total integrity events" value={String(totalEvents)} />
-        <SummaryCard label="High severity events" value={String(highSeverityEvents)} />
-        <SummaryCard label="Students with events" value={String(studentsWithEvents)} />
-        <SummaryCard label="Unresolved events" value={String(unresolvedEvents)} />
-      </div>
-      {data.unresolvedHighSeverityCount > 0 && (
-        <p className="mt-3 text-sm text-red-600">
-          {data.unresolvedHighSeverityCount} unresolved high-severity event(s) — review recommended.
-        </p>
-      )}
-
-      <h2 className="mt-8 text-lg font-medium">Students by integrity risk</h2>
-      <p className="mt-1 text-sm text-gray-500">
-        A deterministic point score (not AI) to help prioritize review. It is evidence for human
-        review, not a misconduct determination.
-      </p>
-      <div className="mt-3 space-y-2">
-        {data.studentGroups.length === 0 && (
-          <p className="text-sm text-gray-500">No integrity events recorded</p>
-        )}
-        {data.studentGroups.slice(0, 5).map((g) => (
-          <div
-            key={g.studentId}
-            className="flex items-center justify-between rounded border border-gray-200 p-3 text-sm"
-          >
-            <div>
-              <p className="font-medium">{g.studentName}</p>
-              <p className="text-gray-500">{g.studentEmail}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-gray-600">{g.eventCount} event(s)</span>
-              {riskBadge(g.riskLevel)}
-              {g.reviewRecommended && (
-                <span className="text-xs text-red-600">Review recommended</span>
-              )}
-              <Link
-                href={`/lecturer/submissions/${g.submissionId}/evidence`}
-                className="text-xs underline"
-              >
-                Evidence report
-              </Link>
-            </div>
+    <div className="mx-auto max-w-7xl">
+      <div>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm font-medium text-[#667085]">Integrity review</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              href={`/lecturer/exams/${id}/analytics`}
+              className="rounded-lg border border-[#E4E7EC] bg-white px-3 py-1.5 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
+            >
+              Analytics
+            </Link>
+            <a
+              href={`/api/lecturer/exams/${id}/integrity-events/export.csv`}
+              className="rounded-lg border border-[#E4E7EC] bg-white px-3 py-1.5 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
+            >
+              Export CSV
+            </a>
           </div>
-        ))}
+        </div>
+        <h1 className="mt-1 text-3xl font-bold text-[#101828]">{examTitle ?? "Exam"}</h1>
+        <p className="mt-1 text-sm text-[#667085]">Review integrity evidence recorded during this examination.</p>
+        <Link
+          href={`/lecturer/exams/${id}`}
+          className="mt-2 inline-block text-sm font-medium text-[#667085] hover:text-[#101828] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] rounded"
+        >
+          ← Back to exam
+        </Link>
       </div>
 
-      <h2 className="mt-8 text-lg font-medium">Event log</h2>
-      <div className="mt-3 overflow-x-auto rounded border border-gray-200">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-gray-200 bg-gray-50 text-left">
-              <th className="p-2">Time</th>
-              <th className="p-2">Student</th>
-              <th className="p-2">Event type</th>
-              <th className="p-2">Severity</th>
-              <th className="p-2">Message</th>
-              <th className="p-2">Status</th>
-              <th className="p-2">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.events.length === 0 && (
-              <tr>
-                <td colSpan={7} className="p-4 text-center text-gray-500">
-                  No integrity events recorded
-                </td>
-              </tr>
-            )}
-            {data.events.map((e) => (
-              <tr key={e.id} className="border-b border-gray-100 align-top">
-                <td className="whitespace-nowrap p-2">
-                  {new Date(e.occurredAt).toLocaleString()}
-                </td>
-                <td className="p-2">
-                  <div>{e.student.name}</div>
-                  <div className="text-xs text-gray-500">{e.student.email}</div>
-                </td>
-                <td className="p-2">{e.eventLabel}</td>
-                <td className="p-2">{severityBadge(e.severity)}</td>
-                <td className="max-w-xs p-2">{e.message}</td>
-                <td className="p-2">
-                  {e.resolvedAt ? (
-                    <span className="text-green-700">
-                      Reviewed{e.resolvedByName ? ` by ${e.resolvedByName}` : ""}
-                    </span>
-                  ) : (
-                    <span className="text-gray-500">Review recommended</span>
-                  )}
-                  {e.resolutionNote && (
-                    <p className="mt-1 text-xs text-gray-500">Note: {e.resolutionNote}</p>
-                  )}
-                </td>
-                <td className="p-2">
-                  {!e.resolvedAt &&
-                    (activeNoteEventId === e.id ? (
-                      <div className="flex flex-col gap-1">
-                        <input
-                          autoFocus
-                          placeholder="Resolution note"
-                          className="w-40 rounded border border-gray-300 px-2 py-1 text-xs"
-                          value={noteText}
-                          onChange={(ev) => setNoteText(ev.target.value)}
-                        />
-                        <div className="flex gap-1">
-                          <button
-                            onClick={() => handleResolve(e.id)}
-                            disabled={saving || !noteText.trim()}
-                            className="rounded bg-black px-2 py-1 text-xs text-white disabled:opacity-50"
-                          >
-                            Mark reviewed
-                          </button>
-                          <button
-                            onClick={() => {
-                              setActiveNoteEventId(null);
-                              setNoteText("");
-                            }}
-                            className="rounded border border-gray-300 px-2 py-1 text-xs"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => {
-                          setActiveNoteEventId(e.id);
-                          setNoteText("");
-                        }}
-                        className="text-xs underline"
-                      >
-                        Review event
-                      </button>
-                    ))}
-                </td>
-              </tr>
+      <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <IntegrityMetric
+          value={totalEvents}
+          label={pluralWord(totalEvents, "Integrity event", "Integrity events")}
+          accent="neutral"
+        />
+        <IntegrityMetric
+          value={studentsWithEvents}
+          label={pluralWord(studentsWithEvents, "Student affected", "Students affected")}
+          accent="info"
+        />
+        <IntegrityMetric value={unresolvedEvents} label="Awaiting review" accent={unresolvedEvents > 0 ? "warning" : "neutral"} />
+        <IntegrityMetric value={highSeverityEvents} label="High severity" accent={highSeverityEvents > 0 ? "danger" : "neutral"} />
+      </div>
+
+      <div className="mt-8 space-y-8">
+        <section>
+          <SectionHeader
+            title="Students requiring review"
+            badge={countLabel(data.studentGroups.length, "student")}
+            subtitle="Prioritisation helps lecturers decide what to review first — a deterministic point score, not AI. It is evidence for human review, not a misconduct determination."
+          />
+          <div className="mt-3 space-y-2">
+            {data.studentGroups.length === 0 && <p className="text-sm text-[#667085]">No integrity events recorded.</p>}
+            {visibleStudents.map((group) => (
+              <StudentReviewCard key={group.studentId} group={group} events={data.events} />
             ))}
-          </tbody>
-        </table>
+          </div>
+          {hasMoreStudents && (
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={() => setShowAllStudents((v) => !v)}
+                className="rounded text-sm font-medium text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+              >
+                {showAllStudents ? "Show fewer" : `Show all ${countLabel(data.studentGroups.length, "student")}`}
+              </button>
+            </div>
+          )}
+        </section>
+
+        <section>
+          <SectionHeader title="Event timeline" subtitle="Every recorded integrity event for this exam, most recent first." />
+
+          {data.events.length > 0 && (
+            <IntegrityFilters
+              reviewStatusFilter={reviewStatusFilter}
+              onReviewStatusFilterChange={setReviewStatusFilter}
+              severityFilter={severityFilter}
+              onSeverityFilterChange={setSeverityFilter}
+              categoryFilter={categoryFilter}
+              onCategoryFilterChange={setCategoryFilter}
+              studentFilter={studentFilter}
+              onStudentFilterChange={setStudentFilter}
+              students={data.studentGroups}
+              hasActiveFilters={hasActiveFilters}
+              onClearFilters={clearFilters}
+            />
+          )}
+
+          {hasActiveFilters && (
+            <p className="mt-2 text-xs text-[#667085]">
+              Showing {filteredEvents.length.toLocaleString()} of {events.length.toLocaleString()} events
+            </p>
+          )}
+
+          <div className="mt-3 overflow-hidden rounded-xl border border-[#E4E7EC] bg-white">
+            {data.events.length === 0 && <p className="p-6 text-center text-sm text-[#667085]">No integrity events recorded.</p>}
+            {data.events.length > 0 && filteredEvents.length === 0 && (
+              <p className="p-6 text-center text-sm text-[#667085]">No events match the current filters.</p>
+            )}
+            <ul>
+              {filteredEvents.map((event) => (
+                <EventTimelineRow
+                  key={event.id}
+                  event={event}
+                  activeNoteEventId={activeNoteEventId}
+                  noteText={noteText}
+                  saving={saving}
+                  onStartReview={() => {
+                    setActiveNoteEventId(event.id);
+                    setNoteText("");
+                  }}
+                  onCancelReview={() => {
+                    setActiveNoteEventId(null);
+                    setNoteText("");
+                  }}
+                  onNoteChange={setNoteText}
+                  onConfirmReview={() => handleResolve(event.id)}
+                />
+              ))}
+            </ul>
+          </div>
+        </section>
       </div>
     </div>
   );
 }
 
-function SummaryCard({ label, value }: { label: string; value: string }) {
+function SectionHeader({ title, badge, subtitle }: { title: string; badge?: string; subtitle?: string }) {
   return (
-    <div className="rounded border border-gray-200 p-4">
-      <p className="text-xs uppercase tracking-wide text-gray-500">{label}</p>
-      <p className="mt-1 text-xl font-semibold">{value}</p>
+    <div>
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <h2 className="text-lg font-semibold text-[#101828]">{title}</h2>
+        {badge && <span className="text-sm font-medium text-[#667085]">{badge}</span>}
+      </div>
+      {subtitle && <p className="mt-0.5 max-w-2xl text-sm text-[#667085]">{subtitle}</p>}
     </div>
+  );
+}
+
+function IntegrityMetric({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: number;
+  accent: "neutral" | "info" | "warning" | "danger";
+}) {
+  const dotColor = {
+    neutral: "bg-[#98A2B3]",
+    info: "bg-[#2563EB]",
+    warning: "bg-[#D97706]",
+    danger: "bg-[#DC2626]",
+  }[accent];
+  const tintClasses =
+    accent === "warning"
+      ? "border-[#FEDF89] bg-[#FFFAEB]"
+      : accent === "danger"
+        ? "border-[#FECDCA] bg-[#FEF2F2]"
+        : "border-[#E4E7EC] bg-white";
+
+  return (
+    <div className={`rounded-xl border p-4 ${tintClasses}`}>
+      <div className="flex items-center gap-1.5">
+        <span className={`h-1.5 w-1.5 rounded-full ${dotColor}`} aria-hidden="true" />
+        <span className="text-sm font-medium text-[#667085]">{label}</span>
+      </div>
+      <div className="mt-1.5 text-2xl font-bold text-[#101828]">{value}</div>
+    </div>
+  );
+}
+
+// WHO needs review (name/email), WHY (priority badge + event categories +
+// the same reviewRecommended signal the API already computes), and WHAT
+// to do about it (one primary action). Event categories are derived
+// client-side from data ALREADY loaded on this page (categoryForEventType
+// over data.events) — no new field, no new request.
+function StudentReviewCard({ group, events }: { group: StudentGroup; events: IntegrityEventRow[] }) {
+  const categories = useMemo(() => {
+    const present = new Set(
+      events.filter((e) => e.student.id === group.studentId).map((e) => categoryForEventType(e.eventType)),
+    );
+    present.delete("info");
+    return Array.from(present).map((c) => INTEGRITY_EVENT_CATEGORY_LABELS[c]);
+  }, [events, group.studentId]);
+
+  return (
+    <div className="rounded-xl border border-[#E4E7EC] bg-white p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-[#101828]">{group.studentName}</p>
+          <p className="truncate text-xs text-[#667085]">{group.studentEmail}</p>
+        </div>
+        <ReviewPriorityBadge level={group.riskLevel} />
+      </div>
+      <p className="mt-2 text-xs text-[#667085]">
+        {countLabel(group.eventCount, "event")}
+        {categories.length > 0 ? ` · ${categories.join(" · ")}` : ""}
+      </p>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+        {group.reviewRecommended ? (
+          <span className="inline-flex items-center rounded-full bg-[#FEF3C7] px-2 py-0.5 text-xs font-medium text-[#92400E]">
+            Needs review
+          </span>
+        ) : (
+          <span className="text-xs text-[#667085]">No unresolved high-severity signals</span>
+        )}
+        <Link
+          href={`/lecturer/submissions/${group.submissionId}/evidence`}
+          className="rounded text-sm font-semibold text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+        >
+          Review evidence →
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+function IntegrityFilters({
+  reviewStatusFilter,
+  onReviewStatusFilterChange,
+  severityFilter,
+  onSeverityFilterChange,
+  categoryFilter,
+  onCategoryFilterChange,
+  studentFilter,
+  onStudentFilterChange,
+  students,
+  hasActiveFilters,
+  onClearFilters,
+}: {
+  reviewStatusFilter: ReviewStatusFilterValue;
+  onReviewStatusFilterChange: (value: ReviewStatusFilterValue) => void;
+  severityFilter: SeverityFilterValue;
+  onSeverityFilterChange: (value: SeverityFilterValue) => void;
+  categoryFilter: CategoryFilterValue;
+  onCategoryFilterChange: (value: CategoryFilterValue) => void;
+  studentFilter: string;
+  onStudentFilterChange: (value: string) => void;
+  students: StudentGroup[];
+  hasActiveFilters: boolean;
+  onClearFilters: () => void;
+}) {
+  return (
+    <div className="mt-3 flex flex-wrap items-end gap-3">
+      <div>
+        <label htmlFor="filter-review-status" className="block text-xs font-medium text-[#667085]">
+          Review status
+        </label>
+        <select
+          id="filter-review-status"
+          value={reviewStatusFilter}
+          onChange={(e) => onReviewStatusFilterChange(e.target.value as ReviewStatusFilterValue)}
+          className="mt-1 rounded-lg border border-[#E4E7EC] bg-white px-2.5 py-1.5 text-sm text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+        >
+          <option value="all">All</option>
+          <option value="needs-review">Needs review</option>
+          <option value="reviewed">Reviewed</option>
+        </select>
+      </div>
+
+      <div>
+        <label htmlFor="filter-severity" className="block text-xs font-medium text-[#667085]">
+          Severity
+        </label>
+        <select
+          id="filter-severity"
+          value={severityFilter}
+          onChange={(e) => onSeverityFilterChange(e.target.value as SeverityFilterValue)}
+          className="mt-1 rounded-lg border border-[#E4E7EC] bg-white px-2.5 py-1.5 text-sm text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+        >
+          <option value="all">All</option>
+          <option value="HIGH">High</option>
+          <option value="MEDIUM">Medium</option>
+          <option value="LOW">Low</option>
+          <option value="INFO">Info</option>
+        </select>
+      </div>
+
+      <div>
+        <label htmlFor="filter-category" className="block text-xs font-medium text-[#667085]">
+          Event
+        </label>
+        <select
+          id="filter-category"
+          value={categoryFilter}
+          onChange={(e) => onCategoryFilterChange(e.target.value as CategoryFilterValue)}
+          className="mt-1 rounded-lg border border-[#E4E7EC] bg-white px-2.5 py-1.5 text-sm text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+        >
+          <option value="all">All event types</option>
+          {CATEGORY_FILTER_OPTIONS.map((c) => (
+            <option key={c} value={c}>
+              {INTEGRITY_EVENT_CATEGORY_LABELS[c]}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {students.length > 1 && (
+        <div>
+          <label htmlFor="filter-student" className="block text-xs font-medium text-[#667085]">
+            Student
+          </label>
+          <select
+            id="filter-student"
+            value={studentFilter}
+            onChange={(e) => onStudentFilterChange(e.target.value)}
+            className="mt-1 rounded-lg border border-[#E4E7EC] bg-white px-2.5 py-1.5 text-sm text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+          >
+            <option value="all">All students</option>
+            {students.map((s) => (
+              <option key={s.studentId} value={s.studentId}>
+                {s.studentName}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {hasActiveFilters && (
+        <button
+          type="button"
+          onClick={onClearFilters}
+          className="rounded pb-1.5 text-sm font-medium text-[#667085] underline underline-offset-2 hover:text-[#101828] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+        >
+          Clear filters
+        </button>
+      )}
+    </div>
+  );
+}
+
+function EventTimelineRow({
+  event,
+  activeNoteEventId,
+  noteText,
+  saving,
+  onStartReview,
+  onCancelReview,
+  onNoteChange,
+  onConfirmReview,
+}: {
+  event: IntegrityEventRow;
+  activeNoteEventId: string | null;
+  noteText: string;
+  saving: boolean;
+  onStartReview: () => void;
+  onCancelReview: () => void;
+  onNoteChange: (value: string) => void;
+  onConfirmReview: () => void;
+}) {
+  const resolved = Boolean(event.resolvedAt);
+  const time = new Date(event.occurredAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" });
+  const isReviewing = activeNoteEventId === event.id;
+
+  return (
+    <li className="border-b border-[#E4E7EC] px-4 py-3 last:border-b-0">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-[#667085]">{time}</span>
+            <SeverityBadge severity={event.severity} />
+            <ReviewStatusBadge resolved={resolved} resolvedByName={event.resolvedByName} />
+          </div>
+          <p className="mt-1 text-sm font-semibold text-[#101828]">{displayLabelForEvent(event)}</p>
+          <p className="mt-0.5 text-sm text-[#667085]">{event.message}</p>
+          <p className="mt-0.5 text-xs text-[#667085]">
+            {event.student.name} · {event.student.email}
+          </p>
+          {event.resolutionNote && <p className="mt-1 text-xs text-[#667085]">Note: {event.resolutionNote}</p>}
+
+          <details className="mt-1.5">
+            <summary className="w-fit cursor-pointer rounded text-xs font-medium text-[#667085] hover:text-[#101828] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]">
+              Technical details
+            </summary>
+            <div className="mt-1.5 space-y-0.5 text-xs text-[#667085]">
+              <p>
+                Event type: <span className="font-mono">{event.eventType}</span>
+              </p>
+              <p>Timestamp: {new Date(event.occurredAt).toISOString()}</p>
+              <p>Submission: {event.submissionId}</p>
+              <p>Severity: {event.severity}</p>
+              <p>Status: {resolved ? "Reviewed" : "Needs review"}</p>
+            </div>
+          </details>
+        </div>
+
+        {!resolved && (
+          <div className="shrink-0">
+            {isReviewing ? (
+              <div className="flex flex-col gap-1.5 sm:items-end">
+                <input
+                  autoFocus
+                  placeholder="Resolution note"
+                  aria-label="Resolution note"
+                  className="w-full rounded-lg border border-[#E4E7EC] px-2.5 py-1.5 text-xs text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] sm:w-44"
+                  value={noteText}
+                  onChange={(e) => onNoteChange(e.target.value)}
+                />
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={onConfirmReview}
+                    disabled={saving || !noteText.trim()}
+                    className="rounded-lg bg-[#2563EB] px-2.5 py-1 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  >
+                    {saving ? "Saving…" : "Mark reviewed"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onCancelReview}
+                    className="rounded-lg border border-[#E4E7EC] px-2.5 py-1 text-xs font-medium text-[#667085] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={onStartReview}
+                className="rounded text-sm font-semibold text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+              >
+                Review →
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </li>
   );
 }
