@@ -9,6 +9,7 @@ import {
   scopedKey,
   classifySaveFailureCategory,
   buildSaveAttemptDiagnostics,
+  classifyNavigationSaveStrategy,
   PENDING_SAVE_RETENTION_MS,
 } from "./pendingSaveQueue";
 
@@ -123,5 +124,47 @@ describe("pendingSaveQueue — bounded save-failure diagnostics", () => {
     expect(d.category).toBe("TIMEOUT");
     expect(d.httpStatus).toBeNull();
     expect(d.serverErrorCode).toBeNull();
+  });
+});
+
+// Physical acceptance follow-up — save/next latency diagnosis. Pure
+// extraction of navigateQuestion()'s own three-way navigation-strategy
+// split (src/app/student/exams/[id]/page.tsx), so the exact same decision
+// the UI makes on every Next/Previous click is independently,
+// behaviorally testable without a DOM/React-rendering harness.
+describe("pendingSaveQueue — classifyNavigationSaveStrategy (clean / dirty / in-flight-reuse)", () => {
+  it("A. clean navigation: an untouched question (response undefined) never triggers a save", () => {
+    expect(classifyNavigationSaveStrategy({ responseIsDefined: false, isAcknowledged: false, hasInFlightSave: false })).toBe("SKIP_SAVE");
+  });
+
+  it("A. clean navigation: content already matching the last genuine server acknowledgement never triggers a save, even if (impossibly) something were also in flight", () => {
+    expect(classifyNavigationSaveStrategy({ responseIsDefined: true, isAcknowledged: true, hasInFlightSave: false })).toBe("SKIP_SAVE");
+    expect(classifyNavigationSaveStrategy({ responseIsDefined: true, isAcknowledged: true, hasInFlightSave: true })).toBe("SKIP_SAVE");
+  });
+
+  it("C. exact in-flight save reuse: dirty content with an identical-content save already outstanding reuses it rather than duplicating", () => {
+    expect(classifyNavigationSaveStrategy({ responseIsDefined: true, isAcknowledged: false, hasInFlightSave: true })).toBe("REUSE_IN_FLIGHT_SAVE");
+  });
+
+  it("B. dirty navigation: not acknowledged and nothing in flight -> the single combined save-and-navigate round trip", () => {
+    expect(classifyNavigationSaveStrategy({ responseIsDefined: true, isAcknowledged: false, hasInFlightSave: false })).toBe("COMBINED_SAVE_AND_NAVIGATE");
+  });
+
+  it("isAcknowledged is checked before hasInFlightSave — matches navigateQuestion()'s own short-circuit order (response !== undefined && !isAcknowledged && !hasInFlightSave)", () => {
+    // Every one of the 2x2 (isAcknowledged, hasInFlightSave) combinations
+    // with responseIsDefined:true, cross-checked against the exact
+    // boolean expression this function replaces.
+    const cases = [
+      { isAcknowledged: false, hasInFlightSave: false, expected: "COMBINED_SAVE_AND_NAVIGATE" },
+      { isAcknowledged: false, hasInFlightSave: true, expected: "REUSE_IN_FLIGHT_SAVE" },
+      { isAcknowledged: true, hasInFlightSave: false, expected: "SKIP_SAVE" },
+      { isAcknowledged: true, hasInFlightSave: true, expected: "SKIP_SAVE" },
+    ] as const;
+    for (const c of cases) {
+      const dirty = true && !c.isAcknowledged && !c.hasInFlightSave; // the original inline expression, response !== undefined already true here
+      const expectedFromOriginal = dirty ? "COMBINED_SAVE_AND_NAVIGATE" : c.hasInFlightSave && !c.isAcknowledged ? "REUSE_IN_FLIGHT_SAVE" : "SKIP_SAVE";
+      expect(expectedFromOriginal).toBe(c.expected);
+      expect(classifyNavigationSaveStrategy({ responseIsDefined: true, isAcknowledged: c.isAcknowledged, hasInFlightSave: c.hasInFlightSave })).toBe(c.expected);
+    }
   });
 });

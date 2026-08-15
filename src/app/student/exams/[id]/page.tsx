@@ -10,6 +10,7 @@ import {
 } from "@/lib/assessmentLifecycle";
 import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
 import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
+import { classifyNavigationSaveStrategy } from "@/lib/pendingSaveQueue";
 import {
   classifyFrameQuality,
   computeLuminanceVariance,
@@ -1483,6 +1484,7 @@ export default function TakeExamPage({
     navigationStartedAtMs: number,
     previousQuestionId: string,
     previousAuthoritativeResponse: string | null,
+    strategy?: "SKIP_SAVE" | "REUSE_IN_FLIGHT_SAVE",
   ) {
     try {
       const questionProgressStartedAtMs = performance.now();
@@ -1492,9 +1494,14 @@ export default function TakeExamPage({
         body: JSON.stringify({ currentIndex: requestedIndex }),
       });
       const questionProgressMs = Math.round(performance.now() - questionProgressStartedAtMs);
+      const serverTiming = res.headers.get("Server-Timing");
       if (!res.ok) throw new Error("navigation failed");
+      const jsonParseStartedAtMs = performance.now();
       const payload: OneQuestionPayload = await res.json();
+      const jsonParseMs = performance.now() - jsonParseStartedAtMs;
+      const applyPayloadStartedAtMs = performance.now();
       applyOneQuestionPayload(payload);
+      const applyPayloadMs = performance.now() - applyPayloadStartedAtMs;
       // Question Navigator immediate-sync follow-up (Part 8) — updates
       // the CURRENT/ANSWERED/SKIPPED tiles and every tile's
       // locked/canNavigate state immediately from this same response,
@@ -1512,9 +1519,13 @@ export default function TakeExamPage({
           : prev,
       );
       logClientTetherDiagnostic("QUESTION_NAVIGATION_TIMING", {
+        strategy: strategy ?? null,
         questionProgressMs,
+        jsonParseMs: Math.round(jsonParseMs),
+        applyPayloadMs: Math.round(applyPayloadMs),
         totalClickToVisibleMs: Math.round(performance.now() - navigationStartedAtMs),
         combinedRequest: false,
+        serverTiming,
       });
     } catch {
       setOneQuestion((prev) => ({
@@ -1561,9 +1572,19 @@ export default function TakeExamPage({
     clearTimeout(saveTimers.current[questionId]);
     const response = responses[questionId];
 
-    const dirty = response !== undefined && !resilientAutosave.isAcknowledged(questionId, response) && !resilientAutosave.getInFlightSave(questionId, response);
+    // Physical acceptance follow-up — save/next latency diagnosis. Pure
+    // extraction (classifyNavigationSaveStrategy, src/lib/pendingSaveQueue.ts)
+    // of the exact same three-way split this inline expression used to
+    // compute directly — see that function's own doc comment for why
+    // SKIP_SAVE and REUSE_IN_FLIGHT_SAVE are kept distinct rather than
+    // collapsed into one "not dirty" boolean.
+    const strategy = classifyNavigationSaveStrategy({
+      responseIsDefined: response !== undefined,
+      isAcknowledged: response !== undefined && resilientAutosave.isAcknowledged(questionId, response),
+      hasInFlightSave: response !== undefined && resilientAutosave.getInFlightSave(questionId, response) !== null,
+    });
 
-    if (dirty) {
+    if (strategy === "COMBINED_SAVE_AND_NAVIGATE") {
       const result = await resilientAutosave.saveAndNavigate(questionId, response, requestedIndex);
       if (!result.ok) {
         if (secureModeEnabled) reportIntegrityEvent("AUTOSAVE_FAILED");
@@ -1589,7 +1610,9 @@ export default function TakeExamPage({
       // checkpoint, after the save above has already succeeded.
       // Best-effort; never blocks navigation.
       answerDevelopmentCapture.flushNavigation(questionId, response);
+      const applyPayloadStartedAtMs = performance.now();
       applyOneQuestionPayload(result.payload);
+      const applyPayloadMs = performance.now() - applyPayloadStartedAtMs;
       // Question Navigator immediate-sync follow-up (Part 8) —
       // result.authoritativeResponse is correct on BOTH SAVED and
       // CONFLICT (see resolveSaveAndNavigateAcknowledgement in
@@ -1607,18 +1630,21 @@ export default function TakeExamPage({
           : prev,
       );
       logClientTetherDiagnostic("QUESTION_NAVIGATION_TIMING", {
+        strategy,
         totalClickToVisibleMs: Math.round(performance.now() - navigationStartedAtMs),
+        applyPayloadMs: Math.round(applyPayloadMs),
         combinedRequest: true,
         acknowledgement: result.acknowledgement,
+        serverTiming: result.serverTiming,
       });
       setNavigatingQuestion(false);
       return;
     }
 
-    // Clean (nothing to save), or an identical save is already in flight
-    // — flushAnswerNow resolves instantly in the former case and simply
-    // awaits the existing in-flight promise in the latter; either way, no
-    // NEW save request is issued here.
+    // SKIP_SAVE (nothing to save) or REUSE_IN_FLIGHT_SAVE (an identical
+    // save is already in flight) — flushAnswerNow resolves instantly in
+    // the former case and simply awaits the existing in-flight promise in
+    // the latter; either way, no NEW save request is issued here.
     const saved = await flushAnswerNow(questionId);
     if (!saved) {
       setOneQuestion((prev) => ({
@@ -1628,7 +1654,7 @@ export default function TakeExamPage({
       setNavigatingQuestion(false);
       return;
     }
-    await requestNavigationOnly(requestedIndex, navigationStartedAtMs, questionId, response ?? null);
+    await requestNavigationOnly(requestedIndex, navigationStartedAtMs, questionId, response ?? null, strategy);
   }
 
   // Question Navigator v1 — see docs/question-navigator-v1.md. Refreshed

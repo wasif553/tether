@@ -88,6 +88,49 @@ export function classifyAcknowledgement(sentRevision: number, acknowledgedRevisi
   return "SAVED";
 }
 
+// ---------------------------------------------------------------------------
+// Physical acceptance follow-up — save/next latency diagnosis. Pure
+// extraction of the "which of the three navigation strategies applies"
+// decision inline in navigateQuestion() (src/app/student/exams/[id]/
+// page.tsx) — a testability-only extraction, not a behavior change: the
+// call site still computes the exact same three inputs from
+// resilientAutosave.isAcknowledged/getInFlightSave and calls this instead
+// of repeating the boolean expression inline.
+// ---------------------------------------------------------------------------
+
+export type NavigationSaveStrategy =
+  /** Nothing to save (question never touched, or already exactly what the server last acknowledged) — a single navigation-only request. */
+  | "SKIP_SAVE"
+  /** An identical-content save is already in flight (e.g. the debounced autosave just fired) — await/reuse it, then navigation-only. Never a duplicate save. */
+  | "REUSE_IN_FLIGHT_SAVE"
+  /** A genuinely dirty, not-yet-acknowledged answer — ONE combined save-and-navigate request. */
+  | "COMBINED_SAVE_AND_NAVIGATE";
+
+/**
+ * Mirrors navigateQuestion()'s own three-way split exactly: `response`
+ * undefined means the question was never touched this session (SKIP_SAVE
+ * — flushAnswerNow/save() resolves instantly with nothing queued);
+ * `isAcknowledged` true means the current content already matches the
+ * last genuine server acknowledgement (SKIP_SAVE); `hasInFlightSave` true
+ * means an identical-content save is already outstanding
+ * (REUSE_IN_FLIGHT_SAVE — awaited, never duplicated); otherwise the
+ * answer is genuinely dirty (COMBINED_SAVE_AND_NAVIGATE — the single
+ * round-trip PR #25 path). SKIP_SAVE and REUSE_IN_FLIGHT_SAVE both end up
+ * calling the same flushAnswerNow -> navigation-only path at the call
+ * site — they are kept as distinct outcomes here (rather than merged into
+ * one "not dirty" boolean) purely so a test/log can tell the two apart,
+ * exactly as this diagnosis task requires distinguishing them.
+ */
+export function classifyNavigationSaveStrategy(params: {
+  responseIsDefined: boolean;
+  isAcknowledged: boolean;
+  hasInFlightSave: boolean;
+}): NavigationSaveStrategy {
+  if (!params.responseIsDefined || params.isAcknowledged) return "SKIP_SAVE";
+  if (params.hasInFlightSave) return "REUSE_IN_FLIGHT_SAVE";
+  return "COMBINED_SAVE_AND_NAVIGATE";
+}
+
 /** Aggregate counts for the recovery-status UI (Part 3/4/16). */
 export function summarizeQueue(entries: ReadonlyArray<{ retryCount: number }>): { pendingCount: number; hasFailedRetries: boolean } {
   return {

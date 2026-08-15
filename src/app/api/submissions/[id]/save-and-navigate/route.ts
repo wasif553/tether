@@ -51,6 +51,7 @@ import {
 } from "@/lib/submissionQuestionPayload";
 import { renewContentAccessLeaseFromValidatedDecision } from "@/lib/secureClient/requireTetherContentAccess";
 import { logServerTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
+import { createTimingCollector, timeSpan, attachServerTimingHeader, logBoundedNavigationTiming } from "@/lib/serverTiming";
 
 const bodySchema = z.object({
   questionId: z.string(),
@@ -66,7 +67,13 @@ const bodySchema = z.object({
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const timingStartMs = performance.now();
-  const session = await auth();
+  // Physical acceptance follow-up — save/next latency diagnosis. Bounded,
+  // opt-in (TETHER_TIMING_HEADERS_ENABLED, unlike TETHER_DIAGNOSTIC_LOGGING_ENABLED
+  // never excluded in production — see serverTiming.ts's own doc comment)
+  // per-stage timing, attached to the response as a standard Server-Timing
+  // header. Never affects behavior when the flag is unset (the default).
+  const timing = createTimingCollector();
+  const session = await timeSpan(timing, "authMs", () => auth());
   if (!session || session.user.role !== "STUDENT") {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -82,7 +89,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   let context;
   try {
-    context = await loadOneQuestionSubmission(id, session.user.id, req);
+    context = await loadOneQuestionSubmission(id, session.user.id, req, timing);
   } catch (err) {
     if (err instanceof OneQuestionModeError) {
       return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
@@ -117,17 +124,21 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // order, so this introduces no new deadlock pattern.
   const transactionStartMs = performance.now();
   const outcome = await prisma.$transaction(async (tx) => {
-    const saveResult = await saveAnswerWithIdempotency(tx, {
-      submissionId: submission.id,
-      examId: submission.examId,
-      questionId,
-      response,
-      clientRequestId,
-      clientRevision,
-    });
+    const saveResult = await saveAnswerWithIdempotency(
+      tx,
+      {
+        submissionId: submission.id,
+        examId: submission.examId,
+        questionId,
+        response,
+        clientRequestId,
+        clientRevision,
+      },
+      timing,
+    );
     if (saveResult.kind === "invalid_question") return { kind: "invalid_question" as const };
 
-    const nav = await resolveSequentialQuestionNavigation(tx, { submission, settings, requestedIndex });
+    const nav = await resolveSequentialQuestionNavigation(tx, { submission, settings, requestedIndex }, timing);
     return { kind: "ok" as const, saveResult, nav };
   });
   const transactionMs = performance.now() - transactionStartMs;
@@ -175,7 +186,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
   if (nav.visitedQuestionId) markQuestionVisited(submission.id, nav.visitedQuestionId).catch(() => {});
 
-  const payload = buildOneQuestionPayload(submission, settings, finalIndex);
+  const payload = await timeSpan(timing, "nextQuestionMs", () => buildOneQuestionPayload(submission, settings, finalIndex));
   if (!payload) {
     return NextResponse.json({ error: "This exam has no questions" }, { status: 404 });
   }
@@ -193,14 +204,28 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // Rolling lease renewal, from the SAME decision loadOneQuestionSubmission
   // already computed — no second decode/verify/DB read (see
   // renewContentAccessLeaseFromValidatedDecision's own doc comment).
+  const leaseRenewalStartMs = performance.now();
   if (leaseDecision) {
     renewContentAccessLeaseFromValidatedDecision(jsonResponse, leaseDecision, { submissionId: submission.id, studentId: submission.studentId });
   }
+  const leaseRenewalMs = performance.now() - leaseRenewalStartMs;
+  timing.record("leaseRenewalMs", leaseRenewalMs);
+  timing.record("answerTransactionMs", transactionMs);
+  timing.record("totalMs", performance.now() - timingStartMs);
+  attachServerTimingHeader(jsonResponse, timing, process.env.TETHER_TIMING_HEADERS_ENABLED);
 
-  logServerTetherDiagnostic("SAVE_AND_NAVIGATE_TIMING", {
-    transactionMs: Math.round(transactionMs),
-    totalMs: Math.round(performance.now() - timingStartMs),
-  });
+  logServerTetherDiagnostic(
+    "SAVE_AND_NAVIGATE_TIMING",
+    Object.fromEntries(timing.entries().map((e) => [e.name, Math.round(e.durationMs * 100) / 100])),
+  );
+  // Physical acceptance follow-up — the SAME bounded stages, as one
+  // structured JSON log line, gated on the SAME TETHER_TIMING_HEADERS_ENABLED
+  // flag as the Server-Timing header above (never TETHER_DIAGNOSTIC_LOGGING_ENABLED,
+  // which excludes production — see serverTiming.ts's own doc comment).
+  // This is what makes the numbers retrievable from a real Vercel
+  // production log during a physical test, with no DevTools and no extra
+  // request.
+  logBoundedNavigationTiming("save-and-navigate", timing, process.env.TETHER_TIMING_HEADERS_ENABLED);
 
   return jsonResponse;
 }

@@ -260,7 +260,7 @@ describe("PART 1 — navigation only ever proceeds after the server has acknowle
     const fn = extractFunctionBody("async function navigateQuestion(requestedIndex: number) {");
     const savedIdx = fn.indexOf("const saved = await flushAnswerNow(questionId);");
     const notSavedIdx = fn.indexOf("if (!saved) {", savedIdx);
-    const requestOnlyIdx = fn.indexOf("await requestNavigationOnly(requestedIndex, navigationStartedAtMs, questionId, response ?? null);");
+    const requestOnlyIdx = fn.indexOf("await requestNavigationOnly(requestedIndex, navigationStartedAtMs, questionId, response ?? null, strategy);");
     expect(savedIdx).toBeGreaterThan(-1);
     expect(notSavedIdx).toBeGreaterThan(savedIdx);
     const failureBranch = fn.slice(notSavedIdx, fn.indexOf("return;", notSavedIdx) + "return;".length);

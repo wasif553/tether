@@ -182,7 +182,9 @@ describe("PART 3/5 — a failed/timed-out save-and-navigate leaves the answer qu
 
   it("saveAndNavigate only ever deletes the local entry and returns ok:true AFTER a successful (2xx) server response — never before", () => {
     const fn = extractFunctionBody("const saveAndNavigate = useCallback(");
-    const okReturnIdx = fn.lastIndexOf("return { ok: true, payload: result.body.navigation, acknowledgement, questionId, authoritativeResponse };");
+    const okReturnIdx = fn.lastIndexOf(
+      "return { ok: true, payload: result.body.navigation, acknowledgement, questionId, authoritativeResponse, serverTiming: result.serverTiming };",
+    );
     const deleteIdx = fn.indexOf("await deleteEntry(entry.userId, entry.submissionId, entry.questionId);");
     expect(okReturnIdx).toBeGreaterThan(-1);
     expect(deleteIdx).toBeGreaterThan(-1);
