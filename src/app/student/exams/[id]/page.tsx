@@ -26,6 +26,7 @@ import {
   resolveCameraIntegrityState,
   decideVisibilityRestoredEmission,
   shouldLogAiCameraDebug,
+  isPhoneCalibrationEnabled,
   DetectionCooldownTracker,
   PHONE_CONFIDENCE_THRESHOLD,
   UNCERTAIN_PERSON_CONFIDENCE_LOWER_BOUND,
@@ -70,6 +71,7 @@ import {
   shouldRunSecondStageVerification,
   expandCandidateBoxForVerification,
   phoneConfidenceBand,
+  buildPhoneCalibrationEventSummary,
   PHONE_DETECTION_ALGORITHM_VERSION,
   type PhoneObservation,
   type PhoneDetectionSource,
@@ -3262,6 +3264,12 @@ export default function TakeExamPage({
     // short the chosen delay is.
     async function runDetectionTick() {
       if (cancelled) return;
+      // Physical acceptance follow-up — phone-detection calibration
+      // observability. Purely observational: only ever read to build a
+      // bounded summary attached to an ALREADY-emitted POSSIBLE_PHONE_VISIBLE
+      // event (see the calibration block below) — never affects scheduling,
+      // detection, or emission itself.
+      const tickStartMs = performance.now();
       const video = detectionVideoRef.current;
       const cooldown = detectionCooldown.current;
       const now = Date.now();
@@ -3597,8 +3605,17 @@ export default function TakeExamPage({
               geometryRejectedPhoneCandidates,
             );
 
+            // Physical acceptance follow-up — phone-detection calibration
+            // observability. Purely observational counters, read only by
+            // the calibration summary below (attached to an event only
+            // when isPhoneCalibrationEnabled() is true) — never consulted
+            // by any scheduling, budget, or detection decision above.
+            let cropInferenceCount = 0;
+            let verificationInferenceCount = 0;
+
             if (!suppressStartup) {
               const schedule = computeCropSchedule(tickIndex);
+              cropInferenceCount = schedule.cropsToRun.length;
               for (const regionName of schedule.cropsToRun) {
                 const region = PHONE_CROP_REGIONS.find((r) => r.name === regionName);
                 if (!region) continue;
@@ -3632,11 +3649,10 @@ export default function TakeExamPage({
             // weakens the candidate's band — never an irreversible
             // decision from a single frame.
             if (!suppressStartup) {
-              let verificationAttempts = 0;
               for (const track of phoneTrackerResult.tracks) {
-                if (verificationAttempts >= MAX_VERIFICATION_ATTEMPTS_PER_TICK) break;
+                if (verificationInferenceCount >= MAX_VERIFICATION_ATTEMPTS_PER_TICK) break;
                 if (!shouldRunSecondStageVerification(track.latestBand)) continue;
-                verificationAttempts += 1;
+                verificationInferenceCount += 1;
                 const verifyDetections = await runPhoneCropPass(
                   expandCandidateBoxForVerification(track.box),
                   video,
@@ -3734,6 +3750,28 @@ export default function TakeExamPage({
 
             if (phoneDecision.shouldEmit && bestConfirmedPhoneTrack) {
               cooldown.markEmitted("POSSIBLE_PHONE_VISIBLE", now);
+              // Physical acceptance follow-up — phone-detection calibration
+              // observability. Attached ONLY when isPhoneCalibrationEnabled()
+              // is true (default: false, everywhere including production —
+              // see that function's own doc comment) — piggybacks on THIS
+              // already-firing request, never a new one. Every field is a
+              // plain number/boolean/short enum string; see
+              // buildPhoneCalibrationEventSummary's own doc comment for the
+              // exact bounds and the deliberate "event-only, not per-tick"
+              // limitation this implies.
+              const calibrationEnabled = isPhoneCalibrationEnabled(process.env.NEXT_PUBLIC_TETHER_PHONE_CALIBRATION_ENABLED);
+              const calibration = calibrationEnabled
+                ? buildPhoneCalibrationEventSummary({
+                    bestTrack: bestConfirmedPhoneTrack,
+                    activeTrackCount: phoneTrackerResult.tracks.length,
+                    shouldEmit: phoneDecision.shouldEmit,
+                    primaryInferenceMs: inferenceMs,
+                    cropInferenceCount,
+                    verificationInferenceCount,
+                    tickElapsedMsAtEmission: performance.now() - tickStartMs,
+                    nextDelayMs: computeNextDetectionDelayMs(inferenceMs),
+                  })
+                : undefined;
               // Safe metadata only (Part 13) — no image/pixel data, ever.
               // Keys deliberately avoid the substring "frame" (see
               // FORBIDDEN_METADATA_KEY_PATTERN in cameraIntegrityDetection.ts
@@ -3752,6 +3790,7 @@ export default function TakeExamPage({
                 observationWindowLength: bestConfirmedPhoneTrack.recentEligibleWindow.length,
                 detectionSource: bestConfirmedPhoneTrack.latestSource,
                 edgeContact: bestConfirmedPhoneTrack.touchesEdge,
+                ...(calibration ? { calibration } : {}),
                 boundingBox: {
                   x: Math.round(bestConfirmedPhoneTrack.box.x * 1000) / 1000,
                   y: Math.round(bestConfirmedPhoneTrack.box.y * 1000) / 1000,

@@ -430,3 +430,110 @@ export function phoneEvidenceTier(
   if (!evidenceCaptureEnabled || !generationValid || !candidateStillPresent) return "BACKEND_REVIEW_EVENT";
   return "EVIDENCE_FRAME_ELIGIBLE";
 }
+
+// ---------------------------------------------------------------------------
+// Production phone-detection calibration observability (physical
+// acceptance follow-up). Pure summary builder — no DOM, no fetch, no
+// side effects. Piggybacks on the EXISTING POSSIBLE_PHONE_VISIBLE
+// integrity-event report (never a new request): the caller attaches this
+// summary to that event's own `metadata` object only when
+// isPhoneCalibrationEnabled() (cameraIntegrityDetection.ts) is true, and
+// only at the moment a phone detection is ACTUALLY confirmed and about
+// to be emitted — never on every tick. This is a deliberate, reported
+// limitation (see docs/phone-detection-calibration-v1.md and the
+// physical acceptance audit): ticks where a candidate was observed but
+// never confirmed (the exact "misses" scenario under investigation)
+// produce no event and therefore no calibration record through this
+// channel — continuous per-tick observability would require either a new
+// per-tick network request or a native (apps/lockdown) logging path,
+// neither of which this change introduces.
+//
+// Every field is a plain number, boolean, short enum-like string, or
+// normalized (0-1) geometry ratio — never a raw image coordinate, pixel
+// buffer, image, frame, or any other media content. Field names avoid
+// "frame" so this can never trip FORBIDDEN_METADATA_KEY_PATTERN (see
+// cameraIntegrityDetection.ts's assertSafeIntegrityMetadata and the
+// server-side mirror in src/app/api/submissions/[id]/integrity-events/route.ts).
+// ---------------------------------------------------------------------------
+
+export type PhoneCalibrationBand = "STRONG" | "MODERATE" | "WEAK" | "NONE";
+
+export type PhoneCalibrationEventSummary = {
+  candidateExisted: boolean;
+  bestConfidence: number | null;
+  band: PhoneCalibrationBand;
+  source: PhoneDetectionSource | null;
+  boxWidth: number | null;
+  boxHeight: number | null;
+  areaRatio: number | null;
+  touchesEdge: boolean | null;
+  activeTrackCount: number;
+  /** How many of the track's last TRACK_CONFIRM_WINDOW eligible ticks were >=MODERATE — null when there is no best track at all. */
+  eligibleHits: number | null;
+  /** The confirmation threshold that applied to the best track (3, or 4 if edge-touching) — null for a STRONG track (confirms instantly, no window requirement) or when there is no best track. */
+  requiredHits: number | null;
+  confirmed: boolean;
+  shouldEmit: boolean;
+  primaryInferenceMs: number | null;
+  /** Crop-region inference passes ATTEMPTED this tick (lower/edge regions from computeCropSchedule) — a call that hit the crop-inference budget and returned [] still counts, since the scheduling attempt itself is what's being calibrated. */
+  cropInferenceCount: number;
+  /** Second-stage verification inference passes attempted this tick — always 0 or 1 (MAX_VERIFICATION_ATTEMPTS_PER_TICK). */
+  verificationInferenceCount: number;
+  /** Elapsed time from this tick's start to the moment this summary was built (immediately before the event fires) — NOT the full tick's total duration, since later per-tick work (second-person/no-person decisions, the local overlay refresh) still runs after this point. */
+  tickElapsedMsAtEmission: number;
+  /** The adaptive cadence delay chosen for the NEXT tick, from this tick's own full-frame inference time (computeNextDetectionDelayMs). */
+  nextDelayMs: number;
+  /** Always false in an event-attached summary by construction — a full-frame inference failure short-circuits the whole confirmation path before any event could ever fire, so this can never be observed as true through this channel. Retained for schema completeness against the audit's requested field list. */
+  primaryInferenceFailed: boolean;
+};
+
+/**
+ * Builds the bounded calibration summary for the phone track that is
+ * ACTUALLY driving this tick's phone decision (the caller's own
+ * `bestConfirmedPhoneTrack` when one exists, otherwise the caller may
+ * pass any single best-scoring track it already has in scope, or null).
+ * Pure derivation from already-computed values — never recomputes
+ * detection, tracking, or confidence-band logic, and never changes any
+ * of it.
+ */
+export function buildPhoneCalibrationEventSummary(params: {
+  bestTrack: Pick<PhoneCandidateTrack, "latestScore" | "latestBand" | "latestSource" | "box" | "touchesEdge" | "recentEligibleWindow" | "confirmedLocalWarning"> | null;
+  activeTrackCount: number;
+  shouldEmit: boolean;
+  primaryInferenceMs: number | null;
+  cropInferenceCount: number;
+  verificationInferenceCount: number;
+  tickElapsedMsAtEmission: number;
+  nextDelayMs: number;
+}): PhoneCalibrationEventSummary {
+  const { bestTrack } = params;
+  const band: PhoneCalibrationBand = (bestTrack ? bestTrack.latestBand : "none").toUpperCase() as PhoneCalibrationBand;
+  const eligibleHits = bestTrack ? bestTrack.recentEligibleWindow.filter(Boolean).length : null;
+  const requiredHits =
+    bestTrack && bestTrack.latestBand === "moderate"
+      ? bestTrack.touchesEdge
+        ? TRACK_CONFIRM_MODERATE_EDGE_COUNT
+        : TRACK_CONFIRM_MODERATE_COUNT
+      : null;
+  return {
+    candidateExisted: bestTrack != null,
+    bestConfidence: bestTrack ? bestTrack.latestScore : null,
+    band,
+    source: bestTrack ? bestTrack.latestSource : null,
+    boxWidth: bestTrack ? bestTrack.box.width : null,
+    boxHeight: bestTrack ? bestTrack.box.height : null,
+    areaRatio: bestTrack ? boxArea(bestTrack.box) : null,
+    touchesEdge: bestTrack ? bestTrack.touchesEdge : null,
+    activeTrackCount: params.activeTrackCount,
+    eligibleHits,
+    requiredHits,
+    confirmed: bestTrack?.confirmedLocalWarning ?? false,
+    shouldEmit: params.shouldEmit,
+    primaryInferenceMs: params.primaryInferenceMs,
+    cropInferenceCount: params.cropInferenceCount,
+    verificationInferenceCount: params.verificationInferenceCount,
+    tickElapsedMsAtEmission: Math.round(params.tickElapsedMsAtEmission),
+    nextDelayMs: params.nextDelayMs,
+    primaryInferenceFailed: false,
+  };
+}

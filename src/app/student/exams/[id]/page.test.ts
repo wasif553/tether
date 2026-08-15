@@ -602,3 +602,48 @@ describe("Part 10 (8) — a background navigator-refresh failure never rolls bac
     expect(catchBlock).not.toMatch(/setOneQuestion|setNavigatingQuestion/);
   });
 });
+
+// Physical acceptance follow-up — phone-detection calibration
+// observability. Structural checks that this is purely additive metadata
+// on the EXISTING POSSIBLE_PHONE_VISIBLE report — never a new request,
+// never a change to detection decisions/cadence/emission.
+describe("phone-detection calibration observability — structural checks on runDetectionTick", () => {
+  it("the calibration summary is gated behind isPhoneCalibrationEnabled — never built unconditionally", () => {
+    const fn = extractFunctionBody("async function runDetectionTick() {");
+    const gateIdx = fn.indexOf("const calibrationEnabled = isPhoneCalibrationEnabled(process.env.NEXT_PUBLIC_TETHER_PHONE_CALIBRATION_ENABLED);");
+    const ternaryIdx = fn.indexOf("const calibration = calibrationEnabled", gateIdx);
+    expect(gateIdx).toBeGreaterThan(-1);
+    expect(ternaryIdx).toBeGreaterThan(gateIdx);
+    expect(fn.slice(ternaryIdx, ternaryIdx + 800)).toContain(": undefined;");
+  });
+
+  it("the calibration object is only spread into the event metadata conditionally — never an unconditional key", () => {
+    const fn = extractFunctionBody("async function runDetectionTick() {");
+    expect(fn).toContain("...(calibration ? { calibration } : {}),");
+  });
+
+  it("attaching calibration metadata introduces no new network call — the block between building the summary and the existing reportIntegrityEvent call contains no fetch()", () => {
+    const fn = extractFunctionBody("async function runDetectionTick() {");
+    const calibrationIdx = fn.indexOf("const calibrationEnabled = isPhoneCalibrationEnabled(");
+    const reportIdx = fn.indexOf('reportIntegrityEvent("POSSIBLE_PHONE_VISIBLE"', calibrationIdx);
+    expect(calibrationIdx).toBeGreaterThan(-1);
+    expect(reportIdx).toBeGreaterThan(calibrationIdx);
+    const between = fn.slice(calibrationIdx, reportIdx);
+    expect(between).not.toMatch(/\bfetch\(/);
+  });
+
+  it("there is still exactly one POSSIBLE_PHONE_VISIBLE report call site in the whole file — calibration did not introduce a second/duplicate emission path", () => {
+    const matches = source.match(/reportIntegrityEvent\("POSSIBLE_PHONE_VISIBLE"/g) ?? [];
+    expect(matches.length).toBe(1);
+  });
+
+  it("buildPhoneCalibrationEventSummary is only ever called from inside the phoneDecision.shouldEmit branch — never on every tick", () => {
+    const fn = extractFunctionBody("async function runDetectionTick() {");
+    const shouldEmitIdx = fn.indexOf("if (phoneDecision.shouldEmit && bestConfirmedPhoneTrack) {");
+    const summaryCallIdx = fn.indexOf("buildPhoneCalibrationEventSummary({");
+    expect(shouldEmitIdx).toBeGreaterThan(-1);
+    expect(summaryCallIdx).toBeGreaterThan(shouldEmitIdx);
+    // Only one call site of the summary builder exists in the file at all.
+    expect(source.match(/buildPhoneCalibrationEventSummary\(/g)?.length).toBe(1);
+  });
+});
