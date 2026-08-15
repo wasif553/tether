@@ -155,6 +155,32 @@ export function shouldLogAiCameraDebug(
   return debugFlagValue === "true";
 }
 
+/**
+ * Physical acceptance follow-up — phone-detection calibration
+ * observability. Gate for whether a CONFIRMED phone-detection event's
+ * backend report should include the bounded calibration summary (see
+ * buildPhoneCalibrationEventSummary in phoneDetectionTracking.ts).
+ * Deliberately SEPARATE from shouldLogAiCameraDebug above, which
+ * hard-disables outside `development` and requires a localStorage flag a
+ * packaged production build cannot use: a physical test runs against a
+ * genuine production-mode Tether build, so a gate that excludes
+ * production would make this unusable for exactly the environment it
+ * exists to diagnose. Off by default everywhere (an unset/non-"true"
+ * value never attaches the summary) and must be deliberately set
+ * (`NEXT_PUBLIC_TETHER_PHONE_CALIBRATION_ENABLED` — a client-side,
+ * build-time flag, since this decision is made in the browser where the
+ * calibration data itself is already computed) for a bounded test
+ * window, in ANY environment including production. Reading the flag's
+ * value and threading it to the one call site that attaches calibration
+ * metadata is the caller's responsibility; this function only decides
+ * the boolean. Never alters detection decisions, cadence, evidence
+ * generation, or event emission — see this module's own decide*
+ * functions, none of which take this flag as an input.
+ */
+export function isPhoneCalibrationEnabled(envFlag: string | undefined): boolean {
+  return envFlag === "true";
+}
+
 export type AdaptiveCadenceConfig = {
   /** Delay used when the previous tick's inference was fast (or hasn't run yet). */
   fastIntervalMs: number;

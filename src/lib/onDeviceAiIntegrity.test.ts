@@ -25,6 +25,7 @@ import {
   decideFrameQualityEmission,
   decideVisibilityRestoredEmission,
   shouldLogAiCameraDebug,
+  isPhoneCalibrationEnabled,
   shouldLogAiIntegrityEvent,
   shouldShowLocalAiOverlay,
   DetectionCooldownTracker,
@@ -80,6 +81,35 @@ describe("shouldLogAiCameraDebug", () => {
 
   it("is false when NODE_ENV is undefined even if the flag is set", () => {
     expect(shouldLogAiCameraDebug(undefined, "true")).toBe(false);
+  });
+});
+
+// Physical acceptance follow-up — phone-detection calibration
+// observability. Deliberately contrasted against shouldLogAiCameraDebug
+// above: that gate is dev-only by design; this one must NOT exclude
+// production, since a physical test runs against a genuine
+// production-mode packaged Tether build.
+describe("isPhoneCalibrationEnabled", () => {
+  it("defaults OFF — undefined never enables it", () => {
+    expect(isPhoneCalibrationEnabled(undefined)).toBe(false);
+  });
+
+  it("is false for any value other than the exact string \"true\"", () => {
+    expect(isPhoneCalibrationEnabled("")).toBe(false);
+    expect(isPhoneCalibrationEnabled("1")).toBe(false);
+    expect(isPhoneCalibrationEnabled("TRUE")).toBe(false);
+    expect(isPhoneCalibrationEnabled("false")).toBe(false);
+  });
+
+  it("is true for exactly \"true\"", () => {
+    expect(isPhoneCalibrationEnabled("true")).toBe(true);
+  });
+
+  it("is NOT automatically disabled in production — unlike shouldLogAiCameraDebug, this gate takes no environment parameter at all, so there is no environment value that can turn it off on its own", () => {
+    // shouldLogAiCameraDebug hard-disables regardless of the flag:
+    expect(shouldLogAiCameraDebug("production", "true")).toBe(false);
+    // isPhoneCalibrationEnabled has no such exclusion — the flag alone decides:
+    expect(isPhoneCalibrationEnabled("true")).toBe(true);
   });
 });
 

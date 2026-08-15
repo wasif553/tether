@@ -33,8 +33,10 @@ import {
   shouldRunSecondStageVerification,
   expandCandidateBoxForVerification,
   phoneEvidenceTier,
+  buildPhoneCalibrationEventSummary,
   type NormalizedBox,
   type PhoneObservation,
+  type PhoneCandidateTrack,
 } from "./phoneDetectionTracking";
 
 function box(x: number, y: number, width: number, height: number): NormalizedBox {
@@ -309,5 +311,125 @@ describe("boxArea", () => {
   it("is zero for a degenerate box and positive for a normal one", () => {
     expect(boxArea(box(0, 0, 0, 0.1))).toBe(0);
     expect(boxArea(box(0, 0, 0.2, 0.2))).toBeCloseTo(0.04);
+  });
+});
+
+// Physical acceptance follow-up — phone-detection calibration
+// observability. Pure summary builder attached to the EXISTING
+// POSSIBLE_PHONE_VISIBLE event's metadata only when calibration is
+// enabled — never a new request, never a detection-decision input.
+describe("buildPhoneCalibrationEventSummary", () => {
+  function track(overrides: Partial<PhoneCandidateTrack> = {}): PhoneCandidateTrack {
+    return {
+      id: "phone-track-1",
+      box: box(0.1, 0.5, 0.15, 0.2),
+      latestScore: 0.5,
+      latestBand: "moderate",
+      latestSource: "full_frame",
+      touchesEdge: false,
+      visibleArea: 0.03,
+      firstSeenAtMs: 1000,
+      lastSeenAtMs: 2000,
+      missedFrames: 0,
+      recentEligibleWindow: [true, true, false, true, false],
+      verificationOutcome: "unverified",
+      confirmedLocalWarning: true,
+      ...overrides,
+    };
+  }
+
+  const baseParams = {
+    activeTrackCount: 2,
+    shouldEmit: true,
+    primaryInferenceMs: 42.3,
+    cropInferenceCount: 1,
+    verificationInferenceCount: 1,
+    tickElapsedMsAtEmission: 123.7,
+    nextDelayMs: 1000,
+  };
+
+  it("reports candidateExisted:false and every candidate-derived field as null when there is no best track", () => {
+    const summary = buildPhoneCalibrationEventSummary({ bestTrack: null, ...baseParams });
+    expect(summary.candidateExisted).toBe(false);
+    expect(summary.bestConfidence).toBeNull();
+    expect(summary.band).toBe("NONE");
+    expect(summary.source).toBeNull();
+    expect(summary.boxWidth).toBeNull();
+    expect(summary.boxHeight).toBeNull();
+    expect(summary.areaRatio).toBeNull();
+    expect(summary.touchesEdge).toBeNull();
+    expect(summary.eligibleHits).toBeNull();
+    expect(summary.requiredHits).toBeNull();
+    expect(summary.confirmed).toBe(false);
+    // Tick/scheduling fields are always reported, regardless of a candidate existing.
+    expect(summary.activeTrackCount).toBe(2);
+    expect(summary.primaryInferenceMs).toBe(42.3);
+    expect(summary.cropInferenceCount).toBe(1);
+    expect(summary.verificationInferenceCount).toBe(1);
+    expect(summary.nextDelayMs).toBe(1000);
+  });
+
+  it("uppercases the confidence band exactly (strong/moderate/weak/none -> STRONG/MODERATE/WEAK/NONE)", () => {
+    expect(buildPhoneCalibrationEventSummary({ bestTrack: track({ latestBand: "strong" }), ...baseParams }).band).toBe("STRONG");
+    expect(buildPhoneCalibrationEventSummary({ bestTrack: track({ latestBand: "moderate" }), ...baseParams }).band).toBe("MODERATE");
+    expect(buildPhoneCalibrationEventSummary({ bestTrack: track({ latestBand: "weak" }), ...baseParams }).band).toBe("WEAK");
+  });
+
+  it("reports the confirmation window that actually applied: moderate + not edge-touching -> TRACK_CONFIRM_MODERATE_COUNT", () => {
+    const summary = buildPhoneCalibrationEventSummary({ bestTrack: track({ latestBand: "moderate", touchesEdge: false }), ...baseParams });
+    expect(summary.requiredHits).toBe(TRACK_CONFIRM_MODERATE_COUNT);
+    expect(summary.touchesEdge).toBe(false);
+  });
+
+  it("reports the stricter edge-touching confirmation window: moderate + edge-touching -> TRACK_CONFIRM_MODERATE_EDGE_COUNT", () => {
+    const summary = buildPhoneCalibrationEventSummary({ bestTrack: track({ latestBand: "moderate", touchesEdge: true }), ...baseParams });
+    expect(summary.requiredHits).toBe(TRACK_CONFIRM_MODERATE_EDGE_COUNT);
+  });
+
+  it("requiredHits is null for a STRONG track — it confirms instantly, no window requirement applies", () => {
+    const summary = buildPhoneCalibrationEventSummary({ bestTrack: track({ latestBand: "strong" }), ...baseParams });
+    expect(summary.requiredHits).toBeNull();
+  });
+
+  it("eligibleHits counts the true entries in the track's own recentEligibleWindow — the exact same value confirmingObservationCount already uses at the call site", () => {
+    const summary = buildPhoneCalibrationEventSummary({ bestTrack: track({ recentEligibleWindow: [true, true, false, true, false] }), ...baseParams });
+    expect(summary.eligibleHits).toBe(3);
+  });
+
+  it("areaRatio is derived via the existing boxArea helper, not recomputed independently", () => {
+    const t = track({ box: box(0, 0, 0.2, 0.2) });
+    const summary = buildPhoneCalibrationEventSummary({ bestTrack: t, ...baseParams });
+    expect(summary.areaRatio).toBeCloseTo(boxArea(t.box));
+    expect(summary.boxWidth).toBeCloseTo(0.2);
+    expect(summary.boxHeight).toBeCloseTo(0.2);
+  });
+
+  it("primaryInferenceFailed is always false — a full-frame failure short-circuits the whole path before any event could fire", () => {
+    expect(buildPhoneCalibrationEventSummary({ bestTrack: track(), ...baseParams }).primaryInferenceFailed).toBe(false);
+    expect(buildPhoneCalibrationEventSummary({ bestTrack: null, ...baseParams }).primaryInferenceFailed).toBe(false);
+  });
+
+  it("rounds tickElapsedMsAtEmission but passes primaryInferenceMs/nextDelayMs through exactly", () => {
+    const summary = buildPhoneCalibrationEventSummary({ bestTrack: track(), ...baseParams, tickElapsedMsAtEmission: 123.7 });
+    expect(summary.tickElapsedMsAtEmission).toBe(124);
+    expect(summary.primaryInferenceMs).toBe(42.3);
+  });
+
+  it("never mutates the track object passed in — a pure derivation, safe to call from the hot detection path", () => {
+    const t = track();
+    const before = JSON.parse(JSON.stringify(t));
+    buildPhoneCalibrationEventSummary({ bestTrack: t, ...baseParams });
+    expect(JSON.parse(JSON.stringify(t))).toEqual(before);
+  });
+
+  it("every key is a bounded number/boolean/string/null — no key or string value could ever trip the FORBIDDEN_METADATA_KEY_PATTERN (image|frame|screenshot|thumbnail|snapshot|base64|blob|dataurl) the server enforces", () => {
+    const summary = buildPhoneCalibrationEventSummary({ bestTrack: track(), ...baseParams });
+    const forbidden = /image|frame|screenshot|thumbnail|snapshot|base64|blob|dataurl/i;
+    const allowedTypes = ["number", "boolean", "string"];
+    for (const [key, value] of Object.entries(summary)) {
+      expect(forbidden.test(key)).toBe(false);
+      expect(value === null || allowedTypes.includes(typeof value)).toBe(true);
+      if (typeof value === "string") expect(/^data:/i.test(value)).toBe(false);
+    }
   });
 });
