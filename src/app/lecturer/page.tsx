@@ -2,7 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { lecturerAvailabilityStatus, lecturerDashboardGroup } from "@/lib/lecturerDashboardGrouping";
+import {
+  lecturerAvailabilityStatus,
+  lecturerDashboardGroup,
+  type LecturerAvailabilityStatus,
+} from "@/lib/lecturerDashboardGrouping";
 
 type ExamSummary = {
   id: string;
@@ -28,6 +32,12 @@ type ExamSummary = {
 // remain independent counts, not display-group sizes.
 const RECENT_CLOSED_LIMIT = 5;
 
+// Commercial UI polish pass — presentation-only cap on how many review
+// rows render before the student needs to expand: never trims the
+// underlying needsAttention array itself, and every exam needing review
+// stays reachable via "Show all N exams" (see ReviewQueue below).
+const REVIEW_QUEUE_INITIAL_LIMIT = 6;
+
 export default function LecturerDashboard() {
   const [exams, setExams] = useState<ExamSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -38,6 +48,7 @@ export default function LecturerDashboard() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showAllClosed, setShowAllClosed] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [showCreatePanel, setShowCreatePanel] = useState(false);
 
   async function loadExams(all = false) {
     setLoading(true);
@@ -94,7 +105,18 @@ export default function LecturerDashboard() {
 
     setTitle("");
     setDurationMins(60);
+    setShowCreatePanel(false);
     await loadExams(showAllClosed);
+  }
+
+  function openCreatePanel() {
+    setError(null);
+    setShowCreatePanel(true);
+  }
+
+  function closeCreatePanel() {
+    setError(null);
+    setShowCreatePanel(false);
   }
 
   const { summary, needsAttention, active, upcoming, draft, recentlyClosed, olderClosed } = useMemo(() => {
@@ -138,136 +160,150 @@ export default function LecturerDashboard() {
   }, [exams]);
 
   return (
-    <div className="mx-auto max-w-3xl">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Lecturer Dashboard</h1>
-        <Link href="/lecturer/courses" className="text-sm underline">
-          Manage courses
-        </Link>
+    <div className="mx-auto max-w-7xl">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-[#101828]">Lecturer Dashboard</h1>
+          <p className="mt-1 text-sm text-[#667085]">Manage exams, review integrity signals and prepare upcoming assessments.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            href="/lecturer/courses"
+            className="rounded-lg border border-[#E4E7EC] bg-white px-4 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
+          >
+            Manage courses
+          </Link>
+          <button
+            type="button"
+            onClick={() => (showCreatePanel ? closeCreatePanel() : openCreatePanel())}
+            aria-expanded={showCreatePanel}
+            aria-controls="create-exam-panel"
+            className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
+          >
+            Create exam
+          </button>
+        </div>
       </div>
 
+      {showCreatePanel && (
+        <CreateExamPanel
+          title={title}
+          durationMins={durationMins}
+          creating={creating}
+          error={error}
+          onTitleChange={setTitle}
+          onDurationChange={setDurationMins}
+          onSubmit={handleCreate}
+          onCancel={closeCreatePanel}
+        />
+      )}
+
       {!loading && !loadError && exams.length > 0 && (
-        <div className="mt-4 grid grid-cols-4 gap-2">
-          <SummaryTile label="Active" value={summary.active} />
-          <SummaryTile label="Upcoming" value={summary.upcoming} />
-          <SummaryTile label="Needs review" value={summary.needsReview} highlight={summary.needsReview > 0} />
-          <SummaryTile label="Drafts" value={summary.drafts} />
+        <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <DashboardMetric label="Active" value={summary.active} accent="success" />
+          <DashboardMetric label="Upcoming" value={summary.upcoming} accent="info" />
+          <DashboardMetric label="Needs review" value={summary.needsReview} accent={summary.needsReview > 0 ? "warning" : "neutral"} />
+          <DashboardMetric label="Drafts" value={summary.drafts} accent="neutral" />
         </div>
       )}
 
-      <form onSubmit={handleCreate} className="mt-6 flex items-end gap-3 rounded border border-gray-200 p-4">
-        <div className="flex-1">
-          <label className="block text-sm font-medium">Exam title</label>
-          <input
-            required
-            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-          />
-        </div>
-        <div className="w-32">
-          <label className="block text-sm font-medium">Duration (min)</label>
-          <input
-            required
-            type="number"
-            min={1}
-            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
-            value={durationMins}
-            onChange={(e) => setDurationMins(Number(e.target.value))}
-          />
-        </div>
-        <button
-          type="submit"
-          disabled={creating}
-          className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
-        >
-          {creating ? "Creating..." : "New exam"}
-        </button>
-      </form>
-      {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+      <div className="mt-8 space-y-10">
+        {loading && <p className="text-sm text-[#667085]">Loading exams…</p>}
 
-      <div className="mt-6 space-y-8">
-        {loading && <p className="text-gray-500">Loading exams...</p>}
         {!loading && loadError && (
-          <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          <div className="rounded-xl border border-[#E4E7EC] bg-[#FEF2F2] p-4 text-sm text-[#DC2626]">
             <p>{loadError}</p>
-            <button onClick={() => loadExams(showAllClosed)} className="mt-2 text-sm underline">
+            <button
+              type="button"
+              onClick={() => loadExams(showAllClosed)}
+              className="mt-2 rounded font-medium underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#DC2626]"
+            >
               Try again
             </button>
           </div>
         )}
+
         {!loading && !loadError && exams.length === 0 && (
-          <p className="text-gray-500">No exams yet. Create one above.</p>
+          <div className="rounded-xl border border-[#E4E7EC] bg-white p-10 text-center">
+            <p className="text-base font-semibold text-[#101828]">No exams yet</p>
+            <p className="mx-auto mt-1 max-w-sm text-sm text-[#667085]">Create your first exam to start preparing an assessment.</p>
+            <button
+              type="button"
+              onClick={openCreatePanel}
+              className="mt-4 rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
+            >
+              Create exam
+            </button>
+          </div>
         )}
 
-        {needsAttention.length > 0 && (
-          <ExamGroupSection title="Needs your attention" exams={needsAttention}>
-            {(exam) => (
-              <Link href={`/lecturer/exams/${exam.id}/integrity`} className="block rounded border border-amber-300 bg-amber-50 p-4 hover:border-amber-400">
-                <ExamCardBody exam={exam} />
-                <span className="mt-2 inline-block rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
-                  {exam.needsReviewCount} integrity {exam.needsReviewCount === 1 ? "signal needs" : "signals need"} review
-                </span>
-              </Link>
-            )}
-          </ExamGroupSection>
-        )}
+        {needsAttention.length > 0 && <ReviewQueue exams={needsAttention} />}
 
         {active.length > 0 && (
-          <ExamGroupSection title="Active" exams={active}>
-            {(exam) => (
-              <ExamCard exam={exam}>
-                <StatusPill exam={exam} />
-              </ExamCard>
-            )}
-          </ExamGroupSection>
+          <section>
+            <SectionHeader title="Active" />
+            <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+              {active.map((exam) => (
+                <ExamCard key={exam.id} exam={exam} />
+              ))}
+            </div>
+          </section>
         )}
 
         {upcoming.length > 0 && (
-          <ExamGroupSection title="Upcoming" exams={upcoming}>
-            {(exam) => (
-              <ExamCard exam={exam}>
-                <StatusPill exam={exam} />
-              </ExamCard>
-            )}
-          </ExamGroupSection>
+          <section>
+            <SectionHeader title="Upcoming" />
+            <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+              {upcoming.map((exam) => (
+                <ExamCard key={exam.id} exam={exam} />
+              ))}
+            </div>
+          </section>
         )}
 
         {draft.length > 0 && (
-          <ExamGroupSection title="Drafts" exams={draft} secondary>
-            {(exam) => (
-              <ExamCard exam={exam} secondary>
-                <StatusPill exam={exam} />
-              </ExamCard>
-            )}
-          </ExamGroupSection>
+          <section>
+            <SectionHeader title="Drafts" muted />
+            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {draft.map((exam) => (
+                <ExamCard key={exam.id} exam={exam} variant="muted" />
+              ))}
+            </div>
+          </section>
         )}
 
         {recentlyClosed.length > 0 && (
-          <ExamGroupSection title="Recent examinations" exams={recentlyClosed} secondary>
-            {(exam) => (
-              <ExamCard exam={exam} secondary>
-                <StatusPill exam={exam} />
-              </ExamCard>
-            )}
-          </ExamGroupSection>
+          <section>
+            <SectionHeader title="Recent examinations" muted />
+            <div className="mt-3 space-y-2">
+              {recentlyClosed.map((exam) => (
+                <ExamCard key={exam.id} exam={exam} variant="muted" />
+              ))}
+            </div>
+          </section>
         )}
 
         {(olderClosed.length > 0 || (!showAllClosed && recentlyClosed.length >= RECENT_CLOSED_LIMIT)) && (
           <div>
             {!showAllClosed ? (
-              <button type="button" onClick={loadFullHistory} disabled={loadingHistory} className="text-sm text-gray-600 underline disabled:opacity-50">
+              <button
+                type="button"
+                onClick={loadFullHistory}
+                disabled={loadingHistory}
+                className="rounded text-sm font-medium text-[#667085] underline underline-offset-2 hover:text-[#101828] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+              >
                 {loadingHistory ? "Loading…" : "Show all older examinations"}
               </button>
             ) : (
               olderClosed.length > 0 && (
-                <ExamGroupSection title="Older examinations" exams={olderClosed} secondary>
-                  {(exam) => (
-                    <ExamCard exam={exam} secondary>
-                      <StatusPill exam={exam} />
-                    </ExamCard>
-                  )}
-                </ExamGroupSection>
+                <section>
+                  <SectionHeader title="Older examinations" muted />
+                  <div className="mt-3 space-y-2">
+                    {olderClosed.map((exam) => (
+                      <ExamCard key={exam.id} exam={exam} variant="muted" />
+                    ))}
+                  </div>
+                </section>
               )
             )}
           </div>
@@ -277,66 +313,238 @@ export default function LecturerDashboard() {
   );
 }
 
-function SummaryTile({ label, value, highlight }: { label: string; value: number; highlight?: boolean }) {
+function CreateExamPanel({
+  title,
+  durationMins,
+  creating,
+  error,
+  onTitleChange,
+  onDurationChange,
+  onSubmit,
+  onCancel,
+}: {
+  title: string;
+  durationMins: number;
+  creating: boolean;
+  error: string | null;
+  onTitleChange: (value: string) => void;
+  onDurationChange: (value: number) => void;
+  onSubmit: (e: React.FormEvent) => void;
+  onCancel: () => void;
+}) {
   return (
-    <div className={`rounded border p-3 text-center ${highlight ? "border-amber-300 bg-amber-50" : "border-gray-200"}`}>
-      <div className={`text-xl font-semibold ${highlight ? "text-amber-800" : ""}`}>{value}</div>
-      <div className="text-xs text-gray-500">{label}</div>
+    <div id="create-exam-panel" className="mt-4 rounded-xl border border-[#E4E7EC] bg-white p-4 sm:p-5">
+      <form onSubmit={onSubmit} className="flex flex-col gap-4 sm:flex-row sm:items-end">
+        <div className="flex-1">
+          <label htmlFor="create-exam-title" className="block text-sm font-medium text-[#101828]">
+            Exam title
+          </label>
+          <input
+            id="create-exam-title"
+            required
+            className="mt-1 w-full rounded-lg border border-[#E4E7EC] px-3 py-2 text-sm text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+            value={title}
+            onChange={(e) => onTitleChange(e.target.value)}
+          />
+        </div>
+        <div className="w-full sm:w-36">
+          <label htmlFor="create-exam-duration" className="block text-sm font-medium text-[#101828]">
+            Duration (min)
+          </label>
+          <input
+            id="create-exam-duration"
+            required
+            type="number"
+            min={1}
+            className="mt-1 w-full rounded-lg border border-[#E4E7EC] px-3 py-2 text-sm text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+            value={durationMins}
+            onChange={(e) => onDurationChange(Number(e.target.value))}
+          />
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="submit"
+            disabled={creating}
+            className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
+          >
+            {creating ? "Creating…" : "Create"}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-lg border border-[#E4E7EC] px-4 py-2 text-sm font-medium text-[#667085] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
+      {error && <p className="mt-3 text-sm text-[#DC2626]">{error}</p>}
     </div>
   );
 }
 
-function StatusPill({ exam }: { exam: ExamSummary }) {
-  return <span className="mt-1 inline-block rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{lecturerAvailabilityStatus(exam)}</span>;
+function DashboardMetric({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: number;
+  accent: "success" | "info" | "warning" | "neutral";
+}) {
+  const dotColor = {
+    success: "bg-[#067647]",
+    info: "bg-[#2563EB]",
+    warning: "bg-[#D97706]",
+    neutral: "bg-[#98A2B3]",
+  }[accent];
+  const isWarning = accent === "warning";
+
+  return (
+    <div
+      className={`rounded-xl border p-4 ${isWarning ? "border-[#FEDF89] bg-[#FFFAEB]" : "border-[#E4E7EC] bg-white"}`}
+    >
+      <div className="flex items-center gap-1.5">
+        <span className={`h-1.5 w-1.5 rounded-full ${dotColor}`} aria-hidden="true" />
+        <span className="text-sm font-medium text-[#667085]">{label}</span>
+      </div>
+      <div className="mt-1.5 text-2xl font-bold text-[#101828]">{value}</div>
+    </div>
+  );
 }
 
-function ExamGroupSection({
-  title,
-  exams,
-  secondary,
-  children,
-}: {
-  title: string;
-  exams: ExamSummary[];
-  secondary?: boolean;
-  children: (exam: ExamSummary) => React.ReactNode;
-}) {
+function SectionHeader({ title, count, subtitle, muted }: { title: string; count?: number; subtitle?: string; muted?: boolean }) {
+  return (
+    <div>
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <h2 className={muted ? "text-sm font-semibold text-[#667085]" : "text-lg font-semibold text-[#101828]"}>{title}</h2>
+        {count != null && <span className="text-sm text-[#667085]">{count}</span>}
+      </div>
+      {subtitle && <p className="mt-0.5 text-sm text-[#667085]">{subtitle}</p>}
+    </div>
+  );
+}
+
+const REVIEW_COLUMNS = "md:grid md:grid-cols-[1fr_110px_130px_130px_90px] md:items-center md:gap-4";
+
+// Highest-priority content on the dashboard (Task: "Needs your
+// attention"). Renders from the SAME needsAttention array the parent
+// already computed via lecturerDashboardGroup — never re-derives
+// membership, never changes which exams qualify. `showAll` is local,
+// presentation-only state: every exam stays in `exams` and reachable,
+// only the INITIAL render is capped to keep the dashboard scannable.
+function ReviewQueue({ exams }: { exams: ExamSummary[] }) {
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? exams : exams.slice(0, REVIEW_QUEUE_INITIAL_LIMIT);
+  const hasMore = exams.length > REVIEW_QUEUE_INITIAL_LIMIT;
+
   return (
     <section>
-      <h2 className={secondary ? "text-sm font-medium text-gray-500" : "text-sm font-semibold uppercase tracking-wide text-gray-700"}>{title}</h2>
-      <div className="mt-2 space-y-2">
-        {exams.map((exam) => (
-          <div key={exam.id}>{children(exam)}</div>
-        ))}
+      <SectionHeader title="Needs your attention" count={exams.length} subtitle="Integrity signals awaiting lecturer review." />
+
+      <div className="mt-3 overflow-hidden rounded-xl border border-[#E4E7EC] border-l-4 border-l-[#D97706] bg-white">
+        <div className={`hidden border-b border-[#E4E7EC] bg-[#F7F8FA] px-4 py-2 text-xs font-medium uppercase tracking-wide text-[#667085] ${REVIEW_COLUMNS}`}>
+          <span>Exam / course</span>
+          <span>Status</span>
+          <span>Submissions</span>
+          <span>Signals</span>
+          <span className="text-right">Action</span>
+        </div>
+        <ul className="divide-y divide-[#E4E7EC]">
+          {visible.map((exam) => (
+            <ReviewRow key={exam.id} exam={exam} />
+          ))}
+        </ul>
       </div>
+
+      {hasMore && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => setShowAll((v) => !v)}
+            className="rounded text-sm font-medium text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+          >
+            {showAll ? "Show fewer" : `Show all ${exams.length} exams`}
+          </button>
+        </div>
+      )}
     </section>
   );
 }
 
-// Essential fields only (title, course, submission/review counts already
-// cheaply available from the single aggregate query, one status pill) —
-// no per-exam extra DB round trip. `secondary` visually de-emphasizes
-// drafts/closed exams.
-function ExamCard({ exam, secondary, children }: { exam: ExamSummary; secondary?: boolean; children: React.ReactNode }) {
+function ReviewRow({ exam }: { exam: ExamSummary }) {
+  const status = lecturerAvailabilityStatus(exam);
   return (
-    <Link
-      href={`/lecturer/exams/${exam.id}`}
-      className={secondary ? "block rounded border border-gray-100 bg-gray-50 p-3 hover:border-gray-300" : "block rounded border border-gray-200 p-4 hover:border-gray-400"}
-    >
-      <ExamCardBody exam={exam} secondary={secondary} />
-      {children}
-    </Link>
+    <li>
+      <Link
+        href={`/lecturer/exams/${exam.id}/integrity`}
+        className={`block px-4 py-3 hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#2563EB] ${REVIEW_COLUMNS}`}
+      >
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-[#101828]">{exam.title}</p>
+          {exam.course && (
+            <p className="truncate text-xs text-[#667085]">
+              {exam.course.code} — {exam.course.name}
+            </p>
+          )}
+        </div>
+        <div className="mt-2 md:mt-0">
+          <StatusPill status={status} />
+        </div>
+        <div className="mt-2 text-sm text-[#667085] md:mt-0">{exam._count.submissions} submissions</div>
+        <div className="mt-2 md:mt-0">
+          <span className="inline-flex items-center rounded-full bg-[#FEF3C7] px-2 py-0.5 text-xs font-medium text-[#92400E]">
+            {exam.needsReviewCount} {exam.needsReviewCount === 1 ? "signal" : "signals"}
+          </span>
+        </div>
+        <div className="mt-2 md:mt-0 md:text-right">
+          <span className="text-sm font-semibold text-[#2563EB]">Review →</span>
+        </div>
+      </Link>
+    </li>
   );
 }
 
-function ExamCardBody({ exam, secondary }: { exam: ExamSummary; secondary?: boolean }) {
+const STATUS_PILL_STYLES: Record<LecturerAvailabilityStatus, string> = {
+  Open: "bg-[#ECFDF3] text-[#067647]",
+  Scheduled: "bg-[#EFF6FF] text-[#1D4ED8]",
+  Draft: "bg-[#F2F4F7] text-[#667085]",
+  Closed: "bg-[#F2F4F7] text-[#667085]",
+};
+
+function StatusPill({ status }: { status: LecturerAvailabilityStatus }) {
+  return <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_PILL_STYLES[status]}`}>{status}</span>;
+}
+
+// Essential fields only (title, course, submission/review counts already
+// cheaply available from the single aggregate query, one status pill) —
+// no per-exam extra DB round trip. `variant="muted"` visually
+// de-emphasizes drafts/closed exams.
+function ExamCard({ exam, variant = "default" }: { exam: ExamSummary; variant?: "default" | "muted" }) {
+  const status = lecturerAvailabilityStatus(exam);
+  const muted = variant === "muted";
+
   return (
-    <>
-      <span className={secondary ? "text-sm font-medium text-gray-700" : "font-medium"}>{exam.title}</span>
-      <p className="mt-1 text-sm text-gray-500">
+    <Link
+      href={`/lecturer/exams/${exam.id}`}
+      className={`block rounded-xl border p-4 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] ${
+        muted ? "border-[#E4E7EC] bg-[#F7F8FA] hover:border-[#98A2B3]" : "border-[#E4E7EC] bg-white hover:border-[#98A2B3]"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-[#101828]">{exam.title}</p>
+          {exam.course && (
+            <p className="mt-0.5 truncate text-xs text-[#667085]">
+              {exam.course.code} — {exam.course.name}
+            </p>
+          )}
+        </div>
+        <StatusPill status={status} />
+      </div>
+      <p className="mt-2 text-xs text-[#667085]">
         {exam._count.questions} questions · {exam.durationMins} min · {exam._count.submissions} submissions
-        {exam.course && ` · ${exam.course.code} — ${exam.course.name}`}
       </p>
-    </>
+    </Link>
   );
 }

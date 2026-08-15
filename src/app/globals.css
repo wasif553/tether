@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Commercial UI polish pass — light neutral application background and
+     a dark-slate (not pure-black) foreground, matching the professional
+     colour system used across src/app/lecturer/page.tsx. No product-level
+     dark theme exists yet, so this is the ONLY palette — see the removed
+     prefers-color-scheme override below. */
+  --background: #f7f8fa;
+  --foreground: #101828;
 }
 
 @theme inline {
@@ -12,15 +17,8 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
