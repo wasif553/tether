@@ -26,6 +26,7 @@ import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { authoriseDirectNavigation, markQuestionVisited, QuestionNavigatorError } from "@/lib/questionNavigatorRunner";
 import { renewContentAccessLeaseFromValidatedDecision } from "@/lib/secureClient/requireTetherContentAccess";
 import { logServerTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
+import { createTimingCollector, timeSpan, attachServerTimingHeader, logBoundedNavigationTiming } from "@/lib/serverTiming";
 
 // Question Navigator v1 — see docs/question-navigator-v1.md. The GOTO
 // action is a DISTINCT navigation surface from the plain `currentIndex`
@@ -47,7 +48,10 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const requestStartedAtMs = performance.now();
+  const authStartMs = requestStartedAtMs;
   const session = await auth();
+  const authMs = performance.now() - authStartMs;
   if (!session || session.user.role !== "STUDENT") {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -92,13 +96,16 @@ export async function POST(
 
   // Latency profiling (physical acceptance follow-up — question
   // navigation latency audit). Bounded, opt-in server-side timing — see
-  // logServerTetherDiagnostic's own doc comment.
-  const timingStartMs = performance.now();
+  // logServerTetherDiagnostic's own doc comment. Also exposed via the
+  // Server-Timing response header when TETHER_TIMING_HEADERS_ENABLED is
+  // set — see serverTiming.ts's own doc comment for why this is a
+  // separate, production-usable gate from the diagnostic-log one above.
+  const timingStartMs = requestStartedAtMs;
+  const timing = createTimingCollector();
+  timing.record("authMs", authMs);
 
   try {
-    const loadStartMs = performance.now();
-    const { submission, settings, leaseDecision } = await loadOneQuestionSubmission(id, session.user.id, req);
-    const loadMs = performance.now() - loadStartMs;
+    const { submission, settings, leaseDecision } = await loadOneQuestionSubmission(id, session.user.id, req, timing);
 
     // Question-navigation performance follow-up — the index-resolution/
     // clamping/update logic now lives in resolveSequentialQuestionNavigation
@@ -106,9 +113,7 @@ export async function POST(
     // save-and-navigate. Called here with the plain `prisma` singleton —
     // this route's own currentQuestionIndex update was never
     // transactional, and stays exactly that way.
-    const indexUpdateStartMs = performance.now();
-    const nav = await resolveSequentialQuestionNavigation(prisma, { submission, settings, requestedIndex });
-    const indexUpdateMs = performance.now() - indexUpdateStartMs;
+    const nav = await resolveSequentialQuestionNavigation(prisma, { submission, settings, requestedIndex }, timing);
     const { finalIndex, eventType } = nav;
 
     // Lightweight navigation logging — INFO/LOW severity (see
@@ -151,7 +156,7 @@ export async function POST(
     // question. Best-effort; never blocks the response.
     if (nav.visitedQuestionId) markQuestionVisited(submission.id, nav.visitedQuestionId).catch(() => {});
 
-    const payload = buildOneQuestionPayload(submission, settings, finalIndex);
+    const payload = await timeSpan(timing, "nextQuestionMs", () => buildOneQuestionPayload(submission, settings, finalIndex));
     if (!payload) {
       return NextResponse.json({ error: "This exam has no questions" }, { status: 404 });
     }
@@ -159,14 +164,24 @@ export async function POST(
     // Rolling lease renewal, from the SAME decision loadOneQuestionSubmission
     // already computed — no second decode/verify/DB read (see
     // renewContentAccessLeaseFromValidatedDecision's own doc comment).
+    const leaseRenewalStartMs = performance.now();
     if (leaseDecision) {
       renewContentAccessLeaseFromValidatedDecision(response, leaseDecision, { submissionId: submission.id, studentId: submission.studentId });
     }
-    logServerTetherDiagnostic("QUESTION_PROGRESS_TIMING", {
-      loadMs: Math.round(loadMs),
-      indexUpdateMs: Math.round(indexUpdateMs),
-      totalMs: Math.round(performance.now() - timingStartMs),
-    });
+    timing.record("leaseRenewalMs", performance.now() - leaseRenewalStartMs);
+    timing.record("totalMs", performance.now() - timingStartMs);
+    attachServerTimingHeader(response, timing, process.env.TETHER_TIMING_HEADERS_ENABLED);
+
+    logServerTetherDiagnostic(
+      "QUESTION_PROGRESS_TIMING",
+      Object.fromEntries(timing.entries().map((e) => [e.name, Math.round(e.durationMs * 100) / 100])),
+    );
+    // Physical acceptance follow-up — the SAME bounded stages, as one
+    // structured JSON log line, gated on the SAME TETHER_TIMING_HEADERS_ENABLED
+    // flag as the Server-Timing header above — see save-and-navigate/
+    // route.ts's identical wiring for why this is a separate gate from
+    // the diagnostic-log one above it.
+    logBoundedNavigationTiming("question-progress", timing, process.env.TETHER_TIMING_HEADERS_ENABLED);
     return response;
   } catch (err) {
     if (err instanceof OneQuestionModeError) {

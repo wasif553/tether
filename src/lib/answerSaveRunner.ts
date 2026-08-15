@@ -23,6 +23,7 @@
  */
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma/client";
+import { timeSpan, type TimingCollector } from "@/lib/serverTiming";
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
 type Answer = Awaited<ReturnType<typeof prisma.answer.upsert>>;
@@ -38,7 +39,16 @@ export type AnswerSaveParams = {
 
 export type AnswerSaveResult = { kind: "invalid_question" } | { kind: "saved"; answer: Answer; applied: boolean };
 
-export async function saveAnswerWithIdempotency(db: DbClient, params: AnswerSaveParams): Promise<AnswerSaveResult> {
+/**
+ * `timing` is optional and purely observational (physical acceptance
+ * follow-up — save/next latency diagnosis): when supplied, records
+ * "advisoryLockMs", "questionLookupMs", "idempotencyMs" (only when
+ * the clientRequestId branch actually runs a lookup), and
+ * "answerWriteMs" around each of this function's own DB round trips.
+ * Omitting it (every pre-existing caller) changes nothing about this
+ * function's behavior.
+ */
+export async function saveAnswerWithIdempotency(db: DbClient, params: AnswerSaveParams, timing?: TimingCollector): Promise<AnswerSaveResult> {
   // Correctness pass (post-merge review) — an advisory lock scoped to
   // THIS (submission, question) pair, mirroring the existing
   // submission-scoped locks in secureClientRunner.ts/submit/route.ts.
@@ -55,11 +65,13 @@ export async function saveAnswerWithIdempotency(db: DbClient, params: AnswerSave
   // the application-level revision check is no longer racing a
   // concurrent writer — closing the gap at the transaction boundary, not
   // merely in application code.
-  await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${params.submissionId}), hashtext(${params.questionId}))`;
+  await timeSpan(timing, "advisoryLockMs", () => db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${params.submissionId}), hashtext(${params.questionId}))`);
 
-  const question = await db.question.findFirst({
-    where: { id: params.questionId, examId: params.examId },
-  });
+  const question = await timeSpan(timing, "questionLookupMs", () =>
+    db.question.findFirst({
+      where: { id: params.questionId, examId: params.examId },
+    }),
+  );
   if (!question) return { kind: "invalid_question" };
 
   // Autosave idempotency and revision control (Part 2) — only engages
@@ -67,9 +79,11 @@ export async function saveAnswerWithIdempotency(db: DbClient, params: AnswerSave
   // never does (any client predating this feature) always falls through
   // to the plain upsert below, unchanged.
   if (params.clientRequestId) {
-    const existing = await db.answer.findUnique({
-      where: { submissionId_questionId: { submissionId: params.submissionId, questionId: params.questionId } },
-    });
+    const existing = await timeSpan(timing, "idempotencyMs", () =>
+      db.answer.findUnique({
+        where: { submissionId_questionId: { submissionId: params.submissionId, questionId: params.questionId } },
+      }),
+    );
     if (existing) {
       // Retrying the SAME request returns the previous successful
       // acknowledgement — never writes again, never creates a duplicate
@@ -88,20 +102,22 @@ export async function saveAnswerWithIdempotency(db: DbClient, params: AnswerSave
     }
   }
 
-  const answer = await db.answer.upsert({
-    where: { submissionId_questionId: { submissionId: params.submissionId, questionId: params.questionId } },
-    update: {
-      response: params.response,
-      lastClientRequestId: params.clientRequestId ?? undefined,
-      clientRevision: params.clientRevision ?? undefined,
-    },
-    create: {
-      submissionId: params.submissionId,
-      questionId: params.questionId,
-      response: params.response,
-      lastClientRequestId: params.clientRequestId ?? null,
-      clientRevision: params.clientRevision ?? null,
-    },
-  });
+  const answer = await timeSpan(timing, "answerWriteMs", () =>
+    db.answer.upsert({
+      where: { submissionId_questionId: { submissionId: params.submissionId, questionId: params.questionId } },
+      update: {
+        response: params.response,
+        lastClientRequestId: params.clientRequestId ?? undefined,
+        clientRevision: params.clientRevision ?? undefined,
+      },
+      create: {
+        submissionId: params.submissionId,
+        questionId: params.questionId,
+        response: params.response,
+        lastClientRequestId: params.clientRequestId ?? null,
+        clientRevision: params.clientRevision ?? null,
+      },
+    }),
+  );
   return { kind: "saved", answer, applied: true };
 }

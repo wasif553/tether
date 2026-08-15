@@ -45,7 +45,9 @@ function generateRequestId(): string {
 /** Bounded client-side ceiling on one save attempt (physical acceptance follow-up — the "answer could not be saved" diagnostic gap). Without this, a hung connection would never resolve, leaving `save()`/`saveAndNavigate()` (and therefore navigation, which awaits them) stuck indefinitely with no error and no retry — worse than a clean, retryable FAILED. 15s is generous for a same-origin JSON request; a genuinely healthy one resolves in well under a second. */
 const SAVE_ATTEMPT_TIMEOUT_MS = 15_000;
 
-type SendJsonOutcome<T> = { ok: true; body: T } | { ok: false; diagnostics: SaveAttemptDiagnostics };
+type SendJsonOutcome<T> =
+  | { ok: true; body: T; fetchMs: number; jsonParseMs: number; serverTiming: string | null }
+  | { ok: false; diagnostics: SaveAttemptDiagnostics };
 
 /**
  * Question-navigation performance follow-up (single-round-trip
@@ -89,12 +91,24 @@ async function sendJsonWithTimeout<T>(params: {
     if (consumeFault("AUTOSAVE_TIMEOUT")) {
       return failed({ threw: false, timedOut: true, httpStatus: null, serverErrorCode: null });
     }
+    // Physical acceptance follow-up — save/next latency diagnosis.
+    // fetchMs is click-to-response-headers (network + full server
+    // processing); jsonParseMs is the separate body-parse cost, so the
+    // two are never conflated into one opaque "request" number.
+    // serverTiming is the RAW Server-Timing header value this same-origin
+    // response carries (only ever present when the server opted in via
+    // TETHER_TIMING_HEADERS_ENABLED — see serverTiming.ts) — bounded to
+    // short stage-name;dur=N.N pairs by that module, never parsed/
+    // interpreted here, just passed through for the caller to log.
+    const fetchStartedAtMs = performance.now();
     const res = await fetch(params.url, {
       method: params.method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params.body),
       signal: controller?.signal,
     });
+    const fetchMs = performance.now() - fetchStartedAtMs;
+    const serverTiming = res.headers.get("Server-Timing");
     const httpStatus = consumeFault("AUTOSAVE_HTTP_500") ? 500 : res.status;
     if (httpStatus >= 400) {
       // Only ever the route's own short `code` field, never the free-text
@@ -104,8 +118,10 @@ async function sendJsonWithTimeout<T>(params: {
       const serverErrorCode = typeof errorBody.code === "string" ? errorBody.code : null;
       return failed({ threw: false, timedOut: false, httpStatus, serverErrorCode });
     }
+    const jsonParseStartedAtMs = performance.now();
     const body = (await res.json().catch(() => ({}))) as T;
-    return { ok: true, body };
+    const jsonParseMs = performance.now() - jsonParseStartedAtMs;
+    return { ok: true, body, fetchMs, jsonParseMs, serverTiming };
   } catch (err) {
     const timedOut = err instanceof DOMException && err.name === "AbortError";
     return failed({ threw: !timedOut, timedOut, httpStatus: null, serverErrorCode: null });
@@ -211,6 +227,16 @@ export type SaveAndNavigateResult<TPayload extends NavigationPayloadShape = Navi
       questionId: string;
       /** On SAVED, the same text the caller sent. On CONFLICT, the server's own authoritative stored answer.response for that question — never the rejected local text. */
       authoritativeResponse: string;
+      /**
+       * Physical acceptance follow-up — save/next latency diagnosis. The
+       * raw Server-Timing header value from this same response (see
+       * sendJsonWithTimeout's own doc comment) — null whenever the server
+       * didn't opt in (TETHER_TIMING_HEADERS_ENABLED unset, the default).
+       * Passed through unparsed/unmodified so the caller can log it
+       * alongside its own click-to-visible measurement for one complete,
+       * bounded latency picture per navigation.
+       */
+      serverTiming: string | null;
     }
   | { ok: false };
 
@@ -499,8 +525,17 @@ export function useResilientAutosave<TPayload extends NavigationPayloadShape = N
         clientRevision: revision,
         retryCount: entry.retryCount,
       });
+      // Physical acceptance follow-up — save/next latency diagnosis.
+      // fetchMs/jsonParseMs split the single "requestMs" number this log
+      // used to report into network+server-processing vs. body-parse;
+      // serverTiming (present only when the server opted in — see
+      // sendJsonWithTimeout's own doc comment) gives the exact server-side
+      // stage breakdown for the SAME response, with no separate request.
       logClientTetherDiagnostic("SAVE_AND_NAVIGATE_REQUEST_TIMING", {
         requestMs: Math.round(performance.now() - requestStartedAtMs),
+        fetchMs: result.ok ? Math.round(result.fetchMs) : null,
+        jsonParseMs: result.ok ? Math.round(result.jsonParseMs) : null,
+        serverTiming: result.ok ? result.serverTiming : null,
         acknowledged: result.ok,
       });
 
@@ -552,7 +587,7 @@ export function useResilientAutosave<TPayload extends NavigationPayloadShape = N
           acknowledgedResponseRef.current[result.body.navigation.question.id] = result.body.navigation.existingResponse;
         }
       }
-      return { ok: true, payload: result.body.navigation, acknowledgement, questionId, authoritativeResponse };
+      return { ok: true, payload: result.body.navigation, acknowledgement, questionId, authoritativeResponse, serverTiming: result.serverTiming };
     },
     [examId, submissionId, syncCount],
   );

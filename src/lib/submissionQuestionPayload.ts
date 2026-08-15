@@ -11,6 +11,7 @@
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma/client";
 import { parseSecureSettings, questionPoolsActive, type SecureExamSettings } from "@/lib/secureExam";
+import { timeSpan, type TimingCollector } from "@/lib/serverTiming";
 import {
   canNavigateNext,
   canNavigatePrevious,
@@ -55,15 +56,25 @@ type SubmissionWithQuestions = NonNullable<Awaited<ReturnType<typeof loadOneQues
  * TETHER_CLIENT_REQUIRED/SEB_REQUIRED submission — isSubmissionContentAccessible
  * above only proves the submission itself is activated, never that THIS
  * request originates from the Tether/SEB instance that activated it.
+ *
+ * `timing` is optional and purely observational (physical acceptance
+ * follow-up — save/next latency diagnosis): when supplied, records
+ * "submissionLookupMs" and, only when the lease branch actually runs,
+ * "leaseCheckMs" — mirroring the same breakdown PATCH /answers already
+ * computes inline for its own (non-shared) lookup+lease check. Omitting
+ * it (every pre-existing caller) changes nothing about this function's
+ * behavior.
  */
-export async function loadOneQuestionSubmission(submissionId: string, studentId: string, req: Request) {
-  const submission = await prisma.submission.findUnique({
-    where: { id: submissionId },
-    include: {
-      exam: { include: { questions: { orderBy: { order: "asc" } } } },
-      answers: true,
-    },
-  });
+export async function loadOneQuestionSubmission(submissionId: string, studentId: string, req: Request, timing?: TimingCollector) {
+  const submission = await timeSpan(timing, "submissionLookupMs", () =>
+    prisma.submission.findUnique({
+      where: { id: submissionId },
+      include: {
+        exam: { include: { questions: { orderBy: { order: "asc" } } } },
+        answers: true,
+      },
+    }),
+  );
   if (!submission || submission.studentId !== studentId) {
     throw new OneQuestionModeError(404, "Not found");
   }
@@ -96,10 +107,12 @@ export async function loadOneQuestionSubmission(submissionId: string, studentId:
   let leaseDecision: ContentAccessDecision | null = null;
   const clientPolicy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
   if (clientPolicy.deliveryMode === "TETHER_CLIENT_REQUIRED") {
-    leaseDecision = await checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
-      submissionId: submission.id,
-      studentId,
-    });
+    leaseDecision = await timeSpan(timing, "leaseCheckMs", () =>
+      checkTetherContentAccessLease(readContentAccessLeaseCookieFromRequest(req), {
+        submissionId: submission.id,
+        studentId,
+      }),
+    );
     if (!leaseDecision.ok) {
       throw new OneQuestionModeError(403, TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE, TETHER_CONTENT_ACCESS_REQUIRED_CODE);
     }
@@ -147,10 +160,19 @@ export type SequentialNavigationResult = {
  * Never touches lease/activation/ownership checks — the caller is
  * responsible for having already validated those (every current/future
  * caller does, via loadOneQuestionSubmission).
+ *
+ * `timing` is optional and purely observational (physical acceptance
+ * follow-up — save/next latency diagnosis): when supplied, records
+ * "navigationUpdateMs" around the submission.currentQuestionIndex write,
+ * ONLY when that write actually runs (finalIndex !== storedIndex — e.g.
+ * never for a blocked back-navigation attempt that doesn't move).
+ * Omitting it (every pre-existing caller) changes nothing about this
+ * function's behavior.
  */
 export async function resolveSequentialQuestionNavigation(
   db: DbClient,
   params: { submission: SubmissionWithQuestions; settings: Pick<SecureExamSettings, "allowBackNavigation" | "enableQuestionPools" | "questionPoolSelectionMode">; requestedIndex: number },
+  timing?: TimingCollector,
 ): Promise<SequentialNavigationResult> {
   const { submission, settings, requestedIndex } = params;
   const storedIndex = submission.currentQuestionIndex;
@@ -170,7 +192,7 @@ export async function resolveSequentialQuestionNavigation(
   const finalIndex = nextAllowedIndex(requestedIndex, storedIndex, settings.allowBackNavigation, total);
 
   if (finalIndex !== storedIndex) {
-    await db.submission.update({ where: { id: submission.id }, data: { currentQuestionIndex: finalIndex } });
+    await timeSpan(timing, "navigationUpdateMs", () => db.submission.update({ where: { id: submission.id }, data: { currentQuestionIndex: finalIndex } }));
   }
 
   const eventType: SequentialNavigationEventType | null = blocked
