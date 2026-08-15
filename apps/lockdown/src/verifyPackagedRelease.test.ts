@@ -54,9 +54,9 @@ const VALID_INPUT = {
   packagedPackageJsonContent: JSON.stringify({ version: "1.2.1" }),
   packagedSharedJsContent: 'exports.LOCKDOWN_VERSION = "1.2.1"; exports.TETHER_APP_USER_MODEL_ID = "com.tether.securebrowser";',
   packagedMainJsContent:
-    'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger); app.setAppUserModelId(shared_1.TETHER_APP_USER_MODEL_ID); const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico"); const remoteSessionMonitor = new remoteSessionMonitor_1.RemoteSessionMonitor({...}); ipcMain.on("lockdown:set-lockdown-exam-active", (_e, active) => { processDetection.setExamActive(active); remoteSessionMonitor.setExamActive(active); }); mainWindow.on("closed", () => { processDetection.stop(); remoteSessionMonitor.stop(); }); mainWindow.webContents.session.setDisplayMediaRequestHandler((_request, callback) => { void (0, screenShareRequestHandler_1.handleDisplayMediaRequest)(() => electron_1.desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 } }), ...); }); const initialExamId = (0, lockdownStartupRouting_1.resolveInitialExamIdFromArgv)(process.argv);',
+    'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger); app.setAppUserModelId(shared_1.TETHER_APP_USER_MODEL_ID); const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico"); const remoteSessionMonitor = new remoteSessionMonitor_1.RemoteSessionMonitor({...}); ipcMain.on("lockdown:set-lockdown-exam-active", (_e, active) => { processDetection.setExamActive(active); remoteSessionMonitor.setExamActive(active); }); mainWindow.on("closed", () => { processDetection.stop(); remoteSessionMonitor.stop(); }); mainWindow.webContents.session.setDisplayMediaRequestHandler((_request, callback) => { void (0, screenShareRequestHandler_1.handleDisplayMediaRequest)(() => electron_1.desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 } }), ...); }); const initialExamId = (0, lockdownStartupRouting_1.resolveInitialExamIdFromArgv)(process.argv); ipcMain.handle("lockdown:get-display-enforcement-status", () => displayEnforcement.getFreshDisplayEnforcementStatus()); onDisplayStateChanged: (status) => { window.webContents.send("lockdown:display-enforcement-state-changed", status); },',
   packagedDisplayEnforcementJsContent:
-    "setEnforcementState(state) { ... } resolveReadinessGatedDisplayDecision(...) evaluate() { ... const run = this.evaluateNow(); this.evaluateInFlight = run; showOverlay(nextDecision.reason); ... }",
+    "setEnforcementState(state) { ... } resolveReadinessGatedDisplayDecision(...) evaluate() { ... const run = this.evaluateNow(); this.evaluateInFlight = run; ... } getDisplayEnforcementStatus() { ... } getFreshDisplayEnforcementStatus() { ... } toDisplayEnforcementStatus(nextDecision, displayCount); evaluateNow() { ... this.callbacks.onDisplayStateChanged?.(nextStatus); ... }",
   packagedProcessDetectionJsContent: "runPreflightScan() { ... } setExamActive(active) { ... } pollOnce() { ... this.scanInFlight = this.pollOnceNow(); ... }",
   packagedRemoteSessionMonitorJsContent:
     "class RemoteSessionMonitor { setExamActive(active) { ... resolveRemoteSessionMonitorIntervalSeconds() ... } stop() { ... } pollOnceNow() { ... computeRemoteSessionMonitorTransitions(this.state, classification) ... } }",
@@ -65,7 +65,11 @@ const VALID_INPUT = {
   packagedScreenShareRequestHandlerJsContent: "function selectEntireScreenSource(sources, primaryDisplayId) { ... } async function handleDisplayMediaRequest(...) { ... }",
   // v1.7.3 sandboxed-preload hotfix — a realistic esbuild-bundled shape:
   // exactly one require("electron"), no relative/local require left over.
-  packagedPreloadJsContent: '"use strict";\nvar import_electron = require("electron");\nvar LOCKDOWN_VERSION = "1.2.1";\nimport_electron.contextBridge.exposeInMainWorld("sesLockdown", { version: LOCKDOWN_VERSION, async getDisplayCount() { return import_electron.ipcRenderer.invoke("lockdown:get-display-count"); } });\n',
+  // Also includes the v1.7.6 Native Display State Bridge surface (bundled
+  // createRemovableListenerRegistry + the get/on IPC pair) so VALID_INPUT
+  // reflects a genuine current-architecture preload.
+  packagedPreloadJsContent:
+    '"use strict";\nvar import_electron = require("electron");\nvar LOCKDOWN_VERSION = "1.2.1";\nfunction createRemovableListenerRegistry() { const listeners = new Set(); return { add(cb) { listeners.add(cb); return () => listeners.delete(cb); }, emit(v) { for (const cb of listeners) cb(v); } }; }\nvar displayEnforcementStateRegistry = createRemovableListenerRegistry();\nimport_electron.ipcRenderer.on("lockdown:display-enforcement-state-changed", (_e, status) => { displayEnforcementStateRegistry.emit(status); });\nimport_electron.contextBridge.exposeInMainWorld("sesLockdown", { version: LOCKDOWN_VERSION, async getDisplayCount() { return import_electron.ipcRenderer.invoke("lockdown:get-display-count"); }, async getDisplayEnforcementStatus() { return import_electron.ipcRenderer.invoke("lockdown:get-display-enforcement-status"); }, onDisplayEnforcementStateChanged(callback) { return displayEnforcementStateRegistry.add(callback); } });\n',
   sourceIconIcoBuffer: buildIcoBuffer(FULL_ICON_RESOLUTIONS),
   electronBuilderYmlContent: VALID_ELECTRON_BUILDER_YML,
   packagedIconIcoBuffer: buildIcoBuffer(FULL_ICON_RESOLUTIONS),
@@ -243,6 +247,101 @@ describe("verifyPackagedReleaseContents", () => {
       });
       expect(result.ok).toBe(false);
       expect(result.errors.some((e) => e.includes("this.evaluateInFlight = run;"))).toBe(true);
+    });
+
+    // v1.7.6 package-verifier alignment — the pre-existing required marker
+    // "showOverlay(nextDecision.reason)" was itself the stale check this
+    // corrects: it belonged exclusively to the pre-1.7.6 native-overlay
+    // architecture that this same PR removed (see ipcChain.test.ts's own
+    // "showOverlay/hideOverlay/overlayWindow/screen-saver-level no longer
+    // exist in this module" source-level guard), so `dist:win` failed
+    // verify:package on a build that was otherwise entirely correct. These
+    // tests cover the verifier contract directly: the current architecture
+    // satisfies every required marker WITHOUT showOverlay ever appearing,
+    // the old markers are now forbidden rather than required, and a build
+    // missing any piece of the new bridge still fails loudly.
+    describe("v1.7.6 package-verifier alignment — Native Display State Bridge replaces the removed overlay", () => {
+      it("passes on the current v1.7.6 architecture even though it contains no showOverlay/hideOverlay call at all", () => {
+        expect(VALID_INPUT.packagedDisplayEnforcementJsContent).not.toContain("showOverlay(");
+        expect(VALID_INPUT.packagedDisplayEnforcementJsContent).not.toContain("hideOverlay(");
+        const result = verifyPackagedReleaseContents(VALID_INPUT);
+        expect(result.ok).toBe(true);
+      });
+
+      it("fails when dist/displayEnforcement.js still contains the removed showOverlay( call site (a pre-1.7.6 stale build)", () => {
+        const result = verifyPackagedReleaseContents({
+          ...VALID_INPUT,
+          packagedDisplayEnforcementJsContent: `${VALID_INPUT.packagedDisplayEnforcementJsContent} showOverlay(nextDecision.reason);`,
+        });
+        expect(result.ok).toBe(false);
+        expect(result.errors.some((e) => e.includes('still contains "showOverlay("'))).toBe(true);
+      });
+
+      it("fails when dist/displayEnforcement.js still contains the removed hideOverlay( call site (a pre-1.7.6 stale build)", () => {
+        const result = verifyPackagedReleaseContents({
+          ...VALID_INPUT,
+          packagedDisplayEnforcementJsContent: `${VALID_INPUT.packagedDisplayEnforcementJsContent} hideOverlay();`,
+        });
+        expect(result.ok).toBe(false);
+        expect(result.errors.some((e) => e.includes('still contains "hideOverlay("'))).toBe(true);
+      });
+
+      it("fails when dist/displayEnforcement.js still constructs the removed native overlay BrowserWindow (a pre-1.7.6 stale build)", () => {
+        const result = verifyPackagedReleaseContents({
+          ...VALID_INPUT,
+          packagedDisplayEnforcementJsContent: `${VALID_INPUT.packagedDisplayEnforcementJsContent} const overlay = new electron_1.BrowserWindow({ alwaysOnTop: true });`,
+        });
+        expect(result.ok).toBe(false);
+        expect(result.errors.some((e) => e.includes('still contains "new electron_1.BrowserWindow("'))).toBe(true);
+      });
+
+      it("does NOT flag processDetection.js's or remoteSessionMonitor.js's own, unrelated showOverlay() methods", () => {
+        const result = verifyPackagedReleaseContents({
+          ...VALID_INPUT,
+          packagedProcessDetectionJsContent: `${VALID_INPUT.packagedProcessDetectionJsContent} showOverlay(capabilityIds) { ... }`,
+          packagedRemoteSessionMonitorJsContent: `${VALID_INPUT.packagedRemoteSessionMonitorJsContent} showOverlay() { ... }`,
+        });
+        expect(result.ok).toBe(true);
+      });
+
+      it("fails when dist/displayEnforcement.js is missing the v1.7.6 Native Display State Bridge or the PR #26 fail-closed fresh-query fix", () => {
+        const result = verifyPackagedReleaseContents({
+          ...VALID_INPUT,
+          packagedDisplayEnforcementJsContent: "setEnforcementState(state) { ... } resolveReadinessGatedDisplayDecision(...) evaluate() { ... const run = this.evaluateNow(); this.evaluateInFlight = run; ... }",
+        });
+        expect(result.ok).toBe(false);
+        expect(result.errors.some((e) => e.includes('missing "getDisplayEnforcementStatus"'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('missing "onDisplayStateChanged"'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('missing "toDisplayEnforcementStatus"'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('missing "getFreshDisplayEnforcementStatus"'))).toBe(true);
+      });
+
+      it("fails when dist/main.js does not wire the Native Display State Bridge IPC channels to displayEnforcement's fail-closed query", () => {
+        const result = verifyPackagedReleaseContents({
+          ...VALID_INPUT,
+          packagedMainJsContent: VALID_INPUT.packagedMainJsContent
+            .replace('ipcMain.handle("lockdown:get-display-enforcement-status", () => displayEnforcement.getFreshDisplayEnforcementStatus());', "")
+            .replace('onDisplayStateChanged: (status) => { window.webContents.send("lockdown:display-enforcement-state-changed", status); },', ""),
+        });
+        expect(result.ok).toBe(false);
+        expect(result.errors.some((e) => e.includes('missing "lockdown:get-display-enforcement-status"'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('missing "getFreshDisplayEnforcementStatus"'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('missing "lockdown:display-enforcement-state-changed"'))).toBe(true);
+      });
+
+      it("fails when dist/preload.js does not expose the Native Display State Bridge or its removable-listener unsubscribe implementation", () => {
+        const result = verifyPackagedReleaseContents({
+          ...VALID_INPUT,
+          packagedPreloadJsContent:
+            '"use strict";\nvar import_electron = require("electron");\nvar LOCKDOWN_VERSION = "1.2.1";\nimport_electron.contextBridge.exposeInMainWorld("sesLockdown", { version: LOCKDOWN_VERSION });\n',
+        });
+        expect(result.ok).toBe(false);
+        expect(result.errors.some((e) => e.includes('missing "lockdown:get-display-enforcement-status"'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('missing "getDisplayEnforcementStatus"'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('missing "lockdown:display-enforcement-state-changed"'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('missing "onDisplayEnforcementStateChanged"'))).toBe(true);
+        expect(result.errors.some((e) => e.includes('missing "createRemovableListenerRegistry"'))).toBe(true);
+      });
     });
 
     it("fails when the packaged version is still 1.7.1 (a stale pre-version-bump build)", () => {
