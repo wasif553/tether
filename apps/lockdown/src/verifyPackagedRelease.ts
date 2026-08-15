@@ -126,6 +126,18 @@ const REQUIRED_MAIN_JS_MARKERS = [
   // without this still uses the old, always-null-safe argv.find(...)
   // inline call, never resolveInitialExamIdFromArgv).
   "resolveInitialExamIdFromArgv",
+  // v1.7.6 — Native Display State Bridge, main-process side. Proves the
+  // IPC wiring between main.js and displayEnforcement.js itself (not just
+  // that each file independently contains a matching string in
+  // isolation): the read-only query channel calls the fail-closed fresh
+  // evaluation (Pre-commit audit fix, PR #26), and the push channel
+  // forwards onDisplayStateChanged (see displayEnforcement.ts) to the
+  // renderer. Fails loudly on a stale pre-1.7.6 build that predates this
+  // bridge, or on a build where the bridge exists in displayEnforcement.js
+  // but was never actually wired up in main.js.
+  "lockdown:get-display-enforcement-status",
+  "getFreshDisplayEnforcementStatus",
+  "lockdown:display-enforcement-state-changed",
 ];
 /**
  * URGENT startup-routing fix — this EXACT fragment only ever appears in
@@ -145,7 +157,25 @@ const REQUIRED_DISPLAY_ENFORCEMENT_JS_MARKERS = [
   // fails loudly on a stale pre-1.7.4 build that predates the
   // BLOCKED==ADDITIONAL_DISPLAY_PRESENT fix.
   "resolveReadinessGatedDisplayDecision",
-  "showOverlay(nextDecision.reason)",
+  // v1.7.6 — Native Display State Bridge. Replaces the old
+  // "showOverlay(nextDecision.reason)" marker: that native BrowserWindow
+  // overlay call site no longer exists in the source (removed after
+  // physical HDMI-recovery testing isolated an unrecoverable-screen
+  // symptom to its recovery path — see displayEnforcement.ts's top-of-file
+  // doc comment). Student-facing blocking is now entirely renderer-driven
+  // via these two bridge surfaces; fails loudly on a stale pre-1.7.6 build
+  // that still expects a native overlay window.
+  "getDisplayEnforcementStatus",
+  "onDisplayStateChanged",
+  // v1.7.6 — proves the bounded {state, reason, displayCount} shape is
+  // actually derived through the current fold (POLICY_NOT_READY -> OK)
+  // rather than some other ad hoc mapping.
+  "toDisplayEnforcementStatus",
+  // Pre-commit audit fix (PR #26) — the fail-closed fresh-evaluation query
+  // used by the renderer's INITIAL status check, so a freshly-mounted/
+  // reloaded page can never silently read a stale cached (or fail-open
+  // default) status. Fails loudly on a build that predates this fix.
+  "getFreshDisplayEnforcementStatus",
   // v1.7.2 poll-serialization fix — the corrected in-flight assignment
   // (evaluateNow()'s own promise, never a `.finally()`-wrapped one).
   "this.evaluateInFlight = run;",
@@ -175,6 +205,29 @@ const FORBIDDEN_PROCESS_DETECTION_JS_MARKER = "this.scanInFlight = run.finally("
  * poll loop (the overlay never re-evaluates after the first check).
  */
 const FORBIDDEN_DISPLAY_ENFORCEMENT_JS_MARKER = "this.evaluateInFlight = run.finally(";
+/**
+ * v1.7.6 — the removed native overlay's own call/construction sites. A
+ * packaged build that still contains any of these has regressed back to
+ * the second always-on-top BrowserWindow that physical HDMI-recovery
+ * testing isolated an unrecoverable-screen symptom to (see
+ * displayEnforcement.ts's top-of-file doc comment). Mirrors the identical
+ * regression guard ipcChain.test.ts already applies to the pre-packaging
+ * source, extended here to the packaged output itself.
+ *
+ * Scoped to dist/displayEnforcement.js ONLY — processDetection.ts and
+ * remoteSessionMonitor.ts each have their own, unrelated, legitimate
+ * showOverlay() methods (a capability-blocking panel and a remote-session
+ * notice, respectively); those files are checked separately, below, and
+ * are never compared against these markers.
+ *
+ * `new electron_1.BrowserWindow(` is tsc's CommonJS emit for a value
+ * import of `BrowserWindow` from "electron" (see `.RemoteSessionMonitor(`
+ * above for the identical module-alias convention) — the current source
+ * only imports BrowserWindow as a type (`import { screen, type
+ * BrowserWindow } from "electron"`), which tsc erases entirely, so this
+ * marker cannot appear in a build compiled from the current architecture.
+ */
+const FORBIDDEN_DISPLAY_ENFORCEMENT_JS_OVERLAY_MARKERS = ["showOverlay(", "hideOverlay(", "new electron_1.BrowserWindow("];
 
 // Mid-exam remote-session monitoring v1 — RemoteSessionMonitor itself:
 // the class, its ACTIVE-lifecycle entrypoint, its configurable interval
@@ -204,6 +257,23 @@ const REQUIRED_LOCKDOWN_STARTUP_ROUTING_JS_MARKERS = [
 // comment) is actually present, not just the handler registration in
 // main.js checked above.
 const REQUIRED_SCREEN_SHARE_REQUEST_HANDLER_JS_MARKERS = ["handleDisplayMediaRequest", "selectEntireScreenSource"];
+
+// v1.7.6 — Native Display State Bridge, renderer/preload side. Proves the
+// packaged preload actually exposes both bridge methods on
+// window.sesLockdown, listens on the matching IPC channels the main.js
+// markers above prove are wired, and bundles a real removable-listener
+// implementation for onDisplayEnforcementStateChanged's unsubscribe
+// return value (Pre-commit audit fix, PR #26) — not just a no-op stub
+// that always returns `() => {}`. Fails loudly on a stale pre-1.7.6
+// preload build, or one where the bridge exists but its cleanup function
+// was stripped/never bundled.
+const REQUIRED_PRELOAD_JS_MARKERS = [
+  "lockdown:get-display-enforcement-status",
+  "getDisplayEnforcementStatus",
+  "lockdown:display-enforcement-state-changed",
+  "onDisplayEnforcementStateChanged",
+  "createRemovableListenerRegistry",
+];
 
 /**
  * Windows taskbar icon fix v1.7.1 — every resolution Windows expects a
@@ -306,6 +376,11 @@ export function verifyPackagedReleaseContents(input: PackagedReleaseVerification
         errors.push(`Packaged dist/preload.js: ${error}`);
       }
     }
+    for (const marker of REQUIRED_PRELOAD_JS_MARKERS) {
+      if (!input.packagedPreloadJsContent.includes(marker)) {
+        errors.push(`Packaged dist/preload.js is missing "${marker}" — the packaged build does not contain the current Native Display State Bridge.`);
+      }
+    }
   }
 
   if (!input.packagedMainJsContent) {
@@ -360,6 +435,16 @@ export function verifyPackagedReleaseContents(input: PackagedReleaseVerification
           "promise it was called on, so the in-flight guard never clears and display-topology enforcement " +
           "silently freezes at its first evaluation result for the rest of the exam.",
       );
+    }
+    for (const marker of FORBIDDEN_DISPLAY_ENFORCEMENT_JS_OVERLAY_MARKERS) {
+      if (input.packagedDisplayEnforcementJsContent.includes(marker)) {
+        errors.push(
+          `Packaged dist/displayEnforcement.js still contains "${marker}" — part of the removed native ` +
+            "BrowserWindow overlay. Physical HDMI-recovery testing isolated an unrecoverable-screen " +
+            "symptom to this overlay's recovery path (see displayEnforcement.ts); a packaged build that still " +
+            "contains it has regressed back to that symptom.",
+        );
+      }
     }
   }
 
