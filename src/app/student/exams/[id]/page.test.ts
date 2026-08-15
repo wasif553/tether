@@ -260,7 +260,7 @@ describe("PART 1 — navigation only ever proceeds after the server has acknowle
     const fn = extractFunctionBody("async function navigateQuestion(requestedIndex: number) {");
     const savedIdx = fn.indexOf("const saved = await flushAnswerNow(questionId);");
     const notSavedIdx = fn.indexOf("if (!saved) {", savedIdx);
-    const requestOnlyIdx = fn.indexOf("await requestNavigationOnly(requestedIndex, navigationStartedAtMs);");
+    const requestOnlyIdx = fn.indexOf("await requestNavigationOnly(requestedIndex, navigationStartedAtMs, questionId, response ?? null);");
     expect(savedIdx).toBeGreaterThan(-1);
     expect(notSavedIdx).toBeGreaterThan(savedIdx);
     const failureBranch = fn.slice(notSavedIdx, fn.indexOf("return;", notSavedIdx) + "return;".length);
@@ -270,7 +270,7 @@ describe("PART 1 — navigation only ever proceeds after the server has acknowle
   });
 
   it("requestNavigationOnly (the shared navigation-only leg) never applies a payload unless the fetch itself succeeded", () => {
-    const fn = extractFunctionBody("async function requestNavigationOnly(requestedIndex: number, navigationStartedAtMs: number) {");
+    const fn = extractFunctionBody("async function requestNavigationOnly(");
     const throwIdx = fn.indexOf('if (!res.ok) throw new Error("navigation failed");');
     const applyIdx = fn.indexOf("applyOneQuestionPayload(payload);");
     expect(throwIdx).toBeGreaterThan(-1);
@@ -357,7 +357,248 @@ describe("PART 1/2 — a slow response cannot cause duplicate navigation: naviga
     // The remaining exit path — a clean/in-flight navigation-only request
     // — delegates to requestNavigationOnly, which has its OWN try/finally
     // clearing the flag no matter how the fetch resolves.
-    const requestOnlyFn = extractFunctionBody("async function requestNavigationOnly(requestedIndex: number, navigationStartedAtMs: number) {");
+    const requestOnlyFn = extractFunctionBody("async function requestNavigationOnly(");
     expect(requestOnlyFn).toMatch(/\}\s*finally\s*\{\s*setNavigatingQuestion\(false\);\s*\}/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Question Navigator immediate-local-synchronization (Tether v1.7.6, Part
+// 10). See src/lib/navigatorLocalSync.test.ts for the behavioral unit
+// tests of applyLocalNavigatorTransition itself — these are the
+// structural (source-text) tests proving it is actually WIRED into
+// navigateQuestion/requestNavigationOnly ahead of, not instead of, the
+// existing background GET question-navigator refresh, and that
+// loadNavigator's stale-request guard is in place.
+// ---------------------------------------------------------------------------
+
+describe("Part 10 (1)/(10) — a successful navigation updates the CURRENT tile immediately and never waits on the navigator GET", () => {
+  it("the dirty (save-and-navigate) path calls applyLocalNavigatorTransition synchronously, textually AFTER the question content is already applied — never behind an await of loadNavigator/fetch(question-navigator)", () => {
+    const fn = extractFunctionBody("async function navigateQuestion(requestedIndex: number) {");
+    const applyContentIdx = fn.indexOf("applyOneQuestionPayload(result.payload);");
+    const syncIdx = fn.indexOf("applyLocalNavigatorTransition(prev, {", applyContentIdx);
+    expect(applyContentIdx).toBeGreaterThan(-1);
+    expect(syncIdx).toBeGreaterThan(applyContentIdx);
+    // The setQuestionNav(...) call wrapping it is a plain synchronous
+    // updater — no await anywhere between applying the question content
+    // and the end of the setQuestionNav(...) call, so nothing can block
+    // question content from being the fast path.
+    const setQuestionNavCall = fn.slice(fn.indexOf("setQuestionNav((prev) =>", applyContentIdx), fn.indexOf(");", syncIdx) + 2);
+    expect(setQuestionNavCall).not.toMatch(/await |fetch\(/);
+    expect(fn).not.toMatch(/await loadNavigator\(\)/);
+  });
+
+  it("the clean (navigation-only) path in requestNavigationOnly does the same — applies the question content, then synchronously syncs the navigator, never awaiting loadNavigator/fetch(question-navigator) itself", () => {
+    const fn = extractFunctionBody("async function requestNavigationOnly(");
+    const applyContentIdx = fn.indexOf("applyOneQuestionPayload(payload);");
+    const syncIdx = fn.indexOf("applyLocalNavigatorTransition(prev, {", applyContentIdx);
+    expect(applyContentIdx).toBeGreaterThan(-1);
+    expect(syncIdx).toBeGreaterThan(applyContentIdx);
+    const setQuestionNavCall = fn.slice(fn.indexOf("setQuestionNav((prev) =>", applyContentIdx), fn.indexOf(");", syncIdx) + 2);
+    expect(setQuestionNavCall).not.toMatch(/await |fetch\(/);
+    expect(fn).not.toMatch(/await loadNavigator\(\)/);
+  });
+});
+
+describe("Part 10 (9) — save-and-navigate request count is unchanged by the navigator-sync addition", () => {
+  it("the dirty path still issues exactly one resilientAutosave.saveAndNavigate call — the local navigator sync adds no new request", () => {
+    const fn = extractFunctionBody("async function navigateQuestion(requestedIndex: number) {");
+    const calls = fn.match(/resilientAutosave\.saveAndNavigate\(/g) ?? [];
+    expect(calls.length).toBe(1);
+  });
+
+  it("requestNavigationOnly still issues exactly one fetch to question-progress — the local navigator sync adds no new request", () => {
+    const fn = extractFunctionBody("async function requestNavigationOnly(");
+    const calls = fn.match(/fetch\(/g) ?? [];
+    expect(calls.length).toBe(1);
+  });
+});
+
+describe("Part 10 (6)/(7) — loadNavigator's stale-request guard: only the latest generation may update questionNav", () => {
+  it("increments a monotonic generation token before the fetch, and only calls setQuestionNav when that token is still current when the response arrives", () => {
+    const fn = extractFunctionBody("const loadNavigator = useCallback(async () => {");
+    const generationIdx = fn.indexOf("const generation = ++navigatorRequestGenerationRef.current;");
+    const fetchIdx = fn.indexOf("fetch(`/api/submissions/${id}/question-navigator`)");
+    const guardIdx = fn.indexOf("if (generation !== navigatorRequestGenerationRef.current) return;");
+    const setIdx = fn.indexOf("setQuestionNav(data);");
+    expect(generationIdx).toBeGreaterThan(-1);
+    expect(fetchIdx).toBeGreaterThan(generationIdx);
+    expect(guardIdx).toBeGreaterThan(fetchIdx);
+    expect(setIdx).toBeGreaterThan(guardIdx); // setQuestionNav is textually gated BEHIND the staleness check, never called unconditionally first
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tether v1.7.6 pre-commit audit — Native Display State Bridge
+// registration-race fix. See apps/lockdown/src/removableListenerRegistry.test.ts
+// for the genuine behavioral coverage of the underlying cleanup mechanism
+// (Part 4.E/F) — these are the structural (source-text) tests proving the
+// exam page actually WIRES it correctly: listener before query, a
+// stale-initial-query guard, and cleanup on unmount.
+// ---------------------------------------------------------------------------
+
+function extractDisplayBridgeEffect(): string {
+  const startMarker = "if (!data?.id || !inLockdownBrowser) return;";
+  const endMarker = "}, [data?.id, inLockdownBrowser]);";
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start);
+  if (start === -1 || end === -1) throw new Error("Could not locate the display-bridge registration effect in page.tsx");
+  return source.slice(start, end + endMarker.length);
+}
+
+describe("Part 4.A/B/C — Native Display State Bridge: the listener is registered before the initial query, so no transition during the query's IPC round trip can be missed", () => {
+  it("onDisplayEnforcementStateChanged is called textually BEFORE getDisplayEnforcementStatus — required safe ordering (register, then query)", () => {
+    const effect = extractDisplayBridgeEffect();
+    const listenerIdx = effect.indexOf("window.sesLockdown?.onDisplayEnforcementStateChanged?.(");
+    const queryIdx = effect.indexOf("?.getDisplayEnforcementStatus?.()");
+    expect(listenerIdx).toBeGreaterThan(-1);
+    expect(queryIdx).toBeGreaterThan(listenerIdx);
+  });
+
+  it("the listener applies whatever status it receives unconditionally (both initial-OK-then-BLOCKED and initial-BLOCKED-then-OK are handled identically — no directional bias)", () => {
+    const effect = extractDisplayBridgeEffect();
+    const listenerBody = effect.slice(
+      effect.indexOf("window.sesLockdown?.onDisplayEnforcementStateChanged?.("),
+      effect.indexOf("});", effect.indexOf("window.sesLockdown?.onDisplayEnforcementStateChanged?.(")) + 3,
+    );
+    expect(listenerBody).toMatch(/liveDisplayUpdateReceived\s*=\s*true;/);
+    expect(listenerBody).toMatch(/setDisplayEnforcementStatus\(status\);/);
+    // Never gated on status.state — applies BLOCKED and OK identically.
+    expect(listenerBody).not.toMatch(/status\.state\s*===\s*"(OK|BLOCKED)"/);
+  });
+});
+
+describe("Part 4.D — a stale initial-query result can never overwrite a newer live transition", () => {
+  it("the initial query's .then() checks liveDisplayUpdateReceived and bails out before calling setDisplayEnforcementStatus if a live push already arrived", () => {
+    const effect = extractDisplayBridgeEffect();
+    const queryStart = effect.indexOf("?.getDisplayEnforcementStatus?.()");
+    const thenIdx = effect.indexOf(".then((status) => {", queryStart);
+    const catchIdx = effect.indexOf(".catch(() => {", queryStart);
+    const queryBlock = effect.slice(thenIdx, catchIdx);
+    const guardIdx = queryBlock.indexOf("if (cancelled || !status || liveDisplayUpdateReceived) return;");
+    const applyIdx = queryBlock.indexOf("setDisplayEnforcementStatus(status);");
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(applyIdx).toBeGreaterThan(guardIdx); // setDisplayEnforcementStatus is textually gated BEHIND the staleness check, never called unconditionally first
+  });
+
+  it("liveDisplayUpdateReceived starts false and is declared before both the listener and the query use it (no TDZ/ordering bug)", () => {
+    const effect = extractDisplayBridgeEffect();
+    const declIdx = effect.indexOf("let liveDisplayUpdateReceived = false;");
+    const listenerIdx = effect.indexOf("window.sesLockdown?.onDisplayEnforcementStateChanged?.(");
+    const queryIdx = effect.indexOf("?.getDisplayEnforcementStatus?.()");
+    expect(declIdx).toBeGreaterThan(-1);
+    expect(listenerIdx).toBeGreaterThan(declIdx);
+    expect(queryIdx).toBeGreaterThan(declIdx);
+  });
+});
+
+describe("Part 4.E/F — cleanup removes exactly the display-state listener; remount cannot accumulate duplicates", () => {
+  it("the listener registration captures the returned unsubscribe function, and the effect's own cleanup calls it", () => {
+    const effect = extractDisplayBridgeEffect();
+    expect(effect).toMatch(/const unsubscribeDisplayEnforcementState = window\.sesLockdown\?\.onDisplayEnforcementStateChanged\?\.\(/);
+    const cleanupIdx = effect.indexOf("return () => {");
+    expect(cleanupIdx).toBeGreaterThan(-1);
+    const cleanupBlock = effect.slice(cleanupIdx);
+    expect(cleanupBlock).toMatch(/unsubscribeDisplayEnforcementState\?\.\(\);/);
+  });
+
+  it("this effect's own dependency array is the stable [data?.id, inLockdownBrowser] pair — it does not re-run (and therefore does not re-register the listener) on every unrelated re-render", () => {
+    expect(source).toMatch(/\}, \[data\?\.id, inLockdownBrowser\]\);/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pre-commit audit fix (PR #26) — the initial getDisplayEnforcementStatus()
+// IPC query can itself REJECT. Silently doing nothing would be a fail-OPEN
+// presentation gap: native state could already be BLOCKED before this
+// renderer mounted, and because live pushes are deduplicated against the
+// last status, an unchanged BLOCKED state may never fire another push to
+// recover from. See src/lib/displayViolationOverlay.test.ts for the
+// behavioral coverage of displayStatusOnInitialQueryFailure/
+// computeDisplayViolationModal (items 4/5/6/7); these are the structural
+// tests proving the exam page actually wires the failure handler in, and
+// that it never fires for STANDARD_WEB (item 8).
+// ---------------------------------------------------------------------------
+
+describe("Pre-commit audit fix (PR #26), item 4/5 — a rejected initial query fails closed with the neutral status, never silently ignored", () => {
+  it("the query's .catch() sets displayStatusOnInitialQueryFailure() — never an empty/no-op handler", () => {
+    const effect = extractDisplayBridgeEffect();
+    const queryStart = effect.indexOf("?.getDisplayEnforcementStatus?.()");
+    const queryBlock = effect.slice(queryStart);
+    expect(queryBlock).toMatch(/\.catch\(\(\) => \{\s*if \(cancelled \|\| liveDisplayUpdateReceived\) return;\s*setDisplayEnforcementStatus\(displayStatusOnInitialQueryFailure\(\)\);\s*\}\);/);
+  });
+
+  it("imports displayStatusOnInitialQueryFailure from src/lib/displayViolationOverlay", () => {
+    expect(source).toMatch(/import \{\s*computeDisplayViolationModal,\s*displayStatusOnInitialQueryFailure,/);
+  });
+});
+
+describe("Pre-commit audit fix (PR #26), item 6/7 — recovery after a failure state is the SAME mechanism as any other transition", () => {
+  it("the live listener is a single, unconditional registration — never disabled or bypassed by the query's own catch block, so a later OK or genuine BLOCKED push always still applies normally", () => {
+    const effect = extractDisplayBridgeEffect();
+    // Exactly one registration of the listener in this effect — the
+    // catch-block addition did not fork a second, conditional listener
+    // path; recovery/replacement after a failure state goes through the
+    // SAME setDisplayEnforcementStatus(status) call the listener always
+    // used.
+    const registrations = effect.match(/window\.sesLockdown\?\.onDisplayEnforcementStateChanged\?\.\(/g) ?? [];
+    expect(registrations.length).toBe(1);
+  });
+});
+
+describe("Pre-commit audit fix (PR #26), item 8 — STANDARD_WEB (no window.sesLockdown) is never affected", () => {
+  it("the failure handler's .catch() is chained directly off the SAME optional ?.getDisplayEnforcementStatus?.() call — never a separate, unguarded statement that could run without a Tether bridge present", () => {
+    const effect = extractDisplayBridgeEffect();
+    const queryIdx = effect.indexOf("?.getDisplayEnforcementStatus?.()");
+    const thenIdx = effect.indexOf(".then((status) => {", queryIdx);
+    const catchIdx = effect.indexOf(".catch(() => {", queryIdx);
+    expect(queryIdx).toBeGreaterThan(-1);
+    // .then and .catch both appear AFTER the optional ?.() call with no
+    // semicolon (i.e. no statement break) in between — proving they are
+    // part of the SAME expression that short-circuits to undefined
+    // (never even reaching .then/.catch) whenever window.sesLockdown or
+    // getDisplayEnforcementStatus itself is absent, exactly as
+    // STANDARD_WEB/non-Tether exams require.
+    // Between the optional call and .then(...) there is no statement-
+    // terminating semicolon — proving .then is chained directly off the
+    // SAME expression, not a separate statement that would run even when
+    // window.sesLockdown?.getDisplayEnforcementStatus?.() short-circuited
+    // to undefined.
+    const betweenQueryAndThen = effect.slice(queryIdx, thenIdx);
+    expect(betweenQueryAndThen).not.toContain(";");
+    expect(catchIdx).toBeGreaterThan(thenIdx);
+  });
+
+  it("there is no second, separately-invoked display-status fetch/IPC call anywhere in this effect that could bypass the optional chain", () => {
+    const effect = extractDisplayBridgeEffect();
+    const occurrences = effect.match(/getDisplayEnforcementStatus/g) ?? [];
+    // Exactly one call site (?.getDisplayEnforcementStatus?.()) — the
+    // preceding doc comments legitimately name it in prose too, so this
+    // just proves there's a single call, not a duplicated/unguarded one.
+    const callSites = effect.match(/\?\.getDisplayEnforcementStatus\?\.\(\)/g) ?? [];
+    expect(callSites.length).toBe(1);
+    expect(occurrences.length).toBeGreaterThanOrEqual(callSites.length);
+  });
+});
+
+describe("Part 4 — preload.ts's onDisplayEnforcementStateChanged returns an unsubscribe function (never repeats onDisplayEnforcementEvent's no-removal limitation)", () => {
+  const preloadSource = fs.readFileSync(path.join(__dirname, "..", "..", "..", "..", "..", "apps", "lockdown", "src", "preload.ts"), "utf8");
+
+  it("the exposed method's return type is a function, backed by a removable listener registry rather than a plain push-only array", () => {
+    expect(preloadSource).toContain(
+      'onDisplayEnforcementStateChanged(callback: (status: { state: "OK" | "BLOCKED"; reason: string | null; displayCount: number }) => void): () => void {',
+    );
+    expect(preloadSource).toContain("return displayEnforcementStateRegistry.add(callback);");
+    expect(preloadSource).toContain('import { createRemovableListenerRegistry } from "./removableListenerRegistry";');
+  });
+});
+
+describe("Part 10 (8) — a background navigator-refresh failure never rolls back the already-displayed question", () => {
+  it("loadNavigator's catch block never touches oneQuestion/setOneQuestion — a failed background refresh only ever leaves the locally-synced navigator in place", () => {
+    const fn = extractFunctionBody("const loadNavigator = useCallback(async () => {");
+    const catchIdx = fn.indexOf("} catch {");
+    expect(catchIdx).toBeGreaterThan(-1);
+    const catchBlock = fn.slice(catchIdx);
+    expect(catchBlock).not.toMatch(/setOneQuestion|setNavigatingQuestion/);
   });
 });

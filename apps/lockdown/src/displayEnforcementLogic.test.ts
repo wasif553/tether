@@ -15,6 +15,9 @@ import {
   isGenuineMultiDisplayReason,
   displayBlockingReasonCopy,
   isOverlayEligibleBlockingReason,
+  toDisplayEnforcementStatus,
+  displayEnforcementStatusesEqual,
+  INITIAL_DISPLAY_ENFORCEMENT_STATUS,
 } from "./displayEnforcementLogic";
 
 // ---------------------------------------------------------------------------
@@ -350,20 +353,23 @@ describe("displayEnforcement.ts source guarantees", () => {
     expect(handleChangeDef).toMatch(/evaluate\(\{\s*bypassDebounce:\s*false\s*\}\)/);
   });
 
-  it("answers remain intact / no automatic submission: this module never references a submission, answer, or submit endpoint — its only job is showing/hiding the overlay and computing the enforcement decision", () => {
+  it("answers remain intact / no automatic submission: this module never references a submission, answer, or submit endpoint — its only job is computing the enforcement decision and pushing/serving the bounded Native Display State Bridge status", () => {
     expect(displayEnforcementSource).not.toMatch(/submission|answer|\/submit\b|fetch\(/i);
   });
 
-  it("the overlay window is configured to receive input instead of the exam window: always-on-top, not resizable/movable by the student, and not click-through/transparent", () => {
-    const overlayOptions = displayEnforcementSource.slice(
-      displayEnforcementSource.indexOf("const overlay = new BrowserWindow({"),
-      displayEnforcementSource.indexOf("overlay.setAlwaysOnTop"),
-    );
-    expect(overlayOptions).toMatch(/alwaysOnTop:\s*true/);
-    expect(overlayOptions).toMatch(/resizable:\s*false/);
-    expect(overlayOptions).toMatch(/movable:\s*false/);
-    expect(overlayOptions).not.toMatch(/transparent:\s*true/);
-    expect(overlayOptions).not.toMatch(/focusable:\s*false/);
+  // v1.7.6 — physical HDMI-disconnect testing isolated an unrecoverable-
+  // screen symptom (requiring a full OS restart) to the overlay
+  // BrowserWindow this used to assert the input-configuration of — the
+  // precise Windows window/compositor failure mechanism was never
+  // independently established, only that removing the overlay entirely
+  // removes the symptom. It has been removed entirely (see
+  // ipcChain.test.ts's "IPC chain hop 5" for the direct regression
+  // coverage that it can never be reconstructed) — student-facing
+  // blocking is now the exam page's own React/DOM blur+modal, driven by
+  // the bounded status this module pushes/serves instead.
+  it("no overlay BrowserWindow of any kind is ever constructed by this module", () => {
+    expect(displayEnforcementSource).not.toMatch(/new BrowserWindow\(/);
+    expect(displayEnforcementSource).not.toMatch(/alwaysOnTop/);
   });
 });
 
@@ -552,6 +558,81 @@ describe("displayBlockingReasonCopy — never claims a display exists without ge
     const copy = displayBlockingReasonCopy("TOPOLOGY_CHECK_UNAVAILABLE");
     expect(copy.message).toBe("Tether could not verify the display configuration. Resolve the display check before beginning the examination.");
     expect(copy.message.toLowerCase()).not.toContain("additional display connected");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.7.6 — Native Display State Bridge. toDisplayEnforcementStatus is the
+// ONE place a DisplayDecision (+ the display count it was computed from)
+// is reshaped into the bounded, renderer-facing status pushed/returned
+// over IPC instead of the old native overlay BrowserWindow — see
+// displayEnforcement.ts's evaluateNow() and this file's own doc comment
+// above isOverlayEligibleBlockingReason for the physical-testing root
+// cause this replaces.
+// ---------------------------------------------------------------------------
+
+describe("toDisplayEnforcementStatus — the Native Display State Bridge's one reshaping point", () => {
+  it("state:OK decisions fold to {state:OK, reason:null}", () => {
+    expect(toDisplayEnforcementStatus({ state: "OK" }, 1)).toEqual({ state: "OK", reason: null, displayCount: 1 });
+  });
+
+  it("POLICY_NOT_READY folds into state:OK — never reaches the renderer as a display-violation reason, exactly mirroring isOverlayEligibleBlockingReason's old overlay-suppression rule", () => {
+    expect(toDisplayEnforcementStatus({ state: "BLOCKED", reason: "POLICY_NOT_READY" }, 1)).toEqual({ state: "OK", reason: null, displayCount: 1 });
+  });
+
+  it("every genuine multi-display reason passes through as BLOCKED with its exact reason preserved", () => {
+    for (const reason of ["ADDITIONAL_ELECTRON_DISPLAY", "WINDOWS_TOPOLOGY_EXTEND", "WINDOWS_TOPOLOGY_CLONE", "MULTIPLE_ACTIVE_TARGETS"] as const) {
+      expect(toDisplayEnforcementStatus({ state: "BLOCKED", reason }, 2)).toEqual({ state: "BLOCKED", reason, displayCount: 2 });
+    }
+  });
+
+  it("TOPOLOGY_CHECK_UNAVAILABLE passes through as BLOCKED (a technical inconclusiveness, still surfaced to the renderer with neutral wording — see src/lib/displayViolationOverlay.ts)", () => {
+    expect(toDisplayEnforcementStatus({ state: "BLOCKED", reason: "TOPOLOGY_CHECK_UNAVAILABLE" }, 1)).toEqual({
+      state: "BLOCKED",
+      reason: "TOPOLOGY_CHECK_UNAVAILABLE",
+      displayCount: 1,
+    });
+  });
+
+  it("carries displayCount through unchanged in every branch, including a genuinely 0/negative-impossible edge value", () => {
+    expect(toDisplayEnforcementStatus({ state: "OK" }, 0).displayCount).toBe(0);
+    expect(toDisplayEnforcementStatus({ state: "BLOCKED", reason: "ADDITIONAL_ELECTRON_DISPLAY" }, 5).displayCount).toBe(5);
+  });
+});
+
+describe("displayEnforcementStatusesEqual — the dedup check that stops duplicate OS events from producing duplicate UI state", () => {
+  it("true for two structurally identical statuses (even distinct object instances)", () => {
+    expect(
+      displayEnforcementStatusesEqual(
+        { state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_EXTEND", displayCount: 2 },
+        { state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_EXTEND", displayCount: 2 },
+      ),
+    ).toBe(true);
+    expect(displayEnforcementStatusesEqual(INITIAL_DISPLAY_ENFORCEMENT_STATUS, { state: "OK", reason: null, displayCount: 0 })).toBe(true);
+  });
+
+  it("false when only the reason differs (BLOCKED reason A -> BLOCKED reason B must still be treated as a real change)", () => {
+    expect(
+      displayEnforcementStatusesEqual(
+        { state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_EXTEND", displayCount: 2 },
+        { state: "BLOCKED", reason: "WINDOWS_TOPOLOGY_CLONE", displayCount: 2 },
+      ),
+    ).toBe(false);
+  });
+
+  it("false when only displayCount differs (still-BLOCKED count change, mirroring DISPLAY_CONFIGURATION_CHANGED's own semantics)", () => {
+    expect(
+      displayEnforcementStatusesEqual(
+        { state: "BLOCKED", reason: "ADDITIONAL_ELECTRON_DISPLAY", displayCount: 2 },
+        { state: "BLOCKED", reason: "ADDITIONAL_ELECTRON_DISPLAY", displayCount: 3 },
+      ),
+    ).toBe(false);
+  });
+
+  it("false when only state differs", () => {
+    expect(displayEnforcementStatusesEqual({ state: "OK", reason: null, displayCount: 1 }, { state: "BLOCKED", reason: "TOPOLOGY_CHECK_UNAVAILABLE", displayCount: 1 })).toBe(
+      false,
+    );
   });
 });
 

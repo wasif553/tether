@@ -11,6 +11,7 @@
  */
 import { contextBridge, ipcRenderer } from "electron";
 import { LOCKDOWN_VERSION, type ExamContext, type SessionInfo } from "./shared";
+import { createRemovableListenerRegistry } from "./removableListenerRegistry";
 
 const ALLOWED_LOG_EVENT_TYPES = ["WINDOW_BLUR", "WINDOW_FOCUS_RETURN", "FULLSCREEN_EXIT", "MANUAL_WARNING"];
 
@@ -46,10 +47,33 @@ const scanUnavailableListeners: Array<(payload: LockdownScanUnavailablePayload) 
 const restorationResultListeners: Array<(payload: LockdownRestorationResultPayload) => void> = [];
 const remoteSessionMonitorEventListeners: Array<(payload: RemoteSessionMonitorEventPayload) => void> = [];
 // Tether launch/install flow v1 — fed by main's debounced, policy-aware
-// display-count evaluation (displayEnforcement.ts). The blocking overlay
-// itself is entirely main-owned; this only lets the hosted page report
-// the corresponding integrity signal via its own authenticated fetch.
+// display-count evaluation (displayEnforcement.ts). Transition-only,
+// integrity-EVENT-reporting metadata: this only lets the hosted page
+// report the corresponding integrity signal via its own authenticated
+// fetch. Distinct from, and unweakened by, the v1.7.6 Native Display
+// State Bridge below (displayEnforcementStateListeners) — that one drives
+// the exam page's own display-violation UI, this one never does.
 const displayEnforcementListeners: Array<(payload: { eventType: string; displayCount: number }) => void> = [];
+/**
+ * v1.7.6 — Native Display State Bridge. Fed by displayEnforcement.ts's
+ * bounded, renderer-facing status (never on every poll tick — only on an
+ * actual change), replacing the old screen-saver-level trapping
+ * BrowserWindow: the exam page renders its own React/DOM blur+modal from
+ * this instead. Bounded to {state, reason, displayCount} — never EDID,
+ * monitor serial numbers, Windows display paths, hardware identifiers, or
+ * display names.
+ *
+ * Pre-commit audit fix — a createRemovableListenerRegistry (not a plain
+ * array like every other listener list on this page) because this is the
+ * one bridge channel the React exam page must be able to cleanly
+ * unsubscribe from on unmount/reload — see onDisplayEnforcementStateChanged
+ * below and removableListenerRegistry.ts's own doc comment for why.
+ */
+const displayEnforcementStateRegistry = createRemovableListenerRegistry<{
+  state: "OK" | "BLOCKED";
+  reason: string | null;
+  displayCount: number;
+}>();
 // Corrective pass v1.2.1, Task A — pushed by main whenever the bounded
 // diagnostic snapshot changes; consumed only by the local diagnostic
 // panel injected below (gated on TETHER_SECURE_CLIENT_DIAGNOSTICS_ENABLED).
@@ -68,6 +92,13 @@ ipcRenderer.on("lockdown:event-recorded", (_event, count: number) => {
 ipcRenderer.on("lockdown:display-enforcement-event", (_event, payload: { eventType: string; displayCount: number }) => {
   for (const listener of displayEnforcementListeners) listener(payload);
 });
+
+ipcRenderer.on(
+  "lockdown:display-enforcement-state-changed",
+  (_event, status: { state: "OK" | "BLOCKED"; reason: string | null; displayCount: number }) => {
+    displayEnforcementStateRegistry.emit(status);
+  },
+);
 
 ipcRenderer.on("lockdown:diagnostics-snapshot", (_event, snapshot: TetherDiagnosticsSnapshot) => {
   for (const listener of diagnosticsListeners) listener(snapshot);
@@ -169,6 +200,40 @@ contextBridge.exposeInMainWorld("sesLockdown", {
 
   onDisplayEnforcementEvent(callback: (payload: { eventType: string; displayCount: number }) => void): void {
     if (typeof callback === "function") displayEnforcementListeners.push(callback);
+  },
+
+  /**
+   * v1.7.6 — Native Display State Bridge, read-only initial query. Call
+   * this once on mount/reload so an already-active display violation is
+   * caught immediately, before the first onDisplayEnforcementStateChanged
+   * push (which only ever fires on the NEXT transition) could arrive.
+   */
+  async getDisplayEnforcementStatus(): Promise<{ state: "OK" | "BLOCKED"; reason: string | null; displayCount: number }> {
+    return ipcRenderer.invoke("lockdown:get-display-enforcement-status");
+  },
+
+  /**
+   * v1.7.6 — live counterpart to getDisplayEnforcementStatus above. Fires
+   * only on an actual bounded-state change (never a duplicate for the
+   * same folded state, and never for POLICY_NOT_READY, which the main
+   * process folds into state:"OK" before this ever reaches the page).
+   * Distinct from onDisplayEnforcementEvent above — that one is
+   * transition-only integrity-event-reporting metadata and keeps its own
+   * existing semantics unchanged; this one drives UI blocking only.
+   *
+   * Pre-commit audit fix — unlike onDisplayEnforcementEvent above (which
+   * has no removal mechanism at all, by design/precedent elsewhere in
+   * this bridge), this listener returns a narrow unsubscribe function so
+   * the calling React effect can remove EXACTLY the one callback it
+   * registered on cleanup. Without this, a remount/reload would leave the
+   * old callback in displayEnforcementStateListeners forever, alongside
+   * the new one — both firing on every future push (a stale closure
+   * referencing an unmounted component's setState, and a duplicate-
+   * handling bug).
+   */
+  onDisplayEnforcementStateChanged(callback: (status: { state: "OK" | "BLOCKED"; reason: string | null; displayCount: number }) => void): () => void {
+    if (typeof callback !== "function") return () => {};
+    return displayEnforcementStateRegistry.add(callback);
   },
 
   /** Task A/B — bounded, non-secret exam-policy context for the local diagnostic panel/log. No-ops harmlessly when diagnostics are disabled (main still stores it, but never renders or writes it anywhere). */

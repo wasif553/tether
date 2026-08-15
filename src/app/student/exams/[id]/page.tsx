@@ -91,6 +91,12 @@ import {
   type AiCameraViolationOverlayState,
 } from "@/lib/aiCameraViolationOverlay";
 import {
+  computeDisplayViolationModal,
+  displayStatusOnInitialQueryFailure,
+  type DisplayEnforcementBridgeStatus,
+} from "@/lib/displayViolationOverlay";
+import { applyLocalNavigatorTransition } from "@/lib/navigatorLocalSync";
+import {
   buildEvidenceFrameUploadPath,
   evidenceUploadSkipReason,
   isEvidenceFrameSourceReady,
@@ -738,6 +744,9 @@ export default function TakeExamPage({
   const [navigatingQuestion, setNavigatingQuestion] = useState(false);
   // Question Navigator v1 — see docs/question-navigator-v1.md.
   const [questionNav, setQuestionNav] = useState<NavigatorResponseDto | null>(null);
+  // Question Navigator stale-request guard (Part 9) — see loadNavigator's
+  // own doc comment below for why this exists.
+  const navigatorRequestGenerationRef = useRef(0);
   const [navigatorPanelOpen, setNavigatorPanelOpen] = useState(false);
   const [navigatorAnnouncement, setNavigatorAnnouncement] = useState("");
   const [flaggingQuestionId, setFlaggingQuestionId] = useState<string | null>(null);
@@ -907,6 +916,18 @@ export default function TakeExamPage({
   useEffect(() => {
     aiCameraViolationOverlayRef.current = aiCameraViolationOverlay;
   }, [aiCameraViolationOverlay]);
+
+  // Native Display State Bridge (v1.7.6) — see src/lib/displayViolationOverlay.ts.
+  // Purely local UI state driven by window.sesLockdown's
+  // getDisplayEnforcementStatus()/onDisplayEnforcementStateChanged(),
+  // mirroring the AI camera violation overlay's blur+modal PRESENTATION
+  // pattern immediately above but with its own state/terminology (never
+  // reused/conflated) and, unlike that overlay, never locally
+  // dismissible while native state remains BLOCKED. null until the first
+  // status arrives (harmless — computeDisplayViolationModal treats null
+  // as "nothing to show", exactly like a real OK status would).
+  const [displayEnforcementStatus, setDisplayEnforcementStatus] = useState<DisplayEnforcementBridgeStatus | null>(null);
+  const displayViolationModal = computeDisplayViolationModal(displayEnforcementStatus);
 
   const [inLockdownBrowser, setInLockdownBrowser] = useState(false);
   // v1.7.5 P0 — see src/lib/secureExamNativeLockdown.ts. Defaults to
@@ -1453,7 +1474,16 @@ export default function TakeExamPage({
   // acknowledged, nothing to save" and "an in-flight save just resolved"
   // cases both end here: a single navigation-only request, reusing the
   // existing POST /question-progress route unchanged.
-  async function requestNavigationOnly(requestedIndex: number, navigationStartedAtMs: number) {
+  //
+  // Question Navigator immediate-sync follow-up (Part 8) —
+  // previousQuestionId/previousAuthoritativeResponse describe the
+  // question being LEFT (never touched when navigation itself failed).
+  async function requestNavigationOnly(
+    requestedIndex: number,
+    navigationStartedAtMs: number,
+    previousQuestionId: string,
+    previousAuthoritativeResponse: string | null,
+  ) {
     try {
       const questionProgressStartedAtMs = performance.now();
       const res = await fetch(`/api/submissions/${id}/question-progress`, {
@@ -1465,6 +1495,22 @@ export default function TakeExamPage({
       if (!res.ok) throw new Error("navigation failed");
       const payload: OneQuestionPayload = await res.json();
       applyOneQuestionPayload(payload);
+      // Question Navigator immediate-sync follow-up (Part 8) — updates
+      // the CURRENT/ANSWERED/SKIPPED tiles and every tile's
+      // locked/canNavigate state immediately from this same response,
+      // without waiting for the separate GET question-navigator request
+      // the effect below still triggers in the background (Part 8 step 7
+      // — reconciles counts/server-only metadata; never the fast path).
+      setQuestionNav((prev) =>
+        prev
+          ? applyLocalNavigatorTransition(prev, {
+              previousQuestionId,
+              previousAuthoritativeResponse,
+              newQuestionId: payload.question.id,
+              newIndex: payload.currentIndex,
+            })
+          : prev,
+      );
       logClientTetherDiagnostic("QUESTION_NAVIGATION_TIMING", {
         questionProgressMs,
         totalClickToVisibleMs: Math.round(performance.now() - navigationStartedAtMs),
@@ -1544,6 +1590,22 @@ export default function TakeExamPage({
       // Best-effort; never blocks navigation.
       answerDevelopmentCapture.flushNavigation(questionId, response);
       applyOneQuestionPayload(result.payload);
+      // Question Navigator immediate-sync follow-up (Part 8) —
+      // result.authoritativeResponse is correct on BOTH SAVED and
+      // CONFLICT (see resolveSaveAndNavigateAcknowledgement in
+      // useResilientAutosave.ts): on SAVED it's the text we just sent, on
+      // CONFLICT it's the server's own kept text — never the possibly-
+      // rejected local `response` blindly.
+      setQuestionNav((prev) =>
+        prev
+          ? applyLocalNavigatorTransition(prev, {
+              previousQuestionId: questionId,
+              previousAuthoritativeResponse: result.authoritativeResponse,
+              newQuestionId: result.payload.question.id,
+              newIndex: result.payload.currentIndex,
+            })
+          : prev,
+      );
       logClientTetherDiagnostic("QUESTION_NAVIGATION_TIMING", {
         totalClickToVisibleMs: Math.round(performance.now() - navigationStartedAtMs),
         combinedRequest: true,
@@ -1566,16 +1628,39 @@ export default function TakeExamPage({
       setNavigatingQuestion(false);
       return;
     }
-    await requestNavigationOnly(requestedIndex, navigationStartedAtMs);
+    await requestNavigationOnly(requestedIndex, navigationStartedAtMs, questionId, response ?? null);
   }
 
   // Question Navigator v1 — see docs/question-navigator-v1.md. Refreshed
   // after every navigation, flag change, or answer save so counts/states
   // never go stale. Silently no-ops on failure (progress display, not the
   // source of truth for anything security-relevant).
+  //
+  // Question Navigator stale-request guard (Part 9) — this GET has been
+  // physically observed taking 2-3s. A student who navigates quickly
+  // (Q1->Q2->Q3) can have an OLDER request (started for Q1->Q2) resolve
+  // AFTER a newer one (Q2->Q3), which would otherwise regress the
+  // displayed navigator back to a stale Q2 snapshot even though the
+  // student is already looking at Q3. navigatorRequestGenerationRef is a
+  // monotonically increasing token: only the response whose generation
+  // still matches the CURRENT value when it resolves is allowed to call
+  // setQuestionNav — every older, now-superseded response is silently
+  // discarded. A failed/rejected fetch never touches questionNav either,
+  // so the locally-updated (Part 8) navigator is never rolled back by a
+  // background reconciliation failure, and exam progression is
+  // unaffected either way.
   const loadNavigator = useCallback(async () => {
-    const res = await fetch(`/api/submissions/${id}/question-navigator`).catch(() => null);
-    if (res && res.ok) setQuestionNav(await res.json());
+    const generation = ++navigatorRequestGenerationRef.current;
+    try {
+      const res = await fetch(`/api/submissions/${id}/question-navigator`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (generation !== navigatorRequestGenerationRef.current) return;
+      setQuestionNav(data);
+    } catch {
+      // Background reconciliation failure — leave the locally-updated
+      // navigator (Part 8) in place; never affects exam progression.
+    }
   }, [id]);
 
   useEffect(() => {
@@ -1835,12 +1920,70 @@ export default function TakeExamPage({
       }).catch(() => {});
     });
 
+    // Native Display State Bridge (v1.7.6) — pre-commit audit fix. The
+    // live listener is registered FIRST, then the read-only initial query
+    // is issued — never the other way around — so a native transition
+    // that occurs during the query's own IPC round trip is never missed
+    // (the listener is already active by the time that round trip even
+    // starts). This must safely handle both directions: initial OK with
+    // a display connected mid-mount (BLOCKED must win), and initial
+    // BLOCKED with the display disconnected mid-mount (OK must win).
+    //
+    // liveDisplayUpdateReceived guards the INVERSE race: a live push
+    // arriving WHILE the initial query is still in flight, followed by
+    // that query's now-stale snapshot resolving afterward and clobbering
+    // the newer live state. Once any live push has been observed, the
+    // initial query's own result is discarded outright — the live
+    // listener is authoritative from that point on. A plain local
+    // variable (not a ref) is deliberately sufficient here: it is
+    // captured once per effect run by both closures below and never
+    // needs to survive a re-render, only the lifetime of this one
+    // registration.
+    let liveDisplayUpdateReceived = false;
+
+    const unsubscribeDisplayEnforcementState = window.sesLockdown?.onDisplayEnforcementStateChanged?.((status) => {
+      if (cancelled) return;
+      liveDisplayUpdateReceived = true;
+      setDisplayEnforcementStatus(status);
+    });
+
+    // Purely local UI state (drives the blur+modal below only) — never
+    // affects the native decision, the existing integrity-event reporting
+    // above, or the render-time content gate. Catches an already-active
+    // violation on a fresh mount/reload, since the listener above only
+    // ever fires on the NEXT transition.
+    //
+    // Pre-commit audit fix (PR #26) — a REJECTED query must not be
+    // silently ignored: native state could already be BLOCKED before
+    // this renderer mounted, and because live pushes are deduplicated
+    // against the last status, an unchanged BLOCKED state may never fire
+    // another push to recover from — doing nothing here would be a
+    // fail-OPEN presentation gap. On rejection, fail closed with the same
+    // bounded, neutral status TOPOLOGY_CHECK_UNAVAILABLE already uses
+    // (never a fabricated "additional display detected" claim). Still
+    // respects both guards above: a cancelled/unmounted effect, and a
+    // live push that has already superseded this query.
+    window.sesLockdown
+      ?.getDisplayEnforcementStatus?.()
+      .then((status) => {
+        if (cancelled || !status || liveDisplayUpdateReceived) return;
+        setDisplayEnforcementStatus(status);
+      })
+      .catch(() => {
+        if (cancelled || liveDisplayUpdateReceived) return;
+        setDisplayEnforcementStatus(displayStatusOnInitialQueryFailure());
+      });
+
     // Tether Windows Lockdown Hardening v1, Part 4/11 — see
     // lockdownClient.ts's own doc comments for exactly what each
     // transition becomes (a reviewable IntegrityEvent, an informational
-    // one, or nothing at all for WARN_AND_REQUIRE_CLOSE). Registered
-    // once per submission, mirroring onDisplayEnforcementEvent's own
-    // "no remove-listener API" constraint immediately above.
+    // one, or nothing at all for WARN_AND_REQUIRE_CLOSE). Registered once
+    // per submission, mirroring onDisplayEnforcementEvent's own "no
+    // remove-listener API" constraint further above (NOT the Native
+    // Display State Bridge's onDisplayEnforcementStateChanged
+    // immediately above, which — unlike this one — DOES return an
+    // unsubscribe function and IS cleaned up, in this effect's own
+    // return() below).
     window.sesLockdown?.onLockdownCapabilityTransition?.((payload) => {
       if (cancelled) return;
       void reportLockdownCapabilityTransition({
@@ -1893,6 +2036,16 @@ export default function TakeExamPage({
 
     return () => {
       cancelled = true;
+      // Native Display State Bridge (v1.7.6) — pre-commit audit fix.
+      // Removes EXACTLY the one listener this effect run registered
+      // above, unlike onDisplayEnforcementEvent/onLockdownCapabilityTransition/
+      // onRemoteSessionMonitorEvent (which have no removal mechanism at
+      // all, by existing precedent, and instead rely on this effect's own
+      // stable dependency array to avoid re-registering). Without this, a
+      // remount/reload would leave the old callback listening forever
+      // alongside the new one — a stale closure referencing an unmounted
+      // render's setState, and duplicate handling of every future push.
+      unsubscribeDisplayEnforcementState?.();
       // Part 10 — leaving this page (submission finalized, navigation
       // away) is one of the explicit restoration triggers; safe to call
       // even if lockdown enforcement never actually activated this
@@ -4455,12 +4608,15 @@ export default function TakeExamPage({
         {enableExamWatermark && <ExamWatermark student={data.student} submissionId={data.id} />}
         {/* On-Device AI Camera Integrity Detection v1 — local exam-content
             blur, distinct from browser/window blur. Blurred and made
-            non-interactive only while an AI camera violation overlay is
-            active; the modal below is a sibling (not a descendant), so it
-            stays sharp and clickable. See src/lib/aiCameraViolationOverlay.ts. */}
+            non-interactive while an AI camera violation overlay OR the
+            v1.7.6 Native Display State Bridge's display-violation modal
+            is active; each modal is a sibling (not a descendant) of this
+            wrapper, so it stays sharp and clickable. See
+            src/lib/aiCameraViolationOverlay.ts and
+            src/lib/displayViolationOverlay.ts. */}
         <div
-          className={aiCameraViolationOverlay ? "pointer-events-none select-none blur-sm" : undefined}
-          aria-hidden={aiCameraViolationOverlay ? true : undefined}
+          className={aiCameraViolationOverlay || displayViolationModal ? "pointer-events-none select-none blur-sm" : undefined}
+          aria-hidden={aiCameraViolationOverlay || displayViolationModal ? true : undefined}
         >
           {oneQuestionAtATime ? (
             // One-Question-At-A-Time Exam Delivery v1 — see
@@ -4792,6 +4948,31 @@ export default function TakeExamPage({
               >
                 I understand — continue
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Native Display State Bridge (v1.7.6) — see
+            src/lib/displayViolationOverlay.ts. Deliberately no dismiss/
+            continue button: unlike the AI camera overlay above, this
+            reflects a native, verifiable fact (not a probabilistic
+            on-device inference), so it is never locally dismissible while
+            native state remains BLOCKED — it clears itself automatically,
+            with no reload/restart/timer-reset/answer loss, the instant
+            window.sesLockdown reports state:"OK" again. */}
+        {displayViolationModal && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="display-violation-heading"
+          >
+            <div className="w-full max-w-sm rounded border border-gray-300 bg-white p-5 shadow-lg">
+              <p id="display-violation-heading" className="text-base font-semibold">
+                {displayViolationModal.title}
+              </p>
+              <p className="mt-2 text-sm text-gray-700">{displayViolationModal.message}</p>
+              <p className="mt-2 text-sm text-gray-600">{displayViolationModal.note}</p>
             </div>
           </div>
         )}

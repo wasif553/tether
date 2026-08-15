@@ -4,12 +4,21 @@
  * Registers Electron's screen listeners once, at app start, and keeps
  * them live for the whole session (not just a one-shot check at initial
  * page load — see docs/lockdown-browser-known-limitations.md in the
- * main repo for what this replaces). Owns a second, always-on-top
- * BrowserWindow that covers the exam window whenever policy requires a
- * single display and more than one is connected — a security property
- * that must not depend on the hosted web page's own JS/React state
- * being responsive, unlike event REPORTING (see main.ts, which is
- * page-driven and reuses the page's own authenticated fetch).
+ * main repo for what this replaces). Detection and decision-making stay
+ * entirely native — a security property that must not depend on the
+ * hosted web page's own JS/React state being responsive — but student-
+ * facing blocking (v1.7.6, Native Display State Bridge) is no longer a
+ * second native BrowserWindow: physical HDMI-disconnect testing isolated
+ * an unrecoverable-screen symptom (requiring a full OS restart) to this
+ * separate native overlay's recovery path — the precise Windows window/
+ * compositor failure mechanism was never independently established, only
+ * that removing the overlay entirely removes the symptom. This module
+ * now only pushes/serves a
+ * bounded, renderer-facing status (getDisplayEnforcementStatus,
+ * onDisplayStateChanged); the exam content page renders its own
+ * React/DOM blur+modal from it. Event REPORTING (onEventType, below) is
+ * separate and unchanged — page-driven, reusing the page's own
+ * authenticated fetch.
  *
  * This module has zero awareness of exam policy on its own — the
  * Electron main process never fetches or trusts secureSettings/policy
@@ -40,65 +49,43 @@
  * of defense and to satisfy the Windows-topology polling requirement
  * (Part 2 of the corrective pass) via the same code path.
  */
-import { screen, BrowserWindow } from "electron";
+import { screen, type BrowserWindow } from "electron";
 import {
   resolveReadinessGatedDisplayDecision,
   debounceDisplayEvent,
   resolveDisplayDecisionEventType,
-  displayBlockingReasonCopy,
-  isOverlayEligibleBlockingReason,
+  toDisplayEnforcementStatus,
+  displayEnforcementStatusesEqual,
   DEFAULT_DISPLAY_EVENT_DEBOUNCE_MS,
   INITIAL_SECURE_CLIENT_ENFORCEMENT_STATE,
   type DisplayEnforcementState,
   type DisplayDecision,
   type DisplayDecisionEventType,
   type DisplayBlockingReason,
+  type DisplayEnforcementStatus,
   type SecureClientEnforcementState,
 } from "./displayEnforcementLogic";
 import { getWindowsDisplayTopology } from "./windowsDisplayTopology";
 import { classifyWindowsDisplayTopology, type WindowsDisplayTopologyClassification } from "./windowsDisplayTopologyClassifier";
 import { diagnosticLog } from "./diagnosticLog";
 
-// Bundled inline (a data: URL) rather than a separate packaged asset, so
-// the overlay renders even if offline and packaging never needs to know
-// about an extra file. No external requests, no network dependency.
-//
-// v1.7.4 pre-exam readiness — the overlay copy is now a function of the
-// specific DisplayBlockingReason (see displayEnforcementLogic.ts), never
-// a single hardcoded "Additional display connected" string. This is the
-// direct fix for the confirmed BLOCKED==ADDITIONAL_DISPLAY_PRESENT bug:
-// a POLICY_NOT_READY (loading-transition) or TOPOLOGY_CHECK_UNAVAILABLE
-// (inconclusive query) block previously showed the exact same "Additional
-// display connected" text as a genuine second monitor.
-const OVERLAY_HTML = (reason: DisplayBlockingReason) => {
-  const { title, message } = displayBlockingReasonCopy(reason);
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<style>
-  html, body { margin: 0; padding: 0; height: 100%; background: #111827; color: #f9fafb; }
-  body {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    font-family: system-ui, sans-serif; text-align: center; padding: 24px; box-sizing: border-box;
-  }
-  h1 { font-size: 20px; margin: 0 0 12px; }
-  p { font-size: 14px; color: #d1d5db; margin: 0; max-width: 480px; }
-</style>
-</head>
-<body>
-  <h1>${title}</h1>
-  <p>${message}</p>
-</body>
-</html>`;
-};
-
 /** Windows topology transitions may not always produce the same Electron display event — this periodic recheck is the backstop (Part 2 of the corrective pass). */
 const PERIODIC_RECHECK_MS = 2_000;
 
 export type DisplayEnforcementCallbacks = {
-  /** v1.7.4 — eventType is now the reason-aware DisplayDecisionEventType (see displayEnforcementLogic.ts); main.ts maps DISPLAY_CHECK_TECHNICAL_FAILURE to the existing CLIENT_TECHNICAL_FAILURE server event type, never a display-presence claim. */
+  /** v1.7.4 — eventType is now the reason-aware DisplayDecisionEventType (see displayEnforcementLogic.ts); main.ts maps DISPLAY_CHECK_TECHNICAL_FAILURE to the existing CLIENT_TECHNICAL_FAILURE server event type, never a display-presence claim. This is the integrity-EVENT-reporting channel — unrelated to, and unweakened by, onDisplayStateChanged below. */
   onEventType?: (eventType: NonNullable<DisplayDecisionEventType>, displayCount: number) => void;
+  /**
+   * v1.7.6 — Native Display State Bridge. Fired only when the bounded
+   * renderer-facing status actually changes (see
+   * displayEnforcementStatusesEqual) — never on every poll tick, and
+   * never for a POLICY_NOT_READY transition (folded into "OK" by
+   * toDisplayEnforcementStatus). This is the UI-blocking signal; it is
+   * deliberately a separate callback from onEventType above so the
+   * existing integrity-event-reporting semantics are never touched by
+   * this addition.
+   */
+  onDisplayStateChanged?: (status: DisplayEnforcementStatus) => void;
   /** Task A/B — fired whenever this module's own piece of the diagnostic snapshot changes (decision, display count, topology, active target count). main.ts merges this with page-reported context and does its own change comparison before pushing to the panel / appending to the log file. */
   onDiagnosticsChanged?: (snapshot: ReturnType<DisplayEnforcement["getDiagnosticsSnapshot"]>) => void;
 };
@@ -110,7 +97,9 @@ export class DisplayEnforcement {
   private previousDisplayCount: number | null = null;
   private previousTopology: WindowsDisplayTopologyClassification | null = null;
   private previousActiveTargetCount: number | null = null;
-  private overlayWindow: BrowserWindow | null = null;
+  /** v1.7.6 — the last bounded status pushed/returned via the Native Display State Bridge. Distinct from previousDecision above: this is the folded (POLICY_NOT_READY -> OK), renderer-facing shape, tracked separately so a duplicate fold never re-fires onDisplayStateChanged. */
+  private previousStatus: DisplayEnforcementStatus | null = null;
+  /** v1.7.6 — no longer used to position a native overlay (that BrowserWindow no longer exists — see this file's top-of-file doc comment), but the parameter is kept on start()/stop() to avoid an unrelated signature churn across every existing call site (main.ts, tests) for a field this module no longer actually needs. */
   private targetWindow: BrowserWindow | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private evaluateInFlight: Promise<void> | null = null;
@@ -146,7 +135,6 @@ export class DisplayEnforcement {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
-    this.hideOverlay();
     this.targetWindow = null;
   }
 
@@ -219,6 +207,7 @@ export class DisplayEnforcement {
     currentDecision: DisplayEnforcementState;
     /** v1.7.4 — the specific reason the last decision was BLOCKED (null when OK or never evaluated). See displayEnforcementLogic.ts's DisplayBlockingReason. */
     blockingReason: DisplayBlockingReason | null;
+    /** v1.7.6 — field name kept for diagnostic-panel/log continuity; no native overlay BrowserWindow exists any more. Now reports whether the renderer's own display-violation modal should currently be visible (i.e. the folded, POLICY_NOT_READY-excluded bridge status is BLOCKED) — the same student-facing meaning "overlay visible" always had. */
     overlayVisible: boolean;
     lastDisplayCheckAt: string | null;
     lastErrorCode: string | null;
@@ -230,10 +219,59 @@ export class DisplayEnforcement {
       activeWindowsTargetCount: this.previousActiveTargetCount,
       currentDecision: this.previousDecision?.state ?? "OK",
       blockingReason: this.previousDecision?.state === "BLOCKED" ? this.previousDecision.reason : null,
-      overlayVisible: Boolean(this.overlayWindow && !this.overlayWindow.isDestroyed()),
+      overlayVisible: this.previousStatus?.state === "BLOCKED",
       lastDisplayCheckAt: this.lastDisplayCheckAtMs != null ? new Date(this.lastDisplayCheckAtMs).toISOString() : null,
       lastErrorCode: this.lastErrorCode,
     };
+  }
+
+  /**
+   * v1.7.6 — Native Display State Bridge, read-only query. Lets a
+   * renderer that just mounted or reloaded pick up an ALREADY-active
+   * display violation immediately, instead of only ever learning about
+   * state changes going forward (which onDisplayStateChanged alone
+   * cannot provide — it only fires on the next transition). Returns the
+   * same bounded {state, reason, displayCount} shape pushed by that
+   * callback; never EDID, monitor serial numbers, Windows display paths,
+   * hardware identifiers, or display names. Falls back to state:"OK"
+   * before the very first evaluate() has completed (the brief window
+   * between start() being called and its initial, non-debounced
+   * evaluation resolving) — the same fail-safe-for-UI-purposes default
+   * the native overlay implicitly had (no overlay existed until the
+   * first evaluateNow() resolved either).
+   */
+  getDisplayEnforcementStatus(): DisplayEnforcementStatus {
+    return this.previousStatus ?? { state: "OK", reason: null, displayCount: this.getCurrentDisplayCount() };
+  }
+
+  /**
+   * Pre-commit audit fix (PR #26) — the plain read above returns whatever
+   * this module already happens to know, which can itself be stale, or
+   * (before the very first evaluate() has ever completed) the fail-open
+   * default. The renderer's INITIAL IPC query needs a genuinely fresh
+   * result: because live pushes are deduplicated against the last status
+   * (see evaluateNow()'s displayEnforcementStatusesEqual check), a
+   * state that was already BLOCKED before the renderer mounted may never
+   * produce another push while it remains unchanged — a plain cached (or
+   * fail-open-default) read here would leave a freshly-mounted renderer
+   * showing nothing even though native detection remains BLOCKED.
+   *
+   * Reuses the exact same evaluate() serialization every other caller
+   * already relies on: bypasses the raw-event debounce (an explicit
+   * on-demand check must never be silently dropped for arriving too soon
+   * after an unrelated OS event — see evaluate()'s own doc comment), and
+   * if an evaluation is already in flight (e.g. the periodic timer just
+   * fired), awaits that SAME evaluation rather than starting a second,
+   * competing native topology query. No decision logic, event semantics,
+   * topology classifier, or polling interval is touched — this only
+   * forces the EXISTING pipeline to run once, synchronously with respect
+   * to the caller, before resolving. Never toggles anything (there is no
+   * overlay any more to toggle); read-only from the caller's
+   * perspective, exactly like getOnDemandDisplayTopology() above.
+   */
+  async getFreshDisplayEnforcementStatus(): Promise<DisplayEnforcementStatus> {
+    await this.evaluate({ bypassDebounce: true });
+    return this.previousStatus ?? { state: "OK", reason: null, displayCount: this.getCurrentDisplayCount() };
   }
 
   /**
@@ -343,13 +381,35 @@ export class DisplayEnforcement {
       previousDecision: this.previousDecision,
     });
 
-    // v1.7.5 P0 — POLICY_NOT_READY must never produce the screen-saver-
-    // level native overlay (see isOverlayEligibleBlockingReason's own doc
-    // comment). The decision itself is still recorded as BLOCKED for
-    // diagnostics/event-suppression purposes below — only the VISIBLE
-    // overlay is suppressed for this one reason.
-    if (nextDecision.state === "BLOCKED" && isOverlayEligibleBlockingReason(nextDecision.reason)) this.showOverlay(nextDecision.reason);
-    else this.hideOverlay();
+    // v1.7.6 — Native Display State Bridge. No second, always-on-top
+    // trapping BrowserWindow is created for a display-policy violation
+    // any more (see this file's top-of-file doc comment for why —
+    // physical testing isolated an unrecoverable-screen symptom to that
+    // overlay's recovery path; the precise Windows compositor mechanism
+    // was never independently established). Student-facing blocking is
+    // now entirely renderer-based: toDisplayEnforcementStatus folds
+    // POLICY_NOT_READY into "OK" (that transient loading/verification
+    // state is handled by the exam page's existing content gate, never a
+    // display-violation modal) exactly as isOverlayEligibleBlockingReason
+    // used to gate the old overlay. The push is deduped against the last
+    // status so repeated/duplicate OS events never produce duplicate UI
+    // state for the renderer.
+    // The very first evaluation ever (previousStatus still null — this
+    // module starts running at app boot, long before any exam page has
+    // mounted or registered a listener) only pushes if it is already
+    // BLOCKED, mirroring resolveDisplayDecisionEventType's own established
+    // "first transition into BLOCKED still fires, first transition into
+    // OK does not" convention just below. An initial OK has nothing for a
+    // not-yet-listening renderer to usefully receive — a fresh mount/
+    // reload instead relies on getDisplayEnforcementStatus()'s read-only
+    // query, which is authoritative regardless of whether a push was ever
+    // sent.
+    const nextStatus = toDisplayEnforcementStatus(nextDecision, displayCount);
+    const statusChanged = this.previousStatus ? !displayEnforcementStatusesEqual(this.previousStatus, nextStatus) : nextStatus.state === "BLOCKED";
+    if (statusChanged) {
+      this.callbacks.onDisplayStateChanged?.(nextStatus);
+    }
+    this.previousStatus = nextStatus;
 
     if (eventType) this.callbacks.onEventType?.(eventType, displayCount);
 
@@ -366,47 +426,5 @@ export class DisplayEnforcement {
     this.previousActiveTargetCount = classification.activeTargetCount;
 
     if (changed) this.callbacks.onDiagnosticsChanged?.(this.getDiagnosticsSnapshot());
-  }
-
-  private showOverlay(reason: DisplayBlockingReason): void {
-    if (!this.targetWindow || this.targetWindow.isDestroyed()) return;
-    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-      this.overlayWindow.webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(OVERLAY_HTML(reason))}`);
-      this.overlayWindow.show();
-      diagnosticLog("overlay: show (already existed)", { result: "shown", reason });
-      return;
-    }
-    const bounds = this.targetWindow.getBounds();
-    const overlay = new BrowserWindow({
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-      frame: false,
-      alwaysOnTop: true,
-      resizable: false,
-      movable: false,
-      minimizable: false,
-      maximizable: false,
-      closable: false,
-      skipTaskbar: true,
-      autoHideMenuBar: true,
-      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
-    });
-    overlay.setAlwaysOnTop(true, "screen-saver");
-    overlay.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(OVERLAY_HTML(reason))}`);
-    overlay.on("closed", () => {
-      if (this.overlayWindow === overlay) this.overlayWindow = null;
-    });
-    this.overlayWindow = overlay;
-    diagnosticLog("overlay: create", { result: "created", bounds: { width: bounds.width, height: bounds.height } });
-  }
-
-  private hideOverlay(): void {
-    if (this.overlayWindow && !this.overlayWindow.isDestroyed()) {
-      this.overlayWindow.close();
-      diagnosticLog("overlay: hide", { result: "closed" });
-    }
-    this.overlayWindow = null;
   }
 }

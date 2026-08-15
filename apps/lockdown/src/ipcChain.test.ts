@@ -140,31 +140,57 @@ describe("IPC chain hop 4: displayEnforcement stores the policy and evaluate() r
   });
 });
 
-describe("IPC chain hop 5: the overlay BrowserWindow is created and shown", () => {
-  it("evaluateNow shows the overlay on BLOCKED (except POLICY_NOT_READY) and hides it otherwise", () => {
+describe("IPC chain hop 5: the Native Display State Bridge (v1.7.6) replaces the old overlay BrowserWindow", () => {
+  // v1.7.6 — physical HDMI-disconnect testing isolated an unrecoverable-
+  // screen symptom (requiring a full OS restart) to the previous
+  // screen-saver-level, non-closable overlay BrowserWindow's recovery
+  // path — the precise Windows window/compositor failure mechanism was
+  // never independently established, only that removing the overlay
+  // entirely removes the symptom; detection itself was confirmed correct
+  // throughout. Student-facing blocking is now entirely renderer-based (see
+  // src/lib/displayViolationOverlay.ts) — this module only pushes/serves
+  // a bounded status. Detection/decision computation (everything BEFORE
+  // this point in evaluateNow) is unchanged.
+  it("evaluateNow no longer shows/hides a native overlay — it pushes the bounded status via onDisplayStateChanged instead", () => {
     const evaluateNow = displayEnforcementSource.slice(
       displayEnforcementSource.indexOf("private async evaluateNow"),
-      displayEnforcementSource.indexOf("private showOverlay"),
+      displayEnforcementSource.lastIndexOf("}"),
     );
-    // v1.7.4 pre-exam readiness — showOverlay now takes the specific
-    // DisplayBlockingReason (never a hardcoded, reason-blind overlay).
-    // v1.7.5 P0 — isOverlayEligibleBlockingReason additionally excludes
-    // POLICY_NOT_READY from ever reaching showOverlay at all (see
-    // displayEnforcementLogic.test.ts / displayEnforcement.test.ts for
-    // the full regression coverage).
-    expect(evaluateNow).toMatch(
-      /if \(nextDecision\.state === "BLOCKED" && isOverlayEligibleBlockingReason\(nextDecision\.reason\)\) this\.showOverlay\(nextDecision\.reason\);/,
-    );
-    expect(evaluateNow).toMatch(/else this\.hideOverlay\(\);/);
+    expect(evaluateNow).not.toMatch(/this\.showOverlay\(/);
+    expect(evaluateNow).not.toMatch(/this\.hideOverlay\(/);
+    expect(evaluateNow).toMatch(/const nextStatus = toDisplayEnforcementStatus\(nextDecision, displayCount\);/);
+    expect(evaluateNow).toMatch(/this\.callbacks\.onDisplayStateChanged\?\.\(nextStatus\);/);
   });
 
-  it("showOverlay actually constructs a new BrowserWindow (not a no-op stub)", () => {
-    const showOverlay = displayEnforcementSource.slice(
-      displayEnforcementSource.indexOf("private showOverlay"),
-      displayEnforcementSource.indexOf("private hideOverlay"),
+  it("no second native overlay BrowserWindow is ever constructed — showOverlay/hideOverlay/overlayWindow/screen-saver-level no longer exist in this module", () => {
+    expect(displayEnforcementSource).not.toMatch(/showOverlay/);
+    expect(displayEnforcementSource).not.toMatch(/hideOverlay/);
+    expect(displayEnforcementSource).not.toMatch(/overlayWindow/);
+    expect(displayEnforcementSource).not.toMatch(/screen-saver/);
+    expect(displayEnforcementSource).not.toMatch(/new BrowserWindow\(/);
+  });
+
+  it("the bounded status push is deduped against the last status — repeated/duplicate OS events never produce duplicate UI state", () => {
+    const evaluateNow = displayEnforcementSource.slice(
+      displayEnforcementSource.indexOf("private async evaluateNow"),
+      displayEnforcementSource.lastIndexOf("}"),
     );
-    expect(showOverlay).toMatch(/new BrowserWindow\(\{/);
-    expect(showOverlay).toMatch(/overlay\.loadURL\(/);
+    expect(evaluateNow).toMatch(
+      /this\.previousStatus \? !displayEnforcementStatusesEqual\(this\.previousStatus, nextStatus\) : nextStatus\.state === "BLOCKED"/,
+    );
+    expect(evaluateNow).toMatch(/if \(statusChanged\) \{/);
+  });
+
+  // v1.7.6 pre-commit audit fix (PR #26) — the IPC handler must call the
+  // FRESH-evaluating method, not a plain cached read, so an already-
+  // BLOCKED native state that predates the renderer's initial query can
+  // never be silently reported as OK. See displayEnforcement.test.ts's
+  // own "getFreshDisplayEnforcementStatus()" describe block for the
+  // behavioral coverage of the method itself.
+  it("lockdown:get-display-enforcement-status calls getFreshDisplayEnforcementStatus(), not the plain cached getDisplayEnforcementStatus()", () => {
+    expect(mainSource).toMatch(
+      /ipcMain\.handle\("lockdown:get-display-enforcement-status",\s*\(\)\s*=>\s*displayEnforcement\.getFreshDisplayEnforcementStatus\(\)\);/,
+    );
   });
 });
 

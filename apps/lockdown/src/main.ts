@@ -35,7 +35,13 @@ import { DisplayEnforcement } from "./displayEnforcement";
 import { resolveStartupLoadUrl, parseExamIdFromDeepLinkUrl, findDeepLinkArg, resolveInitialExamIdFromArgv } from "./lockdownStartupRouting";
 import { handleDisplayMediaRequest, type ScreenShareSource } from "./screenShareRequestHandler";
 import { ensureInstallationKey, getInstallationInfo, signWithInstallationKey, type InstallationKeyStoreSchema } from "./installationKey";
-import { resolveCombinedDisplayDecision, type DisplayDecisionEventType, type DisplayBlockingReason, type SecureClientEnforcementState } from "./displayEnforcementLogic";
+import {
+  resolveCombinedDisplayDecision,
+  type DisplayDecisionEventType,
+  type DisplayBlockingReason,
+  type DisplayEnforcementStatus,
+  type SecureClientEnforcementState,
+} from "./displayEnforcementLogic";
 import {
   isDiagnosticsPanelEnabled,
   snapshotsEqualIgnoringTimestamp,
@@ -106,6 +112,14 @@ const store = new Store<StoreSchema>({
 const displayEnforcement = new DisplayEnforcement({
   onEventType: (eventType: NonNullable<DisplayDecisionEventType>, displayCount: number) => {
     runOnWindowBestEffort(mainWindow, (window) => window.webContents.send("lockdown:display-enforcement-event", { eventType, displayCount }));
+  },
+  // v1.7.6 — Native Display State Bridge. Separate from onEventType above
+  // (which only ever fires for integrity-event reporting); this pushes
+  // the bounded {state, reason, displayCount} the exam page's own
+  // display-violation modal renders from, replacing the old trapping
+  // BrowserWindow overlay.
+  onDisplayStateChanged: (status: DisplayEnforcementStatus) => {
+    runOnWindowBestEffort(mainWindow, (window) => window.webContents.send("lockdown:display-enforcement-state-changed", status));
   },
   onDiagnosticsChanged: () => maybeEmitDiagnostics(),
 });
@@ -791,6 +805,21 @@ ipcMain.on("lockdown:set-secure-client-enforcement-state", (_event, state: unkno
 ipcMain.handle("lockdown:get-secure-client-enforcement-state", () => displayEnforcement.getDiagnosticsSnapshot().enforcementState);
 
 ipcMain.handle("lockdown:get-display-count", () => displayEnforcement.getCurrentDisplayCount());
+
+// v1.7.6 — Native Display State Bridge, read-only initial query. Lets the
+// exam page's display-violation modal pick up an ALREADY-active violation
+// immediately on mount/reload, instead of only ever learning about state
+// changes going forward (the lockdown:display-enforcement-state-changed
+// push, wired from displayEnforcement's onDisplayStateChanged callback
+// near the top of this file, only ever fires on the NEXT transition).
+//
+// Pre-commit audit fix (PR #26) — calls getFreshDisplayEnforcementStatus()
+// (awaits/reuses a real evaluation, serialized with any already-in-flight
+// one) rather than a plain cached read: an already-BLOCKED native state
+// that predates this renderer mounting could otherwise never be observed,
+// since live pushes are deduplicated against the last status and a state
+// that stays BLOCKED unchanged may never fire another one.
+ipcMain.handle("lockdown:get-display-enforcement-status", () => displayEnforcement.getFreshDisplayEnforcementStatus());
 
 // Tether System Check and Exam Readiness v1 — see
 // docs/tether-system-check-v1.md. Four narrowly scoped, read-only
