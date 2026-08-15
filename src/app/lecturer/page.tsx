@@ -38,6 +38,17 @@ const RECENT_CLOSED_LIMIT = 5;
 // stays reachable via "Show all N exams" (see ReviewQueue below).
 const REVIEW_QUEUE_INITIAL_LIMIT = 6;
 
+// Final dashboard polish pass — one shared helper for every "N thing(s)"
+// label in the dashboard (submissions, questions, signals, the review
+// queue's own exam count), instead of duplicating the same singular/
+// plural ternary at each call site. `toLocaleString()` adds thousands
+// separators for large counts (e.g. needsReviewCount) and is a no-op for
+// small ones (`(5).toLocaleString() === "5"`), so it's safe to apply
+// everywhere uniformly — never abbreviates, always the exact count.
+function countLabel(count: number, singular: string, plural: string = `${singular}s`): string {
+  return `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
+}
+
 export default function LecturerDashboard() {
   const [exams, setExams] = useState<ExamSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -199,7 +210,7 @@ export default function LecturerDashboard() {
       )}
 
       {!loading && !loadError && exams.length > 0 && (
-        <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
           <DashboardMetric label="Active" value={summary.active} accent="success" />
           <DashboardMetric label="Upcoming" value={summary.upcoming} accent="info" />
           <DashboardMetric label="Needs review" value={summary.needsReview} accent={summary.needsReview > 0 ? "warning" : "neutral"} />
@@ -207,7 +218,7 @@ export default function LecturerDashboard() {
         </div>
       )}
 
-      <div className="mt-8 space-y-10">
+      <div className="mt-6 space-y-8">
         {loading && <p className="text-sm text-[#667085]">Loading exams…</p>}
 
         {!loading && loadError && (
@@ -244,7 +255,7 @@ export default function LecturerDashboard() {
             <SectionHeader title="Active" />
             <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
               {active.map((exam) => (
-                <ExamCard key={exam.id} exam={exam} />
+                <ExamCard key={exam.id} exam={exam} action="Open →" />
               ))}
             </div>
           </section>
@@ -266,7 +277,7 @@ export default function LecturerDashboard() {
             <SectionHeader title="Drafts" muted />
             <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
               {draft.map((exam) => (
-                <ExamCard key={exam.id} exam={exam} variant="muted" />
+                <ExamCard key={exam.id} exam={exam} variant="muted" action="Continue editing →" />
               ))}
             </div>
           </section>
@@ -413,12 +424,12 @@ function DashboardMetric({
   );
 }
 
-function SectionHeader({ title, count, subtitle, muted }: { title: string; count?: number; subtitle?: string; muted?: boolean }) {
+function SectionHeader({ title, badge, subtitle, muted }: { title: string; badge?: string; subtitle?: string; muted?: boolean }) {
   return (
     <div>
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h2 className={muted ? "text-sm font-semibold text-[#667085]" : "text-lg font-semibold text-[#101828]"}>{title}</h2>
-        {count != null && <span className="text-sm text-[#667085]">{count}</span>}
+        {badge && <span className="text-sm font-medium text-[#667085]">{badge}</span>}
       </div>
       {subtitle && <p className="mt-0.5 text-sm text-[#667085]">{subtitle}</p>}
     </div>
@@ -440,14 +451,18 @@ function ReviewQueue({ exams }: { exams: ExamSummary[] }) {
 
   return (
     <section>
-      <SectionHeader title="Needs your attention" count={exams.length} subtitle="Integrity signals awaiting lecturer review." />
+      <SectionHeader
+        title="Needs your attention"
+        badge={countLabel(exams.length, "exam")}
+        subtitle="Integrity signals awaiting lecturer review."
+      />
 
       <div className="mt-3 overflow-hidden rounded-xl border border-[#E4E7EC] border-l-4 border-l-[#D97706] bg-white">
         <div className={`hidden border-b border-[#E4E7EC] bg-[#F7F8FA] px-4 py-2 text-xs font-medium uppercase tracking-wide text-[#667085] ${REVIEW_COLUMNS}`}>
           <span>Exam / course</span>
           <span>Status</span>
           <span>Submissions</span>
-          <span>Signals</span>
+          <span>Integrity signals</span>
           <span className="text-right">Action</span>
         </div>
         <ul className="divide-y divide-[#E4E7EC]">
@@ -464,7 +479,7 @@ function ReviewQueue({ exams }: { exams: ExamSummary[] }) {
             onClick={() => setShowAll((v) => !v)}
             className="rounded text-sm font-medium text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
           >
-            {showAll ? "Show fewer" : `Show all ${exams.length} exams`}
+            {showAll ? "Show fewer" : `Show all ${countLabel(exams.length, "exam")}`}
           </button>
         </div>
       )}
@@ -481,7 +496,7 @@ function ReviewRow({ exam }: { exam: ExamSummary }) {
         className={`block px-4 py-3 hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#2563EB] ${REVIEW_COLUMNS}`}
       >
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-[#101828]">{exam.title}</p>
+          <p className="truncate text-sm font-semibold text-[#101828]">{exam.title}</p>
           {exam.course && (
             <p className="truncate text-xs text-[#667085]">
               {exam.course.code} — {exam.course.name}
@@ -491,10 +506,10 @@ function ReviewRow({ exam }: { exam: ExamSummary }) {
         <div className="mt-2 md:mt-0">
           <StatusPill status={status} />
         </div>
-        <div className="mt-2 text-sm text-[#667085] md:mt-0">{exam._count.submissions} submissions</div>
+        <div className="mt-2 text-sm text-[#667085] md:mt-0">{countLabel(exam._count.submissions, "submission")}</div>
         <div className="mt-2 md:mt-0">
           <span className="inline-flex items-center rounded-full bg-[#FEF3C7] px-2 py-0.5 text-xs font-medium text-[#92400E]">
-            {exam.needsReviewCount} {exam.needsReviewCount === 1 ? "signal" : "signals"}
+            {countLabel(exam.needsReviewCount, "signal")}
           </span>
         </div>
         <div className="mt-2 md:mt-0 md:text-right">
@@ -520,7 +535,11 @@ function StatusPill({ status }: { status: LecturerAvailabilityStatus }) {
 // cheaply available from the single aggregate query, one status pill) —
 // no per-exam extra DB round trip. `variant="muted"` visually
 // de-emphasizes drafts/closed exams.
-function ExamCard({ exam, variant = "default" }: { exam: ExamSummary; variant?: "default" | "muted" }) {
+// `action`, when given, renders a subtle right-aligned affordance (e.g.
+// "Open →", "Continue editing →") so it's clear the whole card is
+// clickable — never a second link/destination, purely a visual hint on
+// the SAME existing /lecturer/exams/${exam.id} link.
+function ExamCard({ exam, variant = "default", action }: { exam: ExamSummary; variant?: "default" | "muted"; action?: string }) {
   const status = lecturerAvailabilityStatus(exam);
   const muted = variant === "muted";
 
@@ -542,9 +561,12 @@ function ExamCard({ exam, variant = "default" }: { exam: ExamSummary; variant?: 
         </div>
         <StatusPill status={status} />
       </div>
-      <p className="mt-2 text-xs text-[#667085]">
-        {exam._count.questions} questions · {exam.durationMins} min · {exam._count.submissions} submissions
-      </p>
+      <div className="mt-2 flex items-end justify-between gap-3">
+        <p className="text-xs text-[#667085]">
+          {countLabel(exam._count.questions, "question")} · {exam.durationMins} min · {countLabel(exam._count.submissions, "submission")}
+        </p>
+        {action && <span className="shrink-0 text-xs font-medium text-[#2563EB]">{action}</span>}
+      </div>
     </Link>
   );
 }
