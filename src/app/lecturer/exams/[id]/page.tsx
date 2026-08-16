@@ -38,6 +38,10 @@ import {
   applyMandatoryFinalExaminationPolicy,
   type AssessmentType,
 } from "@/lib/assessmentType";
+import {
+  lecturerAvailabilityStatus,
+  type LecturerAvailabilityStatus,
+} from "@/lib/lecturerDashboardGrouping";
 
 type Question = {
   id: string;
@@ -230,6 +234,51 @@ type LtiPlatformOption = {
   issuer: string;
 };
 
+// Exam Workspace UI v1 (Pass 1 — shell/navigation only). Purely a
+// presentation grouping of sections that already exist further down this
+// same file — no new routes, no new API calls, nothing removed.
+type WorkspaceTab = "overview" | "security" | "questions" | "delivery" | "integrations";
+
+const WORKSPACE_TABS: { id: WorkspaceTab; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "security", label: "Security" },
+  { id: "questions", label: "Questions" },
+  { id: "delivery", label: "Access & delivery" },
+  { id: "integrations", label: "Integrations" },
+];
+
+function countLabel(count: number, singular: string, plural: string = `${singular}s`): string {
+  return `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
+}
+
+const AVAILABILITY_PILL_STYLES: Record<LecturerAvailabilityStatus, string> = {
+  Open: "bg-[#ECFDF3] text-[#067647]",
+  Scheduled: "bg-[#EFF6FF] text-[#1D4ED8]",
+  Draft: "bg-[#F2F4F7] text-[#667085]",
+  Closed: "bg-[#F2F4F7] text-[#667085]",
+};
+
+function ExamMetric({
+  label,
+  value,
+  accent = "neutral",
+}: {
+  label: string;
+  value: string | number;
+  accent?: "neutral" | "warning";
+}) {
+  return (
+    <div
+      className={`rounded-xl border p-4 ${
+        accent === "warning" ? "border-[#FEDF89] bg-[#FFFAEB]" : "border-[#E4E7EC] bg-white"
+      }`}
+    >
+      <p className="text-xs font-medium text-[#667085]">{label}</p>
+      <p className="mt-1 text-2xl font-bold text-[#101828]">{value}</p>
+    </div>
+  );
+}
+
 export default function LecturerExamPage({
   params,
 }: {
@@ -240,6 +289,11 @@ export default function LecturerExamPage({
   const [exam, setExam] = useState<Exam | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Exam Workspace UI v1 (Pass 1) — which workspace tab is showing. All
+  // tab panels stay mounted (see `hidden` below) so switching tabs never
+  // resets any of the form state further down this component.
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("overview");
 
   const [secureForm, setSecureForm] = useState<SecureSettings | null>(null);
   // Exam Design Policy v1 — see docs/exam-design-policy-v1.md. Holds a
@@ -975,55 +1029,59 @@ export default function LecturerExamPage({
   // follow automatically and cannot be downgraded through this form.
   const isFinalExamLocked = secureForm?.assessmentType === "FINAL_EXAMINATION";
 
+  // Exam Workspace UI v1 (Pass 1) — derived purely from data already
+  // loaded on this page. lecturerAvailabilityStatus is the SAME
+  // Draft/Scheduled/Open/Closed classification the Lecturer Dashboard
+  // already uses, so the workspace header never invents new lifecycle
+  // vocabulary.
+  const workspaceAvailabilityStatus = lecturerAvailabilityStatus({
+    published: exam.published,
+    availableFrom: exam.availableFrom,
+    availableUntil: exam.availableUntil,
+    needsReviewCount: unresolvedHighRisk ?? 0,
+  });
+  const workspaceCourse = exam.courseId ? courses.find((c) => c.id === exam.courseId) : undefined;
+  const workspaceAvailabilityLine = (() => {
+    if (workspaceAvailabilityStatus === "Draft") {
+      return "Not published — students cannot access this exam yet.";
+    }
+    if (workspaceAvailabilityStatus === "Scheduled") {
+      return exam.availableFrom ? `Opens ${new Date(exam.availableFrom).toLocaleString()}.` : "Scheduled.";
+    }
+    if (workspaceAvailabilityStatus === "Closed") {
+      return exam.availableUntil
+        ? `Closed — was available until ${new Date(exam.availableUntil).toLocaleString()}.`
+        : "Closed.";
+    }
+    return exam.availableUntil
+      ? `Open now — closes ${new Date(exam.availableUntil).toLocaleString()}.`
+      : "Open now — no closing date set.";
+  })();
+
   return (
-    <div className="mx-auto max-w-3xl">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">{exam.title}</h1>
-        <div className="flex gap-2">
-          <Link
-            href={`/lecturer/exams/${id}/submissions`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            Submissions
-          </Link>
-          <Link
-            href={`/lecturer/exams/${id}/analytics`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            View analytics
-          </Link>
-          <Link
-            href={`/lecturer/exams/${id}/integrity`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            Review integrity events
-          </Link>
-          <Link
-            href={`/lecturer/exams/${id}/similarity`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            Similarity review
-          </Link>
-          <Link
-            href={`/lecturer/exams/${id}/collusion-analysis`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            Cohort integrity analysis
-          </Link>
-          <Link
-            href={`/lecturer/exams/${id}/import-questions`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            Import from question bank
-          </Link>
+    <div className="mx-auto max-w-7xl">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <h1 className="truncate text-2xl font-semibold text-[#101828] sm:text-3xl">{exam.title}</h1>
+          <p className="mt-1.5 flex flex-wrap items-center gap-2 text-sm text-[#667085]">
+            <span>{workspaceCourse ? `${workspaceCourse.code} — ${workspaceCourse.name}` : "No course assigned"}</span>
+            <span
+              className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${AVAILABILITY_PILL_STYLES[workspaceAvailabilityStatus]}`}
+            >
+              {workspaceAvailabilityStatus}
+            </span>
+          </p>
+          <p className="mt-1 text-sm text-[#667085]">{workspaceAvailabilityLine}</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
           {exam.questions.some((q) => q.type === "ESSAY") && hasUngradedSubmissions && (
             <button
               onClick={handleMarkEssays}
               disabled={markingEssays}
-              className="flex items-center gap-2 rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+              className="flex items-center gap-2 rounded-lg border border-[#E4E7EC] bg-white px-4 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2 disabled:opacity-50"
             >
               {markingEssays && (
-                <span className="h-3 w-3 animate-spin rounded-full border-2 border-gray-400 border-t-transparent" />
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-[#98A2B3] border-t-transparent" />
               )}
               {markingEssays ? "Marking..." : "Mark essays with AI"}
             </button>
@@ -1032,83 +1090,228 @@ export default function LecturerExamPage({
             onClick={togglePublish}
             className={
               exam.published
-                ? "rounded bg-gray-200 px-3 py-1.5 text-sm"
-                : "rounded bg-black px-3 py-1.5 text-sm text-white"
+                ? "rounded-lg border border-[#E4E7EC] bg-white px-4 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
+                : "rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
             }
           >
             {exam.published ? "Unpublish" : "Publish"}
           </button>
         </div>
       </div>
-      <p className="text-sm text-gray-500">{exam.durationMins} minutes</p>
-      <div className="mt-4 rounded border border-gray-200 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-sm font-medium">
-              {exam.marksReleasedAt ? "Marks released" : "Marks not released"}
-            </p>
-            <p className="text-sm text-gray-500">
-              {exam.marksReleasedAt
-                ? `Released ${new Date(exam.marksReleasedAt).toLocaleString()}`
-                : "Students cannot see scores or feedback until marks are released."}
-            </p>
-          </div>
-          {exam.marksReleasedAt ? (
-            <button
-              type="button"
-              onClick={handleHideMarks}
-              disabled={savingMarksRelease}
-              className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
-            >
-              {savingMarksRelease ? "Saving..." : "Hide marks from students"}
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={handleReleaseMarks}
-              disabled={savingMarksRelease}
-              className="rounded bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
-            >
-              {savingMarksRelease ? "Saving..." : "Release marks to students"}
-            </button>
-          )}
-        </div>
-        {marksReleaseMessage && (
-          <p className="mt-2 text-sm text-gray-600">{marksReleaseMessage}</p>
-        )}
-      </div>
-      {markEssaysMessage && <p className="mt-2 text-sm text-gray-600">{markEssaysMessage}</p>}
+      {markEssaysMessage && <p className="mt-2 text-sm text-[#667085]">{markEssaysMessage}</p>}
 
-      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <div className="rounded border border-gray-200 p-3">
-          <p className="text-xs uppercase text-gray-500">Safe Exam Mode</p>
-          <p className="mt-1 text-sm">
-            {exam.secureSettings.secureModeEnabled ? "Enabled" : "Disabled"}
-          </p>
-        </div>
-        <div className="rounded border border-gray-200 p-3">
-          <p className="text-xs uppercase text-gray-500">Submissions</p>
-          <p className="mt-1 text-sm">
-            {submissionCounts ? `${submissionCounts.total} total` : "—"}
-          </p>
-        </div>
-        <div className="rounded border border-gray-200 p-3">
-          <p className="text-xs uppercase text-gray-500">Pending grading</p>
-          <p className="mt-1 text-sm">{submissionCounts ? submissionCounts.submitted : "—"}</p>
-        </div>
-        <div className="rounded border border-gray-200 p-3">
-          <p className="text-xs uppercase text-gray-500">Unresolved high-risk events</p>
-          <p className={`mt-1 text-sm ${unresolvedHighRisk ? "text-red-600" : ""}`}>
-            {unresolvedHighRisk != null ? unresolvedHighRisk : "—"}
-          </p>
+      <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <ExamMetric label="Questions" value={exam.questions.length} />
+        <ExamMetric label="Submissions" value={submissionCounts ? submissionCounts.total : "—"} />
+        <ExamMetric
+          label="Needs review"
+          value={unresolvedHighRisk != null ? unresolvedHighRisk : "—"}
+          accent={unresolvedHighRisk ? "warning" : "neutral"}
+        />
+        <ExamMetric label="Duration" value={`${exam.durationMins} min`} />
+      </div>
+
+      <div
+        role="tablist"
+        aria-label="Exam workspace sections"
+        className="mt-6 flex gap-1 overflow-x-auto border-b border-[#E4E7EC]"
+        onKeyDown={(e) => {
+          if (e.key !== "ArrowRight" && e.key !== "ArrowLeft" && e.key !== "Home" && e.key !== "End") return;
+          e.preventDefault();
+          const currentIndex = WORKSPACE_TABS.findIndex((t) => t.id === activeTab);
+          let nextIndex = currentIndex;
+          if (e.key === "ArrowRight") nextIndex = (currentIndex + 1) % WORKSPACE_TABS.length;
+          if (e.key === "ArrowLeft") nextIndex = (currentIndex - 1 + WORKSPACE_TABS.length) % WORKSPACE_TABS.length;
+          if (e.key === "Home") nextIndex = 0;
+          if (e.key === "End") nextIndex = WORKSPACE_TABS.length - 1;
+          const nextTab = WORKSPACE_TABS[nextIndex];
+          setActiveTab(nextTab.id);
+          document.getElementById(`workspace-tab-${nextTab.id}`)?.focus();
+        }}
+      >
+        {WORKSPACE_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            id={`workspace-tab-${tab.id}`}
+            aria-selected={activeTab === tab.id}
+            aria-controls={`workspace-panel-${tab.id}`}
+            tabIndex={activeTab === tab.id ? 0 : -1}
+            onClick={() => setActiveTab(tab.id)}
+            className={`shrink-0 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] ${
+              activeTab === tab.id
+                ? "border-[#2563EB] text-[#2563EB]"
+                : "border-transparent text-[#667085] hover:text-[#101828]"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div
+        id="workspace-panel-overview"
+        role="tabpanel"
+        aria-labelledby="workspace-tab-overview"
+        hidden={activeTab !== "overview"}
+        className="mt-6"
+      >
+        <div className="grid gap-6 lg:grid-cols-3">
+          <div className="space-y-6 lg:col-span-2">
+            <section className="rounded-xl border border-[#E4E7EC] bg-white p-5">
+              <h2 className="text-base font-semibold text-[#101828]">Exam status</h2>
+              <dl className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <div>
+                  <dt className="text-xs font-medium text-[#667085]">Lifecycle</dt>
+                  <dd className="mt-1 text-sm font-medium text-[#101828]">
+                    {exam.published ? "Published" : "Draft"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-medium text-[#667085]">Safe Exam Mode</dt>
+                  <dd className="mt-1 text-sm font-medium text-[#101828]">{safeModeStatus}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-medium text-[#667085]">Pending grading</dt>
+                  <dd className="mt-1 text-sm font-medium text-[#101828]">
+                    {submissionCounts ? submissionCounts.submitted : "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-medium text-[#667085]">Marks released</dt>
+                  <dd className="mt-1 text-sm font-medium text-[#101828]">
+                    {exam.marksReleasedAt ? "Yes" : "No"}
+                  </dd>
+                </div>
+              </dl>
+            </section>
+
+            <section className="rounded-xl border border-[#E4E7EC] bg-white p-5">
+              <h2 className="text-base font-semibold text-[#101828]">Availability</h2>
+              <p className="mt-2 text-sm text-[#667085]">{workspaceAvailabilityLine}</p>
+              <p className="mt-1 text-sm text-[#667085]">
+                {workspaceCourse
+                  ? `Assigned to ${workspaceCourse.code} — ${workspaceCourse.name}.`
+                  : "Not assigned to a course — visible institution-wide."}
+              </p>
+              <p className="mt-3 text-xs text-[#98A2B3]">
+                To change dates, course assignment, or the access code, use the Access &amp; delivery tab.
+              </p>
+            </section>
+
+            <section className="rounded-xl border border-[#E4E7EC] bg-white p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold text-[#101828]">
+                    {exam.marksReleasedAt ? "Marks released" : "Marks not released"}
+                  </h2>
+                  <p className="mt-1 text-sm text-[#667085]">
+                    {exam.marksReleasedAt
+                      ? `Released ${new Date(exam.marksReleasedAt).toLocaleString()}`
+                      : "Students cannot see scores or feedback until marks are released."}
+                  </p>
+                </div>
+                {exam.marksReleasedAt ? (
+                  <button
+                    type="button"
+                    onClick={handleHideMarks}
+                    disabled={savingMarksRelease}
+                    className="rounded-lg border border-[#E4E7EC] bg-white px-4 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] disabled:opacity-50"
+                  >
+                    {savingMarksRelease ? "Saving..." : "Hide marks from students"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleReleaseMarks}
+                    disabled={savingMarksRelease}
+                    className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] disabled:opacity-50"
+                  >
+                    {savingMarksRelease ? "Saving..." : "Release marks to students"}
+                  </button>
+                )}
+              </div>
+              {marksReleaseMessage && <p className="mt-2 text-sm text-[#667085]">{marksReleaseMessage}</p>}
+            </section>
+          </div>
+
+          <div className="space-y-6">
+            <section className="rounded-xl border border-[#E4E7EC] bg-white p-5">
+              <h2 className="text-base font-semibold text-[#101828]">Needs attention</h2>
+              {unresolvedHighRisk ? (
+                <Link
+                  href={`/lecturer/exams/${id}/integrity`}
+                  className="mt-3 block rounded-lg border border-[#FEDF89] bg-[#FFFAEB] p-3 text-sm text-[#92400E] hover:border-[#D97706] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                >
+                  {countLabel(unresolvedHighRisk, "unresolved high-risk integrity signal")} — review now →
+                </Link>
+              ) : (
+                <p className="mt-3 text-sm text-[#667085]">Nothing needs your attention right now.</p>
+              )}
+              {hasUngradedSubmissions && (
+                <p className="mt-2 text-sm text-[#667085]">There are ungraded submissions waiting for review.</p>
+              )}
+            </section>
+
+            <section className="rounded-xl border border-[#E4E7EC] bg-white p-5">
+              <h2 className="text-base font-semibold text-[#101828]">Quick actions</h2>
+              <div className="mt-3 space-y-1">
+                <Link
+                  href={`/lecturer/exams/${id}/submissions`}
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                >
+                  Submissions
+                </Link>
+                <Link
+                  href={`/lecturer/exams/${id}/analytics`}
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                >
+                  View analytics
+                </Link>
+                <Link
+                  href={`/lecturer/exams/${id}/integrity`}
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                >
+                  Review integrity events
+                </Link>
+                <Link
+                  href={`/lecturer/exams/${id}/similarity`}
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                >
+                  Similarity review
+                </Link>
+                <Link
+                  href={`/lecturer/exams/${id}/collusion-analysis`}
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                >
+                  Cohort integrity analysis
+                </Link>
+                <Link
+                  href={`/lecturer/exams/${id}/import-questions`}
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                >
+                  Import from question bank
+                </Link>
+              </div>
+            </section>
+          </div>
         </div>
       </div>
+
+      <div
+        id="workspace-panel-security"
+        role="tabpanel"
+        aria-labelledby="workspace-tab-security"
+        hidden={activeTab !== "security"}
+        className="mt-6"
+      >
 
       {/* Exam Design Policy v1 — see docs/exam-design-policy-v1.md. Kept
           compact and separate from the full secure-settings form below —
           this section is about WHAT resources are permitted, not the
           technical enforcement controls. */}
-      <h2 className="mt-8 text-lg font-medium">Exam conditions and permitted resources</h2>
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Exam conditions and permitted resources</h2>
       {secureForm && (
         <div className="mt-3 space-y-4 rounded border border-gray-200 p-4">
           <div>
@@ -1311,7 +1514,7 @@ export default function LecturerExamPage({
         </div>
       )}
 
-      <h2 className="mt-8 text-lg font-medium">Safe Exam Mode</h2>
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Safe Exam Mode</h2>
       <p className="mt-1 text-sm text-gray-500">
         Safe Exam Mode records exam integrity signals for lecturer review. It does not
         automatically accuse students of misconduct.
@@ -2634,8 +2837,16 @@ export default function LecturerExamPage({
           )}
         </div>
       )}
+      </div>
 
-      <h2 className="mt-8 text-lg font-medium">Course, assignment &amp; schedule</h2>
+      <div
+        id="workspace-panel-delivery"
+        role="tabpanel"
+        aria-labelledby="workspace-tab-delivery"
+        hidden={activeTab !== "delivery"}
+        className="mt-6"
+      >
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Course, assignment &amp; schedule</h2>
       <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
         <p className="text-sm text-gray-600">
           Assign this exam to a course, or leave it unassigned to keep it
@@ -2733,7 +2944,7 @@ export default function LecturerExamPage({
         {scheduleMessage && <p className="text-sm text-gray-600">{scheduleMessage}</p>}
       </div>
 
-      <h2 className="mt-8 text-lg font-medium">Share exam link</h2>
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Share exam link</h2>
       <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
         {!exam.published ? (
           <p className="text-sm text-amber-700">
@@ -2776,7 +2987,7 @@ export default function LecturerExamPage({
         )}
       </div>
 
-      <h2 className="mt-8 text-lg font-medium">Exam access code</h2>
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Exam access code</h2>
       <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
         <p className="text-sm text-gray-600">
           Students must enter this code before starting the exam.
@@ -2827,7 +3038,7 @@ export default function LecturerExamPage({
         {accessCodeMessage && <p className="text-sm text-gray-600">{accessCodeMessage}</p>}
       </div>
 
-      <h2 className="mt-8 text-lg font-medium">Export results</h2>
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Export results</h2>
       <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
         <div>
           <p className="text-sm font-medium">Full marks report</p>
@@ -2887,10 +3098,18 @@ export default function LecturerExamPage({
           </div>
         </div>
       </div>
+      </div>
 
+      <div
+        id="workspace-panel-questions"
+        role="tabpanel"
+        aria-labelledby="workspace-tab-questions"
+        hidden={activeTab !== "questions"}
+        className="mt-6"
+      >
       {secureForm?.enableQuestionPools && (
         <>
-          <h2 className="mt-8 text-lg font-medium">Question pools</h2>
+          <h2 className="mt-8 text-lg font-semibold text-[#101828]">Question pools</h2>
           <p className="mt-1 text-sm text-gray-500">
             Create a larger set of questions and draw a smaller random selection for each student
             attempt.
@@ -2969,7 +3188,7 @@ export default function LecturerExamPage({
         </>
       )}
 
-      <h2 className="mt-8 text-lg font-medium">Questions</h2>
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Questions</h2>
       <div className="mt-3 space-y-3">
         {exam.questions.length === 0 && (
           <p className="text-gray-500">No questions yet.</p>
@@ -3023,7 +3242,7 @@ export default function LecturerExamPage({
         ))}
       </div>
 
-      <h2 className="mt-8 text-lg font-medium">Add multiple questions</h2>
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Add multiple questions</h2>
       <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
         <p className="text-sm text-gray-600">
           Paste one or more questions in the format below, then preview before importing. Nothing
@@ -3130,7 +3349,7 @@ export default function LecturerExamPage({
         )}
       </div>
 
-      <h2 className="mt-8 text-lg font-medium">Generate questions with AI</h2>
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Generate questions with AI</h2>
       <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
         <div>
           <label className="block text-sm font-medium">Source material or topic</label>
@@ -3321,7 +3540,7 @@ export default function LecturerExamPage({
         )}
       </div>
 
-      <h2 className="mt-8 text-lg font-medium">Add questions</h2>
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Add questions</h2>
       <div className="mt-3 space-y-3">
         {manualDrafts.map((draft, index) => (
           <div key={index} className="rounded border border-gray-200 p-4">
@@ -3433,8 +3652,16 @@ export default function LecturerExamPage({
         {addError && <p className="text-sm text-red-600">{addError}</p>}
         {addSuccess && <p className="text-sm text-green-700">{addSuccess}</p>}
       </div>
+      </div>
 
-      <h2 className="mt-8 text-lg font-medium">Canvas / LTI linking</h2>
+      <div
+        id="workspace-panel-integrations"
+        role="tabpanel"
+        aria-labelledby="workspace-tab-integrations"
+        hidden={activeTab !== "integrations"}
+        className="mt-6"
+      >
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Canvas / LTI linking</h2>
       <p className="mt-1 text-sm text-gray-500">
         Link a Canvas assignment&apos;s resource link to this exam so students launching from
         Canvas land directly on it. Unlinked Canvas launches never connect to a random exam.
@@ -3529,6 +3756,7 @@ export default function LecturerExamPage({
           {creatingLink ? "Linking..." : "Link Canvas resource"}
         </button>
       </form>
+      </div>
     </div>
   );
 }
