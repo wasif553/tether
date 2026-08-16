@@ -5,14 +5,34 @@
      a dark-slate (not pure-black) foreground, matching the professional
      colour system used across src/app/lecturer/page.tsx. No product-level
      dark theme exists yet, so this is the ONLY palette — see the removed
-     prefers-color-scheme override below. */
+     prefers-color-scheme override below. This --background/--foreground
+     pair is the SHARED default for every route (student exam-taking,
+     login, etc.) and is intentionally left unchanged by the staff-surface
+     contrast pass below. */
   --background: #f7f8fa;
   --foreground: #101828;
+
+  /* Staff application surface polish v1 — tokens for the STAFF-FACING
+     (lecturer) web app only, applied via src/app/lecturer/layout.tsx.
+     Deliberately a separate token set from --background/--foreground
+     above, so the live student exam-taking surface, secure browser
+     content, and lockdown UI are never affected by this pass — those
+     keep using --background exactly as before. */
+  --staff-canvas: #f2f4f7;
+  --staff-surface: #ffffff;
+  --staff-surface-subtle: #f9fafb;
+  --staff-border: #d0d5dd;
+  --staff-border-subtle: #e4e7ec;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-staff-canvas: var(--staff-canvas);
+  --color-staff-surface: var(--staff-surface);
+  --color-staff-surface-subtle: var(--staff-surface-subtle);
+  --color-staff-border: var(--staff-border);
+  --color-staff-border-subtle: var(--staff-border-subtle);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }

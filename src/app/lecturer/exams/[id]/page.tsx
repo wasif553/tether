@@ -1313,7 +1313,7 @@ export default function LecturerExamPage({
           technical enforcement controls. */}
       <h2 className="mt-8 text-lg font-semibold text-[#101828]">Exam conditions and permitted resources</h2>
       {secureForm && (
-        <div className="mt-3 space-y-4 rounded border border-gray-200 p-4">
+        <div className="mt-3 space-y-4 rounded border border-gray-200 bg-white p-4">
           <div>
             <p className="text-sm font-medium">Exam format</p>
             <div className="mt-2 flex flex-wrap gap-2">
@@ -1520,7 +1520,7 @@ export default function LecturerExamPage({
         automatically accuse students of misconduct.
       </p>
       {secureForm && (
-        <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+        <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
           <div className="rounded border border-gray-200 bg-gray-50 p-3">
             <div className="flex flex-wrap items-center gap-2">
               <span
@@ -2847,7 +2847,7 @@ export default function LecturerExamPage({
         className="mt-6"
       >
       <h2 className="mt-8 text-lg font-semibold text-[#101828]">Course, assignment &amp; schedule</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
         <p className="text-sm text-gray-600">
           Assign this exam to a course, or leave it unassigned to keep it
           visible to the whole institution (legacy behaviour).
@@ -2893,7 +2893,7 @@ export default function LecturerExamPage({
         {courseId && assignmentMode === "SELECTED_STUDENTS" && (
           <div>
             <label className="text-sm font-medium">Selected students</label>
-            <div className="mt-1 max-h-40 overflow-y-auto rounded border border-gray-200 p-2">
+            <div className="mt-1 max-h-40 overflow-y-auto rounded border border-gray-200 bg-white p-2">
               {courseStudents.length === 0 && (
                 <p className="text-sm text-gray-500">No students enrolled in this course yet.</p>
               )}
@@ -2945,7 +2945,7 @@ export default function LecturerExamPage({
       </div>
 
       <h2 className="mt-8 text-lg font-semibold text-[#101828]">Share exam link</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
         {!exam.published ? (
           <p className="text-sm text-amber-700">
             Publish this exam before sharing the link — unpublished exams cannot be accessed by
@@ -2988,7 +2988,7 @@ export default function LecturerExamPage({
       </div>
 
       <h2 className="mt-8 text-lg font-semibold text-[#101828]">Exam access code</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
         <p className="text-sm text-gray-600">
           Students must enter this code before starting the exam.
         </p>
@@ -3039,7 +3039,7 @@ export default function LecturerExamPage({
       </div>
 
       <h2 className="mt-8 text-lg font-semibold text-[#101828]">Export results</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
         <div>
           <p className="text-sm font-medium">Full marks report</p>
           <p className="text-xs text-gray-500">
@@ -3117,7 +3117,7 @@ export default function LecturerExamPage({
           <div className="mt-3 space-y-2">
             {pools.length === 0 && <p className="text-gray-500">No pools yet.</p>}
             {pools.map((pool) => (
-              <div key={pool.id} className="rounded border border-gray-200 p-3">
+              <div key={pool.id} className="rounded border border-gray-200 bg-white p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <p className="text-sm font-medium">{pool.name}</p>
@@ -3155,7 +3155,7 @@ export default function LecturerExamPage({
               </div>
             ))}
           </div>
-          <div className="mt-3 flex flex-wrap items-end gap-2 rounded border border-gray-200 p-3">
+          <div className="mt-3 flex flex-wrap items-end gap-2 rounded border border-gray-200 bg-white p-3">
             <div>
               <label className="block text-xs text-gray-600">Pool name</label>
               <input
@@ -3194,7 +3194,7 @@ export default function LecturerExamPage({
           <p className="text-gray-500">No questions yet.</p>
         )}
         {exam.questions.map((q, i) => (
-          <div key={q.id} className="rounded border border-gray-200 p-3">
+          <div key={q.id} className="rounded border border-gray-200 bg-white p-3">
             <div className="flex items-start justify-between">
               <div>
                 <p className="text-sm text-gray-500">
@@ -3243,13 +3243,13 @@ export default function LecturerExamPage({
       </div>
 
       <h2 className="mt-8 text-lg font-semibold text-[#101828]">Add multiple questions</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
         <p className="text-sm text-gray-600">
           Paste one or more questions in the format below, then preview before importing. Nothing
           is saved until you click &quot;Import questions&quot;, and if any question has an error
           nothing is saved.
         </p>
-        <details className="rounded border border-gray-200 p-2 text-sm">
+        <details className="rounded border border-gray-200 bg-white p-2 text-sm">
           <summary className="cursor-pointer font-medium">Show accepted format</summary>
           <pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-xs text-gray-700">
             {BULK_QUESTION_FORMAT_EXAMPLE}
@@ -3350,7 +3350,7 @@ export default function LecturerExamPage({
       </div>
 
       <h2 className="mt-8 text-lg font-semibold text-[#101828]">Generate questions with AI</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
         <div>
           <label className="block text-sm font-medium">Source material or topic</label>
           <textarea
@@ -3465,7 +3465,7 @@ export default function LecturerExamPage({
               {generated.length} question(s) generated — review and select which to add.
             </p>
             {generated.map((q, i) => (
-              <div key={i} className="rounded border border-gray-200 p-3">
+              <div key={i} className="rounded border border-gray-200 bg-white p-3">
                 <div className="flex items-start gap-3">
                   <input
                     type="checkbox"
@@ -3543,7 +3543,7 @@ export default function LecturerExamPage({
       <h2 className="mt-8 text-lg font-semibold text-[#101828]">Add questions</h2>
       <div className="mt-3 space-y-3">
         {manualDrafts.map((draft, index) => (
-          <div key={index} className="rounded border border-gray-200 p-4">
+          <div key={index} className="rounded border border-gray-200 bg-white p-4">
             <div className="flex items-center justify-between">
               <p className="text-sm font-medium">Question {index + 1}</p>
               {manualDrafts.length > 1 && (
@@ -3672,7 +3672,7 @@ export default function LecturerExamPage({
           <p className="text-sm text-gray-500">No Canvas links yet.</p>
         )}
         {ltiLinks.map((link) => (
-          <div key={link.id} className="rounded border border-gray-200 p-3 text-sm">
+          <div key={link.id} className="rounded border border-gray-200 bg-white p-3 text-sm">
             <div className="flex items-start justify-between">
               <div>
                 <p className="font-medium">{link.label || "Canvas link"}</p>
@@ -3695,7 +3695,7 @@ export default function LecturerExamPage({
         ))}
       </div>
 
-      <form onSubmit={handleCreateLink} className="mt-3 space-y-3 rounded border border-gray-200 p-4">
+      <form onSubmit={handleCreateLink} className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
         <div>
           <label className="block text-sm font-medium">Canvas platform</label>
           <select

@@ -7,7 +7,7 @@ export function NavBar() {
   const { data: session, status } = useSession();
 
   return (
-    <header className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+    <header className="flex items-center justify-between border-b border-[#E4E7EC] bg-white px-4 py-3">
       <Link href="/" className="font-semibold">
         Safe Exam System
       </Link>

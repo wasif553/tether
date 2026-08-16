@@ -547,7 +547,7 @@ function ExamCard({ exam, variant = "default", action }: { exam: ExamSummary; va
     <Link
       href={`/lecturer/exams/${exam.id}`}
       className={`block rounded-xl border p-4 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] ${
-        muted ? "border-[#E4E7EC] bg-[#F7F8FA] hover:border-[#98A2B3]" : "border-[#E4E7EC] bg-white hover:border-[#98A2B3]"
+        muted ? "border-[#E4E7EC] bg-staff-canvas hover:border-[#98A2B3]" : "border-[#E4E7EC] bg-white hover:border-[#98A2B3]"
       }`}
     >
       <div className="flex items-start justify-between gap-3">
