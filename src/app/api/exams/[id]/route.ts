@@ -8,8 +8,9 @@ import { secureClientAvailabilityForInstitution } from "@/lib/secureClientAvaila
 import { isDisplayPolicyCombinationValid, resolveEffectiveDeliveryMode } from "@/lib/secureClientPolicy";
 import { applyMandatoryFinalExaminationPolicy, isFinalExaminationPolicyEstablished } from "@/lib/assessmentType";
 import type { Prisma } from "@/generated/prisma/client";
-import { assertSameInstitution, institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
+import { assertSameInstitution, institutionWhere, institutionErrorResponse, requireInstitutionId } from "@/lib/institutionScope";
 import { assertCanAssignExamToCourse, assertStudentsInCourse, CourseAssignmentError } from "@/lib/courseAssignment";
+import { createPlatformAuditLog } from "@/lib/platformAdmin";
 
 const updateExamSchema = z
   .object({
@@ -315,6 +316,24 @@ export async function PATCH(
           : {}),
       },
     });
+
+    // Individual Exam Timing & Accommodations v1 — audit standard-duration
+    // edits. This route has no other audit logging today (confirmed: no
+    // other PATCH here writes a PlatformAuditLog entry), so this cannot
+    // duplicate an existing event. Never blocks the response. Editing the
+    // standard duration never touches any existing Submission — see
+    // src/lib/assessmentLifecycle.ts's resolveSubmissionTimingPolicy,
+    // which freezes each attempt's own duration at start time.
+    if (rest.durationMins !== undefined && rest.durationMins !== exam.durationMins) {
+      createPlatformAuditLog({
+        actorId: session.user.id,
+        action: "EXAM_STANDARD_DURATION_UPDATED",
+        targetType: "Exam",
+        targetId: id,
+        institutionId: requireInstitutionId(session),
+        metadata: { examId: id, previousDurationMins: exam.durationMins, newDurationMins: rest.durationMins },
+      }).catch(() => {});
+    }
 
     return NextResponse.json({
       ...omitAccessCodeHash(updated),

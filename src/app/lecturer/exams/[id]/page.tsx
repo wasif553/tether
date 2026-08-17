@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, use as usePromise } from "react";
+import { useEffect, useState, useRef, use as usePromise } from "react";
 import Link from "next/link";
 import {
   parseBulkQuestionsText,
@@ -42,6 +42,10 @@ import {
   lecturerAvailabilityStatus,
   type LecturerAvailabilityStatus,
 } from "@/lib/lecturerDashboardGrouping";
+import {
+  resolveEffectiveExamDurationMins,
+  type ExamTimeAccommodationMode,
+} from "@/lib/examTimeAccommodation";
 
 type Question = {
   id: string;
@@ -204,6 +208,23 @@ type LecturerCourse = {
   enrollments?: { id: string; role: "STUDENT" | "LECTURER"; user: { id: string; name: string; email: string } }[];
 };
 
+// Individual Exam Timing & Accommodations v1 — see
+// src/lib/examTimeAccommodation.ts and
+// docs/exam-time-accommodations-v1.md.
+type TimeAccommodation = {
+  id: string;
+  studentId: string;
+  name: string;
+  email: string;
+  institutionStudentId: string | null;
+  adjustmentMode: ExamTimeAccommodationMode;
+  adjustmentValue: number;
+  effectiveDurationMins: number;
+  hasInProgressAttempt: boolean;
+};
+
+type EligibleStudent = { id: string; name: string; email: string; institutionStudentId: string | null };
+
 type GeneratedQuestion = {
   type: "MCQ" | "SHORT_ANSWER" | "ESSAY";
   body: string;
@@ -352,6 +373,25 @@ export default function LecturerExamPage({
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [scheduleMessage, setScheduleMessage] = useState<string | null>(null);
 
+  // Individual Exam Timing & Accommodations v1 — see
+  // src/lib/examTimeAccommodation.ts and
+  // docs/exam-time-accommodations-v1.md.
+  const [durationInput, setDurationInput] = useState("");
+  const durationInitialized = useRef(false);
+  const [savingDuration, setSavingDuration] = useState(false);
+  const [durationMessage, setDurationMessage] = useState<string | null>(null);
+  const [accommodations, setAccommodations] = useState<TimeAccommodation[]>([]);
+  const [eligibleStudents, setEligibleStudents] = useState<EligibleStudent[]>([]);
+  const [accommodationsLoaded, setAccommodationsLoaded] = useState(false);
+  const [showAccommodationForm, setShowAccommodationForm] = useState(false);
+  const [editingAccommodationStudentId, setEditingAccommodationStudentId] = useState<string | null>(null);
+  const [accommodationStudentId, setAccommodationStudentId] = useState("");
+  const [accommodationMode, setAccommodationMode] = useState<ExamTimeAccommodationMode>("PERCENT_EXTRA");
+  const [accommodationValue, setAccommodationValue] = useState("25");
+  const [savingAccommodation, setSavingAccommodation] = useState(false);
+  const [accommodationFormError, setAccommodationFormError] = useState<string | null>(null);
+  const [accommodationsMessage, setAccommodationsMessage] = useState<string | null>(null);
+
   // Safe Exam Deep Link v1 — see docs/course-enrolment-and-exam-assignment.md.
   const [copiedJoinLink, setCopiedJoinLink] = useState(false);
   const joinLinkUrl =
@@ -474,6 +514,18 @@ export default function LecturerExamPage({
     if (res.ok) setPools(await res.json());
   }
 
+  // Individual Exam Timing & Accommodations v1 — see
+  // src/lib/examTimeAccommodation.ts.
+  async function loadTimeAccommodations() {
+    const res = await fetch(`/api/exams/${id}/time-accommodations`);
+    if (res.ok) {
+      const data = await res.json();
+      setAccommodations(data.accommodations);
+      setEligibleStudents(data.eligibleStudents);
+    }
+    setAccommodationsLoaded(true);
+  }
+
   async function handleCreatePool() {
     if (!newPoolName.trim()) return;
     setPoolsMessage(null);
@@ -560,6 +612,112 @@ export default function LecturerExamPage({
     }
   }
 
+  // Individual Exam Timing & Accommodations v1 — see
+  // src/lib/examTimeAccommodation.ts and
+  // docs/exam-time-accommodations-v1.md. Reuses the EXISTING
+  // PATCH /api/exams/[id] endpoint — no new endpoint just for duration.
+  // Never alters an already-started attempt: see
+  // resolveSubmissionTimingPolicy in src/lib/assessmentLifecycle.ts.
+  async function handleSaveDuration() {
+    const parsed = Number(durationInput);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      setDurationMessage("Duration must be a positive whole number of minutes.");
+      return;
+    }
+    setSavingDuration(true);
+    setDurationMessage(null);
+    const res = await fetch(`/api/exams/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ durationMins: parsed }),
+    });
+    setSavingDuration(false);
+    if (res.ok) {
+      setDurationMessage("Standard duration saved. Existing attempts keep the duration they started with — this applies to new attempts only.");
+      await loadExam({ preserveSecureForm: true });
+      // Re-fetch accommodations so every row's effectiveDurationMins is
+      // recalculated server-side (by the same pure resolver) against the
+      // newly saved standard duration — the "Standard time" column above
+      // already updates via loadExam, but the "Effective time" column
+      // comes from this separate response and would otherwise go stale.
+      // Never recomputed client-side — the server/pure resolver remains
+      // the single source of truth.
+      await loadTimeAccommodations();
+    } else {
+      const body = await res.json().catch(() => null);
+      setDurationMessage(typeof body?.error === "string" ? body.error : "Failed to save duration.");
+    }
+  }
+
+  function handleOpenAddAccommodation() {
+    setEditingAccommodationStudentId(null);
+    setAccommodationStudentId("");
+    setAccommodationMode("PERCENT_EXTRA");
+    setAccommodationValue("25");
+    setAccommodationFormError(null);
+    setShowAccommodationForm(true);
+  }
+
+  function handleOpenEditAccommodation(accommodation: TimeAccommodation) {
+    setEditingAccommodationStudentId(accommodation.studentId);
+    setAccommodationStudentId(accommodation.studentId);
+    setAccommodationMode(accommodation.adjustmentMode);
+    setAccommodationValue(String(accommodation.adjustmentValue));
+    setAccommodationFormError(null);
+    setShowAccommodationForm(true);
+  }
+
+  function handleCancelAccommodationForm() {
+    setShowAccommodationForm(false);
+    setEditingAccommodationStudentId(null);
+    setAccommodationFormError(null);
+  }
+
+  async function handleSaveAccommodation() {
+    if (!accommodationStudentId) {
+      setAccommodationFormError("Choose a student.");
+      return;
+    }
+    const value = Number(accommodationValue);
+    if (!Number.isInteger(value) || value <= 0) {
+      setAccommodationFormError("Enter a positive whole number.");
+      return;
+    }
+    setSavingAccommodation(true);
+    setAccommodationFormError(null);
+    const res = await fetch(`/api/exams/${id}/time-accommodations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        studentId: accommodationStudentId,
+        adjustmentMode: accommodationMode,
+        adjustmentValue: value,
+      }),
+    });
+    setSavingAccommodation(false);
+    if (res.ok) {
+      setShowAccommodationForm(false);
+      setEditingAccommodationStudentId(null);
+      setAccommodationsMessage("Accommodation saved.");
+      await loadTimeAccommodations();
+    } else {
+      const body = await res.json().catch(() => null);
+      setAccommodationFormError(typeof body?.error === "string" ? body.error : "Failed to save accommodation.");
+    }
+  }
+
+  async function handleRemoveAccommodation(accommodation: TimeAccommodation) {
+    if (!confirm(`Remove ${accommodation.name}'s time accommodation? Their next attempt will use the standard exam duration.`)) return;
+    setAccommodationsMessage(null);
+    const res = await fetch(`/api/exams/${id}/time-accommodations/${accommodation.id}`, { method: "DELETE" });
+    if (res.ok) {
+      setAccommodationsMessage("Accommodation removed.");
+      await loadTimeAccommodations();
+    } else {
+      setAccommodationsMessage("Failed to remove accommodation.");
+    }
+  }
+
   async function loadSubmissionStatus() {
     const res = await fetch(`/api/exams/${id}/submissions`);
     if (!res.ok) return;
@@ -598,6 +756,7 @@ export default function LecturerExamPage({
     loadPlatforms();
     loadCourses();
     loadPools();
+    loadTimeAccommodations();
   }, [id]);
 
   useEffect(() => {
@@ -639,6 +798,13 @@ export default function LecturerExamPage({
     await fetch(`/api/lecturer/exams/${id}/lti-links/${linkId}`, { method: "DELETE" });
     await loadLtiLinks();
   }
+
+  useEffect(() => {
+    if (exam && !durationInitialized.current) {
+      durationInitialized.current = true;
+      setDurationInput(String(exam.durationMins));
+    }
+  }, [exam]);
 
   useEffect(() => {
     if (exam && !subject) {
@@ -2942,6 +3108,247 @@ export default function LecturerExamPage({
           {savingSchedule ? "Saving..." : "Save course & schedule"}
         </button>
         {scheduleMessage && <p className="text-sm text-gray-600">{scheduleMessage}</p>}
+      </div>
+
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Exam duration</h2>
+      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
+        <div>
+          <label className="text-sm font-medium">Standard duration</label>
+          <div className="mt-1 flex items-center gap-2">
+            <input
+              type="number"
+              min={1}
+              value={durationInput}
+              onChange={(e) => setDurationInput(e.target.value)}
+              className="w-24 rounded border border-gray-300 px-3 py-1.5 text-sm"
+            />
+            <span className="text-sm text-gray-600">minutes</span>
+          </div>
+          <p className="mt-1 text-xs text-gray-500">
+            Applies to students without an individual time accommodation.
+          </p>
+        </div>
+        <p className="text-xs text-gray-500">
+          Existing attempts keep the duration they started with. This change applies to new attempts only.
+        </p>
+        <button
+          onClick={handleSaveDuration}
+          disabled={savingDuration}
+          className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+        >
+          {savingDuration ? "Saving..." : "Save duration"}
+        </button>
+        {durationMessage && <p className="text-sm text-gray-600">{durationMessage}</p>}
+      </div>
+
+      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Time accommodations</h2>
+      <p className="mt-1 text-sm text-gray-500">
+        Provide approved individual time adjustments without changing the standard exam duration. For example, an
+        approved Learning Access Plan.
+      </p>
+      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
+        {accommodations.length === 0 ? (
+          <p className="text-sm text-gray-500">
+            {accommodationsLoaded ? "No time accommodations yet." : "Loading..."}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {accommodations.map((a) => (
+              <div key={a.id} className="rounded border border-gray-200 p-3 text-sm">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="font-medium">{a.name}</p>
+                    <p className="text-xs text-gray-500">{a.email}</p>
+                    {a.hasInProgressAttempt && (
+                      <p className="mt-1 text-xs text-amber-700">
+                        This student already has an active attempt. Its current duration will not change. This
+                        accommodation will apply to a future attempt.
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-4 text-right">
+                    <div>
+                      <p className="text-xs text-gray-500">Adjustment</p>
+                      <p>
+                        {a.adjustmentMode === "PERCENT_EXTRA"
+                          ? `+${a.adjustmentValue}%`
+                          : a.adjustmentMode === "EXTRA_MINUTES"
+                            ? `+${a.adjustmentValue} minutes`
+                            : `${a.adjustmentValue} min total`}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">Standard time</p>
+                      <p>{exam.durationMins} min</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500">Effective time</p>
+                      <p className="font-medium">{a.effectiveDurationMins} min</p>
+                    </div>
+                    <div className="flex flex-col items-end gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenEditAccommodation(a)}
+                        className="text-sm text-blue-700 underline"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveAccommodation(a)}
+                        className="text-xs text-red-600 underline"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {accommodationsMessage && <p className="text-sm text-gray-600">{accommodationsMessage}</p>}
+
+        {!showAccommodationForm ? (
+          <button
+            type="button"
+            onClick={handleOpenAddAccommodation}
+            className="rounded border border-gray-300 px-4 py-2 text-sm"
+          >
+            + Add accommodation
+          </button>
+        ) : (
+          <div className="rounded border border-gray-200 bg-gray-50 p-3">
+            <p className="text-sm font-medium">
+              {editingAccommodationStudentId ? "Edit accommodation" : "Add accommodation"}
+            </p>
+            <div className="mt-2 space-y-3">
+              <div>
+                <label className="block text-sm font-medium">Student</label>
+                <select
+                  disabled={editingAccommodationStudentId != null}
+                  value={accommodationStudentId}
+                  onChange={(e) => setAccommodationStudentId(e.target.value)}
+                  className="mt-1 w-full rounded border border-gray-300 px-3 py-1.5 text-sm disabled:bg-gray-100"
+                >
+                  <option value="">Select a student...</option>
+                  {eligibleStudents.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} — {s.email}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-xs text-gray-500">Standard duration: {exam.durationMins} minutes</p>
+              <div>
+                <label className="block text-sm font-medium">Time adjustment</label>
+                <div className="mt-1 flex flex-wrap gap-3 text-sm">
+                  {[25, 50, 100].map((pct) => (
+                    <label key={pct} className="flex items-center gap-1">
+                      <input
+                        type="radio"
+                        checked={accommodationMode === "PERCENT_EXTRA" && accommodationValue === String(pct)}
+                        onChange={() => {
+                          setAccommodationMode("PERCENT_EXTRA");
+                          setAccommodationValue(String(pct));
+                        }}
+                      />
+                      +{pct}%
+                    </label>
+                  ))}
+                  <label className="flex items-center gap-1">
+                    <input
+                      type="radio"
+                      checked={accommodationMode === "EXTRA_MINUTES"}
+                      onChange={() => {
+                        setAccommodationMode("EXTRA_MINUTES");
+                        setAccommodationValue("30");
+                      }}
+                    />
+                    Extra minutes
+                  </label>
+                  <label className="flex items-center gap-1">
+                    <input
+                      type="radio"
+                      checked={accommodationMode === "TOTAL_DURATION"}
+                      onChange={() => {
+                        setAccommodationMode("TOTAL_DURATION");
+                        setAccommodationValue(String(exam.durationMins));
+                      }}
+                    />
+                    Custom total duration
+                  </label>
+                </div>
+              </div>
+
+              {accommodationMode === "EXTRA_MINUTES" && (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    value={accommodationValue}
+                    onChange={(e) => setAccommodationValue(e.target.value)}
+                    className="w-24 rounded border border-gray-300 px-3 py-1.5 text-sm"
+                  />
+                  <span className="text-sm text-gray-600">minutes extra</span>
+                </div>
+              )}
+              {accommodationMode === "TOTAL_DURATION" && (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    value={accommodationValue}
+                    onChange={(e) => setAccommodationValue(e.target.value)}
+                    className="w-24 rounded border border-gray-300 px-3 py-1.5 text-sm"
+                  />
+                  <span className="text-sm text-gray-600">minutes total</span>
+                </div>
+              )}
+
+              {(() => {
+                const value = Number(accommodationValue);
+                if (!Number.isInteger(value) || value <= 0) return null;
+                let effective: number | null = null;
+                try {
+                  effective = resolveEffectiveExamDurationMins({
+                    standardDurationMins: exam.durationMins,
+                    accommodation: { adjustmentMode: accommodationMode, adjustmentValue: value },
+                  });
+                } catch {
+                  effective = null;
+                }
+                if (effective == null) return null;
+                return (
+                  <div className="rounded border border-gray-200 bg-white p-3">
+                    <p className="text-xs text-gray-500">Effective exam duration</p>
+                    <p className="text-lg font-semibold">{effective} minutes</p>
+                  </div>
+                );
+              })()}
+
+              {accommodationFormError && <p className="text-sm text-red-600">{accommodationFormError}</p>}
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleSaveAccommodation}
+                  disabled={savingAccommodation}
+                  className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+                >
+                  {savingAccommodation ? "Saving..." : "Save accommodation"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCancelAccommodationForm}
+                  className="rounded border border-gray-300 px-4 py-2 text-sm"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <h2 className="mt-8 text-lg font-semibold text-[#101828]">Share exam link</h2>

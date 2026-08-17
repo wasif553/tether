@@ -12,6 +12,7 @@
  * observations, never proof.
  */
 import type { ExamTimingPolicy } from "@/lib/assessmentLifecycle";
+import type { ExamTimeAccommodationSnapshot } from "@/lib/examTimeAccommodation";
 
 export const EXAM_POLICY_VERSION = "v1.0";
 /** Bumped only if the snapshot's shape changes in a way old snapshots can't be read as. */
@@ -350,6 +351,25 @@ export type ExamPolicySnapshot = {
    * only via this snapshot.
    */
   timingPolicy: ExamTimingPolicy;
+  /**
+   * Individual Exam Timing & Accommodations v1 (additive, optional) — see
+   * src/lib/examTimeAccommodation.ts. Immutable explainability metadata
+   * only: "what standard duration and accommodation produced
+   * timingPolicy.durationMins above?" Nothing reads this field for
+   * enforcement — resolveSubmissionTimingPolicy only ever reads
+   * timingPolicy.durationMins. `null` when the attempt had no
+   * accommodation. Optional (`?`) rather than required so every
+   * historical snapshot created before this field existed remains a
+   * valid ExamPolicySnapshot without any migration/backfill — a missing
+   * property and an explicit `null` are both treated as "no
+   * accommodation" by every reader. schemaVersion is NOT bumped for this
+   * field: it is purely additive, exactly like every other
+   * *PolicySnapshotJson sibling column on Submission (e.g.
+   * aiAssistancePolicySnapshotJson), all of which use the same
+   * "missing/null means legacy behaviour" convention without a version
+   * bump.
+   */
+  timeAccommodation?: ExamTimeAccommodationSnapshot | null;
 };
 
 /**

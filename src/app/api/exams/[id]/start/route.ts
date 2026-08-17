@@ -15,7 +15,7 @@ import {
 } from "@/lib/questionDelivery";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
-import { buildExamPolicySnapshot } from "@/lib/examPolicy";
+import { buildExamPolicySnapshot, type ExamPolicySnapshot } from "@/lib/examPolicy";
 import { buildAiAssistancePolicySnapshot } from "@/lib/aiAssistancePolicy";
 import { buildScreenSharePolicySnapshot } from "@/lib/screenSharePolicy";
 import { buildAnswerProvenancePolicySnapshot } from "@/lib/answerProvenancePolicy";
@@ -37,6 +37,13 @@ import { parseAttestationRequirement } from "@/lib/tetherAttestationConfig";
 import { resolveTrustedTetherVerification } from "@/lib/tetherRecovery";
 import { resolveOfflineContinueMs } from "@/lib/tetherRecoveryConfig";
 import { submissionRequiresActivation } from "@/lib/secureClientActivation";
+import {
+  resolveEffectiveExamDurationMins,
+  buildExamTimeAccommodationSnapshot,
+  isValidExamTimeAccommodationMode,
+  InvalidExamTimeAccommodationError,
+  type ExamTimeAccommodationAdjustment,
+} from "@/lib/examTimeAccommodation";
 
 // Tether launch/install flow v1 — Requirement 9 ("Production start
 // protection"). Additive response field: `{required: false}` for every
@@ -319,41 +326,97 @@ export async function POST(
         }
       : null;
 
+  // Individual Exam Timing & Accommodations v1 — resolved ONLY here, for
+  // a brand-new attempt, from the student's current
+  // ExamTimeAccommodation row (if any) and the exam's CURRENT standard
+  // duration. See src/lib/examTimeAccommodation.ts, the single source of
+  // truth for this resolution. The existing IN_PROGRESS resume path
+  // above returns well before this point and never re-resolves an
+  // accommodation — an attempt's effective duration is frozen exactly
+  // once, at creation. Falls back to the standard duration (never blocks
+  // exam start) if the stored row is somehow malformed — this should
+  // never happen since only the validated lecturer API below ever writes
+  // this table, but a data issue must never prevent a student from
+  // starting their exam.
+  const accommodationRow = await prisma.examTimeAccommodation.findUnique({
+    where: { examId_studentId: { examId: id, studentId: session.user.id } },
+  });
+  let accommodationAdjustment: ExamTimeAccommodationAdjustment | null = null;
+  if (accommodationRow && isValidExamTimeAccommodationMode(accommodationRow.adjustmentMode)) {
+    accommodationAdjustment = {
+      adjustmentMode: accommodationRow.adjustmentMode,
+      adjustmentValue: accommodationRow.adjustmentValue,
+    };
+  }
+  let effectiveDurationMins = exam.durationMins;
+  try {
+    effectiveDurationMins = resolveEffectiveExamDurationMins({
+      standardDurationMins: exam.durationMins,
+      accommodation: accommodationAdjustment,
+    });
+  } catch (err) {
+    if (!(err instanceof InvalidExamTimeAccommodationError)) throw err;
+    console.error("Invalid ExamTimeAccommodation row — falling back to standard duration", { examId: id, studentId: session.user.id, err });
+    accommodationAdjustment = null;
+    effectiveDurationMins = exam.durationMins;
+  }
+  // Optional, backward-compatible, additive-only metadata — answers "what
+  // standard duration and accommodation produced this attempt's
+  // duration?" without ever needing to re-read the (possibly since
+  // changed/removed) ExamTimeAccommodation row. Never includes
+  // diagnosis/reason/health information. null for every attempt without
+  // an accommodation, including every pre-existing snapshot.
+  const timeAccommodationSnapshot = buildExamTimeAccommodationSnapshot({
+    standardDurationMins: exam.durationMins,
+    accommodation: accommodationAdjustment,
+  });
+
   // Exam Design Policy v1 — the immutable snapshot for THIS attempt,
   // built once here from the exam's settings as they exist right now.
   // Never recomputed or overwritten later — changing the exam afterwards
   // never changes this attempt's snapshot (see
   // docs/exam-design-policy-v1.md).
-  const policySnapshot = buildExamPolicySnapshot(
-    {
-      examMode: settings.examMode,
-      calculatorAllowed: settings.calculatorAllowed,
-      notesAllowed: settings.notesAllowed,
-      internetAllowed: settings.internetAllowed,
-      aiToolsAllowed: settings.aiToolsAllowed,
-    },
-    {
-      secureModeEnabled: settings.secureModeEnabled,
-      requireFullscreen: settings.requireFullscreen,
-      blockCopyPaste: settings.blockCopyPaste,
-      trackWindowBlur: settings.trackWindowBlur,
-      requireCamera: settings.requireCamera,
-      enableAiCameraIntegrityChecks: settings.enableAiCameraIntegrityChecks,
-    },
-    // Freeze timing policy for active exam attempts — captured once,
-    // here, from the exam's CURRENT duration/late-submit/auto-submit
-    // settings. Never recomputed for this attempt afterwards, even if
-    // the lecturer edits Exam.durationMins or these secureSettings —
-    // see resolveSubmissionTimingPolicy in assessmentLifecycle.ts, the
-    // only function that should ever read it back.
-    {
-      durationMins: exam.durationMins,
-      allowLateSubmit: settings.allowLateSubmit,
-      autoSubmitOnTimerEnd: settings.autoSubmitOnTimerEnd,
-    },
-    policyAcknowledgedAt,
-    new Date(),
-  );
+  const policySnapshot: ExamPolicySnapshot = {
+    ...buildExamPolicySnapshot(
+      {
+        examMode: settings.examMode,
+        calculatorAllowed: settings.calculatorAllowed,
+        notesAllowed: settings.notesAllowed,
+        internetAllowed: settings.internetAllowed,
+        aiToolsAllowed: settings.aiToolsAllowed,
+      },
+      {
+        secureModeEnabled: settings.secureModeEnabled,
+        requireFullscreen: settings.requireFullscreen,
+        blockCopyPaste: settings.blockCopyPaste,
+        trackWindowBlur: settings.trackWindowBlur,
+        requireCamera: settings.requireCamera,
+        enableAiCameraIntegrityChecks: settings.enableAiCameraIntegrityChecks,
+      },
+      // Freeze timing policy for active exam attempts — captured once,
+      // here, from the exam's CURRENT duration/late-submit/auto-submit
+      // settings, with any individual time accommodation already
+      // resolved into durationMins above. Never recomputed for this
+      // attempt afterwards, even if the lecturer edits
+      // Exam.durationMins, this student's accommodation, or these
+      // secureSettings — see resolveSubmissionTimingPolicy in
+      // assessmentLifecycle.ts, the only function that should ever read
+      // it back.
+      {
+        durationMins: effectiveDurationMins,
+        allowLateSubmit: settings.allowLateSubmit,
+        autoSubmitOnTimerEnd: settings.autoSubmitOnTimerEnd,
+      },
+      policyAcknowledgedAt,
+      new Date(),
+    ),
+    // Individual Exam Timing & Accommodations v1 — formally declared,
+    // optional field on ExamPolicySnapshot itself (see examPolicy.ts),
+    // alongside timingPolicy, for audit/explainability only. Nothing
+    // downstream reads this for enforcement; resolveSubmissionTimingPolicy
+    // only ever reads timingPolicy.durationMins above.
+    timeAccommodation: timeAccommodationSnapshot,
+  };
 
   // Controlled AI Brainstorming Assistance v1 — see
   // docs/controlled-ai-brainstorming-assistance-v1.md. Same immutable-

@@ -99,3 +99,43 @@ describe("lecturer exam page — display requirement availability wired for Teth
     expect(bannerBlock).toMatch(/Tether Secure Browser —\s+required/);
   });
 });
+
+describe("lecturer exam page — standard-duration save refreshes accommodation data (migration review fix)", () => {
+  const handleSaveDurationBlock = pageSource.slice(
+    pageSource.indexOf("async function handleSaveDuration()"),
+    pageSource.indexOf("function handleOpenAddAccommodation()"),
+  );
+
+  it("handleSaveDuration exists and is isolated in the expected source region", () => {
+    expect(handleSaveDurationBlock.length).toBeGreaterThan(0);
+    expect(handleSaveDurationBlock).toMatch(/async function handleSaveDuration\(\)/);
+  });
+
+  it("on a successful PATCH, calls loadExam before loadTimeAccommodations (server/pure resolver stays authoritative, never a client recomputation)", () => {
+    const successBranch = handleSaveDurationBlock.slice(handleSaveDurationBlock.indexOf("if (res.ok) {"));
+    const loadExamIndex = successBranch.indexOf("await loadExam(");
+    const loadAccommodationsIndex = successBranch.indexOf("await loadTimeAccommodations();");
+    expect(loadExamIndex).toBeGreaterThan(-1);
+    expect(loadAccommodationsIndex).toBeGreaterThan(-1);
+    expect(loadAccommodationsIndex).toBeGreaterThan(loadExamIndex);
+  });
+
+  it("does NOT recompute effective duration client-side inside handleSaveDuration itself — no resolveEffectiveExamDurationMins call in this function", () => {
+    expect(handleSaveDurationBlock).not.toMatch(/resolveEffectiveExamDurationMins/);
+  });
+
+  it("on a FAILED PATCH, neither loadExam nor loadTimeAccommodations is called — failure never reloads as though the save succeeded", () => {
+    const failureBranch = handleSaveDurationBlock.slice(handleSaveDurationBlock.indexOf("} else {"));
+    expect(failureBranch).not.toMatch(/await loadExam\(/);
+    expect(failureBranch).not.toMatch(/await loadTimeAccommodations\(\)/);
+    expect(failureBranch).toMatch(/setDurationMessage/);
+  });
+
+  it("loadTimeAccommodations itself always re-fetches from the server (GET /api/exams/[id]/time-accommodations) rather than recomputing client-side", () => {
+    const loaderBlock = pageSource.slice(
+      pageSource.indexOf("async function loadTimeAccommodations()"),
+      pageSource.indexOf("async function loadTimeAccommodations()") + 400,
+    );
+    expect(loaderBlock).toMatch(/fetch\(`\/api\/exams\/\$\{id\}\/time-accommodations`\)/);
+  });
+});

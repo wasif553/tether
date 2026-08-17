@@ -16,8 +16,11 @@ import {
   integrityEventPolicyToRecommendationSignal,
   type ExamPolicy,
   type RelevantSecureSettings,
+  type ExamPolicySnapshot,
 } from "./examPolicy";
 import type { ExamTimingPolicy } from "./assessmentLifecycle";
+import { resolveSubmissionTimingPolicy } from "./assessmentLifecycle";
+import { buildExamTimeAccommodationSnapshot } from "./examTimeAccommodation";
 
 const NEUTRAL_SETTINGS: RelevantSecureSettings = {
   secureModeEnabled: false,
@@ -228,6 +231,96 @@ describe("14. policy snapshot is immutable after attempt start", () => {
   it("carries the frozen timingPolicy through unchanged", () => {
     const snapshot = buildExamPolicySnapshot(policy({ examMode: "CLOSED_BOOK" }), STRICT_SETTINGS, TIMING_POLICY, new Date(), new Date());
     expect(snapshot.timingPolicy).toEqual(TIMING_POLICY);
+  });
+});
+
+describe("ExamPolicySnapshot.timeAccommodation — formal, backward-compatible type contract", () => {
+  it("1. a snapshot with no accommodation (timeAccommodation: null) is a valid ExamPolicySnapshot", () => {
+    const snapshot: ExamPolicySnapshot = {
+      ...buildExamPolicySnapshot(policy({ examMode: "CLOSED_BOOK" }), STRICT_SETTINGS, TIMING_POLICY, new Date(), new Date()),
+      timeAccommodation: buildExamTimeAccommodationSnapshot({ standardDurationMins: 60, accommodation: null }),
+    };
+    expect(snapshot.timeAccommodation).toBeNull();
+    // Still round-trips through JSON exactly like every other
+    // *PolicySnapshotJson column (Prisma stores these as Json?).
+    expect(JSON.parse(JSON.stringify(snapshot)).timeAccommodation).toBeNull();
+  });
+
+  it("2. an accommodation snapshot stores exactly the four documented operational fields — no diagnosis/reason", () => {
+    const snapshot: ExamPolicySnapshot = {
+      ...buildExamPolicySnapshot(policy({ examMode: "CLOSED_BOOK" }), STRICT_SETTINGS, TIMING_POLICY, new Date(), new Date()),
+      timeAccommodation: buildExamTimeAccommodationSnapshot({
+        standardDurationMins: 60,
+        accommodation: { adjustmentMode: "PERCENT_EXTRA", adjustmentValue: 50 },
+      }),
+    };
+    expect(snapshot.timeAccommodation).toEqual({
+      standardDurationMins: 60,
+      adjustmentMode: "PERCENT_EXTRA",
+      adjustmentValue: 50,
+      effectiveDurationMins: 90,
+    });
+    expect(Object.keys(snapshot.timeAccommodation ?? {}).sort()).toEqual(
+      ["adjustmentMode", "adjustmentValue", "effectiveDurationMins", "standardDurationMins"].sort(),
+    );
+  });
+
+  it("3. a historical snapshot with NO timeAccommodation property at all (predates this field) remains valid and readable", () => {
+    // Simulates a real pre-existing examPolicySnapshotJson row: the
+    // property is entirely ABSENT from the stored JSON, not merely null
+    // — optional (`?`), not required, is exactly what makes this
+    // assignable without any migration/backfill.
+    const legacySnapshot: ExamPolicySnapshot = buildExamPolicySnapshot(
+      policy({ examMode: "CLOSED_BOOK" }),
+      STRICT_SETTINGS,
+      TIMING_POLICY,
+      new Date(),
+      new Date(),
+    );
+    expect("timeAccommodation" in legacySnapshot).toBe(false);
+    expect(legacySnapshot.timeAccommodation).toBeUndefined();
+
+    // The one function that reads timing back out of a snapshot must
+    // keep working unchanged on a row missing this property entirely.
+    const resolved = resolveSubmissionTimingPolicy({
+      examPolicySnapshotJson: legacySnapshot,
+      currentExamDurationMins: 999, // must be ignored — a real snapshot exists
+      currentSecureSettings: { allowLateSubmit: true, autoSubmitOnTimerEnd: false },
+    });
+    expect(resolved.durationMins).toBe(TIMING_POLICY.durationMins);
+  });
+
+  it("4. frozen timingPolicy.durationMins equals timeAccommodation.effectiveDurationMins, never the standard duration, when an accommodation applied", () => {
+    const standardDurationMins = 60;
+    const timeAccommodation = buildExamTimeAccommodationSnapshot({
+      standardDurationMins,
+      accommodation: { adjustmentMode: "EXTRA_MINUTES", adjustmentValue: 30 },
+    });
+    const snapshot: ExamPolicySnapshot = {
+      ...buildExamPolicySnapshot(
+        policy({ examMode: "CLOSED_BOOK" }),
+        STRICT_SETTINGS,
+        // Mirrors exactly what POST /api/exams/[id]/start does: the
+        // EFFECTIVE (already-accommodated) duration is what gets frozen
+        // into timingPolicy, never the raw standard duration.
+        { durationMins: timeAccommodation!.effectiveDurationMins, allowLateSubmit: false, autoSubmitOnTimerEnd: true },
+        new Date(),
+        new Date(),
+      ),
+      timeAccommodation,
+    };
+    expect(snapshot.timingPolicy.durationMins).toBe(90);
+    expect(snapshot.timeAccommodation?.effectiveDurationMins).toBe(90);
+    expect(snapshot.timeAccommodation?.standardDurationMins).toBe(60);
+    expect(snapshot.timingPolicy.durationMins).not.toBe(snapshot.timeAccommodation?.standardDurationMins);
+
+    // And the authoritative resolver reads exactly that frozen value back.
+    const resolved = resolveSubmissionTimingPolicy({
+      examPolicySnapshotJson: snapshot,
+      currentExamDurationMins: standardDurationMins,
+      currentSecureSettings: { allowLateSubmit: false, autoSubmitOnTimerEnd: true },
+    });
+    expect(resolved.durationMins).toBe(90);
   });
 });
 
