@@ -487,35 +487,55 @@ function ReviewQueue({ exams }: { exams: ExamSummary[] }) {
   );
 }
 
+// Commercial UI polish pass — corrective fix: this row has TWO distinct
+// destinations (open the exam workspace vs. review its integrity
+// signals), so it can no longer be a single wrapping <Link> the way
+// ExamCard's single-destination rows are — see "Needs your attention
+// exam navigation" fix. Exam title and "Open exam →" both go to the
+// Exam Workspace (/lecturer/exams/{id}); "Review signals" is the
+// separate, explicitly-labelled entry point into Integrity Review
+// (/lecturer/exams/{id}/integrity). No nested <Link>s — each is its own
+// sibling element with its own focus-visible state.
 function ReviewRow({ exam }: { exam: ExamSummary }) {
   const status = lecturerAvailabilityStatus(exam);
   return (
-    <li>
-      <Link
-        href={`/lecturer/exams/${exam.id}/integrity`}
-        className={`block px-4 py-3 hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#2563EB] ${REVIEW_COLUMNS}`}
-      >
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-[#101828]">{exam.title}</p>
-          {exam.course && (
-            <p className="truncate text-xs text-[#667085]">
-              {exam.course.code} — {exam.course.name}
-            </p>
-          )}
-        </div>
-        <div className="mt-2 md:mt-0">
-          <StatusPill status={status} />
-        </div>
-        <div className="mt-2 text-sm text-[#667085] md:mt-0">{countLabel(exam._count.submissions, "submission")}</div>
-        <div className="mt-2 md:mt-0">
-          <span className="inline-flex items-center rounded-full bg-[#FEF3C7] px-2 py-0.5 text-xs font-medium text-[#92400E]">
-            {countLabel(exam.needsReviewCount, "signal")}
-          </span>
-        </div>
-        <div className="mt-2 md:mt-0 md:text-right">
-          <span className="text-sm font-semibold text-[#2563EB]">Review →</span>
-        </div>
-      </Link>
+    <li className={`px-4 py-3 ${REVIEW_COLUMNS}`}>
+      <div className="min-w-0">
+        <Link
+          href={`/lecturer/exams/${exam.id}`}
+          className="truncate rounded text-sm font-semibold text-[#101828] hover:text-[#2563EB] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+        >
+          {exam.title}
+        </Link>
+        {exam.course && (
+          <p className="truncate text-xs text-[#667085]">
+            {exam.course.code} — {exam.course.name}
+          </p>
+        )}
+      </div>
+      <div className="mt-2 md:mt-0">
+        <StatusPill status={status} />
+      </div>
+      <div className="mt-2 text-sm text-[#667085] md:mt-0">{countLabel(exam._count.submissions, "submission")}</div>
+      <div className="mt-2 md:mt-0">
+        <span className="inline-flex items-center rounded-full bg-[#FEF3C7] px-2 py-0.5 text-xs font-medium text-[#92400E]">
+          {countLabel(exam.needsReviewCount, "signal")}
+        </span>
+      </div>
+      <div className="mt-2 flex flex-col items-start gap-1 md:mt-0 md:items-end">
+        <Link
+          href={`/lecturer/exams/${exam.id}`}
+          className="rounded text-sm font-semibold text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+        >
+          Open exam →
+        </Link>
+        <Link
+          href={`/lecturer/exams/${exam.id}/integrity`}
+          className="rounded text-sm font-medium text-[#667085] hover:text-[#101828] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+        >
+          Review signals
+        </Link>
+      </div>
     </li>
   );
 }
