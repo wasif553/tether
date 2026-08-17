@@ -326,6 +326,43 @@ export default function GradeSubmissionPage({
     if (res.ok) await loadAiUseReview();
   }
 
+  // Controlled AI activity summary — commercial completion pass, see
+  // docs/controlled-ai-brainstorming-assistance-v1.md. Reuses the existing
+  // lecturer AI-assistance review endpoint (buildAiAssistanceReview's
+  // derived `summary`) rather than adding a new endpoint. A secondary,
+  // non-blocking fetch: a failure here must never block grading or
+  // navigation on this page.
+  const [aiAssistanceSummary, setAiAssistanceSummary] = useState<{
+    aiAssistanceEnabled: boolean;
+    summary: {
+      totalRequests: number;
+      guidanceShownCount: number;
+      declinedCount: number;
+      failedCount: number;
+      questionsUsedCount: number;
+    };
+  } | null>(null);
+  const [aiAssistanceSummaryError, setAiAssistanceSummaryError] = useState(false);
+
+  const loadAiAssistanceSummary = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/lecturer/submissions/${submissionId}/ai-assistance`);
+      if (!res.ok) {
+        setAiAssistanceSummaryError(true);
+        return;
+      }
+      const body = await res.json();
+      setAiAssistanceSummary({ aiAssistanceEnabled: body.aiAssistanceEnabled, summary: body.summary });
+    } catch {
+      setAiAssistanceSummaryError(true);
+    }
+  }, [submissionId]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadAiAssistanceSummary();
+  }, [loadAiAssistanceSummary]);
+
   // Exam Session Binding + Time Anomaly Review v1 state — see
   // docs/exam-session-binding-v1.md and docs/time-anomaly-review-v1.md.
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -532,6 +569,36 @@ export default function GradeSubmissionPage({
       <p className="text-sm text-gray-500">
         Status: {data.status} · Attempt {data.attemptNumber}
       </p>
+
+      {aiAssistanceSummary?.aiAssistanceEnabled && (
+        <div className="mt-3 rounded border border-gray-200 bg-white p-3 text-sm">
+          <div className="flex items-center justify-between gap-3">
+            <p className="font-medium text-gray-900">Controlled AI activity</p>
+            <Link
+              href={`/lecturer/submissions/${submissionId}/ai-assistance`}
+              className="shrink-0 text-sm text-blue-600 hover:underline"
+            >
+              View AI activity →
+            </Link>
+          </div>
+          {aiAssistanceSummary.summary.totalRequests === 0 ? (
+            <p className="mt-1 text-gray-600">Enabled — no requests made.</p>
+          ) : (
+            <p className="mt-1 text-gray-600">
+              Enabled for attempt · {aiAssistanceSummary.summary.totalRequests} request(s) ·{" "}
+              {aiAssistanceSummary.summary.guidanceShownCount} guidance response(s) shown ·{" "}
+              {aiAssistanceSummary.summary.declinedCount} declined ·{" "}
+              {aiAssistanceSummary.summary.questionsUsedCount} question(s) used
+            </p>
+          )}
+        </div>
+      )}
+      {aiAssistanceSummary && !aiAssistanceSummary.aiAssistanceEnabled && (
+        <p className="mt-2 text-xs text-gray-500">Controlled AI: Not enabled for this attempt.</p>
+      )}
+      {!aiAssistanceSummary && aiAssistanceSummaryError && (
+        <p className="mt-2 text-xs text-gray-500">Controlled AI activity unavailable.</p>
+      )}
 
       <div className="mt-6 space-y-4">
         {data.exam.questions.map((q, i) => {

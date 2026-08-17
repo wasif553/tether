@@ -340,7 +340,7 @@ describe("16/17. lecturer summary and snapshot independence", () => {
     const summary = buildLecturerExamPolicySummary(policy({ examMode: "CLOSED_BOOK", calculatorAllowed: true }), STRICT_SETTINGS);
     expect(summary.examModeLabel).toBe("Closed-book exam");
     expect(summary.allowed).toEqual(["Calculator"]);
-    expect(summary.notAllowed).toEqual(["Notes", "Internet", "AI tools"]);
+    expect(summary.notAllowed).toEqual(["Notes", "Internet", "External AI tools"]);
     expect(summary.secureControls).toEqual([
       "Fullscreen required",
       "Clipboard restricted",

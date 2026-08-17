@@ -139,3 +139,67 @@ describe("lecturer exam page — standard-duration save refreshes accommodation 
     expect(loaderBlock).toMatch(/fetch\(`\/api\/exams\/\$\{id\}\/time-accommodations`\)/);
   });
 });
+
+describe("lecturer exam page — Controlled AI commercial completion pass (Section 3/4)", () => {
+  const controlledAiSectionStart = pageSource.indexOf(
+    '<h3 className="text-sm font-medium">Tether Controlled AI</h3>',
+  );
+  const controlledAiSectionEnd = pageSource.indexOf("Screen-share evidence");
+  const controlledAiSection = pageSource.slice(controlledAiSectionStart, controlledAiSectionEnd);
+
+  it("labels the permitted-resources checkbox 'External AI tools', not the old bare 'AI tools'", () => {
+    expect(pageSource).toMatch(/>\s*External AI tools\s*</);
+  });
+
+  it("the External AI tools helper text distinguishes it from Tether Controlled AI without claiming a technical block", () => {
+    expect(pageSource).toMatch(/permits AI tools outside Tether Controlled AI/);
+    expect(pageSource.replace(/\s+/g, " ")).toMatch(/policy statement, not a technical block/);
+  });
+
+  it("uses the commercial name 'Tether Controlled AI' as the section heading (not the old internal 'AI Brainstorming Assistance' heading)", () => {
+    expect(controlledAiSectionStart).toBeGreaterThan(-1);
+    expect(pageSource).not.toMatch(/<h3 className="text-sm font-medium">AI Brainstorming Assistance<\/h3>/);
+  });
+
+  it("the primary Controlled AI control is a simple Off / Controlled guidance choice mapped to the existing DISABLED/BRAINSTORM_ONLY values — no new schema enum", () => {
+    expect(controlledAiSection).toMatch(/aiAssistanceMode:\s*"DISABLED"/);
+    expect(controlledAiSection).toMatch(/aiAssistanceMode:\s*"BRAINSTORM_ONLY"/);
+    expect(controlledAiSection).toMatch(/>\s*Off\s*</);
+    expect(controlledAiSection).toMatch(/>\s*Controlled guidance\s*</);
+  });
+
+  it("shows the concise policy summary before the advanced settings when Controlled guidance is enabled", () => {
+    const summaryIndex = controlledAiSection.indexOf("Controlled guidance enabled");
+    const detailsIndex = controlledAiSection.indexOf("Advanced Controlled AI settings");
+    expect(summaryIndex).toBeGreaterThan(-1);
+    expect(detailsIndex).toBeGreaterThan(-1);
+    expect(summaryIndex).toBeLessThan(detailsIndex);
+  });
+
+  it("puts the detailed limits and capability toggles behind an 'Advanced Controlled AI settings' progressive disclosure", () => {
+    expect(controlledAiSection).toMatch(/<details[^>]*>[\s\S]*<summary[^>]*>\s*Advanced Controlled AI settings\s*<\/summary>/);
+  });
+
+  it("keeps every existing advanced control inside the disclosure — three numeric limits and four capability checkboxes, values unchanged", () => {
+    const detailsStart = controlledAiSection.indexOf("Advanced Controlled AI settings");
+    const detailsBlock = controlledAiSection.slice(detailsStart);
+    expect(detailsBlock).toMatch(/aiAssistanceMaxPromptsPerQuestion/);
+    expect(detailsBlock).toMatch(/aiAssistanceMaxPromptsPerAttempt/);
+    expect(detailsBlock).toMatch(/aiAssistanceMaxResponseCharacters/);
+    expect(detailsBlock).toMatch(/aiAssistanceAllowConceptExplanations/);
+    expect(detailsBlock).toMatch(/aiAssistanceAllowAnswerPlanning/);
+    expect(detailsBlock).toMatch(/aiAssistanceAllowReasoningFeedback/);
+    expect(detailsBlock).toMatch(/aiAssistanceAllowProgrammingConceptHelp/);
+    expect(detailsBlock).toMatch(/min=\{1\}\s*\n\s*max=\{20\}/);
+    expect(detailsBlock).toMatch(/min=\{1\}\s*\n\s*max=\{100\}/);
+    expect(detailsBlock).toMatch(/min=\{200\}\s*\n\s*max=\{4000\}/);
+  });
+
+  it("the Tether Controlled AI section never references aiToolsAllowed — changing Controlled AI mode never silently mutates the independent external-AI-tools setting", () => {
+    expect(controlledAiSection).not.toMatch(/aiToolsAllowed/);
+  });
+
+  it("no longer shows the old 'Enable AI brainstorming assistance' checkbox label", () => {
+    expect(pageSource).not.toMatch(/Enable AI brainstorming assistance/);
+  });
+});

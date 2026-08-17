@@ -6,6 +6,31 @@ reasoning, and get guiding questions during a live exam — **an allowed
 assessment resource, not an integrity violation.** Disabled by default;
 a lecturer must explicitly enable it per exam.
 
+## Commercial naming (product-facing UI only)
+
+Everywhere a lecturer or student sees this feature, it is presented as
+**"Tether Controlled AI"** — never "AI Brainstorming Assistance" or
+"the brainstorming assistant." This is a UI-wording layer only: internal
+identifiers (`BRAINSTORM_ONLY`, `AiAssistanceInteraction`,
+`AiBrainstormPanel`, this doc's filename, etc.) are unchanged, and the
+lecturer control still maps directly onto the existing
+`aiAssistanceMode` values — `DISABLED` ("Off") and `BRAINSTORM_ONLY`
+("Controlled guidance") — no new schema enum was introduced. This is
+also kept strictly distinct from `secureExam.ts`'s separate
+`aiToolsAllowed` exam-design setting (labelled "External AI tools" in
+the lecturer UI), which governs AI tools *outside* Tether entirely and
+is never read or written by anything in this feature.
+
+Lecturer-facing review terminology uses "Controlled AI activity" / "AI
+interaction record" / "Guidance shown" / "Request declined" / "Could
+not be completed" rather than internal status names — see
+`summarizeAiAssistanceInteractions()` in `src/lib/aiAssistanceReview.ts`,
+which derives the compact activity counts (requests, guidance shown,
+declined, questions used) from the same normalized interaction list
+used by the full review page, shown both as a compact card on the
+submission review page and at the top of the full AI interaction
+record.
+
 ## What assistance is allowed
 
 - Explaining what a question is asking, in general terms.

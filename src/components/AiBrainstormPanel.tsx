@@ -116,16 +116,16 @@ export function AiBrainstormPanel(props: {
         onClick={() => setExpanded((v) => !v)}
         className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-indigo-900"
       >
-        <span>AI Brainstorming Assistant</span>
+        <span>Tether Controlled AI</span>
         <span className="text-xs font-normal text-indigo-700">{expanded ? "Hide" : "Show"}</span>
       </button>
 
       {expanded && (
         <div className="border-t border-indigo-200 px-3 py-3">
           <p className="text-xs text-indigo-900">
-            This assistant can help you think through the task, but it will not provide the answer
-            or write a response that you can submit. Interactions may be recorded as part of the
-            assessment record.
+            Use this assistant for guidance, planning and reasoning support during this assessment.
+            It is restricted from providing final answers. Your prompts and the responses shown to
+            you are recorded as part of this assessment.
           </p>
 
           <div className="mt-2 flex flex-wrap gap-2 text-xs text-indigo-800">
@@ -157,7 +157,7 @@ export function AiBrainstormPanel(props: {
             {transcript.map((entry) => (
               <div key={entry.id} className="rounded bg-white p-2 text-xs">
                 <p className="font-medium text-gray-700">You: {entry.prompt}</p>
-                {entry.response && <p className="mt-1 text-gray-800">Assistant: {entry.response}</p>}
+                {entry.response && <p className="mt-1 text-gray-800">Tether: {entry.response}</p>}
                 {entry.status === "BLOCKED" && entry.studentMessage && (
                   <p className="mt-1 text-amber-700">{entry.studentMessage}</p>
                 )}
@@ -187,7 +187,7 @@ export function AiBrainstormPanel(props: {
               type="text"
               value={customPrompt}
               onChange={(e) => setCustomPrompt(e.target.value)}
-              placeholder="Or ask your own brainstorming question..."
+              placeholder="Or ask your own question..."
               maxLength={1000}
               disabled={disabled}
               className="flex-1 rounded border border-gray-300 px-2 py-1 text-xs disabled:opacity-50"

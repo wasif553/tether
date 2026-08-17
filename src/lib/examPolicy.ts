@@ -144,7 +144,7 @@ export function validateExamPolicy(policy: ExamPolicy, secureSettings: RelevantS
   if (policy.examMode === "CLOSED_BOOK" && policy.aiToolsAllowed) {
     warnings.push({
       code: "CLOSED_BOOK_WITH_AI_TOOLS",
-      message: "AI tools are enabled for an otherwise closed-book exam. Review the policy before publishing.",
+      message: "External AI tools are enabled for an otherwise closed-book exam. Review the policy before publishing.",
     });
   }
   if (policy.internetAllowed && secureSettings.requireFullscreen) {
@@ -157,7 +157,7 @@ export function validateExamPolicy(policy: ExamPolicy, secureSettings: RelevantS
   if (policy.aiToolsAllowed && !policy.internetAllowed) {
     warnings.push({
       code: "AI_TOOLS_WITHOUT_INTERNET",
-      message: "Confirm how students will access the permitted AI tool, such as through an institution-managed service.",
+      message: "Confirm how students will access the permitted external AI tool, such as through an institution-managed service.",
     });
   }
   if (policy.notesAllowed && (secureSettings.requireCamera || secureSettings.enableAiCameraIntegrityChecks)) {
@@ -208,7 +208,12 @@ function resourceLists(policy: PermittedResources, internetLabel: string): { all
   (policy.calculatorAllowed ? allowed : notAllowed).push("Calculator");
   (policy.notesAllowed ? allowed : notAllowed).push("Notes");
   (policy.internetAllowed ? allowed : notAllowed).push(internetLabel);
-  (policy.aiToolsAllowed ? allowed : notAllowed).push("AI tools");
+  // Controlled AI commercial completion pass — "External AI tools" so
+  // this never reads as covering Tether's own, separately-gated
+  // Controlled AI assistant (aiAssistanceMode) — see
+  // docs/controlled-ai-brainstorming-assistance-v1.md. Wording only;
+  // aiToolsAllowed's stored value/semantics are unchanged.
+  (policy.aiToolsAllowed ? allowed : notAllowed).push("External AI tools");
   return { allowed, notAllowed };
 }
 

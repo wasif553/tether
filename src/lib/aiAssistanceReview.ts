@@ -13,7 +13,7 @@
  */
 import { prisma } from "@/lib/prisma";
 import { isPlatformAdmin } from "@/lib/institutionScope";
-import { isStaleReservation } from "@/lib/aiAssistancePolicy";
+import { isStaleReservation, parseAiAssistancePolicy, isAiAssistanceEnabled } from "@/lib/aiAssistancePolicy";
 import type { Session } from "next-auth";
 
 export class AiAssistanceReviewNotFoundError extends Error {}
@@ -33,13 +33,59 @@ export type AiAssistanceReviewInteraction = {
   createdAt: string;
 };
 
+export type AiAssistanceReviewSummary = {
+  totalRequests: number;
+  guidanceShownCount: number;
+  declinedCount: number;
+  failedCount: number;
+  questionsUsedCount: number;
+};
+
 export type AiAssistanceReview = {
   submissionId: string;
   student: { name: string; email: string };
   exam: { id: string; title: string };
   aiAssistanceEnabled: boolean;
+  summary: AiAssistanceReviewSummary;
   interactions: AiAssistanceReviewInteraction[];
 };
+
+/**
+ * Derives the compact lecturer-facing summary (submission review card and
+ * the top of the full review page) from the ALREADY-normalized
+ * `interactions` produced by buildAiAssistanceReview below — never from
+ * raw Prisma rows — so the stale-RESERVED-to-FAILED interpretation is
+ * applied exactly once and can't drift between the summary and the detail
+ * list. Commercial polish pass — see
+ * docs/controlled-ai-brainstorming-assistance-v1.md. Counts here are
+ * informational only: BLOCKED/FAILED are never treated as integrity
+ * concerns and no risk score is derived from them.
+ */
+export function summarizeAiAssistanceInteractions(
+  interactions: AiAssistanceReviewInteraction[],
+): AiAssistanceReviewSummary {
+  const questionIds = new Set<string>();
+  let guidanceShownCount = 0;
+  let declinedCount = 0;
+  let failedCount = 0;
+  for (const interaction of interactions) {
+    questionIds.add(interaction.questionId);
+    if (interaction.status === "APPROVED" || interaction.status === "FALLBACK") {
+      guidanceShownCount += 1;
+    } else if (interaction.status === "BLOCKED") {
+      declinedCount += 1;
+    } else if (interaction.status === "FAILED") {
+      failedCount += 1;
+    }
+  }
+  return {
+    totalRequests: interactions.length,
+    guidanceShownCount,
+    declinedCount,
+    failedCount,
+    questionsUsedCount: questionIds.size,
+  };
+}
 
 export async function buildAiAssistanceReview(
   submissionId: string,
@@ -66,12 +112,8 @@ export async function buildAiAssistanceReview(
     throw new AiAssistanceReviewForbiddenError("Submission belongs to a different institution");
   }
 
-  return {
-    submissionId: submission.id,
-    student: { name: submission.student.name, email: submission.student.email },
-    exam: { id: submission.exam.id, title: submission.exam.title },
-    aiAssistanceEnabled: submission.aiAssistancePolicySnapshotJson != null,
-    interactions: submission.aiAssistanceInteractions.map((interaction) => ({
+  const interactions: AiAssistanceReviewInteraction[] = submission.aiAssistanceInteractions.map(
+    (interaction) => ({
       id: interaction.id,
       questionId: interaction.questionId,
       questionText: interaction.question.text,
@@ -97,6 +139,25 @@ export async function buildAiAssistanceReview(
       promptNumberForAttempt: interaction.promptNumberForAttempt,
       policyVersion: interaction.policyVersion,
       createdAt: interaction.createdAt.toISOString(),
-    })),
+    }),
+  );
+
+  // A non-null snapshot alone does NOT mean Controlled AI was enabled for
+  // this attempt — POST /api/exams/[id]/start builds and stores an AI
+  // assistance policy snapshot unconditionally, even when the frozen mode
+  // is DISABLED (see buildAiAssistancePolicySnapshot's call site there).
+  // The only authoritative signal is the snapshot's own `mode`, read back
+  // through the SAME fail-closed parser every request-time decision uses
+  // (null/malformed/DISABLED all resolve to disabled) — never a bespoke
+  // re-inspection of the raw JSON here.
+  const aiAssistancePolicy = parseAiAssistancePolicy(submission.aiAssistancePolicySnapshotJson);
+
+  return {
+    submissionId: submission.id,
+    student: { name: submission.student.name, email: submission.student.email },
+    exam: { id: submission.exam.id, title: submission.exam.title },
+    aiAssistanceEnabled: isAiAssistanceEnabled(aiAssistancePolicy),
+    summary: summarizeAiAssistanceInteractions(interactions),
+    interactions,
   };
 }

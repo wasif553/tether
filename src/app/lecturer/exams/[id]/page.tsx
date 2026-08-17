@@ -1534,7 +1534,7 @@ export default function LecturerExamPage({
                 <li>Calculator: {getExamModePreset(pendingPreset)?.resources.calculatorAllowed ? "allowed" : "not allowed"}</li>
                 <li>Notes: {getExamModePreset(pendingPreset)?.resources.notesAllowed ? "allowed" : "not allowed"}</li>
                 <li>Internet: {getExamModePreset(pendingPreset)?.resources.internetAllowed ? "allowed" : "not allowed"}</li>
-                <li>AI tools: {getExamModePreset(pendingPreset)?.resources.aiToolsAllowed ? "allowed" : "not allowed"}</li>
+                <li>External AI tools: {getExamModePreset(pendingPreset)?.resources.aiToolsAllowed ? "allowed" : "not allowed"}</li>
               </ul>
               <p className="mt-2 text-xs text-amber-800">
                 You can change any of these afterwards — applying a preset never locks the
@@ -1603,12 +1603,17 @@ export default function LecturerExamPage({
                   checked={secureForm.aiToolsAllowed}
                   onChange={(e) => setSecureForm({ ...secureForm, aiToolsAllowed: e.target.checked })}
                 />
-                AI tools
+                External AI tools
               </label>
             </div>
             <p className="mt-2 text-xs text-gray-500">
+              Set whether the assessment permits AI tools outside Tether Controlled AI (below). This is a
+              policy statement, not a technical block — Tether does not prevent a student from opening an
+              external AI tool in another window.
+            </p>
+            <p className="mt-1 text-xs text-gray-500">
               {secureForm.aiToolsAllowed
-                ? "Students may use AI tools according to the assessment instructions. AI-use answer signals will not be treated as policy violations by themselves."
+                ? "Students may use external AI tools according to the assessment instructions. AI-use answer signals will not be treated as policy violations by themselves."
                 : "AI-use review signals may be considered alongside other evidence, but they do not prove that AI was used."}
             </p>
           </div>
@@ -2159,149 +2164,164 @@ export default function LecturerExamPage({
           {/* Controlled AI Brainstorming Assistance v1 — see
               docs/controlled-ai-brainstorming-assistance-v1.md. This is an
               ALLOWED assessment resource, not a secure-mode control — kept
-              enabled/disabled independently of secureModeEnabled. */}
+              enabled/disabled independently of secureModeEnabled, and
+              deliberately never coupled to aiToolsAllowed above (separate,
+              independently-stored settings — see the "Permitted resources"
+              section). Commercial polish pass — product-facing name is
+              "Tether Controlled AI"; the underlying values
+              (DISABLED/BRAINSTORM_ONLY) and every limit/capability field
+              are unchanged. */}
           <div className="border-t border-gray-200 pt-3">
-            <h3 className="text-sm font-medium">AI Brainstorming Assistance</h3>
+            <h3 className="text-sm font-medium">Tether Controlled AI</h3>
             <p className="mt-1 text-xs text-gray-500">
-              Students may use a controlled assistant to understand the task, organise ideas and
-              receive guiding questions. It will not provide the answer or write a
-              submission-ready response.
+              Allow students to use Tether&apos;s restricted assistant for question clarification,
+              planning and reasoning support. It does not provide final answers. Student prompts
+              and responses are retained for lecturer review.
             </p>
-            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={secureForm.aiAssistanceMode === "BRAINSTORM_ONLY"}
-                onChange={(e) =>
-                  setSecureForm({
-                    ...secureForm,
-                    aiAssistanceMode: e.target.checked ? "BRAINSTORM_ONLY" : "DISABLED",
-                  })
-                }
-              />
-              <span>
-                Enable AI brainstorming assistance
-                <span className="mt-0.5 block text-xs font-normal text-gray-500">
-                  Disabled by default. Every interaction is recorded as part of the assessment
-                  record and reviewable by lecturers — see the AI assistance section on each
-                  submission.
-                </span>
-              </span>
-            </label>
+            <div className="mt-2 flex gap-4">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="radio"
+                  name="aiAssistanceMode"
+                  checked={secureForm.aiAssistanceMode === "DISABLED"}
+                  onChange={() => setSecureForm({ ...secureForm, aiAssistanceMode: "DISABLED" })}
+                />
+                Off
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="radio"
+                  name="aiAssistanceMode"
+                  checked={secureForm.aiAssistanceMode === "BRAINSTORM_ONLY"}
+                  onChange={() => setSecureForm({ ...secureForm, aiAssistanceMode: "BRAINSTORM_ONLY" })}
+                />
+                Controlled guidance
+              </label>
+            </div>
 
             {secureForm.aiAssistanceMode === "BRAINSTORM_ONLY" && (
-              <div className="mt-3 space-y-3 pl-6">
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <label className="text-xs text-gray-700">
-                    Max prompts per question
-                    <input
-                      type="number"
-                      min={1}
-                      max={20}
-                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
-                      value={secureForm.aiAssistanceMaxPromptsPerQuestion}
-                      onChange={(e) =>
-                        setSecureForm({
-                          ...secureForm,
-                          aiAssistanceMaxPromptsPerQuestion: Math.max(1, Number(e.target.value) || 1),
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="text-xs text-gray-700">
-                    Max prompts per attempt
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
-                      value={secureForm.aiAssistanceMaxPromptsPerAttempt}
-                      onChange={(e) =>
-                        setSecureForm({
-                          ...secureForm,
-                          aiAssistanceMaxPromptsPerAttempt: Math.max(1, Number(e.target.value) || 1),
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="text-xs text-gray-700">
-                    Max response length (characters)
-                    <input
-                      type="number"
-                      min={200}
-                      max={4000}
-                      step={100}
-                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
-                      value={secureForm.aiAssistanceMaxResponseCharacters}
-                      onChange={(e) =>
-                        setSecureForm({
-                          ...secureForm,
-                          aiAssistanceMaxResponseCharacters: Math.max(200, Number(e.target.value) || 200),
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="flex items-start gap-2 text-sm text-gray-700">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5"
-                      checked={secureForm.aiAssistanceAllowConceptExplanations}
-                      onChange={(e) =>
-                        setSecureForm({ ...secureForm, aiAssistanceAllowConceptExplanations: e.target.checked })
-                      }
-                    />
-                    <span>Allow concept explanations</span>
-                  </label>
-                  <label className="flex items-start gap-2 text-sm text-gray-700">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5"
-                      checked={secureForm.aiAssistanceAllowAnswerPlanning}
-                      onChange={(e) =>
-                        setSecureForm({ ...secureForm, aiAssistanceAllowAnswerPlanning: e.target.checked })
-                      }
-                    />
-                    <span>Allow answer planning (structuring an approach, not the wording)</span>
-                  </label>
-                  <label className="flex items-start gap-2 text-sm text-gray-700">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5"
-                      checked={secureForm.aiAssistanceAllowReasoningFeedback}
-                      onChange={(e) =>
-                        setSecureForm({ ...secureForm, aiAssistanceAllowReasoningFeedback: e.target.checked })
-                      }
-                    />
-                    <span>Allow feedback on the student&apos;s own reasoning</span>
-                  </label>
-                  <label className="flex items-start gap-2 text-sm text-gray-700">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5"
-                      checked={secureForm.aiAssistanceAllowProgrammingConceptHelp}
-                      onChange={(e) =>
-                        setSecureForm({ ...secureForm, aiAssistanceAllowProgrammingConceptHelp: e.target.checked })
-                      }
-                    />
-                    <span>Allow programming-concept assistance (no complete code)</span>
-                  </label>
-                </div>
-
+              <div className="mt-3 space-y-3">
                 <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
-                  <p className="font-medium">AI Brainstorming Assistance: Enabled</p>
-                  <p>
-                    {secureForm.aiAssistanceMaxPromptsPerQuestion} prompt(s) per question,{" "}
-                    {secureForm.aiAssistanceMaxPromptsPerAttempt} per attempt, responses up to{" "}
-                    {secureForm.aiAssistanceMaxResponseCharacters} characters.
-                  </p>
-                  <p className="mt-1">
-                    It will never reveal the correct answer, correct MCQ option, marking rubric, or
-                    write a submission-ready response — see docs/controlled-ai-brainstorming-assistance-v1.md.
-                  </p>
+                  <p className="font-medium">Controlled guidance enabled</p>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    <li>Up to {secureForm.aiAssistanceMaxPromptsPerQuestion} request(s) per question</li>
+                    <li>Up to {secureForm.aiAssistanceMaxPromptsPerAttempt} request(s) per attempt</li>
+                    <li>Responses limited to {secureForm.aiAssistanceMaxResponseCharacters} characters</li>
+                    <li>Prompts and responses retained for review</li>
+                  </ul>
                 </div>
+
+                <details className="rounded border border-gray-200">
+                  <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-gray-700">
+                    Advanced Controlled AI settings
+                  </summary>
+                  <div className="space-y-3 border-t border-gray-200 p-3">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                      <label className="text-xs text-gray-700">
+                        Max prompts per question
+                        <input
+                          type="number"
+                          min={1}
+                          max={20}
+                          className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                          value={secureForm.aiAssistanceMaxPromptsPerQuestion}
+                          onChange={(e) =>
+                            setSecureForm({
+                              ...secureForm,
+                              aiAssistanceMaxPromptsPerQuestion: Math.max(1, Number(e.target.value) || 1),
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="text-xs text-gray-700">
+                        Max prompts per attempt
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                          value={secureForm.aiAssistanceMaxPromptsPerAttempt}
+                          onChange={(e) =>
+                            setSecureForm({
+                              ...secureForm,
+                              aiAssistanceMaxPromptsPerAttempt: Math.max(1, Number(e.target.value) || 1),
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="text-xs text-gray-700">
+                        Max response length (characters)
+                        <input
+                          type="number"
+                          min={200}
+                          max={4000}
+                          step={100}
+                          className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                          value={secureForm.aiAssistanceMaxResponseCharacters}
+                          onChange={(e) =>
+                            setSecureForm({
+                              ...secureForm,
+                              aiAssistanceMaxResponseCharacters: Math.max(200, Number(e.target.value) || 200),
+                            })
+                          }
+                        />
+                      </label>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="flex items-start gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={secureForm.aiAssistanceAllowConceptExplanations}
+                          onChange={(e) =>
+                            setSecureForm({ ...secureForm, aiAssistanceAllowConceptExplanations: e.target.checked })
+                          }
+                        />
+                        <span>Allow concept explanations</span>
+                      </label>
+                      <label className="flex items-start gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={secureForm.aiAssistanceAllowAnswerPlanning}
+                          onChange={(e) =>
+                            setSecureForm({ ...secureForm, aiAssistanceAllowAnswerPlanning: e.target.checked })
+                          }
+                        />
+                        <span>Allow answer planning (structuring an approach, not the wording)</span>
+                      </label>
+                      <label className="flex items-start gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={secureForm.aiAssistanceAllowReasoningFeedback}
+                          onChange={(e) =>
+                            setSecureForm({ ...secureForm, aiAssistanceAllowReasoningFeedback: e.target.checked })
+                          }
+                        />
+                        <span>Allow feedback on the student&apos;s own reasoning</span>
+                      </label>
+                      <label className="flex items-start gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={secureForm.aiAssistanceAllowProgrammingConceptHelp}
+                          onChange={(e) =>
+                            setSecureForm({ ...secureForm, aiAssistanceAllowProgrammingConceptHelp: e.target.checked })
+                          }
+                        />
+                        <span>Allow programming-concept assistance (no complete code)</span>
+                      </label>
+                    </div>
+
+                    <p className="text-xs text-gray-500">
+                      It is restricted from providing the correct answer, correct MCQ option, marking
+                      rubric, or a submission-ready response — see
+                      docs/controlled-ai-brainstorming-assistance-v1.md.
+                    </p>
+                  </div>
+                </details>
               </div>
             )}
           </div>
