@@ -15,12 +15,14 @@
  * acceptance, the entire transaction rolls back: no partial institution
  * assignment, no course enrolment, ever remains.
  *
- * Race safety: the invitation is claimed via an UPDATE whose WHERE
- * clause re-checks acceptedAt/revokedAt/tokenHash atomically against
- * the database at write time (not just the values read moments earlier
- * in this same transaction) — Postgres row-level locking means a
- * concurrent regenerate/revoke/second-accept can never both "win" a
- * race through the gap between read and write.
+ * Race safety: BOTH the invitation row and the User row are claimed via
+ * a conditional UPDATE (updateMany with a WHERE clause re-checking the
+ * exact prior state) rather than a plain read-then-write — Postgres
+ * row-level locking means a concurrent regenerate/revoke/second-accept,
+ * or a second acceptance of a DIFFERENT invitation (different
+ * institution) for the same null-institution student, can never both
+ * "win" a race through the gap between read and write. See the two
+ * `updateMany` calls below for the exact mechanism.
  */
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
@@ -96,29 +98,40 @@ export async function POST(
       return { kind: "invalid" };
     }
 
-    // Re-check the student's CURRENT institutionId inside this same
-    // transaction — never the value read (if any) before the claim
-    // above, and never trusted from outside the transaction.
-    const student = await tx.user.findUnique({
-      where: { id: studentId },
-      select: { institutionId: true },
+    // Atomic User-row claim — mirrors the invitation claim above, and
+    // for the same reason. A plain "read institutionId, then if null
+    // write it" has a read/write race: two concurrent acceptances of
+    // two DIFFERENT invitations (two different institutions) for this
+    // same null-institution student could both read institutionId:
+    // null before either writes, and an unconditional
+    // `update({where: {id}})` would let the second silently overwrite
+    // the first institution — exactly the "Institution A -> Institution
+    // B" transition this feature must never allow. This conditional
+    // `updateMany` only succeeds if institutionId is STILL null at the
+    // moment of the write; Postgres row-level locking means the loser's
+    // write is evaluated only after the winner's has already committed.
+    const claimUser = await tx.user.updateMany({
+      where: { id: studentId, institutionId: null },
+      data: { institutionId: invitation.course.institutionId },
     });
 
-    if (student?.institutionId != null && student.institutionId !== invitation.course.institutionId) {
-      // Became linked to a DIFFERENT institution concurrently — throwing
-      // here rolls back the entire transaction, including the claim
-      // above, so the invitation is left exactly as it was (still
-      // pending) rather than "accepted" with no resulting affiliation.
-      throw new CrossInstitutionConflictError();
-    }
-
-    if (student?.institutionId == null) {
-      await tx.user.update({
+    if (claimUser.count !== 1) {
+      // Lost the User-row claim — re-read inside this same transaction
+      // to tell an idempotent re-run (already exactly this institution)
+      // apart from a genuine conflict (a DIFFERENT institution won).
+      const student = await tx.user.findUnique({
         where: { id: studentId },
-        data: { institutionId: invitation.course.institutionId },
+        select: { institutionId: true },
       });
+      if (student?.institutionId !== invitation.course.institutionId) {
+        // A different institution won the race — throwing here rolls
+        // back the entire transaction, including the invitation claim
+        // above, so the invitation is left exactly as it was (still
+        // pending) rather than "accepted" with no resulting affiliation.
+        throw new CrossInstitutionConflictError();
+      }
+      // else: already exactly this institution — idempotent no-op continuation.
     }
-    // else: already exactly this institution — idempotent no-op continuation.
 
     await tx.courseEnrollment.upsert({
       where: { courseId_userId: { courseId: invitation.courseId, userId: studentId } },

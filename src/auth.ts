@@ -2,6 +2,7 @@ import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
+import { applyJwtUpdate } from "@/lib/sessionRefresh";
 
 declare module "next-auth" {
   interface User {
@@ -50,13 +51,20 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     }),
   ],
   callbacks: {
-    jwt: async ({ token, user }) => {
+    jwt: async ({ token, user, trigger }) => {
       if (user) {
         (token as Record<string, unknown>).id = user.id;
         (token as Record<string, unknown>).role = user.role;
         (token as Record<string, unknown>).institutionId = user.institutionId ?? null;
+        return token;
       }
-      return token;
+      // Tether Course Invitation + Acceptance v1 hardening — see
+      // src/lib/sessionRefresh.ts's own doc comment for the full
+      // reasoning. Only refreshes institutionId from the database when
+      // the client explicitly calls `useSession().update()`; an
+      // ordinary request (trigger undefined) is a pure no-op, exactly
+      // the pre-hardening behavior.
+      return applyJwtUpdate(token as Record<string, unknown>, trigger);
     },
     session: async ({ session, token }) => {
       if (session.user) {

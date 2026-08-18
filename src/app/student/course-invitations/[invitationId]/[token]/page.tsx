@@ -22,6 +22,7 @@
 
 import { useEffect, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
+import { useSession } from "next-auth/react";
 
 type PreviewResult =
   | { ok: true; institutionName: string; course: { code: string; name: string } }
@@ -48,6 +49,7 @@ export default function CourseInvitationPage({
 }) {
   const { invitationId, token } = usePromise(params);
   const router = useRouter();
+  const { update: updateSession } = useSession();
 
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -69,11 +71,24 @@ export default function CourseInvitationPage({
       method: "POST",
     });
     const body = await res.json().catch(() => null);
-    setAccepting(false);
     if (!res.ok || !body?.ok) {
+      setAccepting(false);
       setAcceptError(messageFor(body?.reason ?? "invalid"));
       return;
     }
+    // Tether Course Invitation + Acceptance v1 hardening — see
+    // docs/tether-course-invitation-acceptance-v1.md. Acceptance just
+    // changed this student's User.institutionId in the database, but
+    // this browser's JWT session still holds whatever institutionId it
+    // was minted with. Explicitly trigger NextAuth's session update
+    // (src/auth.ts's applyJwtUpdate, invoked only for trigger:"update")
+    // and wait for it to resolve BEFORE navigating, so /student and the
+    // exam-visibility checks it depends on immediately see the new
+    // affiliation — no logout/login required. The update payload here
+    // carries no institutionId of its own; the refreshed value always
+    // comes from the server re-reading the database.
+    await updateSession();
+    setAccepting(false);
     router.replace("/student");
   }
 
