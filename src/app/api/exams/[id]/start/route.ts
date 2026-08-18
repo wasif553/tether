@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
-import { assertSameInstitution, institutionErrorResponse, requireInstitutionId } from "@/lib/institutionScope";
+import { assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 import { captureNetworkEvidence } from "@/lib/networkEvidence";
 import { canCreateAttempt, nextAttemptNumber } from "@/lib/assessmentLifecycle";
 import { parseSecureSettings, questionPoolsActive } from "@/lib/secureExam";
@@ -138,38 +138,53 @@ export async function POST(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  try {
-    assertSameInstitution(session, exam.institutionId);
-  } catch (err) {
-    const res = institutionErrorResponse(err);
-    if (res) return res;
-    throw err;
-  }
-
-  // Course, Enrolment, Exam Assignment, Scheduling v1 — see
-  // docs/course-enrolment-and-exam-assignment.md. A courseId: null exam
-  // is a legacy institution-wide exam and needs no further check here —
-  // institution membership above is sufficient, exactly as before this
-  // feature. Otherwise the student must be enrolled in the exam's course
-  // (assignmentMode COURSE) or directly assigned (SELECTED_STUDENTS).
-  if (exam.courseId) {
-    const [enrolled, assigned] = await Promise.all([
-      exam.assignmentMode === "COURSE"
-        ? prisma.courseEnrollment.findUnique({
-            where: { courseId_userId: { courseId: exam.courseId, userId: session.user.id } },
-          })
-        : Promise.resolve(null),
-      exam.assignmentMode === "SELECTED_STUDENTS"
-        ? prisma.examAssignment.findUnique({
-            where: { examId_studentId: { examId: id, studentId: session.user.id } },
-          })
-        : Promise.resolve(null),
-    ]);
-    const hasAccess =
-      (exam.assignmentMode === "COURSE" && enrolled?.role === "STUDENT") ||
-      (exam.assignmentMode === "SELECTED_STUDENTS" && assigned != null);
-    if (!hasAccess) {
+  // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md. Same
+  // reasoning as GET /api/exams/[id]/access-check: a STANDALONE exam's
+  // entitlement is an existing per-student ExamAssignment row, never
+  // institution membership — assertSameInstitution is skipped entirely
+  // for this mode (it would incorrectly throw for a null-institution
+  // student, who is exactly who this mode exists to serve).
+  if (exam.assignmentMode === "STANDALONE") {
+    const assigned = await prisma.examAssignment.findUnique({
+      where: { examId_studentId: { examId: id, studentId: session.user.id } },
+    });
+    if (!assigned) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+  } else {
+    try {
+      assertSameInstitution(session, exam.institutionId);
+    } catch (err) {
+      const res = institutionErrorResponse(err);
+      if (res) return res;
+      throw err;
+    }
+
+    // Course, Enrolment, Exam Assignment, Scheduling v1 — see
+    // docs/course-enrolment-and-exam-assignment.md. A courseId: null exam
+    // is a legacy institution-wide exam and needs no further check here —
+    // institution membership above is sufficient, exactly as before this
+    // feature. Otherwise the student must be enrolled in the exam's course
+    // (assignmentMode COURSE) or directly assigned (SELECTED_STUDENTS).
+    if (exam.courseId) {
+      const [enrolled, assigned] = await Promise.all([
+        exam.assignmentMode === "COURSE"
+          ? prisma.courseEnrollment.findUnique({
+              where: { courseId_userId: { courseId: exam.courseId, userId: session.user.id } },
+            })
+          : Promise.resolve(null),
+        exam.assignmentMode === "SELECTED_STUDENTS"
+          ? prisma.examAssignment.findUnique({
+              where: { examId_studentId: { examId: id, studentId: session.user.id } },
+            })
+          : Promise.resolve(null),
+      ]);
+      const hasAccess =
+        (exam.assignmentMode === "COURSE" && enrolled?.role === "STUDENT") ||
+        (exam.assignmentMode === "SELECTED_STUDENTS" && assigned != null);
+      if (!hasAccess) {
+        return NextResponse.json({ error: "Not found" }, { status: 404 });
+      }
     }
   }
 
@@ -596,10 +611,26 @@ export async function POST(
 
     // Academic Integrity Network Evidence v1 — captured fire-and-forget
     // after the submission row exists. Never blocks exam start.
-    const institutionId = requireInstitutionId(session);
+    //
+    // Standalone Exam Link v1 bug fix — see docs/standalone-exam-link-v1.md.
+    // This used to be `requireInstitutionId(session)`, which throws for
+    // any session with institutionId: null. That is now a normal,
+    // supported case (a null-institution student taking a STANDALONE
+    // exam via an accepted ExamAssignment) reaching this line AFTER
+    // prisma.submission.create above has already durably succeeded — an
+    // uncaught throw here would surface as an unhandled 500 on an attempt
+    // that was, in fact, already created. exam.institutionId is the
+    // correct value regardless: it's the exam's own tenancy owner (always
+    // populated for a real published exam), not the requesting student's
+    // session institution, which for STANDALONE mode is allowed to be
+    // absent.
+    const institutionId = exam.institutionId;
 
     // Exam Design Policy v1 — audit both the acknowledgement and the
-    // snapshot creation. Never blocks exam start.
+    // snapshot creation. Never blocks exam start. institutionId here may
+    // be null (createPlatformAuditLog's own institutionId param accepts
+    // string | null | undefined) — audit logs remain best-effort and are
+    // never a gate on exam start.
     createPlatformAuditLog({
       actorId: session.user.id,
       action: "EXAM_POLICY_ACKNOWLEDGED",
@@ -616,14 +647,23 @@ export async function POST(
       institutionId,
       metadata: { examId: id, examMode: policySnapshot.examMode, policyVersion: policySnapshot.policyVersion },
     }).catch(() => {});
-    captureNetworkEvidence({
-      req,
-      submissionId: submission.id,
-      examId: id,
-      studentId: session.user.id,
-      institutionId,
-      source: "EXAM_START",
-    }).catch(() => {/* evidence capture is best-effort */});
+    // captureNetworkEvidence's institutionId param is typed as a required
+    // (non-nullable) string — see src/lib/networkEvidence.ts. Guarded
+    // rather than widened, since every other caller legitimately always
+    // has one; this is the one call site where it can be null in
+    // practice (a STANDALONE exam somehow created with no institution),
+    // and evidence capture is already documented as best-effort/
+    // never-blocking.
+    if (institutionId) {
+      captureNetworkEvidence({
+        req,
+        submissionId: submission.id,
+        examId: id,
+        studentId: session.user.id,
+        institutionId,
+        source: "EXAM_START",
+      }).catch(() => {/* evidence capture is best-effort */});
+    }
 
     // Exam Session Binding + Time Anomaly Review v1 — coarse telemetry
     // marker only. Session BINDING itself (cookies, device token) is

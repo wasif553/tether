@@ -129,10 +129,11 @@ async function loadAllOldLecturerExams(scope: LecturerScope, now: Date, needsRev
 
 type LecturerExamRow = Awaited<ReturnType<typeof loadCurrentLecturerExams>>[number];
 
-/** Never includes accessCodeHash in any API response — see docs/student-onboarding-and-exam-access.md. Attaches needsReviewCount from the map built up-front. */
+/** Never includes accessCodeHash or standaloneInviteTokenHash in any API response. Attaches needsReviewCount from the map built up-front. */
 function sanitizeLecturerExam(exam: LecturerExamRow, needsReviewByExamId: Map<string, number>) {
   const rest: Partial<LecturerExamRow> & { needsReviewCount?: number } = { ...exam };
   delete rest.accessCodeHash;
+  delete rest.standaloneInviteTokenHash;
   rest.needsReviewCount = needsReviewByExamId.get(exam.id) ?? 0;
   return rest;
 }

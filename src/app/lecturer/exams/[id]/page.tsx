@@ -194,11 +194,13 @@ type Exam = {
   secureClientAvailability: SecureClientAvailability;
   accessCodeRequired: boolean;
   courseId: string | null;
-  assignmentMode: "COURSE" | "SELECTED_STUDENTS";
+  assignmentMode: "COURSE" | "SELECTED_STUDENTS" | "STANDALONE";
   availableFrom: string | null;
   availableUntil: string | null;
   marksReleasedAt: string | null;
   marksReleasedById: string | null;
+  // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md.
+  standaloneInviteEnabled: boolean;
 };
 
 type LecturerCourse = {
@@ -373,6 +375,25 @@ export default function LecturerExamPage({
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [scheduleMessage, setScheduleMessage] = useState<string | null>(null);
 
+  // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md. `audience`
+  // is a view-only 3-way selector (derived from exam.assignmentMode/courseId
+  // on load) that decides which of the three sub-panels below is shown; it
+  // never itself switches the exam's server-side mode. Only clicking
+  // "Generate link" actually flips assignmentMode to STANDALONE (via POST
+  // .../standalone-invite), and only "Save course & schedule" with the
+  // Course/Institution-wide panel showing flips it back — exactly mirroring
+  // the two existing, already-authoritative server actions.
+  const [audience, setAudience] = useState<"INSTITUTION" | "COURSE" | "STANDALONE">("INSTITUTION");
+  // The plaintext invitation link is only ever known for the lifetime of
+  // this page load, right after a Generate/Regenerate call — never
+  // refetchable afterwards (the server only stores a hash). null after a
+  // reload even if exam.standaloneInviteEnabled is true.
+  const [standaloneInviteUrl, setStandaloneInviteUrl] = useState<string | null>(null);
+  const [generatingInvite, setGeneratingInvite] = useState(false);
+  const [disablingInvite, setDisablingInvite] = useState(false);
+  const [inviteMessage, setInviteMessage] = useState<string | null>(null);
+  const [copiedInviteLink, setCopiedInviteLink] = useState(false);
+
   // Individual Exam Timing & Accommodations v1 — see
   // src/lib/examTimeAccommodation.ts and
   // docs/exam-time-accommodations-v1.md.
@@ -497,7 +518,12 @@ export default function LecturerExamPage({
       setSecureForm(data.secureSettings);
     }
     setCourseId(data.courseId ?? "");
-    setAssignmentMode(data.assignmentMode ?? "COURSE");
+    // assignmentMode here drives only the Course sub-panel's Whole
+    // course/Selected students radios — STANDALONE is tracked separately
+    // via `audience` below, never assigned into this state (its type
+    // deliberately excludes STANDALONE).
+    setAssignmentMode(data.assignmentMode === "SELECTED_STUDENTS" ? "SELECTED_STUDENTS" : "COURSE");
+    setAudience(data.assignmentMode === "STANDALONE" ? "STANDALONE" : data.courseId ? "COURSE" : "INSTITUTION");
     setAvailableFrom(data.availableFrom ? data.availableFrom.slice(0, 16) : "");
     setAvailableUntil(data.availableUntil ? data.availableUntil.slice(0, 16) : "");
     setLoading(false);
@@ -591,16 +617,28 @@ export default function LecturerExamPage({
   async function saveSchedule() {
     setSavingSchedule(true);
     setScheduleMessage(null);
+    // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md. When
+    // the Standalone panel is showing, this button only ever touches the
+    // schedule window — courseId/assignmentMode are deliberately omitted
+    // from the request so a stray click here can never downgrade a
+    // STANDALONE exam back to COURSE/institution-wide (that only ever
+    // happens by explicitly choosing the Institution-wide or Course
+    // audience option and saving from there).
+    const body: Record<string, unknown> = {
+      availableFrom: availableFrom ? new Date(availableFrom).toISOString() : null,
+      availableUntil: availableUntil ? new Date(availableUntil).toISOString() : null,
+    };
+    if (audience !== "STANDALONE") {
+      body.courseId = audience === "COURSE" ? courseId || null : null;
+      body.assignmentMode = audience === "COURSE" ? assignmentMode : "COURSE";
+      if (audience === "COURSE" && assignmentMode === "SELECTED_STUDENTS") {
+        body.selectedStudentIds = selectedStudentIds;
+      }
+    }
     const res = await fetch(`/api/exams/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        courseId: courseId || null,
-        assignmentMode,
-        selectedStudentIds: assignmentMode === "SELECTED_STUDENTS" ? selectedStudentIds : undefined,
-        availableFrom: availableFrom ? new Date(availableFrom).toISOString() : null,
-        availableUntil: availableUntil ? new Date(availableUntil).toISOString() : null,
-      }),
+      body: JSON.stringify(body),
     });
     setSavingSchedule(false);
     if (res.ok) {
@@ -610,6 +648,55 @@ export default function LecturerExamPage({
       const body = await res.json().catch(() => null);
       setScheduleMessage(typeof body?.error === "string" ? body.error : "Failed to save.");
     }
+  }
+
+  // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md. POST
+  // is used for both first-generate and regenerate — every call issues a
+  // brand-new token and atomically switches the exam to STANDALONE
+  // (clearing courseId server-side). The returned plaintext is shown
+  // exactly once, here — it is never requested or stored again after
+  // this response.
+  async function handleGenerateInvite() {
+    setGeneratingInvite(true);
+    setInviteMessage(null);
+    const res = await fetch(`/api/exams/${id}/standalone-invite`, { method: "POST" });
+    setGeneratingInvite(false);
+    if (!res.ok) {
+      setInviteMessage("Failed to generate invitation link.");
+      return;
+    }
+    const data: { inviteUrl: string } = await res.json();
+    setStandaloneInviteUrl(
+      typeof window !== "undefined" ? `${window.location.origin}${data.inviteUrl}` : data.inviteUrl,
+    );
+    setAudience("STANDALONE");
+    loadExam();
+  }
+
+  async function handleCopyInviteLink() {
+    if (!standaloneInviteUrl) return;
+    try {
+      await navigator.clipboard.writeText(standaloneInviteUrl);
+      setCopiedInviteLink(true);
+      setTimeout(() => setCopiedInviteLink(false), 2000);
+    } catch {
+      // Clipboard access can fail (permissions, non-secure context) —
+      // the link is still visible and selectable in the input above.
+    }
+  }
+
+  async function handleDisableInvite() {
+    setDisablingInvite(true);
+    setInviteMessage(null);
+    const res = await fetch(`/api/exams/${id}/standalone-invite`, { method: "DELETE" });
+    setDisablingInvite(false);
+    if (!res.ok) {
+      setInviteMessage("Failed to disable invitation link.");
+      return;
+    }
+    setStandaloneInviteUrl(null);
+    setInviteMessage("Disabled — this link no longer grants new access. Students who already accepted keep their access.");
+    loadExam();
   }
 
   // Individual Exam Timing & Accommodations v1 — see
@@ -1207,6 +1294,13 @@ export default function LecturerExamPage({
     needsReviewCount: unresolvedHighRisk ?? 0,
   });
   const workspaceCourse = exam.courseId ? courses.find((c) => c.id === exam.courseId) : undefined;
+  // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md.
+  const workspaceAudienceLabel =
+    exam.assignmentMode === "STANDALONE"
+      ? "Standalone exam link"
+      : workspaceCourse
+        ? `${workspaceCourse.code} — ${workspaceCourse.name}`
+        : "No course assigned";
   const workspaceAvailabilityLine = (() => {
     if (workspaceAvailabilityStatus === "Draft") {
       return "Not published — students cannot access this exam yet.";
@@ -1230,7 +1324,7 @@ export default function LecturerExamPage({
         <div className="min-w-0">
           <h1 className="truncate text-2xl font-semibold text-[#101828] sm:text-3xl">{exam.title}</h1>
           <p className="mt-1.5 flex flex-wrap items-center gap-2 text-sm text-[#667085]">
-            <span>{workspaceCourse ? `${workspaceCourse.code} — ${workspaceCourse.name}` : "No course assigned"}</span>
+            <span>{workspaceAudienceLabel}</span>
             <span
               className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${AVAILABILITY_PILL_STYLES[workspaceAvailabilityStatus]}`}
             >
@@ -3035,25 +3129,71 @@ export default function LecturerExamPage({
       <h2 className="mt-8 text-lg font-semibold text-[#101828]">Course, assignment &amp; schedule</h2>
       <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
         <p className="text-sm text-gray-600">
-          Assign this exam to a course, or leave it unassigned to keep it
-          visible to the whole institution (legacy behaviour).
+          Choose who can access this exam: the whole institution, a
+          specific course, or individual students you invite directly via
+          a standalone link.
         </p>
         <div>
-          <label className="text-sm font-medium">Course</label>
-          <select
-            className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
-            value={courseId}
-            onChange={(e) => setCourseId(e.target.value)}
-          >
-            <option value="">No course (institution-wide)</option>
-            {courses.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.code} — {c.name}
-              </option>
-            ))}
-          </select>
+          <label className="text-sm font-medium">Audience</label>
+          <div className="mt-1 flex flex-col gap-2 text-sm">
+            <label className="flex items-start gap-2">
+              <input
+                type="radio"
+                className="mt-0.5"
+                checked={audience === "INSTITUTION"}
+                onChange={() => setAudience("INSTITUTION")}
+              />
+              <span>
+                Institution-wide (legacy)
+                <span className="block text-xs text-gray-500">Visible to every student in your institution.</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input
+                type="radio"
+                className="mt-0.5"
+                checked={audience === "COURSE"}
+                onChange={() => setAudience("COURSE")}
+              />
+              <span>
+                Course
+                <span className="block text-xs text-gray-500">Assign to a course you teach.</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input
+                type="radio"
+                className="mt-0.5"
+                checked={audience === "STANDALONE"}
+                onChange={() => setAudience("STANDALONE")}
+              />
+              <span>
+                Standalone exam link
+                <span className="block text-xs text-gray-500">
+                  Invite individual students directly — no course or institution membership required.
+                </span>
+              </span>
+            </label>
+          </div>
         </div>
-        {courseId && (
+        {audience === "COURSE" && (
+          <div>
+            <label className="text-sm font-medium">Course</label>
+            <select
+              className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
+              value={courseId}
+              onChange={(e) => setCourseId(e.target.value)}
+            >
+              <option value="">Select a course</option>
+              {courses.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.code} — {c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {audience === "COURSE" && courseId && (
           <div>
             <label className="text-sm font-medium">Assign to</label>
             <div className="mt-1 flex gap-4 text-sm">
@@ -3076,7 +3216,7 @@ export default function LecturerExamPage({
             </div>
           </div>
         )}
-        {courseId && assignmentMode === "SELECTED_STUDENTS" && (
+        {audience === "COURSE" && courseId && assignmentMode === "SELECTED_STUDENTS" && (
           <div>
             <label className="text-sm font-medium">Selected students</label>
             <div className="mt-1 max-h-40 overflow-y-auto rounded border border-gray-200 bg-white p-2">
@@ -3098,6 +3238,72 @@ export default function LecturerExamPage({
                 </label>
               ))}
             </div>
+          </div>
+        )}
+        {audience === "STANDALONE" && (
+          <div className="rounded border border-gray-200 bg-gray-50 p-3">
+            {!standaloneInviteUrl && !exam.standaloneInviteEnabled && (
+              <>
+                <p className="text-sm text-gray-600">
+                  Generate a secure link to invite individual students to this exam. A
+                  student who opens the link and accepts gets access — no course or
+                  institution membership needed, and no other student can see this exam.
+                </p>
+                <button
+                  onClick={handleGenerateInvite}
+                  disabled={generatingInvite}
+                  className="mt-2 rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+                >
+                  {generatingInvite ? "Generating..." : "Generate link"}
+                </button>
+              </>
+            )}
+            {standaloneInviteUrl && (
+              <>
+                <p className="text-sm font-medium">Invitation link</p>
+                <div className="mt-1 flex items-center gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={standaloneInviteUrl}
+                    onFocus={(e) => e.target.select()}
+                    className="flex-1 rounded border border-gray-300 px-2 py-1.5 text-xs"
+                  />
+                  <button
+                    onClick={handleCopyInviteLink}
+                    className="rounded border border-gray-300 px-3 py-1.5 text-xs"
+                  >
+                    {copiedInviteLink ? "Copied!" : "Copy link"}
+                  </button>
+                </div>
+                <p className="mt-1 text-xs text-amber-700">
+                  This link is shown once. Copy it now — it cannot be recovered after you
+                  leave or reload this page.
+                </p>
+              </>
+            )}
+            {!standaloneInviteUrl && exam.standaloneInviteEnabled && (
+              <p className="text-sm text-gray-700">Invitation link active.</p>
+            )}
+            {exam.standaloneInviteEnabled && (
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={handleGenerateInvite}
+                  disabled={generatingInvite}
+                  className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+                >
+                  {generatingInvite ? "Generating..." : "Regenerate link"}
+                </button>
+                <button
+                  onClick={handleDisableInvite}
+                  disabled={disablingInvite}
+                  className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+                >
+                  {disablingInvite ? "Disabling..." : "Disable"}
+                </button>
+              </div>
+            )}
+            {inviteMessage && <p className="mt-2 text-sm text-gray-600">{inviteMessage}</p>}
           </div>
         )}
         <div className="grid gap-2 sm:grid-cols-2">
@@ -3401,14 +3607,22 @@ export default function LecturerExamPage({
               not grant access on its own — it only works for students who are already authorized
               to take this exam.
             </p>
-            {courseId && (
+            {exam.assignmentMode === "STANDALONE" ? (
               <p className="text-xs text-gray-500">
-                {assignmentMode === "SELECTED_STUDENTS"
-                  ? "Only students assigned to this exam will be able to access it via this link."
-                  : `Only students enrolled in ${
-                      courses.find((c) => c.id === courseId)?.name ?? "this course"
-                    } will be able to access it via this link.`}
+                This exam uses a standalone invitation link. This ordinary link only works
+                for students who have already accepted an invitation — see &quot;Standalone
+                exam link&quot; above to invite new students.
               </p>
+            ) : (
+              courseId && (
+                <p className="text-xs text-gray-500">
+                  {assignmentMode === "SELECTED_STUDENTS"
+                    ? "Only students assigned to this exam will be able to access it via this link."
+                    : `Only students enrolled in ${
+                        courses.find((c) => c.id === courseId)?.name ?? "this course"
+                      } will be able to access it via this link.`}
+                </p>
+              )
             )}
           </>
         )}

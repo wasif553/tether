@@ -29,7 +29,14 @@ const updateExamSchema = z
     // docs/course-enrolment-and-exam-assignment.md. courseId: null clears
     // the course link (reverts to a legacy institution-wide exam).
     courseId: z.string().min(1).nullable().optional(),
-    assignmentMode: z.enum(["COURSE", "SELECTED_STUDENTS"]).optional(),
+    // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md.
+    // STANDALONE is accepted here so this route doesn't reject a save
+    // that merely updates availableFrom/availableUntil on an exam
+    // already switched to STANDALONE (e.g. via the dedicated
+    // POST /api/exams/[id]/standalone-invite endpoint, the only route
+    // that actually TURNS ON standalone mode) — but this route never
+    // generates/stores an invite token itself.
+    assignmentMode: z.enum(["COURSE", "SELECTED_STUDENTS", "STANDALONE"]).optional(),
     // Replaces the full selected-student list when provided (and
     // assignmentMode is SELECTED_STUDENTS) — not an incremental add.
     selectedStudentIds: z.array(z.string().min(1)).optional(),
@@ -40,6 +47,10 @@ const updateExamSchema = z
     (data) =>
       !data.availableFrom || !data.availableUntil || data.availableUntil > data.availableFrom,
     { message: "availableUntil must be after availableFrom", path: ["availableUntil"] },
+  )
+  .refine(
+    (data) => data.assignmentMode !== "STANDALONE" || data.courseId === null || data.courseId === undefined,
+    { message: "A standalone exam cannot have a courseId", path: ["courseId"] },
   );
 
 /**
@@ -65,13 +76,14 @@ function pickSubmittedSecureSettings<T extends object>(parsedSecureSettings: T, 
   ) as Partial<T>;
 }
 
-/** Strips accessCodeHash from any exam object before it's ever sent in a response. */
-function omitAccessCodeHash<T extends { accessCodeHash?: string | null }>(
+/** Strips accessCodeHash and standaloneInviteTokenHash from any exam object before it's ever sent in a response. */
+function omitAccessCodeHash<T extends { accessCodeHash?: string | null; standaloneInviteTokenHash?: string | null }>(
   exam: T,
-): Omit<T, "accessCodeHash"> {
+): Omit<T, "accessCodeHash" | "standaloneInviteTokenHash"> {
   const rest: Partial<T> = { ...exam };
   delete rest.accessCodeHash;
-  return rest as Omit<T, "accessCodeHash">;
+  delete rest.standaloneInviteTokenHash;
+  return rest as Omit<T, "accessCodeHash" | "standaloneInviteTokenHash">;
 }
 
 async function getOwnedExam(examId: string, lecturerId: string, session: Parameters<typeof institutionWhere>[0]) {
@@ -274,6 +286,19 @@ export async function PATCH(
     // clears it (reverts to legacy institution-wide exam), a string sets
     // it — but only after verifying the lecturer teaches that course.
     const effectiveCourseId = courseId !== undefined ? courseId : exam.courseId;
+    const effectiveAssignmentMode = assignmentMode !== undefined ? assignmentMode : exam.assignmentMode;
+    // Standalone Exam Link v1 — checked against the EFFECTIVE (merged)
+    // state, not just the raw submitted body (the zod .refine() above
+    // only catches the case where both fields are submitted together in
+    // the same request) — a request that sets assignmentMode:
+    // STANDALONE while leaving a previously-set courseId untouched must
+    // also be rejected.
+    if (effectiveAssignmentMode === "STANDALONE" && effectiveCourseId) {
+      return NextResponse.json(
+        { error: "A standalone exam cannot have a courseId" },
+        { status: 400 },
+      );
+    }
     if (courseId) {
       await assertCanAssignExamToCourse(session, courseId);
     }

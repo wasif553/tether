@@ -42,35 +42,53 @@ export async function GET(
     return NextResponse.json({ ok: false, reason: "no_access" });
   }
 
-  try {
-    assertSameInstitution(session, exam.institutionId);
-  } catch (err) {
-    const res = institutionErrorResponse(err);
-    if (res) return NextResponse.json({ ok: false, reason: "no_access" });
-    throw err;
-  }
-
-  // Course, Enrolment, Exam Assignment, Scheduling v1 — identical logic
-  // to POST /api/exams/[id]/start. courseId: null is a legacy
-  // institution-wide exam and needs no further check.
-  if (exam.courseId) {
-    const [enrolled, assigned] = await Promise.all([
-      exam.assignmentMode === "COURSE"
-        ? prisma.courseEnrollment.findUnique({
-            where: { courseId_userId: { courseId: exam.courseId, userId: session.user.id } },
-          })
-        : Promise.resolve(null),
-      exam.assignmentMode === "SELECTED_STUDENTS"
-        ? prisma.examAssignment.findUnique({
-            where: { examId_studentId: { examId: id, studentId: session.user.id } },
-          })
-        : Promise.resolve(null),
-    ]);
-    const hasAccess =
-      (exam.assignmentMode === "COURSE" && enrolled?.role === "STUDENT") ||
-      (exam.assignmentMode === "SELECTED_STUDENTS" && assigned != null);
-    if (!hasAccess) {
+  // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md. A
+  // STANDALONE exam is reachable by a student regardless of
+  // institution membership (including institutionId: null) — entitlement
+  // is entirely governed by an existing ExamAssignment row, created only
+  // by the deliberate accept action, never by this read-only check.
+  // assertSameInstitution is deliberately skipped for this mode: it
+  // would incorrectly throw for a null-institution student and would be
+  // the wrong check even for an institution-linked one, since a
+  // standalone exam's entitlement is per-student, not per-institution.
+  if (exam.assignmentMode === "STANDALONE") {
+    const assigned = await prisma.examAssignment.findUnique({
+      where: { examId_studentId: { examId: id, studentId: session.user.id } },
+    });
+    if (!assigned) {
       return NextResponse.json({ ok: false, reason: "no_access" });
+    }
+  } else {
+    try {
+      assertSameInstitution(session, exam.institutionId);
+    } catch (err) {
+      const res = institutionErrorResponse(err);
+      if (res) return NextResponse.json({ ok: false, reason: "no_access" });
+      throw err;
+    }
+
+    // Course, Enrolment, Exam Assignment, Scheduling v1 — identical logic
+    // to POST /api/exams/[id]/start. courseId: null is a legacy
+    // institution-wide exam and needs no further check.
+    if (exam.courseId) {
+      const [enrolled, assigned] = await Promise.all([
+        exam.assignmentMode === "COURSE"
+          ? prisma.courseEnrollment.findUnique({
+              where: { courseId_userId: { courseId: exam.courseId, userId: session.user.id } },
+            })
+          : Promise.resolve(null),
+        exam.assignmentMode === "SELECTED_STUDENTS"
+          ? prisma.examAssignment.findUnique({
+              where: { examId_studentId: { examId: id, studentId: session.user.id } },
+            })
+          : Promise.resolve(null),
+      ]);
+      const hasAccess =
+        (exam.assignmentMode === "COURSE" && enrolled?.role === "STUDENT") ||
+        (exam.assignmentMode === "SELECTED_STUDENTS" && assigned != null);
+      if (!hasAccess) {
+        return NextResponse.json({ ok: false, reason: "no_access" });
+      }
     }
   }
 

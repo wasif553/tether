@@ -46,9 +46,23 @@ async function getOwnedExam(examId: string, lecturerId: string, session: Paramet
  * accommodation for a student who could not actually take this exam.
  */
 async function isStudentEligibleForExam(
-  exam: { id: string; courseId: string | null; assignmentMode: "COURSE" | "SELECTED_STUDENTS"; institutionId: string | null },
+  exam: { id: string; courseId: string | null; assignmentMode: "COURSE" | "SELECTED_STUDENTS" | "STANDALONE"; institutionId: string | null },
   studentId: string,
 ): Promise<boolean> {
+  // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md. A
+  // STANDALONE exam also has courseId: null, so this check MUST run
+  // before the legacy institution-wide branch below — otherwise a
+  // student with institutionId: null (the normal case for a standalone-
+  // accepting self-service student) would be wrongly rejected by the
+  // `student.institutionId === exam.institutionId` comparison there.
+  // Eligibility here is exactly "holds an ExamAssignment", independent
+  // of institution membership.
+  if (exam.assignmentMode === "STANDALONE") {
+    const assigned = await prisma.examAssignment.findUnique({
+      where: { examId_studentId: { examId: exam.id, studentId } },
+    });
+    return assigned != null;
+  }
   if (!exam.courseId) {
     const student = await prisma.user.findUnique({
       where: { id: studentId },
@@ -72,10 +86,22 @@ async function isStudentEligibleForExam(
 async function listEligibleStudents(exam: {
   id: string;
   courseId: string | null;
-  assignmentMode: "COURSE" | "SELECTED_STUDENTS";
+  assignmentMode: "COURSE" | "SELECTED_STUDENTS" | "STANDALONE";
   institutionId: string | null;
 }) {
   const select = { id: true, name: true, email: true, institutionStudentId: true } as const;
+  // Standalone Exam Link v1 — must run before the courseId:null legacy
+  // branch below for the same reason as isStudentEligibleForExam above:
+  // a STANDALONE exam also has courseId: null, but its eligible
+  // population is exactly its ExamAssignment holders, never "every
+  // student in the institution."
+  if (exam.assignmentMode === "STANDALONE") {
+    const assignments = await prisma.examAssignment.findMany({
+      where: { examId: exam.id },
+      include: { student: { select } },
+    });
+    return assignments.map((a) => a.student);
+  }
   if (!exam.courseId) {
     return prisma.user.findMany({ where: { institutionId: exam.institutionId, role: "STUDENT" }, select, orderBy: { name: "asc" } });
   }

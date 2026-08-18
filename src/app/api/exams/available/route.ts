@@ -46,7 +46,14 @@ function studentVisibilityWhere(scope: StudentVisibilityScope) {
     published: true,
     ...scope.institution,
     OR: [
-      { courseId: null },
+      // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md.
+      // Legacy institution-wide visibility (courseId: null) must mean
+      // ONLY assignmentMode COURSE (the schema default every pre-existing
+      // exam already has) — a STANDALONE exam also has courseId: null,
+      // but must NEVER be institution-wide visible; it's covered instead
+      // by the third branch below (an explicit ExamAssignment), which
+      // already doesn't filter by assignmentMode.
+      { courseId: null, assignmentMode: "COURSE" as const },
       { courseId: { in: scope.studentCourseIds }, assignmentMode: "COURSE" as const },
       { assignments: { some: { studentId: scope.studentId } } },
     ],
@@ -153,6 +160,32 @@ async function loadAllOldStudentExams(scope: StudentVisibilityScope, now: Date) 
   });
 }
 
+/**
+ * Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md,
+ * "Dashboard". A null-institution student (self-signup STUDENT who has
+ * never joined any institution — see
+ * docs/self-service-account-onboarding-v1.md) can still legitimately
+ * hold entitlement to individual STANDALONE exams via an accepted
+ * invitation (POST /api/exams/[id]/standalone-invite/accept). This query
+ * is deliberately NOT scoped by institution (there is none to scope to,
+ * and studentVisibilityWhere's `scope.institution` spread assumes one) —
+ * it returns ONLY exams with an explicit ExamAssignment row for this
+ * student AND assignmentMode STANDALONE. It never falls back to
+ * institution-wide or course-based visibility, and a STANDALONE exam
+ * this student has NOT accepted an invitation for is never included.
+ */
+async function loadNullInstitutionStudentExams(studentId: string) {
+  return prisma.exam.findMany({
+    where: {
+      published: true,
+      assignmentMode: "STANDALONE",
+      assignments: { some: { studentId } },
+    },
+    orderBy: { createdAt: "desc" },
+    include: examIncludeForStudent(studentId),
+  });
+}
+
 type StudentExamRow = Awaited<ReturnType<typeof loadCurrentStudentExams>>[number];
 
 /**
@@ -237,12 +270,26 @@ export async function GET(req?: Request) {
   // requireInstitutionId() below would otherwise throw for this session
   // and surface as a "please log in again" error, which is wrong here:
   // this account IS correctly logged in, it simply has nothing to see
-  // yet. Deliberately short-circuits before any exam/course query runs —
-  // never falls back to DEFAULT_INSTITUTION_SLUG or any other
-  // institution's exams. Applies regardless of query mode (?all=true,
-  // history pagination) since the answer is the same either way: nothing.
+  // yet. Deliberately short-circuits before any institution-scoped
+  // query runs — never falls back to DEFAULT_INSTITUTION_SLUG or any
+  // other institution's exams.
+  //
+  // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md. This
+  // used to unconditionally return []. It now returns exactly the
+  // STANDALONE exams this student has accepted an invitation for (see
+  // loadNullInstitutionStudentExams above) — everything else about a
+  // null-institution student's dashboard remains []. The list is
+  // inherently small and per-student, so — unlike the institution-scoped
+  // path below — it deliberately skips history pagination/`?all=true`
+  // handling and always returns the plain combined array; there is no
+  // institution-scale history to bound here.
   if (session.user.institutionId == null) {
-    return NextResponse.json([]);
+    const exams = await loadNullInstitutionStudentExams(session.user.id);
+    const now = new Date();
+    const combinedView = computeStudentExamView(exams, now);
+    const actionable = combinedView.filter((exam) => !isStudentHistoryItem(exam));
+    const history = sortStudentHistoryBySubmittedAtDesc(combinedView.filter(isStudentHistoryItem));
+    return NextResponse.json([...actionable, ...history]);
   }
 
   try {

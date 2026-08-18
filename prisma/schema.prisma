@@ -160,6 +160,17 @@ enum CourseRole {
 enum ExamAssignmentMode {
   COURSE
   SELECTED_STUDENTS
+  // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md. A
+  // deliberately course-free, institution-membership-free exam: access
+  // is granted exclusively by accepting a lecturer-issued invitation
+  // link, which creates an ExamAssignment for the accepting student
+  // (reusing the existing model — no new entitlement table). Always
+  // paired with courseId: null, but — unlike the legacy COURSE +
+  // courseId: null combination — NEVER falls back to institution-wide
+  // visibility. This explicit value is what distinguishes a deliberate
+  // standalone exam from an accidental/legacy unassigned one; the two
+  // must never be conflated.
+  STANDALONE
 }
 
 // Multi-Tenant Architecture v1 — see docs/multi-tenant-migration.md.
@@ -353,6 +364,22 @@ model Exam {
   // no window restriction (see docs/course-enrolment-and-exam-assignment.md).
   availableFrom  DateTime?
   availableUntil DateTime?
+
+  // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md. Only
+  // meaningful when assignmentMode is STANDALONE. The plaintext
+  // invitation token is NEVER stored — only its bcrypt hash, and only
+  // ever returned to the lecturer once, at generation/regeneration time
+  // (same "shown once" discipline as accessCode above). Independent of
+  // accessCode: the invite token answers "may this student acquire
+  // entitlement to this exam", accessCode answers "does an already-
+  // entitled student know the operational code needed to start now" —
+  // both may be set on the same exam. standaloneInviteEnabled is a
+  // separate boolean (mirroring accessCodeRequired's pattern) so
+  // disabling future claims is an explicit, unambiguous action that
+  // never has to clear/regenerate the hash and never affects any
+  // ExamAssignment a student already holds.
+  standaloneInviteTokenHash String?
+  standaloneInviteEnabled   Boolean @default(false)
 
   // Question Pools v1 (additive, opt-in) — see docs/question-pools-v1.md.
   questionPools QuestionPool[]

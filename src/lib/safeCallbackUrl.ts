@@ -22,6 +22,25 @@ export function isSafeJoinCallbackUrl(value: string | null | undefined): value i
 }
 
 /**
+ * Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md. The
+ * invitation-token-bearing join URL is a distinct path shape
+ * (`/student/exams/join/{examId}/invite/{token}`), not a query string —
+ * deliberately, so this allowlist stays a pure path-based regex rather
+ * than needing to parse/validate query parameters, and so the plain
+ * `/student/exams/join/{examId}` route (matched by JOIN_PATH_RE above)
+ * is untouched and still never carries standalone entitlement on its
+ * own. Same character class as every other path segment here — no
+ * query/hash smuggling, no traversal.
+ */
+const JOIN_WITH_INVITE_PATH_RE = /^\/student\/exams\/join\/[A-Za-z0-9_-]+\/invite\/[A-Za-z0-9_-]+$/;
+
+export function isSafeJoinWithInviteCallbackUrl(value: string | null | undefined): value is string {
+  if (!value) return false;
+  if (!value.startsWith("/") || value.startsWith("//")) return false;
+  return JOIN_WITH_INVITE_PATH_RE.test(value);
+}
+
+/**
  * Narrow companion to isSafeJoinCallbackUrl: also allows a same-origin,
  * relative path under the authenticated lecturer area (e.g.
  * `/lecturer/exams/[id]/submissions`), so a lecturer whose session
@@ -56,5 +75,10 @@ export function isSafeTetherLaunchCallbackUrl(value: string | null | undefined):
 export function isSafeAppCallbackUrl(value: string | null | undefined): value is string {
   if (!value) return false;
   if (!value.startsWith("/") || value.startsWith("//")) return false;
-  return JOIN_PATH_RE.test(value) || LECTURER_PATH_RE.test(value) || TETHER_LAUNCH_PATH_RE.test(value);
+  return (
+    JOIN_PATH_RE.test(value) ||
+    JOIN_WITH_INVITE_PATH_RE.test(value) ||
+    LECTURER_PATH_RE.test(value) ||
+    TETHER_LAUNCH_PATH_RE.test(value)
+  );
 }
