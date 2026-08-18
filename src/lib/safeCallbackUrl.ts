@@ -88,6 +88,34 @@ export function isSafeCourseInvitationCallbackUrl(value: string | null | undefin
   return COURSE_INVITATION_PATH_RE.test(value);
 }
 
+/**
+ * Canvas/LTI identity-collision browser-flow hardening — see
+ * docs/lti-identity-collision-hardening-v1.md. The identity-link page
+ * needs a signed handoff token to survive a login round-trip, and that
+ * token (a compact JWT) contains `.` characters that don't fit any
+ * existing path-segment convention here. Rather than generalizing this
+ * file into a query-string-aware allowlist (a materially riskier change
+ * to a security-critical file — see the other guards' own doc comments
+ * for why that has been deliberately avoided every other time this
+ * came up), this is a narrow, hardcoded special case for exactly ONE
+ * fixed path: an exact match, or that exact path followed by `?` and a
+ * restrictive character class. The query string is never parsed or
+ * treated as a redirect target itself — it's opaque data (the signed,
+ * separately-verified handoff) consumed entirely by the fixed
+ * destination page. No `/`, `#`, `:`, or `@` is ever permitted in it, so
+ * this can never smuggle a new path, fragment, or authority.
+ */
+const LTI_IDENTITY_LINK_PATH = "/lti/identity-link";
+const LTI_IDENTITY_LINK_QUERY_RE = /^\?[A-Za-z0-9_=&.%-]*$/;
+
+export function isSafeLtiIdentityLinkCallbackUrl(value: string | null | undefined): value is string {
+  if (!value) return false;
+  if (!value.startsWith("/") || value.startsWith("//")) return false;
+  if (value === LTI_IDENTITY_LINK_PATH) return true;
+  if (!value.startsWith(`${LTI_IDENTITY_LINK_PATH}?`)) return false;
+  return LTI_IDENTITY_LINK_QUERY_RE.test(value.slice(LTI_IDENTITY_LINK_PATH.length));
+}
+
 export function isSafeAppCallbackUrl(value: string | null | undefined): value is string {
   if (!value) return false;
   if (!value.startsWith("/") || value.startsWith("//")) return false;
@@ -96,6 +124,7 @@ export function isSafeAppCallbackUrl(value: string | null | undefined): value is
     JOIN_WITH_INVITE_PATH_RE.test(value) ||
     LECTURER_PATH_RE.test(value) ||
     TETHER_LAUNCH_PATH_RE.test(value) ||
-    COURSE_INVITATION_PATH_RE.test(value)
+    COURSE_INVITATION_PATH_RE.test(value) ||
+    isSafeLtiIdentityLinkCallbackUrl(value)
   );
 }

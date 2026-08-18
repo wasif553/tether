@@ -2,12 +2,10 @@ import { NextResponse } from "next/server";
 import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWTPayload } from "jose";
-import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { findPlatformJwk } from "@/lib/lti/jwks-cache";
 import { createSessionCookie } from "@/lib/lti/session";
-import { resolveLtiEmailCollision } from "@/lib/lti/identityCollision";
-import { createPlatformAuditLog } from "@/lib/platformAdmin";
+import { createIdentityLinkHandoff } from "@/lib/lti/identityLinkHandoff";
 import { resolveInternalRedirectOrigin } from "@/lib/appOrigin";
 import type { Prisma } from "@/generated/prisma/client";
 
@@ -176,53 +174,30 @@ export async function POST(req: Request) {
       : null;
 
     if (existingByEmail) {
-      const currentSession = await auth();
-      const collision = await resolveLtiEmailCollision({
+      // Canvas/LTI identity-collision browser-flow hardening — see
+      // docs/lti-identity-collision-hardening-v1.md. This is a
+      // cross-site POST from Canvas; Auth.js's SameSite=Lax session
+      // cookie (unchanged, deliberately) will not be attached to it, so
+      // `auth()` here could never reliably see the student's existing
+      // Tether session. Ownership confirmation is deferred to a
+      // same-site follow-up instead: issue a short-lived signed handoff
+      // identifying the collision candidate, and send the browser to a
+      // normal Tether page to complete it. This launch's job stops at
+      // "a collision was detected" — role/institution/canvasId
+      // compatibility and actual linking all happen at confirmation
+      // time (POST /api/lti/identity-link/confirm), against
+      // then-current database state, never anything decided here.
+      const handoff = await createIdentityLinkHandoff({
         existingUserId: existingByEmail.id,
         canvasUserId,
+        platformId: platform.id,
         derivedRole: role,
-        platformInstitutionId: platform.institutionId,
-        // Never trust anything client-supplied for identity — only the
-        // server-verified session, exactly like every other route in
-        // this app that calls auth().
-        currentSessionUserId: currentSession?.user?.id ?? null,
       });
 
-      if (collision.kind !== "linked") {
-        createPlatformAuditLog({
-          actorId: currentSession?.user?.id ?? null,
-          action: "lti.identity_link_blocked",
-          targetType: "User",
-          targetId: existingByEmail.id,
-          institutionId: platform.institutionId,
-          // Never plaintext email/id_token/session cookie — only the
-          // safe, already-non-secret reason code and platform id.
-          metadata: { platformId: platform.id, reason: collision.kind },
-        }).catch(() => {});
-
-        const requestOrigin = resolveInternalRedirectOrigin(req.url);
-        return NextResponse.redirect(
-          new URL(`/lti/identity-link?reason=${collision.kind}`, requestOrigin),
-          302,
-        );
-      }
-
-      createPlatformAuditLog({
-        actorId: existingByEmail.id,
-        action: "lti.identity_linked",
-        targetType: "User",
-        targetId: existingByEmail.id,
-        institutionId: platform.institutionId,
-        metadata: { platformId: platform.id },
-      }).catch(() => {});
-
-      user = await prisma.user.findUniqueOrThrow({ where: { id: collision.userId } });
-      if (canvasCourseId && !user.canvasCourseIds.includes(canvasCourseId)) {
-        user = await prisma.user.update({
-          where: { id: user.id },
-          data: { canvasCourseIds: [...user.canvasCourseIds, canvasCourseId] },
-        });
-      }
+      const requestOrigin = resolveInternalRedirectOrigin(req.url);
+      const redirectUrl = new URL("/lti/identity-link", requestOrigin);
+      redirectUrl.searchParams.set("handoff", handoff);
+      return NextResponse.redirect(redirectUrl, 302);
     } else {
       const randomPassword = randomBytes(32).toString("hex");
       const passwordHash = await bcrypt.hash(randomPassword, 12);

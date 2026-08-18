@@ -1,87 +1,128 @@
 "use client";
 
 /**
- * Canvas/LTI identity-collision hardening v1 — see
- * docs/lti-identity-collision-hardening-v1.md. Shown when a Canvas
- * launch's email matches an existing Tether account that the current
- * browser has not proven ownership of (or is otherwise not safe to
- * connect automatically). Small and commercial — no technical jargon,
- * no internal IDs.
+ * Canvas/LTI identity-collision browser-flow hardening — see
+ * docs/lti-identity-collision-hardening-v1.md.
+ *
+ * A normal, same-site Tether page — reached only via a redirect from the
+ * (now cross-site-unsafe-for-session-reading) Canvas launch. Carries a
+ * short-lived signed handoff token in `?handoff=`, never trusted on its
+ * own: the actual link only happens after this page's own same-site POST
+ * to /api/lti/identity-link/confirm, where the CURRENT authenticated
+ * Tether session is re-verified against the handoff's candidate account.
+ *
+ * If not signed in, the "Sign in to Tether" link preserves this exact
+ * page (with its handoff) as the post-login callback — guarded by
+ * isSafeLtiIdentityLinkCallbackUrl (src/lib/safeCallbackUrl.ts) — so the
+ * user lands right back here, still holding the same handoff, ready to
+ * confirm. It never returns to the consumed Canvas launch itself.
  */
 
-import { Suspense } from "react";
+import { Suspense, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { signOut } from "next-auth/react";
+import { useSession } from "next-auth/react";
 
-type Reason = "requires_login" | "wrong_account" | "role_mismatch" | "different_institution" | "canvas_id_taken";
+type ConfirmResult = { ok: true } | { ok: false; reason: string };
 
-function isReason(value: string | null): value is Reason {
+const REASON_MESSAGES: Record<string, string> = {
+  wrong_account: "This Canvas identity is associated with a different Tether account than the one you're signed in as.",
+  invalid: "This connection link is no longer valid. Please return to Canvas and open the assessment again.",
+};
+
+function messageFor(reason: string): string {
   return (
-    value === "requires_login" ||
-    value === "wrong_account" ||
-    value === "role_mismatch" ||
-    value === "different_institution" ||
-    value === "canvas_id_taken"
+    REASON_MESSAGES[reason] ??
+    "This Canvas identity couldn't be connected automatically. Please contact your institution's Tether administrator."
   );
 }
 
 function IdentityLinkContent() {
   const searchParams = useSearchParams();
-  const reasonParam = searchParams.get("reason");
-  const reason: Reason = isReason(reasonParam) ? reasonParam : "requires_login";
+  const handoff = searchParams.get("handoff");
+  const { data: session, status } = useSession();
+  const [connecting, setConnecting] = useState(false);
+  const [result, setResult] = useState<ConfirmResult | null>(null);
 
-  if (reason === "requires_login") {
+  async function handleConnect() {
+    if (!handoff) return;
+    setConnecting(true);
+    const res = await fetch("/api/lti/identity-link/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ handoff }),
+    });
+    const body = await res.json().catch(() => null);
+    setConnecting(false);
+    setResult(res.ok && body?.ok ? { ok: true } : { ok: false, reason: typeof body?.reason === "string" ? body.reason : "invalid" });
+  }
+
+  if (!handoff) {
     return (
-      <div className="mx-auto max-w-md py-16 text-center">
+      <div className="mx-auto mt-16 max-w-md rounded border border-gray-200 p-6 text-center">
+        <h1 className="text-xl font-semibold">Connect your Canvas identity</h1>
+        <p className="mt-4 text-gray-600">
+          This connection link is no longer valid. Please return to Canvas and open the assessment
+          again.
+        </p>
+      </div>
+    );
+  }
+
+  if (result?.ok) {
+    return (
+      <div className="mx-auto mt-16 max-w-md rounded border border-gray-200 p-6 text-center">
+        <h1 className="text-xl font-semibold">Canvas identity connected</h1>
+        <p className="mt-4 text-gray-600">Return to Canvas and open the assessment again.</p>
+      </div>
+    );
+  }
+
+  if (result && !result.ok) {
+    return (
+      <div className="mx-auto mt-16 max-w-md rounded border border-gray-200 p-6 text-center">
+        <h1 className="text-xl font-semibold">Couldn&apos;t connect your Canvas identity</h1>
+        <p className="mt-4 text-gray-600">{messageFor(result.reason)}</p>
+      </div>
+    );
+  }
+
+  if (status === "loading") {
+    return <p className="mx-auto mt-16 max-w-md text-center text-gray-500">Loading...</p>;
+  }
+
+  if (status !== "authenticated" || !session) {
+    const returnTo = `/lti/identity-link?handoff=${encodeURIComponent(handoff)}`;
+    const loginHref = `/login?callbackUrl=${encodeURIComponent(returnTo)}`;
+    return (
+      <div className="mx-auto mt-16 max-w-md rounded border border-gray-200 p-6 text-center">
         <h1 className="text-xl font-semibold">Existing account found</h1>
         <p className="mt-4 text-gray-600">
-          Tether found an existing account using the email supplied by Canvas. For security, we
-          need you to confirm that account before connecting it.
+          Tether found an existing account using the email supplied by Canvas. For security, sign
+          in to confirm that this account belongs to you.
         </p>
         <a
-          href="/login"
+          href={loginHref}
           className="mt-6 inline-block rounded bg-black px-4 py-2 text-sm text-white"
         >
           Sign in to Tether
         </a>
-        <p className="mt-4 text-xs text-gray-400">
-          After signing in, return to Canvas and open this assessment again.
-        </p>
       </div>
     );
   }
 
-  if (reason === "wrong_account") {
-    return (
-      <div className="mx-auto max-w-md py-16 text-center">
-        <h1 className="text-xl font-semibold">A different Tether account is currently signed in</h1>
-        <p className="mt-4 text-gray-600">
-          Sign out of Tether, sign in with the account associated with this Canvas identity, then
-          open the assessment from Canvas again.
-        </p>
-        <button
-          onClick={() => signOut({ callbackUrl: "/login" })}
-          className="mt-6 rounded bg-black px-4 py-2 text-sm text-white"
-        >
-          Sign out
-        </button>
-        <p className="mt-4 text-xs text-gray-400">
-          Then sign in with the Tether account associated with your Canvas identity.
-        </p>
-      </div>
-    );
-  }
-
-  // role_mismatch / different_institution / canvas_id_taken — all edge
-  // cases without a self-service resolution; point to support rather
-  // than exposing internal details about why.
   return (
-    <div className="mx-auto max-w-md py-16 text-center">
-      <h1 className="text-xl font-semibold">Couldn&apos;t connect your Canvas identity</h1>
+    <div className="mx-auto mt-16 max-w-md rounded border border-gray-200 p-6 text-center">
+      <h1 className="text-xl font-semibold">You are signed in to Tether</h1>
       <p className="mt-4 text-gray-600">
-        This Canvas identity couldn&apos;t be connected to a Tether account automatically. Please
-        contact your institution&apos;s Tether administrator for help.
+        Confirm that this is the account you want to connect to your Canvas identity.
       </p>
+      <button
+        onClick={handleConnect}
+        disabled={connecting}
+        className="mt-6 rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+      >
+        {connecting ? "Connecting..." : "Connect Canvas identity"}
+      </button>
     </div>
   );
 }

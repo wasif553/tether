@@ -11,14 +11,22 @@
  * `fetch` call inside findPlatformJwk/getPlatformJwks is mocked to
  * return the corresponding public JWK — jwtVerify itself is never
  * mocked, so signature/issuer/audience verification runs for real).
+ *
+ * Covers launch-route-only concerns: normal provisioning, the collision
+ * hand-off redirect itself (never a session/auth() dependency — see
+ * docs/lti-identity-collision-hardening-v1.md's "Browser-flow
+ * hardening"), mapped-user email-update hardening, the no-email
+ * synthetic path, nonce/replay/signature verification, and
+ * LtiExamLink/launch-redirect regression. Everything about
+ * resolveLtiEmailCollision's own outcomes (role/institution/canvasId
+ * checks, races) and the confirmation endpoint lives in
+ * ltiIdentityLinkHandoff.test.ts instead — the launch route no longer
+ * determines any of those itself.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import bcrypt from "bcryptjs";
 import { SignJWT, exportJWK, generateKeyPair, type JWK } from "jose";
 import { randomBytes } from "node:crypto";
-
-const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
-vi.mock("@/auth", () => ({ auth: mockAuth }));
 
 const { prisma } = await import("../prisma");
 const { getOrCreateTestInstitution } = await import("../testInstitution");
@@ -31,10 +39,6 @@ const stamp = Date.now();
 const cleanupUserIds: string[] = [];
 const cleanupPlatformIds: string[] = [];
 const cleanupInstitutionScopedExamIds: string[] = [];
-
-function sessionFor(userId: string, role: "LECTURER" | "STUDENT" | "PLATFORM_ADMIN", institutionId: string | null) {
-  return { user: { id: userId, email: `${userId}@test.invalid`, name: "Test", role, institutionId } };
-}
 
 async function createUser(opts: {
   email: string;
@@ -169,7 +173,7 @@ afterAll(async () => {
   await prisma.user.deleteMany({ where: { id: { in: cleanupUserIds } } });
 });
 
-// ── 1-2: normal provisioning / mapped launch unchanged ────────────────────
+// ── normal provisioning / mapped launch unchanged ──────────────────────────
 
 describe("Normal Canvas launch behavior — unchanged", () => {
   it("1. new Canvas user with an unused email still provisions normally", async () => {
@@ -207,10 +211,10 @@ describe("Normal Canvas launch behavior — unchanged", () => {
   });
 });
 
-// ── 3-16: the collision itself ─────────────────────────────────────────────
+// ── the collision hand-off itself ──────────────────────────────────────────
 
-describe("Email collision — no unhandled crash, no automatic email-only linking", () => {
-  it("3 & 5. collision no longer produces a unique-email failure, and does not create a duplicate User", async () => {
+describe("Email collision — hand-off redirect, never a session/auth() dependency", () => {
+  it("collision no longer produces a unique-email failure, and does not create a duplicate User", async () => {
     const platform = await createPlatform(instA.id);
     const existing = await createUser({ email: `collide-3-${stamp}@test.invalid`, role: "STUDENT", institutionId: null });
     const session = await startLtiSession(platform.id);
@@ -219,7 +223,6 @@ describe("Email collision — no unhandled crash, no automatic email-only linkin
       platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
       nonce: session.nonce, canvasUserId, email: existing.email, role: "STUDENT",
     });
-    mockAuth.mockResolvedValue(null);
     const { POST } = await import("@/app/api/lti/launch/route");
     const res = await POST(launchRequest(idToken, session.state));
     expect(res.status).toBe(302); // not a 500
@@ -227,7 +230,7 @@ describe("Email collision — no unhandled crash, no automatic email-only linkin
     expect(count).toBe(1);
   });
 
-  it("4. collision + no Tether session does NOT link automatically", async () => {
+  it("collision always redirects to a signed hand-off, regardless of any cookie the cross-site request happens to carry", async () => {
     const platform = await createPlatform(instA.id);
     const existing = await createUser({ email: `collide-4-${stamp}@test.invalid`, role: "STUDENT", institutionId: null });
     const session = await startLtiSession(platform.id);
@@ -235,191 +238,40 @@ describe("Email collision — no unhandled crash, no automatic email-only linkin
       platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
       nonce: session.nonce, canvasUserId: `cu-${stamp}-4`, email: existing.email, role: "STUDENT",
     });
-    mockAuth.mockResolvedValue(null);
     const { POST } = await import("@/app/api/lti/launch/route");
     const res = await POST(launchRequest(idToken, session.state));
-    expect(res.headers.get("location")).toContain("/lti/identity-link?reason=requires_login");
+    const location = res.headers.get("location") ?? "";
+    expect(location).toContain("/lti/identity-link?handoff=");
+    // Nothing is ever written at launch time — linking only ever happens
+    // via the separate, same-site confirmation endpoint.
     const fresh = await prisma.user.findUniqueOrThrow({ where: { id: existing.id } });
     expect(fresh.canvasUserId).toBeNull();
     expect(fresh.institutionId).toBeNull();
   });
 
-  it("6. collision + wrong signed-in Tether User does NOT link", async () => {
+  it("the launch route never sets a session cookie, creates an LtiLaunch row, or writes an audit entry for a collision", async () => {
     const platform = await createPlatform(instA.id);
-    const existing = await createUser({ email: `collide-6-${stamp}@test.invalid`, role: "STUDENT", institutionId: null });
-    const otherLoggedIn = await createUser({ email: `collide-6-other-${stamp}@test.invalid`, role: "STUDENT", institutionId: instA.id });
+    const existing = await createUser({ email: `collide-noaudit-${stamp}@test.invalid`, role: "STUDENT", institutionId: null });
     const session = await startLtiSession(platform.id);
     const idToken = await buildIdToken({
       platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
-      nonce: session.nonce, canvasUserId: `cu-${stamp}-6`, email: existing.email, role: "STUDENT",
-    });
-    mockAuth.mockResolvedValue(sessionFor(otherLoggedIn.id, "STUDENT", instA.id));
-    const { POST } = await import("@/app/api/lti/launch/route");
-    const res = await POST(launchRequest(idToken, session.state));
-    expect(res.headers.get("location")).toContain("/lti/identity-link?reason=wrong_account");
-    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: existing.id } });
-    expect(fresh.canvasUserId).toBeNull();
-  });
-
-  it("7 & 8. collision + exact matching authenticated Tether User links safely, canvasUserId attached", async () => {
-    const platform = await createPlatform(instA.id);
-    const existing = await createUser({ email: `collide-7-${stamp}@test.invalid`, role: "STUDENT", institutionId: instA.id });
-    const session = await startLtiSession(platform.id);
-    const canvasUserId = `cu-${stamp}-7`;
-    const idToken = await buildIdToken({
-      platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
-      nonce: session.nonce, canvasUserId, email: existing.email, role: "STUDENT",
-    });
-    mockAuth.mockResolvedValue(sessionFor(existing.id, "STUDENT", instA.id));
-    const { POST } = await import("@/app/api/lti/launch/route");
-    const res = await POST(launchRequest(idToken, session.state));
-    expect(res.status).toBe(302);
-    expect(res.headers.get("location")).not.toContain("/lti/identity-link");
-    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: existing.id } });
-    expect(fresh.canvasUserId).toBe(canvasUserId);
-  });
-
-  it("9. null institution becomes platform institution only after confirmed link", async () => {
-    const platform = await createPlatform(instA.id);
-    const existing = await createUser({ email: `collide-9-${stamp}@test.invalid`, role: "STUDENT", institutionId: null });
-    const session = await startLtiSession(platform.id);
-    mockAuth.mockResolvedValue(sessionFor(existing.id, "STUDENT", null));
-    const idToken = await buildIdToken({
-      platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
-      nonce: session.nonce, canvasUserId: `cu-${stamp}-9`, email: existing.email, role: "STUDENT",
-    });
-    const { POST } = await import("@/app/api/lti/launch/route");
-    await POST(launchRequest(idToken, session.state));
-    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: existing.id } });
-    expect(fresh.institutionId).toBe(instA.id);
-  });
-
-  it("10. same-institution account links normally", async () => {
-    const platform = await createPlatform(instA.id);
-    const existing = await createUser({ email: `collide-10-${stamp}@test.invalid`, role: "STUDENT", institutionId: instA.id });
-    const session = await startLtiSession(platform.id);
-    mockAuth.mockResolvedValue(sessionFor(existing.id, "STUDENT", instA.id));
-    const idToken = await buildIdToken({
-      platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
-      nonce: session.nonce, canvasUserId: `cu-${stamp}-10`, email: existing.email, role: "STUDENT",
+      nonce: session.nonce, canvasUserId: `cu-${stamp}-noaudit`, email: existing.email, role: "STUDENT",
     });
     const { POST } = await import("@/app/api/lti/launch/route");
     const res = await POST(launchRequest(idToken, session.state));
-    expect(res.status).toBe(302);
-    expect(res.headers.get("location")).not.toContain("identity-link");
-    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: existing.id } });
-    expect(fresh.institutionId).toBe(instA.id);
-  });
-
-  it("11 & 12. different-institution account is rejected; institution is never overwritten", async () => {
-    const platform = await createPlatform(instB.id);
-    const existing = await createUser({ email: `collide-11-${stamp}@test.invalid`, role: "STUDENT", institutionId: instA.id });
-    const session = await startLtiSession(platform.id);
-    mockAuth.mockResolvedValue(sessionFor(existing.id, "STUDENT", instA.id));
-    const idToken = await buildIdToken({
-      platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
-      nonce: session.nonce, canvasUserId: `cu-${stamp}-11`, email: existing.email, role: "STUDENT",
-    });
-    const { POST } = await import("@/app/api/lti/launch/route");
-    const res = await POST(launchRequest(idToken, session.state));
-    expect(res.headers.get("location")).toContain("reason=different_institution");
-    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: existing.id } });
-    expect(fresh.institutionId).toBe(instA.id);
-    expect(fresh.canvasUserId).toBeNull();
-  });
-
-  it("13. role mismatch is rejected", async () => {
-    const platform = await createPlatform(instA.id);
-    const existing = await createUser({ email: `collide-13-${stamp}@test.invalid`, role: "LECTURER", institutionId: instA.id });
-    const session = await startLtiSession(platform.id);
-    mockAuth.mockResolvedValue(sessionFor(existing.id, "LECTURER", instA.id));
-    // Canvas reports this identity as a STUDENT — mismatched against the existing LECTURER account.
-    const idToken = await buildIdToken({
-      platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
-      nonce: session.nonce, canvasUserId: `cu-${stamp}-13`, email: existing.email, role: "STUDENT",
-    });
-    const { POST } = await import("@/app/api/lti/launch/route");
-    const res = await POST(launchRequest(idToken, session.state));
-    expect(res.headers.get("location")).toContain("reason=role_mismatch");
-    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: existing.id } });
-    expect(fresh.canvasUserId).toBeNull();
-  });
-
-  it("14. canvasUserId already owned by another User is rejected", async () => {
-    // Exercised directly against resolveLtiEmailCollision: through the
-    // full route, Step A's own initial canvasUserId lookup (identical in
-    // scope to the resolver's own upfront check) would already resolve
-    // to the owner directly, never reaching the email-collision path for
-    // a second user at all — this is the correct unit boundary for this
-    // specific rule, same reasoning as the race tests above.
-    const { resolveLtiEmailCollision } = await import("./identityCollision");
-    const canvasUserId = `cu-${stamp}-14`;
-    const owner = await createUser({ email: `collide-14-owner-${stamp}@test.invalid`, role: "STUDENT", institutionId: instA.id, canvasUserId });
-    const existing = await createUser({ email: `collide-14-${stamp}@test.invalid`, role: "STUDENT", institutionId: instA.id });
-    const outcome = await resolveLtiEmailCollision({
-      existingUserId: existing.id,
-      canvasUserId,
-      derivedRole: "STUDENT",
-      platformInstitutionId: instA.id,
-      currentSessionUserId: existing.id,
-    });
-    expect(outcome.kind).toBe("canvas_id_taken");
-    const freshExisting = await prisma.user.findUniqueOrThrow({ where: { id: existing.id } });
-    expect(freshExisting.canvasUserId).toBeNull();
-    const freshOwner = await prisma.user.findUniqueOrThrow({ where: { id: owner.id } });
-    expect(freshOwner.canvasUserId).toBe(canvasUserId);
+    expect(res.cookies.get("authjs.session-token")).toBeUndefined();
+    expect(res.cookies.get("__Secure-authjs.session-token")).toBeUndefined();
+    const launches = await prisma.ltiLaunch.count({ where: { platformId: platform.id } });
+    expect(launches).toBe(0);
+    const logs = await prisma.platformAuditLog.count({ where: { targetId: existing.id } });
+    expect(logs).toBe(0);
   });
 });
 
-// ── 15-16: races ────────────────────────────────────────────────────────
-//
-// Exercised directly against resolveLtiEmailCollision rather than the
-// full route: `auth()` is a global, no-argument call with no way to
-// route a mocked response to "this specific concurrent request" — the
-// resolver function itself takes currentSessionUserId as an explicit
-// parameter, which is the actual mechanism under test here anyway.
-
-describe("Identity-linking races", () => {
-  it("15. concurrent linking cannot bind one Canvas identity to two users", async () => {
-    const { resolveLtiEmailCollision } = await import("./identityCollision");
-    const canvasUserId = `cu-${stamp}-15`;
-    const existingX = await createUser({ email: `collide-15-x-${stamp}@test.invalid`, role: "STUDENT", institutionId: instA.id });
-    const existingY = await createUser({ email: `collide-15-y-${stamp}@test.invalid`, role: "STUDENT", institutionId: instA.id });
-
-    const [outcomeX, outcomeY] = await Promise.all([
-      resolveLtiEmailCollision({ existingUserId: existingX.id, canvasUserId, derivedRole: "STUDENT", platformInstitutionId: instA.id, currentSessionUserId: existingX.id }),
-      resolveLtiEmailCollision({ existingUserId: existingY.id, canvasUserId, derivedRole: "STUDENT", platformInstitutionId: instA.id, currentSessionUserId: existingY.id }),
-    ]);
-    const outcomes = [outcomeX, outcomeY];
-    expect(outcomes.filter((o) => o.kind === "linked")).toHaveLength(1);
-    expect(outcomes.filter((o) => o.kind === "canvas_id_taken")).toHaveLength(1);
-
-    const owners = await prisma.user.findMany({ where: { canvasUserId }, select: { id: true } });
-    expect(owners).toHaveLength(1);
-  });
-
-  it("16. concurrent different-institution claim cannot move User between tenants", async () => {
-    const { resolveLtiEmailCollision } = await import("./identityCollision");
-    const existing = await createUser({ email: `collide-16-${stamp}@test.invalid`, role: "STUDENT", institutionId: null });
-
-    const [outcomeA, outcomeB] = await Promise.all([
-      resolveLtiEmailCollision({ existingUserId: existing.id, canvasUserId: `cu-${stamp}-16a`, derivedRole: "STUDENT", platformInstitutionId: instA.id, currentSessionUserId: existing.id }),
-      resolveLtiEmailCollision({ existingUserId: existing.id, canvasUserId: `cu-${stamp}-16b`, derivedRole: "STUDENT", platformInstitutionId: instB.id, currentSessionUserId: existing.id }),
-    ]);
-    const outcomes = [outcomeA, outcomeB];
-    expect(outcomes.filter((o) => o.kind === "linked")).toHaveLength(1);
-    expect(outcomes.filter((o) => o.kind === "different_institution")).toHaveLength(1);
-
-    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: existing.id } });
-    // Exactly one institution won, never both, never neither.
-    expect([instA.id, instB.id]).toContain(fresh.institutionId);
-  });
-});
-
-// ── 17-18: mapped-user email-update hardening ──────────────────────────────
+// ── mapped-user email-update hardening ─────────────────────────────────────
 
 describe("Mapped-user email-update hardening", () => {
-  it("17. mapped user email change to an unused email remains safe", async () => {
+  it("mapped user email change to an unused email remains safe", async () => {
     const platform = await createPlatform(instA.id);
     const canvasUserId = `cu-${stamp}-17`;
     const existing = await createUser({ email: `mapped-17-old-${stamp}@test.invalid`, role: "STUDENT", institutionId: instA.id, canvasUserId });
@@ -436,7 +288,7 @@ describe("Mapped-user email-update hardening", () => {
     expect(fresh.email).toBe(newEmail);
   });
 
-  it("18. mapped user email change colliding with another User does not 500 and does not merge identities", async () => {
+  it("mapped user email change colliding with another User does not 500 and does not merge identities", async () => {
     const platform = await createPlatform(instA.id);
     const canvasUserId = `cu-${stamp}-18`;
     const collidingEmail = `mapped-18-taken-${stamp}@test.invalid`;
@@ -458,10 +310,10 @@ describe("Mapped-user email-update hardening", () => {
   });
 });
 
-// ── 19-20: no-email Canvas users ───────────────────────────────────────────
+// ── no-email Canvas users ──────────────────────────────────────────────────
 
 describe("No-email Canvas launches", () => {
-  it("19. Canvas launch with no email still follows the existing synthetic-identity path", async () => {
+  it("Canvas launch with no email still follows the existing synthetic-identity path", async () => {
     const platform = await createPlatform(instA.id);
     const session = await startLtiSession(platform.id);
     const canvasUserId = `cu-${stamp}-19`;
@@ -477,7 +329,7 @@ describe("No-email Canvas launches", () => {
     cleanupUserIds.push(user.id);
   });
 
-  it("20. no-email path never matches an existing user by name", async () => {
+  it("no-email path never matches an existing user by name", async () => {
     const platform = await createPlatform(instA.id);
     // A pre-existing self-service user who happens to share the SAME
     // display name Canvas will send — must never be matched or linked.
@@ -488,7 +340,6 @@ describe("No-email Canvas launches", () => {
       platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
       nonce: session.nonce, canvasUserId, name: "Test", role: "STUDENT", // no email
     });
-    mockAuth.mockResolvedValue(null);
     const { POST } = await import("@/app/api/lti/launch/route");
     const res = await POST(launchRequest(idToken, session.state));
     expect(res.status).toBe(302);
@@ -501,10 +352,10 @@ describe("No-email Canvas launches", () => {
   });
 });
 
-// ── 21-23: LTI session / replay safety unchanged ───────────────────────────
+// ── LTI session / replay safety unchanged ──────────────────────────────────
 
 describe("LTI session / replay safety — unchanged", () => {
-  it("21. nonce validation unchanged — mismatched nonce is rejected", async () => {
+  it("nonce validation unchanged — mismatched nonce is rejected", async () => {
     const platform = await createPlatform(instA.id);
     const session = await startLtiSession(platform.id);
     const idToken = await buildIdToken({
@@ -516,7 +367,7 @@ describe("LTI session / replay safety — unchanged", () => {
     expect(res.status).toBe(403);
   });
 
-  it("22. replay protection unchanged — a consumed LtiSession cannot be reused", async () => {
+  it("replay protection unchanged — a consumed LtiSession cannot be reused", async () => {
     const platform = await createPlatform(instA.id);
     const session = await startLtiSession(platform.id);
     const canvasUserId = `cu-${stamp}-22`;
@@ -534,7 +385,7 @@ describe("LTI session / replay safety — unchanged", () => {
     cleanupUserIds.push(users[0].id);
   });
 
-  it("23. bad JWT signature is rejected", async () => {
+  it("bad JWT signature is rejected", async () => {
     const platform = await createPlatform(instA.id);
     const otherPlatform = await createPlatform(instB.id); // different keypair
     const session = await startLtiSession(platform.id);
@@ -549,10 +400,10 @@ describe("LTI session / replay safety — unchanged", () => {
   });
 });
 
-// ── 24-27: LtiExamLink resolution / launch redirects unchanged ────────────
+// ── LtiExamLink resolution / launch redirects unchanged ────────────────────
 
 describe("LtiExamLink resolution and launch redirects — unchanged", () => {
-  it("24 & 25. STUDENT linked exam launch creates a submission and redirects into it", async () => {
+  it("STUDENT linked exam launch creates a submission and redirects into it", async () => {
     const platform = await createPlatform(instA.id);
     const lecturer = await createUser({ email: `lti-lect-24-${stamp}@test.invalid`, role: "LECTURER", institutionId: instA.id });
     const exam = await prisma.exam.create({
@@ -578,7 +429,7 @@ describe("LtiExamLink resolution and launch redirects — unchanged", () => {
     expect(submission).toBeTruthy();
   });
 
-  it("26. LECTURER linked exam launch redirects to the exam editor", async () => {
+  it("LECTURER linked exam launch redirects to the exam editor", async () => {
     const platform = await createPlatform(instA.id);
     const lecturer = await createUser({ email: `lti-lect-26-${stamp}@test.invalid`, role: "LECTURER", institutionId: instA.id });
     const exam = await prisma.exam.create({
@@ -601,7 +452,7 @@ describe("LtiExamLink resolution and launch redirects — unchanged", () => {
     cleanupUserIds.push(user.id);
   });
 
-  it("27. unlinked-assignment friendly route unchanged", async () => {
+  it("unlinked-assignment friendly route unchanged", async () => {
     const platform = await createPlatform(instA.id);
     const session = await startLtiSession(platform.id);
     const canvasUserId = `cu-${stamp}-27`;
@@ -617,45 +468,12 @@ describe("LtiExamLink resolution and launch redirects — unchanged", () => {
   });
 });
 
-// ── 29-32: cross-feature regression ────────────────────────────────────────
+// ── cross-feature regression ────────────────────────────────────────────────
 
-describe("Cross-feature regression — self-service / Course Invitation / Standalone unaffected", () => {
-  it("29. self-service account login is unaffected by this module's existence", async () => {
+describe("Cross-feature regression — self-service unaffected", () => {
+  it("self-service account creation is unaffected by this module's existence", async () => {
     const student = await createUser({ email: `ss-29-${stamp}@test.invalid`, role: "STUDENT", institutionId: null });
     expect(student.institutionId).toBeNull();
     expect(student.canvasUserId).toBeNull();
-  });
-
-  it("30 & 31 & 32. audit entries for a blocked and a successful link are safe (no token/email/password leakage)", async () => {
-    const platform = await createPlatform(instA.id);
-    const existing = await createUser({ email: `audit-30-${stamp}@test.invalid`, role: "STUDENT", institutionId: null });
-
-    const sessionBlocked = await startLtiSession(platform.id);
-    mockAuth.mockResolvedValue(null);
-    const idTokenBlocked = await buildIdToken({
-      platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
-      nonce: sessionBlocked.nonce, canvasUserId: `cu-${stamp}-30a`, email: existing.email, role: "STUDENT",
-    });
-    const { POST } = await import("@/app/api/lti/launch/route");
-    await POST(launchRequest(idTokenBlocked, sessionBlocked.state));
-
-    const sessionLinked = await startLtiSession(platform.id);
-    mockAuth.mockResolvedValue(sessionFor(existing.id, "STUDENT", null));
-    const idTokenLinked = await buildIdToken({
-      platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
-      nonce: sessionLinked.nonce, canvasUserId: `cu-${stamp}-30b`, email: existing.email, role: "STUDENT",
-    });
-    await POST(launchRequest(idTokenLinked, sessionLinked.state));
-
-    const logs = await prisma.platformAuditLog.findMany({ where: { targetId: existing.id } });
-    const actions = logs.map((l) => l.action);
-    expect(actions).toContain("lti.identity_link_blocked");
-    expect(actions).toContain("lti.identity_linked");
-    for (const log of logs) {
-      const metadataStr = JSON.stringify(log.metadata).toLowerCase();
-      expect(metadataStr).not.toContain("password");
-      expect(metadataStr).not.toContain(idTokenBlocked.toLowerCase());
-      expect(metadataStr).not.toContain(existing.email.toLowerCase());
-    }
   });
 });
