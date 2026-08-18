@@ -55,8 +55,9 @@
 -- safe to run as a single script regardless of how the SQL editor
 -- batches statements.
 --
--- THIS MIGRATION HAS NOT BEEN APPLIED TO ANY ENVIRONMENT. Do not apply it
--- without explicit authorization — see docs/migration-ledger.md.
+-- APPLIED ONCE — 2026-08-18 to the shared Preview/Production Supabase
+-- database. DO NOT RE-APPLY. See docs/migration-ledger.md row 20 for the
+-- full pre-check/apply/post-check record.
 
 -- ============================================================================
 -- 0. Pre-check (read-only) — run BEFORE applying anything below, to
