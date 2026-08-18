@@ -363,6 +363,40 @@ export default function GradeSubmissionPage({
     loadAiAssistanceSummary();
   }, [loadAiAssistanceSummary]);
 
+  // Integrity Evidence Timeline v1 — see
+  // docs/integrity-evidence-timeline-v1.md. Same non-blocking secondary-
+  // fetch pattern as the Controlled AI activity summary above: a failure
+  // here must never block grading or submission review navigation.
+  const [timelineSummary, setTimelineSummary] = useState<{
+    totalEvents: number;
+    evidenceAssetCount: number;
+    needsReviewCount: number;
+  } | null>(null);
+  const [timelineSummaryError, setTimelineSummaryError] = useState(false);
+
+  const loadTimelineSummary = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/lecturer/submissions/${submissionId}/timeline`);
+      if (!res.ok) {
+        setTimelineSummaryError(true);
+        return;
+      }
+      const body = await res.json();
+      setTimelineSummary({
+        totalEvents: body.summary.totalEvents,
+        evidenceAssetCount: body.summary.evidenceAssetCount,
+        needsReviewCount: body.summary.needsReviewCount,
+      });
+    } catch {
+      setTimelineSummaryError(true);
+    }
+  }, [submissionId]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadTimelineSummary();
+  }, [loadTimelineSummary]);
+
   // Exam Session Binding + Time Anomaly Review v1 state — see
   // docs/exam-session-binding-v1.md and docs/time-anomaly-review-v1.md.
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -598,6 +632,30 @@ export default function GradeSubmissionPage({
       )}
       {!aiAssistanceSummary && aiAssistanceSummaryError && (
         <p className="mt-2 text-xs text-gray-500">Controlled AI activity unavailable.</p>
+      )}
+
+      {timelineSummary && (
+        <div className="mt-3 rounded border border-gray-200 bg-white p-3 text-sm">
+          <div className="flex items-center justify-between gap-3">
+            <p className="font-medium text-gray-900">Integrity evidence timeline</p>
+            <Link
+              href={`/lecturer/submissions/${submissionId}/timeline`}
+              className="shrink-0 text-sm text-blue-600 hover:underline"
+            >
+              View timeline →
+            </Link>
+          </div>
+          <p className="mt-1 text-gray-600">
+            Reconstruct this attempt from exam activity, Tether security events and supporting evidence.
+          </p>
+          <p className="mt-1 text-gray-600">
+            {timelineSummary.totalEvents} recorded event(s) · {timelineSummary.evidenceAssetCount} evidence frame(s) ·{" "}
+            {timelineSummary.needsReviewCount} item(s) awaiting review
+          </p>
+        </div>
+      )}
+      {!timelineSummary && timelineSummaryError && (
+        <p className="mt-2 text-xs text-gray-500">Integrity timeline unavailable.</p>
       )}
 
       <div className="mt-6 space-y-4">

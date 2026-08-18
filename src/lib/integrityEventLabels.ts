@@ -54,6 +54,42 @@ const EVENT_TYPE_LABELS: Partial<Record<string, string>> = {
   DEBUGGING_TOOL_DETECTED: "Debugging tool detected — needs review",
   PROHIBITED_APPLICATION_DETECTED: "Prohibited application detected — needs review",
   PROHIBITED_APPLICATION_CLOSED: "Prohibited application closed",
+  // Integrity Evidence Timeline v1 — see docs/integrity-evidence-timeline-v1.md.
+  // These event types previously fell back to their raw enum string
+  // (still-valid behaviour for any caller not listed here) — the
+  // Timeline is the first surface to display window/focus/navigation/
+  // network/timer events densely enough that the raw codes read poorly,
+  // so friendly labels are added here rather than in a second, divergent
+  // map. Purely additive — no existing behaviour changes for callers
+  // that already handled these via the raw-string fallback.
+  FULLSCREEN_EXIT: "Fullscreen exited",
+  WINDOW_BLUR: "Window focus lost",
+  WINDOW_FOCUS_RETURN: "Window focus restored",
+  COPY_ATTEMPT: "Copy attempt",
+  PASTE_ATTEMPT: "Paste attempt",
+  RIGHT_CLICK_ATTEMPT: "Right-click attempt",
+  DEVTOOLS_SUSPECTED: "Developer tools suspected",
+  NETWORK_OFFLINE: "Network connection lost",
+  NETWORK_ONLINE: "Network connection restored",
+  AUTOSAVE_FAILED: "Autosave failed",
+  TIMER_EXPIRED: "Exam timer expired",
+  SUBMIT_AFTER_DEADLINE: "Submitted after the deadline",
+  MANUAL_WARNING: "Manual warning issued",
+  QUESTION_NAVIGATED_NEXT: "Moved to next question",
+  QUESTION_NAVIGATED_PREVIOUS: "Moved to previous question",
+  QUESTION_BACK_NAVIGATION_BLOCKED: "Back navigation blocked",
+  QUESTION_NAVIGATED_DIRECT: "Jumped to a different question",
+  QUESTION_DIRECT_NAVIGATION_BLOCKED: "Direct navigation blocked",
+  AI_ASSISTANCE_LIMIT_REACHED: "Tether Controlled AI request limit reached",
+  // AI_ASSISTANCE_USED/_REQUEST_BLOCKED/_RESPONSE_REGENERATED/_REQUEST_FAILED
+  // are given labels here for completeness (e.g. the evidence report CSV
+  // export), but the Timeline builder deliberately suppresses these four
+  // event types in favour of the richer AiAssistanceInteraction record —
+  // see integrityEvidenceTimeline.ts's AI dedup rule.
+  AI_ASSISTANCE_USED: "Tether Controlled AI guidance shown",
+  AI_ASSISTANCE_REQUEST_BLOCKED: "Tether Controlled AI request declined",
+  AI_ASSISTANCE_RESPONSE_REGENERATED: "Tether Controlled AI guidance regenerated",
+  AI_ASSISTANCE_REQUEST_FAILED: "Tether Controlled AI request could not be completed",
 };
 
 /**

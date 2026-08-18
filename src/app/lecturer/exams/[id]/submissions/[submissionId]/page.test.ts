@@ -64,3 +64,35 @@ describe("submission review page — Controlled AI activity summary card (Sectio
     expect(cardBlock.toLowerCase()).not.toMatch(/risk score|misconduct|suspicion|dependency/);
   });
 });
+
+describe("submission review page — Integrity evidence timeline compact card (Section 3/6 of the Timeline v1 spec)", () => {
+  it("fetches the summary from the timeline endpoint as a secondary, non-blocking load", () => {
+    const loaderStart = pageSource.indexOf("const loadTimelineSummary = useCallback(");
+    const loaderEnd = pageSource.indexOf("}, [submissionId]);", loaderStart);
+    const loaderBlock = pageSource.slice(loaderStart, loaderEnd);
+    expect(loaderBlock).toMatch(/fetch\(`\/api\/lecturer\/submissions\/\$\{submissionId\}\/timeline`\)/);
+    expect(loaderBlock).toMatch(/try\s*\{/);
+    expect(loaderBlock).toMatch(/catch\s*\{/);
+    expect(loaderBlock).toMatch(/setTimelineSummaryError\(true\)/);
+  });
+
+  it("renders 'Integrity evidence timeline' with the factual explanation and count summary — no percentage, no score", () => {
+    const cardStart = pageSource.indexOf("Integrity evidence timeline");
+    const cardEnd = pageSource.indexOf("<div className=\"mt-6 space-y-4\">");
+    const cardBlock = pageSource.slice(cardStart, cardEnd);
+    expect(cardBlock).toMatch(/Reconstruct this attempt from exam activity, Tether security events and supporting evidence\./);
+    expect(cardBlock).toMatch(/timelineSummary\.totalEvents/);
+    expect(cardBlock).toMatch(/timelineSummary\.evidenceAssetCount/);
+    expect(cardBlock).toMatch(/timelineSummary\.needsReviewCount/);
+    expect(cardBlock.toLowerCase()).not.toMatch(/coverage|completeness|risk score|cheating score/);
+  });
+
+  it("links to the full timeline route", () => {
+    expect(pageSource).toMatch(/href=\{`\/lecturer\/submissions\/\$\{submissionId\}\/timeline`\}/);
+    expect(pageSource).toMatch(/View timeline →/);
+  });
+
+  it("shows a neutral 'unavailable' state on fetch failure, never blocking grading or the rest of the page", () => {
+    expect(pageSource).toMatch(/Integrity timeline unavailable\./);
+  });
+});
