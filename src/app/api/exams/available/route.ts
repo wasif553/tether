@@ -230,6 +230,21 @@ export async function GET(req?: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // Self-Service Account Onboarding v1 — see
+  // docs/self-service-account-onboarding-v1.md. A self-service student
+  // has institutionId: null by design (a valid account with no
+  // entitlements yet, not an error state) — institutionWhere()/
+  // requireInstitutionId() below would otherwise throw for this session
+  // and surface as a "please log in again" error, which is wrong here:
+  // this account IS correctly logged in, it simply has nothing to see
+  // yet. Deliberately short-circuits before any exam/course query runs —
+  // never falls back to DEFAULT_INSTITUTION_SLUG or any other
+  // institution's exams. Applies regardless of query mode (?all=true,
+  // history pagination) since the answer is the same either way: nothing.
+  if (session.user.institutionId == null) {
+    return NextResponse.json([]);
+  }
+
   try {
     // Course, Enrolment, Exam Assignment, Scheduling v1 — see
     // docs/course-enrolment-and-exam-assignment.md. A student may see an

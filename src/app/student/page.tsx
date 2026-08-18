@@ -159,7 +159,11 @@ export default function StudentDashboard() {
       </div>
 
       {loading && <p className="mt-6 text-gray-500">Loading...</p>}
-      {!loading && exams.length === 0 && <p className="mt-6 text-gray-500">No exams available right now.</p>}
+      {!loading && exams.length === 0 && (
+        <p className="mt-6 text-gray-500">
+          No exams available right now. Exams will appear here when you are given access.
+        </p>
+      )}
 
       {!loading && exams.length > 0 && (
         <div className="mt-6 space-y-8">

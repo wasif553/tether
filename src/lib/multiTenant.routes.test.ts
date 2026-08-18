@@ -134,12 +134,22 @@ describe("12. GET /api/exams/[id] — PLATFORM_ADMIN bypasses institution scopin
 });
 
 describe("13. A session with no institutionId fails loudly rather than silently scoping to nothing", () => {
-  it("returns 401 with a re-login message for /api/exams/available", async () => {
+  // Self-Service Account Onboarding v1 — see
+  // docs/self-service-account-onboarding-v1.md — carves out ONE
+  // documented, deliberate exception to the "fails loudly" default: a
+  // STUDENT session with institutionId: null is a genuinely valid
+  // account state (self-service signup, not yet given access to any
+  // institution), not a corrupt/stale session, so
+  // GET /api/exams/available now returns 200 [] for this specific
+  // route+role combination instead of throwing. Every OTHER
+  // institution-scoped route (see the lecturer-list case directly below,
+  // unchanged) still fails loudly exactly as before.
+  it("STUDENT with institutionId: null gets 200 [] from /api/exams/available — a deliberate 'no entitlements yet' state, not a bypass", async () => {
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", null));
     const res = await availableRoute.GET();
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.error).toMatch(/log in again/i);
+    expect(body).toEqual([]);
   });
 
   it("returns 401 for /api/exams (lecturer list)", async () => {
@@ -203,8 +213,16 @@ describe("15. GET /api/platform/institutions — PLATFORM_ADMIN only", () => {
   });
 });
 
-describe("16. POST /api/signup — assigns the default institution", () => {
-  it("a new self-signup user is stamped with the default institution's id", async () => {
+// Self-Service Account Onboarding v1 — see
+// docs/self-service-account-onboarding-v1.md. Superseded behavior: this
+// block used to prove a self-signup STUDENT was stamped into the shared
+// DEFAULT_INSTITUTION_SLUG institution. That is now explicitly the
+// behavior being prevented — see src/lib/selfServiceSignup.ts and
+// src/lib/selfServiceAccountOnboarding.routes.test.ts for the full
+// STUDENT/LECTURER self-signup test coverage. This block is kept (rather
+// than deleted) specifically to prove the OLD behavior is gone.
+describe("16. POST /api/signup — self-service accounts never land in a shared default institution", () => {
+  it("a new self-signup STUDENT has institutionId: null, never DEFAULT_INSTITUTION_SLUG's id", async () => {
     const stamp = Date.now();
     const res = await signupRoute.POST(
       jsonRequest("POST", {
@@ -214,11 +232,34 @@ describe("16. POST /api/signup — assigns the default institution", () => {
         role: "STUDENT",
       }),
     );
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    const user = await prisma.user.findUnique({ where: { id: body.id } });
+    expect(user?.institutionId).toBeNull();
+    await prisma.user.delete({ where: { id: body.id } });
+  });
+
+  it("a new self-signup LECTURER gets a brand-new institution, never the shared default", async () => {
+    const stamp = Date.now();
+    const res = await signupRoute.POST(
+      jsonRequest("POST", {
+        name: "Signup Test Lecturer",
+        email: `signup-mt-lect-${stamp}@test.local`,
+        password: "test-password-123",
+        role: "LECTURER",
+        organisationName: `Signup MT Org ${stamp}`,
+      }),
+    );
+    expect(res.status).toBe(201);
     const body = await res.json();
     const user = await prisma.user.findUnique({ where: { id: body.id } });
     expect(user?.institutionId).not.toBeNull();
+    const defaultInstitution = await prisma.institution.findUnique({ where: { slug: "default" } });
+    if (defaultInstitution) {
+      expect(user?.institutionId).not.toBe(defaultInstitution.id);
+    }
     await prisma.user.delete({ where: { id: body.id } });
+    await prisma.institution.delete({ where: { id: user!.institutionId! } });
   });
 });
 
