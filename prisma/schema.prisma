@@ -240,6 +240,10 @@ model User {
   // docs/course-enrolment-and-exam-assignment.md.
   courseEnrollments    CourseEnrollment[]
   examAssignments      ExamAssignment[]
+  // Tether Course Invitation + Acceptance v1 — see
+  // docs/tether-course-invitation-acceptance-v1.md.
+  courseInvitationsReceived CourseEnrollmentInvitation[] @relation("CourseInvitationStudent")
+  courseInvitationsSent     CourseEnrollmentInvitation[] @relation("CourseInvitationInviter")
   // Assessment Operations v1 (additive) — see
   // docs/assessment-operations-v1.md. An optional institution-issued
   // student ID (e.g. a roll number or SIS ID), distinct from this row's
@@ -973,6 +977,9 @@ model Course {
   updatedAt      DateTime           @updatedAt
   enrollments    CourseEnrollment[]
   exams          Exam[]
+  // Tether Course Invitation + Acceptance v1 — see
+  // docs/tether-course-invitation-acceptance-v1.md.
+  invitations    CourseEnrollmentInvitation[]
   // Canvas/LTI mapping hook (v1 foundation only) — see
   // docs/course-enrolment-and-exam-assignment.md Part 7. Exam-level
   // Canvas mapping already exists via LtiExamLink; these are the
@@ -1012,6 +1019,56 @@ model ExamAssignment {
   @@unique([examId, studentId])
   @@index([examId])
   @@index([studentId])
+}
+
+// Tether Course Invitation + Acceptance v1 (additive) — see
+// docs/tether-course-invitation-acceptance-v1.md. Connects a
+// self-service STUDENT (User.institutionId: null — see
+// docs/self-service-account-onboarding-v1.md) to a lecturer's
+// institution/course safely. A lecturer can never silently claim a
+// null-institution student merely by knowing their email:
+// User.institutionId is only ever written by the student's own explicit
+// POST acceptance (see the student-facing acceptance route), never by
+// invitation creation itself. Bound to an exact existing studentId, not
+// an email string — an invitation for an email with no existing User
+// can never be created (see the invitation-creation route).
+//
+// One logical invitation per (courseId, studentId): regenerating
+// updates this same row (new tokenHash/expiresAt, cleared
+// revokedAt) rather than creating an uncontrolled duplicate. The row is
+// never deleted — acceptedAt/revokedAt are minimal lifecycle/audit
+// evidence, not just transient state.
+model CourseEnrollmentInvitation {
+  id        String  @id @default(cuid())
+  courseId  String
+  course    Course  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  studentId String
+  student   User    @relation("CourseInvitationStudent", fields: [studentId], references: [id], onDelete: Cascade)
+
+  // The lecturer/platform operator who created (or most recently
+  // regenerated) this invitation. RESTRICT (not CASCADE) — matches the
+  // ExamTimeAccommodation.createdById convention below: an inviter's own
+  // account should never be deletable out from under an invitation
+  // record without an explicit decision about what happens to it.
+  invitedById String
+  invitedBy   User   @relation("CourseInvitationInviter", fields: [invitedById], references: [id], onDelete: Restrict)
+
+  // Only ever a SHA-256 hash (see src/lib/courseInvitationToken.ts) —
+  // the plaintext token is returned to the lecturer once, at
+  // create/regenerate time, and never stored or logged. Cleared after a
+  // successful acceptance, since the secret is no longer needed.
+  tokenHash String?
+  expiresAt DateTime
+
+  acceptedAt DateTime?
+  revokedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([courseId, studentId])
+  @@index([studentId])
+  @@index([invitedById])
 }
 
 // Individual Exam Timing & Accommodations v1 (additive) — see

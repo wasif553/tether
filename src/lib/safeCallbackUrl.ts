@@ -72,6 +72,22 @@ export function isSafeTetherLaunchCallbackUrl(value: string | null | undefined):
   return TETHER_LAUNCH_PATH_RE.test(value);
 }
 
+/**
+ * Tether Course Invitation + Acceptance v1 — see
+ * docs/tether-course-invitation-acceptance-v1.md. Same shape/reasoning as
+ * JOIN_WITH_INVITE_PATH_RE above: a dedicated path
+ * (`/student/course-invitations/{invitationId}/{token}`), not a query
+ * string, so this stays a pure path-based regex. Unrelated to, and does
+ * not modify, the Standalone Exam Link v1 routes/regexes above.
+ */
+const COURSE_INVITATION_PATH_RE = /^\/student\/course-invitations\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/;
+
+export function isSafeCourseInvitationCallbackUrl(value: string | null | undefined): value is string {
+  if (!value) return false;
+  if (!value.startsWith("/") || value.startsWith("//")) return false;
+  return COURSE_INVITATION_PATH_RE.test(value);
+}
+
 export function isSafeAppCallbackUrl(value: string | null | undefined): value is string {
   if (!value) return false;
   if (!value.startsWith("/") || value.startsWith("//")) return false;
@@ -79,6 +95,7 @@ export function isSafeAppCallbackUrl(value: string | null | undefined): value is
     JOIN_PATH_RE.test(value) ||
     JOIN_WITH_INVITE_PATH_RE.test(value) ||
     LECTURER_PATH_RE.test(value) ||
-    TETHER_LAUNCH_PATH_RE.test(value)
+    TETHER_LAUNCH_PATH_RE.test(value) ||
+    COURSE_INVITATION_PATH_RE.test(value)
   );
 }
