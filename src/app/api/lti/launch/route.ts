@@ -2,9 +2,12 @@ import { NextResponse } from "next/server";
 import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { decodeProtectedHeader, importJWK, jwtVerify, type JWTPayload } from "jose";
+import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { findPlatformJwk } from "@/lib/lti/jwks-cache";
 import { createSessionCookie } from "@/lib/lti/session";
+import { resolveLtiEmailCollision } from "@/lib/lti/identityCollision";
+import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { resolveInternalRedirectOrigin } from "@/lib/appOrigin";
 import type { Prisma } from "@/generated/prisma/client";
 
@@ -123,8 +126,17 @@ export async function POST(req: Request) {
   }
 
   const name = typeof payload.name === "string" ? payload.name : "Canvas User";
-  const email =
-    typeof payload.email === "string" ? payload.email : `lti-${canvasUserId}@safe-exam-system.local`;
+  // Canvas/LTI identity-collision hardening v1 — see
+  // docs/lti-identity-collision-hardening-v1.md. `hasCanvasEmail`
+  // distinguishes a REAL Canvas-supplied email from the synthetic
+  // per-canvasUserId fallback — only a real email can ever collide with
+  // an existing Tether account, so only a real email is ever looked up
+  // against existing Users below (rule 5: no-email launches never
+  // attempt any identity reconciliation, by name or otherwise).
+  const hasCanvasEmail = typeof payload.email === "string";
+  const email = hasCanvasEmail
+    ? (payload.email as string)
+    : `lti-${canvasUserId}@safe-exam-system.local`;
 
   const context = payload[CONTEXT_CLAIM] as LtiContextClaim | undefined;
   const resourceLink = payload[RESOURCE_LINK_CLAIM] as LtiResourceLinkClaim | undefined;
@@ -153,19 +165,79 @@ export async function POST(req: Request) {
     : await prisma.user.findFirst({ where: { canvasUserId } });
 
   if (!user) {
-    const randomPassword = randomBytes(32).toString("hex");
-    const passwordHash = await bcrypt.hash(randomPassword, 12);
-    user = await prisma.user.create({
-      data: {
-        name,
-        email,
-        passwordHash,
-        role,
+    // Canvas/LTI identity-collision hardening v1 — see
+    // docs/lti-identity-collision-hardening-v1.md. Before creating a new
+    // User (the pre-existing behavior), check whether a REAL Canvas
+    // email already belongs to an existing Tether User — creating one
+    // unconditionally used to crash with an unhandled unique-constraint
+    // violation on User.email in exactly this case.
+    const existingByEmail = hasCanvasEmail
+      ? await prisma.user.findUnique({ where: { email } })
+      : null;
+
+    if (existingByEmail) {
+      const currentSession = await auth();
+      const collision = await resolveLtiEmailCollision({
+        existingUserId: existingByEmail.id,
         canvasUserId,
-        canvasCourseIds: canvasCourseId ? [canvasCourseId] : [],
+        derivedRole: role,
+        platformInstitutionId: platform.institutionId,
+        // Never trust anything client-supplied for identity — only the
+        // server-verified session, exactly like every other route in
+        // this app that calls auth().
+        currentSessionUserId: currentSession?.user?.id ?? null,
+      });
+
+      if (collision.kind !== "linked") {
+        createPlatformAuditLog({
+          actorId: currentSession?.user?.id ?? null,
+          action: "lti.identity_link_blocked",
+          targetType: "User",
+          targetId: existingByEmail.id,
+          institutionId: platform.institutionId,
+          // Never plaintext email/id_token/session cookie — only the
+          // safe, already-non-secret reason code and platform id.
+          metadata: { platformId: platform.id, reason: collision.kind },
+        }).catch(() => {});
+
+        const requestOrigin = resolveInternalRedirectOrigin(req.url);
+        return NextResponse.redirect(
+          new URL(`/lti/identity-link?reason=${collision.kind}`, requestOrigin),
+          302,
+        );
+      }
+
+      createPlatformAuditLog({
+        actorId: existingByEmail.id,
+        action: "lti.identity_linked",
+        targetType: "User",
+        targetId: existingByEmail.id,
         institutionId: platform.institutionId,
-      },
-    });
+        metadata: { platformId: platform.id },
+      }).catch(() => {});
+
+      user = await prisma.user.findUniqueOrThrow({ where: { id: collision.userId } });
+      if (canvasCourseId && !user.canvasCourseIds.includes(canvasCourseId)) {
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: { canvasCourseIds: [...user.canvasCourseIds, canvasCourseId] },
+        });
+      }
+    } else {
+      const randomPassword = randomBytes(32).toString("hex");
+      const passwordHash = await bcrypt.hash(randomPassword, 12);
+      user = await prisma.user.create({
+        data: {
+          name,
+          email,
+          passwordHash,
+          role,
+          canvasUserId,
+          canvasCourseIds: canvasCourseId ? [canvasCourseId] : [],
+          institutionId: platform.institutionId,
+        },
+      });
+    }
   } else {
     if (platform.institutionId && user.institutionId && user.institutionId !== platform.institutionId) {
       // Cross-tenant identity mismatch — never silently reassign a user's
@@ -178,7 +250,22 @@ export async function POST(req: Request) {
     }
     const updates: { name?: string; email?: string; canvasCourseIds?: string[] } = {};
     if (user.name !== name) updates.name = name;
-    if (user.email !== email) updates.email = email;
+    if (user.email !== email) {
+      // Canvas/LTI identity-collision hardening v1 — email-update
+      // hardening. User.email is globally unique; a later Canvas email
+      // change for an ALREADY-mapped user must never crash or silently
+      // merge identities if the new email happens to belong to some
+      // other Tether User. The launch continues using the safely mapped
+      // canvasUserId identity regardless.
+      const emailOwner = await prisma.user.findUnique({ where: { email } });
+      if (!emailOwner || emailOwner.id === user.id) {
+        updates.email = email;
+      } else {
+        console.error(
+          `LTI launch: mapped user ${user.id}'s Canvas email changed to an email already used by a different User (${emailOwner.id}) — not overwriting`,
+        );
+      }
+    }
     if (canvasCourseId && !user.canvasCourseIds.includes(canvasCourseId)) {
       updates.canvasCourseIds = [...user.canvasCourseIds, canvasCourseId];
     }
