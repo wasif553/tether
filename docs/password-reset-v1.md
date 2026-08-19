@@ -83,6 +83,22 @@ existence, and no broader IP-based/WAF anti-abuse subsystem is
 implemented in this pass — that can be layered on later at the
 infrastructure level without any change here.
 
+**Concurrency hardening.** The cooldown re-check and the token INSERT run
+inside one `prisma.$transaction` guarded by a transaction-scoped Postgres
+advisory lock keyed on the user id
+(`pg_advisory_xact_lock(hashtext(userId))`), the same convention already
+used for submission-scoped locks in `src/lib/secureClientRunner.ts`,
+`src/lib/aiAssistanceRunner.ts`, and `src/lib/answerSaveRunner.ts`. A
+plain `findFirst` → `create` sequence (the original v1 shape) let two
+truly simultaneous requests for the same user both observe "no recent
+token" and both issue one; the lock serializes them so only the first to
+acquire it can actually insert. Two requests for different users hash to
+different lock keys and are not serialized against each other. Email
+delivery stays outside the transaction — the lock (and the transaction
+holding it) is released at commit, before `sendPasswordResetEmail` is
+ever called, so a call to an external provider never holds a database
+connection open.
+
 ## Email delivery
 
 `src/lib/mail/sendPasswordResetEmail.ts` — a small Resend adapter behind
@@ -129,12 +145,24 @@ stays generic (a sanitized error is logged server-side).
 
 `resetPasswordWithToken` (`src/lib/passwordReset.ts`) guarantees one-time
 use: the only write that can flip `consumedAt` from `null` is a
-conditional `updateMany` guarded on `consumedAt: null`, inside a
-transaction that also updates `User.passwordHash` and invalidates every
-other outstanding token for the same user. Two concurrent requests
-against the same token both read a not-yet-consumed row, but only one
-`updateMany` can actually match; the loser sees `count !== 1` and returns
-`"invalid"` without ever touching the password.
+conditional `updateMany` guarded on `consumedAt: null` AND `expiresAt`
+still in the future, inside a transaction that also updates
+`User.passwordHash` and invalidates every other outstanding token for the
+same user. Two concurrent requests against the same token both read a
+not-yet-consumed row, but only one `updateMany` can actually match; the
+loser sees `count !== 1` and returns `"invalid"` without ever touching
+the password.
+
+**Expiry enforced at the atomic write, not only at the initial read.**
+An earlier fast pre-check (`tokenRow.expiresAt.getTime() <= Date.now()`,
+run immediately after the initial read) is kept as a cheap short-circuit,
+but it is never the sole enforcement — bcrypt hashing the new password is
+deliberately slow (cost 12, ~100-300ms) and a token could genuinely
+expire in the gap between that pre-check and the transaction. The
+transaction's own `updateMany` independently re-checks `expiresAt`
+against a single `now` captured immediately before it (and reused for
+every write inside that transaction), so an expired token can never
+successfully claim/reset even if expiration happens mid-request.
 
 ## Active JWT session security review
 
@@ -230,7 +258,12 @@ See `.env.example` for the full documented block.
   token hash storage, cooldown, provider-failure cleanup, missing-origin
   fail-closed behavior, APP_URL/VERCEL_URL precedence, Host-header
   injection resistance, expiry/consumption/reuse/concurrency, password
-  minimum, and the audit log.
+  minimum, and the audit log. Includes the concurrency-hardening
+  regressions: two truly simultaneous forgot-password requests for the
+  same user (`Promise.all`) issue exactly one token/email, two different
+  users are not serialized against each other, and expiry is proven
+  enforced at the atomic write (not only the initial read) by racing the
+  bcrypt hash against a token whose TTL expires mid-request.
 - `src/app/(auth)/login/page.test.ts`,
   `src/app/(auth)/forgot-password/page.test.ts`,
   `src/app/(auth)/reset-password/page.test.ts` — source-text assertions,

@@ -194,6 +194,52 @@ describe("POST /api/auth/forgot-password", () => {
     expect(rows).toHaveLength(1);
   });
 
+  it("concurrency hardening: two truly simultaneous requests for the SAME user issue exactly one token and one email", async () => {
+    const user = await createUser("STUDENT");
+    const { POST } = await import("@/app/api/auth/forgot-password/route");
+
+    const [resA, resB] = await Promise.all([
+      POST(forgotPasswordRequest(user.email)),
+      POST(forgotPasswordRequest(user.email)),
+    ]);
+    const [bodyA, bodyB] = await Promise.all([resA.json(), resB.json()]);
+
+    expect(resA.status).toBe(200);
+    expect(resB.status).toBe(200);
+    expect(bodyA).toEqual(bodyB);
+    expect(bodyA.message).toBe(GENERIC_MESSAGE);
+
+    // The old findFirst-then-create sequence could let both requests
+    // observe "no recent token" and both create one; the advisory-lock-
+    // guarded transaction in requestPasswordReset must serialize these so
+    // only the first to acquire the lock actually issues a token.
+    expect(sendPasswordResetEmailMock).toHaveBeenCalledTimes(1);
+    const rows = await prisma.passwordResetToken.findMany({ where: { userId: user.id } });
+    expect(rows).toHaveLength(1);
+  });
+
+  it("concurrency hardening: simultaneous requests for two DIFFERENT users are not blocked by each other's lock", async () => {
+    const userA = await createUser("STUDENT");
+    const userB = await createUser("LECTURER");
+    const { POST } = await import("@/app/api/auth/forgot-password/route");
+
+    const [resA, resB] = await Promise.all([
+      POST(forgotPasswordRequest(userA.email)),
+      POST(forgotPasswordRequest(userB.email)),
+    ]);
+
+    expect(resA.status).toBe(200);
+    expect(resB.status).toBe(200);
+    // Each user's own advisory-lock key (hashtext of their own id) is
+    // independent — neither request is starved or rejected by the other.
+    expect(sendPasswordResetEmailMock).toHaveBeenCalledTimes(2);
+
+    const rowsA = await prisma.passwordResetToken.findMany({ where: { userId: userA.id } });
+    const rowsB = await prisma.passwordResetToken.findMany({ where: { userId: userB.id } });
+    expect(rowsA).toHaveLength(1);
+    expect(rowsB).toHaveLength(1);
+  });
+
   it("26. a provider send failure still returns the generic response and does not leave a live orphan token", async () => {
     sendPasswordResetEmailMock.mockRejectedValueOnce(new Error("simulated provider outage"));
     const user = await createUser("STUDENT");
@@ -302,6 +348,45 @@ describe("POST /api/auth/reset-password", () => {
     const { POST } = await import("@/app/api/auth/reset-password/route");
     const res = await POST(resetPasswordRequest(plaintext, "NewPassw0rd!"));
     expect(res.status).toBe(400);
+  });
+
+  it("concurrency hardening: expiry is enforced at atomic consumption, not only at the initial read", async () => {
+    const user = await createUser("STUDENT");
+    const plaintext = randomBytes(32).toString("base64url");
+    // Expires 100ms after creation — comfortably after the initial DB
+    // read (fast, local, and this test runs well after the connection
+    // pool has already warmed up earlier in this file) but comfortably
+    // before bcrypt(cost=12) finishes hashing the new password (measured
+    // ~300ms on typical hardware — see resetPasswordWithToken's own doc
+    // comment). This reproduces the exact race the fix closes: the fast
+    // pre-check (right after the read) sees a not-yet-expired token and
+    // passes it through, but by the time the atomic transaction runs
+    // (after the bcrypt hash completes) the token has genuinely expired.
+    // Reverting the `expiresAt` condition on the transaction's
+    // `updateMany` would make this test fail — the old code path would
+    // successfully reset the password with an expired token.
+    await prisma.passwordResetToken.create({
+      data: {
+        userId: user.id,
+        tokenHash: hashToken(plaintext),
+        expiresAt: new Date(Date.now() + 100),
+      },
+    });
+
+    const { POST } = await import("@/app/api/auth/reset-password/route");
+    const res = await POST(resetPasswordRequest(plaintext, "ShouldNeverApplyPassw0rd!"));
+    expect(res.status).toBe(400);
+    expect((await res.json()).ok).toBe(false);
+
+    const fresh = await prisma.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(await bcrypt.compare("ShouldNeverApplyPassw0rd!", fresh.passwordHash)).toBe(false);
+    expect(await bcrypt.compare("OriginalPassw0rd!", fresh.passwordHash)).toBe(true);
+
+    // Rejected because it was expired, not because it was "used" — the
+    // atomic updateMany's WHERE clause never matched, so consumedAt was
+    // never written.
+    const row = await prisma.passwordResetToken.findFirst({ where: { userId: user.id } });
+    expect(row!.consumedAt).toBeNull();
   });
 
   it("14, 15 & 16. a valid token resets the password — old password fails, new password succeeds", async () => {
