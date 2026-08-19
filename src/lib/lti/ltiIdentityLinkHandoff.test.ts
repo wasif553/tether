@@ -126,6 +126,7 @@ async function buildIdToken(opts: {
   canvasUserId: string;
   email?: string;
   role?: "STUDENT" | "LECTURER";
+  resourceLinkId?: string;
 }) {
   const keys = platformKeys.get(opts.platformId);
   if (!keys) throw new Error("no test keypair for platform");
@@ -135,6 +136,9 @@ async function buildIdToken(opts: {
     "https://purl.imsglobal.org/spec/lti/claim/roles": STUDENT_ROLE_CLAIM,
   };
   if (opts.email !== undefined) payload.email = opts.email;
+  if (opts.resourceLinkId) {
+    payload["https://purl.imsglobal.org/spec/lti/claim/resource_link"] = { id: opts.resourceLinkId };
+  }
 
   return new SignJWT(payload)
     .setProtectedHeader({ alg: "RS256", kid: keys.kid })
@@ -456,6 +460,46 @@ describe("POST /api/lti/identity-link/confirm", () => {
     const users = await prisma.user.findMany({ where: { canvasUserId } });
     expect(users).toHaveLength(1);
     expect(users[0].id).toBe(existing.id);
+  });
+
+  it("K. after confirmation, a fresh launch against an unlinked resource routes safely to /lti/not-linked — not a repeated identity-link prompt", async () => {
+    const platform = await createPlatform(instA.id);
+    const existing = await createUser({ email: `confirm-k-${stamp}@test.invalid`, role: "STUDENT", institutionId: null });
+    const canvasUserId = `cu-h-${stamp}-k`;
+    const resourceLinkId = `rl-unlinked-k-${stamp}`;
+
+    const firstSession = await startLtiSession(platform.id);
+    const firstIdToken = await buildIdToken({
+      platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
+      nonce: firstSession.nonce, canvasUserId, email: existing.email, role: "STUDENT",
+    });
+    const { POST: launch } = await import("@/app/api/lti/launch/route");
+    const firstRes = await launch(launchRequest(firstIdToken, firstSession.state));
+    const handoff = extractHandoff(firstRes.headers.get("location") ?? "");
+
+    mockAuth.mockResolvedValue(sessionFor(existing.id, "STUDENT", null));
+    const { POST: confirm } = await import("@/app/api/lti/identity-link/confirm/route");
+    const confirmRes = await confirm(jsonRequest({ handoff }));
+    expect((await confirmRes.json()).ok).toBe(true);
+
+    // A brand-new launch, this time carrying a resourceLinkId that has no
+    // LtiExamLink registered — the existing, unrelated "unlinked
+    // assignment" fallback, exercised here specifically AFTER a
+    // collision-then-confirm flow to prove the two features compose
+    // correctly rather than each only being tested in isolation.
+    const secondSession = await startLtiSession(platform.id);
+    const secondIdToken = await buildIdToken({
+      platformId: platform.id, issuer: platform.issuer, audience: platform.clientId,
+      nonce: secondSession.nonce, canvasUserId, email: existing.email, role: "STUDENT", resourceLinkId,
+    });
+    const secondRes = await launch(launchRequest(secondIdToken, secondSession.state));
+    expect(secondRes.status).toBe(302);
+    const location = secondRes.headers.get("location") ?? "";
+    expect(location).not.toContain("identity-link"); // no repeated collision prompt
+    expect(location).toContain("/lti/not-linked"); // normal unlinked-resource fallback
+
+    const users = await prisma.user.findMany({ where: { canvasUserId } });
+    expect(users).toHaveLength(1);
   });
 });
 

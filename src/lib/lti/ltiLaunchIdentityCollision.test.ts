@@ -398,6 +398,27 @@ describe("LTI session / replay safety — unchanged", () => {
     const res = await POST(launchRequest(idToken, session.state));
     expect(res.status).toBe(401);
   });
+
+  it("R. a validly-signed token with a mismatched issuer/audience claim is rejected — proves jwtVerify's issuer/audience options are actually wired up, not just signature checking", async () => {
+    const platform = await createPlatform(instA.id);
+    const session = await startLtiSession(platform.id);
+    // Signed with the CORRECT (findable via kid) key for this platform,
+    // but the iss/aud claims themselves don't match what's registered —
+    // a different failure mode than an unknown kid or a wrong signing
+    // key, and one jwtVerify's own {issuer, audience} options are
+    // responsible for catching.
+    const idToken = await buildIdToken({
+      platformId: platform.id,
+      issuer: "https://not-the-registered-issuer.example.com",
+      audience: "not-the-registered-client-id",
+      nonce: session.nonce,
+      canvasUserId: `cu-${stamp}-r`,
+      role: "STUDENT",
+    });
+    const { POST } = await import("@/app/api/lti/launch/route");
+    const res = await POST(launchRequest(idToken, session.state));
+    expect(res.status).toBe(401);
+  });
 });
 
 // ── LtiExamLink resolution / launch redirects unchanged ────────────────────
