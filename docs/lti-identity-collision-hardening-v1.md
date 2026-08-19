@@ -298,6 +298,40 @@ fixed without touching any of the identity-collision hardening above:
    attacker-controlled on an unauthenticated login-initiation request).
    `GET /api/lti/config` uses the same helper for the same reason.
 
+## Email normalization hardening
+
+Real browser testing against the 1EdTech reference platform found a
+genuine remaining defect: self-service onboarding has always stored
+`User.email` as `trim().toLowerCase()`
+(`src/lib/selfServiceSignup.ts`), but the LTI launch route used a
+Canvas-supplied email exactly as received. Two representations of the
+same real-world address — Canvas sending `"Stanley.Wisoky@Example.org"`
+while a pre-existing self-service account was `"stanley.wisoky@example.org"`
+— would never match in the exact-string `User.email` lookup that drives
+collision detection, letting a genuine collision silently fall through
+to ordinary new-user provisioning instead.
+
+`src/lib/identityEmail.ts`'s `normalizeIdentityEmail` (`trim() +
+toLowerCase()`, the exact self-service convention) is now applied to
+every REAL Canvas-supplied email — never the synthetic no-email
+fallback, which stays exactly as before — before any operational use:
+the Step B collision lookup, new-`User` creation, and the mapped-user
+email-update comparison/lookup all read from one `email` variable that
+is normalized once, at the point it's derived from the verified
+`id_token` payload. `payload` itself (and therefore `launchClaimsJson`,
+built from it) is never mutated, so the platform's original
+casing/whitespace remains intact as raw, immutable evidence — only the
+separate operational `email` value is normalized.
+
+This changes *what counts as a match*, not the security model: a
+case/whitespace-only difference is now correctly detected as a
+collision (signed handoff issued), but linking still requires the exact
+same authenticated-ownership confirmation as before — email equality
+alone still never links an account. Mapped-user email-update hardening
+(a later Canvas email change that collides with a *different* User is
+never overwritten or merged) applies identically to the normalized
+value.
+
 ## Tests
 
 - `src/lib/lti/ltiLaunchIdentityCollision.test.ts` — the original pass's
@@ -325,3 +359,18 @@ fixed without touching any of the identity-collision hardening above:
   `LtiPlatform`; `APP_URL` wins when configured; `VERCEL_URL` safely
   (and only) fills in when `APP_URL` is absent, normalized to `https://`;
   both missing fails closed with no `LtiSession` created.
+- `src/lib/identityEmail.test.ts` — pure unit tests for
+  `normalizeIdentityEmail`: lowercasing, whitespace trimming, matching
+  the self-service convention, idempotency.
+- `src/lib/lti/ltiEmailNormalization.test.ts` — the email-normalization
+  hardening suite: a case/whitespace-only difference between a Canvas
+  claim and an existing self-service `User.email` is now detected as a
+  collision (signed handoff, no duplicate `User`); email equality alone
+  still never links an account (confirmation, and exact-account
+  ownership, is still required); a brand-new Canvas identity is
+  provisioned with a normalized lowercase `User.email`; a mapped user's
+  historical uppercase email is canonicalized when the normalized value
+  is unused, and never overwritten/merged when it collides with a
+  different `User`; and `LtiLaunch.launchClaimsJson.email` retains the
+  platform's exact original casing/whitespace, never the normalized
+  operational value.

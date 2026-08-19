@@ -7,6 +7,7 @@ import { findPlatformJwk } from "@/lib/lti/jwks-cache";
 import { createSessionCookie } from "@/lib/lti/session";
 import { createIdentityLinkHandoff } from "@/lib/lti/identityLinkHandoff";
 import { resolveInternalRedirectOrigin } from "@/lib/appOrigin";
+import { normalizeIdentityEmail } from "@/lib/identityEmail";
 import type { Prisma } from "@/generated/prisma/client";
 
 const CONTEXT_CLAIM = "https://purl.imsglobal.org/spec/lti/claim/context";
@@ -131,9 +132,20 @@ export async function POST(req: Request) {
   // an existing Tether account, so only a real email is ever looked up
   // against existing Users below (rule 5: no-email launches never
   // attempt any identity reconciliation, by name or otherwise).
+  //
+  // LTI email normalization hardening — a real Canvas-supplied email is
+  // normalized (trim + lowercase, src/lib/identityEmail.ts) before it is
+  // ever used operationally below (lookup, creation, update comparison)
+  // — the same canonical convention self-service onboarding has always
+  // used for User.email, so two representations of the same address
+  // (differing only in case/whitespace) are correctly treated as the
+  // same candidate identity instead of silently missing each other in
+  // an exact-string lookup. `payload` itself (and therefore
+  // launchClaimsJson below, built from it) is never mutated — the raw,
+  // platform-supplied casing/whitespace remains intact as evidence.
   const hasCanvasEmail = typeof payload.email === "string";
   const email = hasCanvasEmail
-    ? (payload.email as string)
+    ? normalizeIdentityEmail(payload.email as string)
     : `lti-${canvasUserId}@safe-exam-system.local`;
 
   const context = payload[CONTEXT_CLAIM] as LtiContextClaim | undefined;
