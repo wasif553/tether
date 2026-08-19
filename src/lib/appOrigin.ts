@@ -61,3 +61,27 @@ export function resolveLtiToolOrigin(): string | null {
 
   return null;
 }
+
+/**
+ * Password Reset v1 — trusted origin for the password-reset link mailed
+ * to a user. See docs/password-reset-v1.md.
+ *
+ * Same threat model, and deliberately the same APP_URL-then-VERCEL_URL
+ * precedence, as resolveLtiToolOrigin above (see its doc comment for the
+ * full reasoning) — this is NOT derived from the incoming request's
+ * Host/Forwarded headers, because /api/auth/forgot-password is an
+ * unauthenticated endpoint and an attacker-controlled Host would let a
+ * crafted request steer a real reset email's link at an arbitrary origin.
+ * A separate, identically-shaped function rather than reusing
+ * resolveLtiToolOrigin directly, so this feature never has to touch (or
+ * risk destabilizing) any LTI code path.
+ */
+export function resolveTrustedExternalOrigin(): string | null {
+  const appUrl = process.env.APP_URL;
+  if (appUrl) return appUrl;
+
+  const vercelUrl = process.env.VERCEL_URL;
+  if (vercelUrl) return `https://${vercelUrl}`;
+
+  return null;
+}

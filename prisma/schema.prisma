@@ -309,8 +309,36 @@ model User {
   examTimeAccommodationsReceived ExamTimeAccommodation[] @relation("ExamTimeAccommodationStudent")
   examTimeAccommodationsCreated  ExamTimeAccommodation[] @relation("ExamTimeAccommodationCreatedBy")
 
+  // Password Reset v1 (additive) — see docs/password-reset-v1.md.
+  passwordResetTokens PasswordResetToken[]
+
   @@unique([institutionId, canvasUserId])
   @@index([institutionId])
+}
+
+/**
+ * Password Reset v1 — see docs/password-reset-v1.md. One row per issued
+ * reset link. Only a SHA-256 hash of the token is ever stored (tokenHash)
+ * — the plaintext exists only long enough to build the emailed URL and is
+ * never persisted anywhere. `consumedAt` is set exactly once, by an
+ * atomic conditional update (`updateMany` guarded on `consumedAt: null`),
+ * which is what guarantees a token can never be used to reset a password
+ * twice even under concurrent requests. A successful reset also sets
+ * `consumedAt` on every OTHER outstanding token for the same user, in the
+ * same transaction, so an old, still-unused reset email can never be used
+ * after a newer one (or the same one) has completed a reset.
+ */
+model PasswordResetToken {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([userId, createdAt])
 }
 
 model Exam {

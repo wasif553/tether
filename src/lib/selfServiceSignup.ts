@@ -19,7 +19,11 @@ import { sanitizeInstitutionSlug } from "@/lib/platformAdmin";
 
 const nameSchema = z.string().trim().min(1, "name is required");
 const emailSchema = z.string().trim().toLowerCase().email("a valid email is required");
-const passwordSchema = z.string().min(8, "password must be at least 8 characters");
+// Exported so Password Reset v1 (src/lib/passwordReset.ts) enforces the
+// exact same minimum as self-service signup — see
+// docs/password-reset-v1.md. Keep this the single source of truth for
+// Tether's password-strength floor rather than duplicating "8" elsewhere.
+export const passwordSchema = z.string().min(8, "password must be at least 8 characters");
 
 export const studentSignupSchema = z
   .object({
