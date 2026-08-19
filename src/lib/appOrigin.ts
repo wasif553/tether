@@ -22,3 +22,42 @@
 export function resolveInternalRedirectOrigin(requestUrl: string): string {
   return new URL(requestUrl).origin;
 }
+
+/**
+ * LTI Reference Platform compatibility repair — trusted origin for LTI
+ * OIDC endpoints that a platform (Canvas, or the 1EdTech LTI 1.3
+ * Reference Implementation used for manual testing) must be able to
+ * reach and that Tether registers ahead of time (`redirect_uri`,
+ * `oidc_initiation_url`, `target_link_uri` in /api/lti/login and
+ * /api/lti/config). Unlike resolveInternalRedirectOrigin above, this is
+ * NEVER derived from an incoming request's Host/Forwarded headers —
+ * those are attacker-controlled on a request whose whole purpose is
+ * bootstrapping trust (an unauthenticated login-initiation hit), so
+ * trusting them here would let a crafted request redirect a real LTI
+ * launch anywhere.
+ *
+ * Precedence:
+ *   1. `APP_URL`, when explicitly configured — the stable, manually
+ *      registered value Canvas Developer Keys (and the 1EdTech
+ *      Reference Platform's own tool registration) point at in
+ *      production. Always wins when present, exactly as before this
+ *      function existed.
+ *   2. `VERCEL_URL` — Vercel's own server-injected deployment hostname
+ *      (never client-supplied; set automatically by the platform on
+ *      every build, including each Preview deployment), so Preview LTI
+ *      testing works without hand-configuring `APP_URL` per deployment.
+ *      Normalized to an `https://` origin — `VERCEL_URL` is documented
+ *      as a bare host, never a scheme.
+ *   3. Neither is available — fails closed (`null`); callers must
+ *      surface a clear configuration error rather than guessing at an
+ *      origin.
+ */
+export function resolveLtiToolOrigin(): string | null {
+  const appUrl = process.env.APP_URL;
+  if (appUrl) return appUrl;
+
+  const vercelUrl = process.env.VERCEL_URL;
+  if (vercelUrl) return `https://${vercelUrl}`;
+
+  return null;
+}

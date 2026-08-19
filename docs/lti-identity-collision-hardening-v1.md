@@ -265,6 +265,39 @@ AGS/grade passback, the unlinked-assignment friendly route, Auth.js's
 `SameSite=Lax` session-cookie policy, and every other Canvas/course/
 Standalone Exam Link/Tether Course Invitation/self-service behavior.
 
+## LTI Reference Platform compatibility repair
+
+Manual browser testing against the official 1EdTech LTI 1.3 Reference
+Implementation platform exposed two real compatibility defects, both
+fixed without touching any of the identity-collision hardening above:
+
+1. **Login initiation supported GET only.** LTI 1.3/OIDC third-party
+   login initiation permits either GET or POST; the reference platform
+   uses POST, which used to 405. `POST /api/lti/login` now shares one
+   internal `handleLoginInitiation` with `GET` — same issuer lookup,
+   same state/nonce generation, same registered-config-only redirect
+   construction, parsed from `application/x-www-form-urlencoded` (or
+   `multipart/form-data`) instead of query parameters. Optional
+   `client_id`/`lti_deployment_id` fields, if a platform supplies them,
+   are validated against the registered `LtiPlatform` and the request is
+   rejected on a mismatch — but neither field, nor `target_link_uri`
+   (never even read), nor any other supplied value is ever used to
+   choose *which* clientId/authEndpoint/redirect_uri Tether actually
+   sends; those always come from the registered `LtiPlatform` row.
+2. **Preview login failed with "Server configuration error" whenever
+   `APP_URL` was unset.** `APP_URL` is a stable, manually-configured
+   value production Canvas Developer Keys are registered against, so it
+   must keep winning when present — but requiring it to be hand-set for
+   every Preview deployment (which gets a fresh URL each time) made real
+   browser LTI testing on Preview impossible. `src/lib/appOrigin.ts`'s
+   new `resolveLtiToolOrigin()` adds one safe fallback: Vercel's own
+   server-injected `VERCEL_URL` (never client-supplied), normalized to
+   an `https://` origin, used only when `APP_URL` is absent. Neither
+   present → fails closed with the same "Server configuration error",
+   never guesses from a request's own Host/Forwarded headers (those are
+   attacker-controlled on an unauthenticated login-initiation request).
+   `GET /api/lti/config` uses the same helper for the same reason.
+
 ## Tests
 
 - `src/lib/lti/ltiLaunchIdentityCollision.test.ts` — the original pass's
@@ -284,3 +317,11 @@ Standalone Exam Link/Tether Course Invitation/self-service behavior.
   (already-consumed) `LtiSession`; and the full end-to-end path of a
   second, brand-new LTI launch finding the Step A mapping and proceeding
   completely normally after confirmation.
+- `src/lib/lti/ltiLoginInitiation.test.ts` — the Reference Platform
+  compatibility suite: GET and POST both work and produce equivalent
+  redirect semantics; unknown issuer rejected on both methods; a
+  mismatched `client_id`/injected `redirect_uri`/`target_link_uri`/
+  bogus `authEndpoint` field can never override the registered
+  `LtiPlatform`; `APP_URL` wins when configured; `VERCEL_URL` safely
+  (and only) fills in when `APP_URL` is absent, normalized to `https://`;
+  both missing fails closed with no `LtiSession` created.

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { exportJWK } from "jose";
 import { getPublicKey, LTI_KEY_ID, LTI_SIGNING_ALG } from "@/lib/lti/keys";
+import { resolveLtiToolOrigin } from "@/lib/appOrigin";
 
 type LtiToolConfig = {
   title: string;
@@ -30,7 +31,14 @@ type LtiToolConfig = {
 };
 
 export async function GET() {
-  const appUrl = process.env.APP_URL;
+  // LTI Reference Platform compatibility repair — see
+  // src/lib/appOrigin.ts's resolveLtiToolOrigin doc comment. APP_URL
+  // still wins whenever it's explicitly configured (production
+  // behavior unchanged); this only adds a safe, non-client-controlled
+  // fallback to Vercel's own deployment hostname so tool configuration
+  // doesn't independently fail on Preview for the same reason
+  // /api/lti/login used to.
+  const appUrl = resolveLtiToolOrigin();
   if (!appUrl) {
     return NextResponse.json(
       { error: "Missing required environment variable: APP_URL" },
