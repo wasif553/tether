@@ -13,6 +13,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requestPasswordReset } from "@/lib/passwordReset";
+import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
 
 const bodySchema = z
   .object({
@@ -28,7 +29,8 @@ export async function POST(req: Request) {
 
   if (parsed.success) {
     try {
-      await requestPasswordReset(parsed.data.email);
+      const sourceIp = resolveTrustedRequestSource(req);
+      await requestPasswordReset(parsed.data.email, sourceIp);
     } catch (err) {
       console.error(
         "Password reset request failed unexpectedly",

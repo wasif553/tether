@@ -28,6 +28,8 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { verifyCourseInvitationToken } from "@/lib/courseInvitationToken";
+import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
+import { courseInvitationRateLimitGate, recordCourseInvitationInvalidGuess } from "@/lib/security/courseInvitationRateLimit";
 
 type AcceptOutcome =
   | { kind: "invalid" }
@@ -45,7 +47,7 @@ class CrossInstitutionConflictError extends Error {
 }
 
 export async function POST(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ invitationId: string; token: string }> },
 ) {
   const session = await auth();
@@ -55,6 +57,15 @@ export async function POST(
 
   const { invitationId, token } = await params;
   const studentId = session.user.id;
+
+  const sourceIp = resolveTrustedRequestSource(req);
+  const gate = await courseInvitationRateLimitGate(sourceIp, invitationId);
+  if (!gate.allowed) {
+    return NextResponse.json(
+      { ok: false, reason: "rate_limited" },
+      { status: 429, headers: { "Retry-After": String(gate.retryAfterSeconds) } },
+    );
+  }
 
   const outcome: AcceptOutcome = await prisma.$transaction(async (tx): Promise<AcceptOutcome> => {
     const invitation = await tx.courseEnrollmentInvitation.findUnique({
@@ -157,6 +168,10 @@ export async function POST(
     }
     throw err;
   });
+
+  if (outcome.kind === "invalid") {
+    await recordCourseInvitationInvalidGuess(sourceIp, invitationId);
+  }
 
   if (outcome.kind === "accepted" || outcome.kind === "already_ok") {
     return NextResponse.json({ ok: true });

@@ -23,18 +23,31 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
+/**
+ * Auth and Token Abuse Protection v1 — every call below defaults to a
+ * fresh, random `X-Forwarded-For` unless the caller explicitly overrides
+ * it. Without this, every test in this file would share the same
+ * "unknown-source" rate-limit bucket (no header set at all) and start
+ * blocking each other once the source-level limiters below are exercised
+ * — tests that specifically want to share one source (to exercise the
+ * limiter) pass an explicit `X-Forwarded-For` instead.
+ */
+function randomTestSource(): string {
+  return `203.0.113.${Math.floor(Math.random() * 254) + 1}-${Math.random().toString(36).slice(2)}`;
+}
+
 function forgotPasswordRequest(email: unknown, headers: Record<string, string> = {}) {
   return new Request("http://test.local/api/auth/forgot-password", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...headers },
+    headers: { "Content-Type": "application/json", "X-Forwarded-For": randomTestSource(), ...headers },
     body: JSON.stringify({ email }),
   });
 }
 
-function resetPasswordRequest(token: unknown, password: unknown) {
+function resetPasswordRequest(token: unknown, password: unknown, headers: Record<string, string> = {}) {
   return new Request("http://test.local/api/auth/reset-password", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Forwarded-For": randomTestSource(), ...headers },
     body: JSON.stringify({ token, password }),
   });
 }
@@ -240,6 +253,48 @@ describe("POST /api/auth/forgot-password", () => {
     expect(rowsB).toHaveLength(1);
   });
 
+  it("Auth and Token Abuse Protection v1: a source spraying requests across many different accounts is limited, still getting the generic response, with no token/email created once limited", async () => {
+    const { FORGOT_PASSWORD_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const { POST } = await import("@/app/api/auth/forgot-password/route");
+    const sharedSource = randomTestSource();
+
+    let lastBody: unknown;
+    for (let i = 0; i < FORGOT_PASSWORD_SOURCE_MAX_ATTEMPTS; i++) {
+      const res = await POST(forgotPasswordRequest(`spray-${stamp}-${i}@test.invalid`, { "X-Forwarded-For": sharedSource }));
+      expect(res.status).toBe(200);
+      lastBody = await res.json();
+    }
+    expect((lastBody as { message: string }).message).toBe(GENERIC_MESSAGE);
+
+    sendPasswordResetEmailMock.mockClear();
+
+    // Now spray against a REAL account from the same now-saturated source —
+    // still the identical generic 200, but no token/email is created.
+    const realUser = await createUser("STUDENT");
+    const limitedRes = await POST(forgotPasswordRequest(realUser.email, { "X-Forwarded-For": sharedSource }));
+    expect(limitedRes.status).toBe(200);
+    expect(await limitedRes.json()).toEqual(lastBody);
+    expect(sendPasswordResetEmailMock).not.toHaveBeenCalled();
+    const rows = await prisma.passwordResetToken.findMany({ where: { userId: realUser.id } });
+    expect(rows).toHaveLength(0);
+  });
+
+  it("Auth and Token Abuse Protection v1: a different source is not affected by another source's spray", async () => {
+    const { FORGOT_PASSWORD_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const { POST } = await import("@/app/api/auth/forgot-password/route");
+    const sprayingSource = randomTestSource();
+    for (let i = 0; i < FORGOT_PASSWORD_SOURCE_MAX_ATTEMPTS; i++) {
+      await POST(forgotPasswordRequest(`spray2-${stamp}-${i}@test.invalid`, { "X-Forwarded-For": sprayingSource }));
+    }
+    sendPasswordResetEmailMock.mockClear();
+
+    const otherSource = randomTestSource();
+    const realUser = await createUser("STUDENT");
+    const res = await POST(forgotPasswordRequest(realUser.email, { "X-Forwarded-For": otherSource }));
+    expect(res.status).toBe(200);
+    expect(sendPasswordResetEmailMock).toHaveBeenCalledTimes(1);
+  });
+
   it("26. a provider send failure still returns the generic response and does not leave a live orphan token", async () => {
     sendPasswordResetEmailMock.mockRejectedValueOnce(new Error("simulated provider outage"));
     const user = await createUser("STUDENT");
@@ -321,6 +376,54 @@ describe("POST /api/auth/reset-password", () => {
     const res = await POST(resetPasswordRequest("not-a-real-token-value-xyz", "NewPassw0rd!"));
     expect(res.status).toBe(400);
     expect((await res.json()).ok).toBe(false);
+  });
+
+  it("Auth and Token Abuse Protection v1: repeated bogus-token attempts from one source are limited with a 429 + Retry-After, distinct from a plain invalid response", async () => {
+    const { RESET_PASSWORD_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const { POST } = await import("@/app/api/auth/reset-password/route");
+    const sharedSource = randomTestSource();
+
+    for (let i = 0; i < RESET_PASSWORD_SOURCE_MAX_ATTEMPTS; i++) {
+      const res = await POST(resetPasswordRequest(`bogus-token-${stamp}-${i}`, "SomePassw0rd!", { "X-Forwarded-For": sharedSource }));
+      expect(res.status).toBe(400); // still ordinary "invalid" — not yet limited
+    }
+
+    const limited = await POST(resetPasswordRequest(`bogus-token-${stamp}-final`, "SomePassw0rd!", { "X-Forwarded-For": sharedSource }));
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("Retry-After")).toBeTruthy();
+    const body = await limited.json();
+    expect(body).toEqual({ ok: false, error: "rate_limited" });
+  });
+
+  it("Auth and Token Abuse Protection v1: a valid reset from a source that has made many bogus attempts against a DIFFERENT token still succeeds (only invalid outcomes consume the bucket, threshold not yet reached)", async () => {
+    const { POST } = await import("@/app/api/auth/reset-password/route");
+    const sharedSource = randomTestSource();
+
+    // A few (fewer than the threshold) bogus attempts from this source.
+    for (let i = 0; i < 3; i++) {
+      await POST(resetPasswordRequest(`bogus-token-b-${stamp}-${i}`, "SomePassw0rd!", { "X-Forwarded-For": sharedSource }));
+    }
+
+    const user = await createUser("STUDENT");
+    const token = await requestResetAndGetToken(user);
+    const res = await POST(resetPasswordRequest(token, "GenuineNewPassw0rd!", { "X-Forwarded-For": sharedSource }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+  });
+
+  it("Auth and Token Abuse Protection v1: a different source is independent from another source's bogus-guessing budget", async () => {
+    const { RESET_PASSWORD_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const { POST } = await import("@/app/api/auth/reset-password/route");
+    const guessingSource = randomTestSource();
+    for (let i = 0; i < RESET_PASSWORD_SOURCE_MAX_ATTEMPTS; i++) {
+      await POST(resetPasswordRequest(`bogus-token-c-${stamp}-${i}`, "SomePassw0rd!", { "X-Forwarded-For": guessingSource }));
+    }
+
+    const otherSource = randomTestSource();
+    const user = await createUser("STUDENT");
+    const token = await requestResetAndGetToken(user);
+    const res = await POST(resetPasswordRequest(token, "GenuineNewPassw0rd!", { "X-Forwarded-For": otherSource }));
+    expect(res.status).toBe(200);
   });
 
   it("20. a too-short password is rejected", async () => {

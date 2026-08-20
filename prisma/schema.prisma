@@ -2835,3 +2835,41 @@ model TetherClientInstallation {
   @@unique([userId, publicKeyFingerprint])
   @@index([userId, status])
 }
+
+/**
+ * Auth and Token Abuse Protection v1 — see
+ * docs/auth-token-abuse-protection-v1.md. A single generic, durable,
+ * fixed-window rate-limit bucket shared by every abuse-sensitive
+ * verification surface (login, forgot-password, reset-password token
+ * guessing, course-invitation token guessing, standalone-invite token
+ * guessing, exam access-code guessing) — one small additive table rather
+ * than one bespoke table per surface.
+ *
+ * `scope` names which control this bucket belongs to (e.g.
+ * "auth.login.source_account") — see src/lib/security/rateLimitScopes.ts
+ * for the fixed list. `keyHash` is an HMAC-SHA256 digest (never a raw
+ * email, IP, password, token, or access code — see
+ * src/lib/security/rateLimitKey.ts) of the scope-specific identifier
+ * (e.g. "<source>|<normalized-email>"), so this table never stores
+ * anything that could itself be reversed into a student's real identity
+ * or a guessable secret. `windowStart`/`count` implement a fixed-window
+ * counter: a request either falls inside the current window (count
+ * checked/incremented) or the window has expired (treated as fresh,
+ * count reset to 1) — see consumeRateLimit() in
+ * src/lib/security/rateLimiter.ts for the exact atomic (Postgres
+ * advisory-lock-guarded) semantics. Rows are temporary security metadata
+ * only — see that same doc for the opportunistic cleanup strategy; no
+ * row here is ever treated as a permanent record.
+ */
+model SecurityRateLimitBucket {
+  id          String   @id @default(cuid())
+  scope       String
+  keyHash     String
+  windowStart DateTime
+  count       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([scope, keyHash])
+  @@index([windowStart])
+}

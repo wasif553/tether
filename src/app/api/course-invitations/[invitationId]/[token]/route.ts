@@ -15,9 +15,11 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { verifyCourseInvitationToken } from "@/lib/courseInvitationToken";
+import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
+import { courseInvitationRateLimitGate, recordCourseInvitationInvalidGuess } from "@/lib/security/courseInvitationRateLimit";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ invitationId: string; token: string }> },
 ) {
   const session = await auth();
@@ -26,12 +28,22 @@ export async function GET(
   }
 
   const { invitationId, token } = await params;
+  const sourceIp = resolveTrustedRequestSource(req);
+  const gate = await courseInvitationRateLimitGate(sourceIp, invitationId);
+  if (!gate.allowed) {
+    return NextResponse.json(
+      { ok: false, reason: "rate_limited" },
+      { status: 429, headers: { "Retry-After": String(gate.retryAfterSeconds) } },
+    );
+  }
+
   const invitation = await prisma.courseEnrollmentInvitation.findUnique({
     where: { id: invitationId },
     include: { course: { include: { institution: { select: { name: true } } } } },
   });
 
   if (!invitation) {
+    await recordCourseInvitationInvalidGuess(sourceIp, invitationId);
     return NextResponse.json({ ok: false, reason: "invalid" });
   }
   if (invitation.studentId !== session.user.id) {
@@ -47,6 +59,7 @@ export async function GET(
     return NextResponse.json({ ok: false, reason: "expired" });
   }
   if (!invitation.tokenHash || !verifyCourseInvitationToken(token, invitation.tokenHash)) {
+    await recordCourseInvitationInvalidGuess(sourceIp, invitationId);
     return NextResponse.json({ ok: false, reason: "invalid" });
   }
 

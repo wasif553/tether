@@ -22,6 +22,15 @@ import {
   PASSWORD_RESET_TOKEN_TTL_MS,
   PASSWORD_RESET_REQUEST_COOLDOWN_MS,
 } from "@/lib/passwordResetToken";
+import { safeConsumeRateLimit, safePeekRateLimitBlocked } from "@/lib/security/rateLimiter";
+import {
+  FORGOT_PASSWORD_SOURCE_SCOPE,
+  FORGOT_PASSWORD_SOURCE_MAX_ATTEMPTS,
+  FORGOT_PASSWORD_SOURCE_WINDOW_SECONDS,
+  RESET_PASSWORD_SOURCE_SCOPE,
+  RESET_PASSWORD_SOURCE_MAX_ATTEMPTS,
+  RESET_PASSWORD_SOURCE_WINDOW_SECONDS,
+} from "@/lib/security/rateLimitScopes";
 
 /**
  * Always resolves (never rejects) — every branch below (no such account,
@@ -64,8 +73,29 @@ import {
  * with each other (the send is a network call to an external provider) —
  * this is a best-effort cleanup, not a correctness guarantee the way the
  * token table's own consumedAt handling is.
+ *
+ * Auth and Token Abuse Protection v1 — a source-level bucket (keyed on
+ * `sourceIp` alone, independent of any account) is consumed FIRST, before
+ * any account lookup — a source that has already sprayed too many
+ * forgot-password requests (regardless of which emails, real or fake,
+ * it targeted) is rejected before this function does anything else: no
+ * user lookup, no per-user cooldown check, no token, no email. This is
+ * layered on top of, and does not replace or weaken, the existing
+ * per-account 60-second cooldown below. Deliberately a plain "consume,
+ * never release" bucket (unlike the login limiter) — every call from a
+ * source counts toward its spray budget regardless of outcome, which is
+ * exactly what stops one caller from probing/emailing many different
+ * accounts.
  */
-export async function requestPasswordReset(rawEmail: string): Promise<void> {
+export async function requestPasswordReset(rawEmail: string, sourceIp: string): Promise<void> {
+  const sourceGate = await safeConsumeRateLimit({
+    scope: FORGOT_PASSWORD_SOURCE_SCOPE,
+    identifier: sourceIp,
+    maxAttempts: FORGOT_PASSWORD_SOURCE_MAX_ATTEMPTS,
+    windowSeconds: FORGOT_PASSWORD_SOURCE_WINDOW_SECONDS,
+  });
+  if (!sourceGate.allowed) return; // source-limited — silent no-op; caller still returns the generic response
+
   const email = normalizeIdentityEmail(rawEmail);
 
   const user = await prisma.user.findUnique({ where: { email }, select: { id: true, email: true } });
@@ -128,7 +158,8 @@ export async function requestPasswordReset(rawEmail: string): Promise<void> {
   }
 }
 
-export type ResetPasswordOutcome = "ok" | "invalid";
+export type ResetPasswordOutcome = "ok" | "invalid" | "rate_limited";
+export type ResetPasswordResult = { outcome: ResetPasswordOutcome; retryAfterSeconds?: number };
 
 /**
  * Concurrency-safe by construction: the only write that can flip a
@@ -155,8 +186,47 @@ export type ResetPasswordOutcome = "ok" | "invalid";
  * transaction, and reused for both the WHERE comparison and the
  * `consumedAt`/other-tokens write below, so every write in this
  * transaction agrees on exactly the same instant.
+ *
+ * Auth and Token Abuse Protection v1 — a source-level bucket (keyed on
+ * `sourceIp` alone) guards against high-volume bogus-token submission.
+ * Checked as a cheap, read-only fast-path FIRST (before the token-hash
+ * lookup below), and only actually CONSUMED when this call's own outcome
+ * ends up "invalid" — a genuinely valid reset never counts against it.
+ * Distinct from "invalid": the route surfaces this as a conventional 429
+ * with Retry-After, which is safe here specifically because it reveals
+ * nothing about whether any particular token/account exists — only that
+ * this source has made too many bad guesses.
  */
-export async function resetPasswordWithToken(rawToken: string, newPassword: string): Promise<ResetPasswordOutcome> {
+export async function resetPasswordWithToken(
+  rawToken: string,
+  newPassword: string,
+  sourceIp: string,
+): Promise<ResetPasswordResult> {
+  const sourcePeek = await safePeekRateLimitBlocked({
+    scope: RESET_PASSWORD_SOURCE_SCOPE,
+    identifier: sourceIp,
+    maxAttempts: RESET_PASSWORD_SOURCE_MAX_ATTEMPTS,
+    windowSeconds: RESET_PASSWORD_SOURCE_WINDOW_SECONDS,
+  });
+  if (sourcePeek.blocked) {
+    return { outcome: "rate_limited", retryAfterSeconds: sourcePeek.retryAfterSeconds };
+  }
+
+  const result = await resetPasswordWithTokenCore(rawToken, newPassword);
+
+  if (result !== "ok") {
+    await safeConsumeRateLimit({
+      scope: RESET_PASSWORD_SOURCE_SCOPE,
+      identifier: sourceIp,
+      maxAttempts: RESET_PASSWORD_SOURCE_MAX_ATTEMPTS,
+      windowSeconds: RESET_PASSWORD_SOURCE_WINDOW_SECONDS,
+    });
+  }
+
+  return { outcome: result };
+}
+
+async function resetPasswordWithTokenCore(rawToken: string, newPassword: string): Promise<"ok" | "invalid"> {
   const tokenHash = hashPasswordResetToken(rawToken);
   const tokenRow = await prisma.passwordResetToken.findUnique({ where: { tokenHash } });
   if (!tokenRow) return "invalid";

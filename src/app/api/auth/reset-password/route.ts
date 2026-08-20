@@ -10,6 +10,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { passwordSchema } from "@/lib/selfServiceSignup";
 import { resetPasswordWithToken } from "@/lib/passwordReset";
+import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
 
 const bodySchema = z
   .object({
@@ -25,7 +26,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
   }
 
-  const outcome = await resetPasswordWithToken(parsed.data.token, parsed.data.password);
+  const sourceIp = resolveTrustedRequestSource(req);
+  const { outcome, retryAfterSeconds } = await resetPasswordWithToken(parsed.data.token, parsed.data.password, sourceIp);
+
+  if (outcome === "rate_limited") {
+    return NextResponse.json(
+      { ok: false, error: "rate_limited" },
+      { status: 429, headers: retryAfterSeconds ? { "Retry-After": String(retryAfterSeconds) } : undefined },
+    );
+  }
   if (outcome !== "ok") {
     return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
   }

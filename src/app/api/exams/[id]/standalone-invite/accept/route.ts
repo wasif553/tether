@@ -20,12 +20,15 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { verifyStandaloneInviteToken } from "@/lib/standaloneInvite";
+import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
+import { standaloneInviteRateLimitGate, recordStandaloneInviteInvalidGuess } from "@/lib/security/standaloneInviteRateLimit";
 
 const acceptSchema = z.object({
   token: z.string().min(1),
 });
 
-function invalidInvite() {
+async function invalidInvite(sourceIp: string, examId: string) {
+  await recordStandaloneInviteInvalidGuess(sourceIp, examId);
   return NextResponse.json({ ok: false, reason: "invalid_invite" });
 }
 
@@ -39,10 +42,19 @@ export async function POST(
   }
 
   const { id } = await params;
+  const sourceIp = resolveTrustedRequestSource(req);
+  const gate = await standaloneInviteRateLimitGate(sourceIp, id);
+  if (!gate.allowed) {
+    return NextResponse.json(
+      { ok: false, reason: "rate_limited" },
+      { status: 429, headers: { "Retry-After": String(gate.retryAfterSeconds) } },
+    );
+  }
+
   const body = await req.json().catch(() => null);
   const parsed = acceptSchema.safeParse(body);
   if (!parsed.success) {
-    return invalidInvite();
+    return invalidInvite(sourceIp, id);
   }
 
   const exam = await prisma.exam.findUnique({
@@ -63,11 +75,11 @@ export async function POST(
     !exam.standaloneInviteEnabled ||
     !exam.standaloneInviteTokenHash
   ) {
-    return invalidInvite();
+    return invalidInvite(sourceIp, id);
   }
 
   if (!verifyStandaloneInviteToken(parsed.data.token, exam.standaloneInviteTokenHash)) {
-    return invalidInvite();
+    return invalidInvite(sourceIp, id);
   }
 
   // The userId is always the authenticated caller — never client-

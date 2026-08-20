@@ -38,10 +38,21 @@ function sessionFor(userId: string, role: "LECTURER" | "STUDENT", institutionId:
   };
 }
 
-function jsonRequest(body?: unknown, method = "POST") {
+/**
+ * Auth and Token Abuse Protection v1 — defaults to a fresh, random
+ * `X-Forwarded-For` per call unless the caller explicitly overrides it,
+ * so the many existing tests in this file don't share a rate-limit
+ * bucket with each other by accident. Tests that specifically want to
+ * share one source pass an explicit header instead.
+ */
+function randomTestSource(): string {
+  return `203.0.113.${Math.floor(Math.random() * 254) + 1}-${Math.random().toString(36).slice(2)}`;
+}
+
+function jsonRequest(body?: unknown, method = "POST", headers: Record<string, string> = {}) {
   return new Request("http://localhost/route", {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Forwarded-For": randomTestSource(), ...headers },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 }
@@ -324,6 +335,94 @@ describe("Lecturer invite generation + student acceptance", () => {
     const { POST: accept } = await import("@/app/api/exams/[id]/standalone-invite/accept/route");
     const res = await accept(jsonRequest({ token: "x" }), { params: Promise.resolve({ id: exam.id }) });
     expect(res.status).toBe(401);
+  });
+
+  it("Auth and Token Abuse Protection v1: repeated invalid invite-token guesses against ONE exam from one source are limited (429 + Retry-After)", async () => {
+    const { STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const exam = await createExam({
+      institutionId: instA, createdById: lecturerA, assignmentMode: "STANDALONE",
+      standaloneInviteEnabled: true, standaloneInviteTokenHash: hashStandaloneInviteToken("the-real-token"),
+    });
+    mockAuth.mockResolvedValue(sessionFor(studentInA, "STUDENT", instA));
+    const { POST: accept } = await import("@/app/api/exams/[id]/standalone-invite/accept/route");
+    const sharedSource = randomTestSource();
+
+    for (let i = 0; i < STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS; i++) {
+      const res = await accept(jsonRequest({ token: `wrong-guess-${i}` }, "POST", { "X-Forwarded-For": sharedSource }), {
+        params: Promise.resolve({ id: exam.id }),
+      });
+      expect((await res.json()).ok).toBe(false);
+    }
+
+    const limited = await accept(jsonRequest({ token: "yet-another-wrong-guess" }, "POST", { "X-Forwarded-For": sharedSource }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("Retry-After")).toBeTruthy();
+    expect((await limited.json()).reason).toBe("rate_limited");
+
+    // Even the genuinely correct token is now rejected from this source
+    // until the window expires — this is the intended, short, auto-
+    // expiring block, not a change to token validity itself.
+    const evenCorrectToken = await accept(jsonRequest({ token: "the-real-token" }, "POST", { "X-Forwarded-For": sharedSource }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    expect(evenCorrectToken.status).toBe(429);
+  });
+
+  it("Auth and Token Abuse Protection v1: the same source can still use a DIFFERENT exam's legitimate invite after being limited on another exam (campus-NAT safety)", async () => {
+    const { STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const guessedExam = await createExam({
+      institutionId: instA, createdById: lecturerA, assignmentMode: "STANDALONE",
+      standaloneInviteEnabled: true, standaloneInviteTokenHash: hashStandaloneInviteToken("guessed-exam-token"),
+    });
+    mockAuth.mockResolvedValue(sessionFor(studentInA, "STUDENT", instA));
+    const { POST: accept } = await import("@/app/api/exams/[id]/standalone-invite/accept/route");
+    const sharedSource = randomTestSource();
+    for (let i = 0; i < STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS; i++) {
+      await accept(jsonRequest({ token: `wrong-guess-${i}` }, "POST", { "X-Forwarded-For": sharedSource }), {
+        params: Promise.resolve({ id: guessedExam.id }),
+      });
+    }
+
+    // A different, legitimate exam's own invite, from the exact same source.
+    const legitExam = await createExam({ institutionId: instA, createdById: lecturerA });
+    mockAuth.mockResolvedValue(sessionFor(lecturerA, "LECTURER", instA));
+    const { POST: generate } = await import("@/app/api/exams/[id]/standalone-invite/route");
+    const gen = await (await generate(jsonRequest(), { params: Promise.resolve({ id: legitExam.id }) })).json();
+    const legitToken = gen.inviteUrl.split("/invite/")[1];
+
+    mockAuth.mockResolvedValue(sessionFor(studentInA, "STUDENT", instA));
+    const res = await accept(jsonRequest({ token: legitToken }, "POST", { "X-Forwarded-For": sharedSource }), {
+      params: Promise.resolve({ id: legitExam.id }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+  });
+
+  it("Auth and Token Abuse Protection v1: a different source is independent from another source's guessing against the same exam", async () => {
+    const { STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const exam = await createExam({ institutionId: instA, createdById: lecturerA });
+    mockAuth.mockResolvedValue(sessionFor(lecturerA, "LECTURER", instA));
+    const { POST: generate } = await import("@/app/api/exams/[id]/standalone-invite/route");
+    const gen = await (await generate(jsonRequest(), { params: Promise.resolve({ id: exam.id }) })).json();
+    const token = gen.inviteUrl.split("/invite/")[1];
+
+    mockAuth.mockResolvedValue(sessionFor(studentInA, "STUDENT", instA));
+    const { POST: accept } = await import("@/app/api/exams/[id]/standalone-invite/accept/route");
+    const guessingSource = randomTestSource();
+    for (let i = 0; i < STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS; i++) {
+      await accept(jsonRequest({ token: `wrong-guess-${i}` }, "POST", { "X-Forwarded-For": guessingSource }), {
+        params: Promise.resolve({ id: exam.id }),
+      });
+    }
+
+    const otherSource = randomTestSource();
+    const res = await accept(jsonRequest({ token }, "POST", { "X-Forwarded-For": otherSource }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
   });
 
   it("20. a wrong token against a real, enabled invite is a generic invalid_invite denial — no ExamAssignment created", async () => {

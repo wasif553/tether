@@ -1,8 +1,8 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import bcrypt from "bcryptjs";
-import { prisma } from "@/lib/prisma";
 import { applyJwtUpdate } from "@/lib/sessionRefresh";
+import { attemptCredentialsLogin } from "@/lib/security/loginAttempt";
+import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
 
 declare module "next-auth" {
   interface User {
@@ -29,24 +29,21 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
       },
-      authorize: async (credentials) => {
+      // Auth and Token Abuse Protection v1 — the actual verification
+      // logic (lookup, bcrypt compare, and durable, concurrency-safe
+      // rate limiting) lives in attemptCredentialsLogin
+      // (src/lib/security/loginAttempt.ts), extracted so it's directly
+      // unit-testable without NextAuth's internal request-handling
+      // pipeline. `request` is NextAuth v5's own second `authorize`
+      // parameter — the original inbound Request, carrying whatever
+      // headers actually reached this server (see
+      // resolveTrustedRequestSource's own doc comment for the Vercel
+      // trust boundary this relies on).
+      authorize: async (credentials, request) => {
         const email = credentials?.email as string | undefined;
         const password = credentials?.password as string | undefined;
-        if (!email || !password) return null;
-
-        const user = await prisma.user.findUnique({ where: { email } });
-        if (!user) return null;
-
-        const valid = await bcrypt.compare(password, user.passwordHash);
-        if (!valid) return null;
-
-        return {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          institutionId: user.institutionId,
-        };
+        const sourceIp = resolveTrustedRequestSource(request);
+        return attemptCredentialsLogin({ email, password, sourceIp });
       },
     }),
   ],

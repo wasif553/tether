@@ -33,10 +33,22 @@ function sessionFor(userId: string, role: "LECTURER" | "STUDENT" | "PLATFORM_ADM
   };
 }
 
-function jsonRequest(body?: unknown, method = "POST") {
+/**
+ * Auth and Token Abuse Protection v1 — defaults to a fresh, random
+ * `X-Forwarded-For` per call unless the caller explicitly overrides it,
+ * so the many existing tests in this file (each typically its own
+ * distinct invitation) don't share a rate-limit bucket with each other by
+ * accident. Tests that specifically want to share one source pass an
+ * explicit header instead.
+ */
+function randomTestSource(): string {
+  return `203.0.113.${Math.floor(Math.random() * 254) + 1}-${Math.random().toString(36).slice(2)}`;
+}
+
+function jsonRequest(body?: unknown, method = "POST", headers: Record<string, string> = {}) {
   return new Request("http://localhost/route", {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Forwarded-For": randomTestSource(), ...headers },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 }
@@ -435,6 +447,80 @@ describe("GET preview + POST accept — /api/course-invitations/[invitationId]/[
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.reason).toBe("revoked");
+  });
+
+  it("Auth and Token Abuse Protection v1: repeated invalid guesses against ONE invitation from one source are limited (429 + Retry-After)", async () => {
+    const { COURSE_INVITATION_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const student = await createUser(`acc-limit-${stamp}@test.invalid`, "STUDENT", null);
+    const { invitation } = await createInvitationRow({ courseId: courseA, studentId: student.id, invitedById: lecturerA });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", null));
+    const { POST: accept } = await import("@/app/api/course-invitations/[invitationId]/[token]/accept/route");
+    const sharedSource = randomTestSource();
+
+    for (let i = 0; i < COURSE_INVITATION_SOURCE_MAX_ATTEMPTS; i++) {
+      const res = await accept(jsonRequest({}, "POST", { "X-Forwarded-For": sharedSource }), {
+        params: Promise.resolve({ invitationId: invitation.id, token: `wrong-guess-${i}` }),
+      });
+      expect((await res.json()).reason).toBe("invalid");
+    }
+
+    const limited = await accept(jsonRequest({}, "POST", { "X-Forwarded-For": sharedSource }), {
+      params: Promise.resolve({ invitationId: invitation.id, token: "yet-another-wrong-guess" }),
+    });
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("Retry-After")).toBeTruthy();
+    expect((await limited.json()).reason).toBe("rate_limited");
+  });
+
+  it("Auth and Token Abuse Protection v1: the same source can still use a DIFFERENT legitimate invitation after being limited on another one (campus-NAT safety)", async () => {
+    const { COURSE_INVITATION_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const guessedStudent = await createUser(`acc-nat-guessed-${stamp}@test.invalid`, "STUDENT", null);
+    const { invitation: guessedInvitation } = await createInvitationRow({
+      courseId: courseA, studentId: guessedStudent.id, invitedById: lecturerA,
+    });
+    const { POST: accept } = await import("@/app/api/course-invitations/[invitationId]/[token]/accept/route");
+    const sharedSource = randomTestSource();
+
+    mockAuth.mockResolvedValue(sessionFor(guessedStudent.id, "STUDENT", null));
+    for (let i = 0; i < COURSE_INVITATION_SOURCE_MAX_ATTEMPTS; i++) {
+      await accept(jsonRequest({}, "POST", { "X-Forwarded-For": sharedSource }), {
+        params: Promise.resolve({ invitationId: guessedInvitation.id, token: `wrong-guess-${i}` }),
+      });
+    }
+
+    // A DIFFERENT student, with their OWN legitimate invitation, from the
+    // exact same source, must be unaffected.
+    const legitimateStudent = await createUser(`acc-nat-legit-${stamp}@test.invalid`, "STUDENT", null);
+    const { invitation: legitInvitation, token: legitToken } = await createInvitationRow({
+      courseId: courseA, studentId: legitimateStudent.id, invitedById: lecturerA,
+    });
+    mockAuth.mockResolvedValue(sessionFor(legitimateStudent.id, "STUDENT", null));
+    const res = await accept(jsonRequest({}, "POST", { "X-Forwarded-For": sharedSource }), {
+      params: Promise.resolve({ invitationId: legitInvitation.id, token: legitToken }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+  });
+
+  it("Auth and Token Abuse Protection v1: a different source is independent from another source's guessing against the same invitation", async () => {
+    const { COURSE_INVITATION_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const student = await createUser(`acc-indep-${stamp}@test.invalid`, "STUDENT", null);
+    const { invitation, token } = await createInvitationRow({ courseId: courseA, studentId: student.id, invitedById: lecturerA });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", null));
+    const { POST: accept } = await import("@/app/api/course-invitations/[invitationId]/[token]/accept/route");
+    const guessingSource = randomTestSource();
+    for (let i = 0; i < COURSE_INVITATION_SOURCE_MAX_ATTEMPTS; i++) {
+      await accept(jsonRequest({}, "POST", { "X-Forwarded-For": guessingSource }), {
+        params: Promise.resolve({ invitationId: invitation.id, token: `wrong-guess-${i}` }),
+      });
+    }
+
+    const otherSource = randomTestSource();
+    const res = await accept(jsonRequest({}, "POST", { "X-Forwarded-For": otherSource }), {
+      params: Promise.resolve({ invitationId: invitation.id, token }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
   });
 
   it("28 & 29. acceptance sets institutionId null -> course institution AND creates CourseEnrollment STUDENT", async () => {

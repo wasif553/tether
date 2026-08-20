@@ -44,6 +44,8 @@ import {
   InvalidExamTimeAccommodationError,
   type ExamTimeAccommodationAdjustment,
 } from "@/lib/examTimeAccommodation";
+import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
+import { examAccessCodeRateLimitGate, recordExamAccessCodeInvalidGuess } from "@/lib/security/examAccessCodeRateLimit";
 
 // Tether launch/install flow v1 — Requirement 9 ("Production start
 // protection"). Additive response field: `{required: false}` for every
@@ -246,12 +248,28 @@ export async function POST(
   // Student Onboarding and Exam Access v1 — see
   // docs/student-onboarding-and-exam-access.md.
   if (exam.accessCodeRequired) {
+    // Auth and Token Abuse Protection v1 — a source+examId bucket guards
+    // this comparison against high-volume access-code guessing. Checked
+    // only when a code is actually required (never for exams without
+    // one), and only ever counted against on a genuinely WRONG code —
+    // see src/lib/security/examAccessCodeRateLimit.ts. Purely additive:
+    // no other exam-start behavior below this block is touched.
+    const sourceIp = resolveTrustedRequestSource(req);
+    const gate = await examAccessCodeRateLimitGate(sourceIp, id);
+    if (!gate.allowed) {
+      return NextResponse.json(
+        { error: "Too many attempts. Please try again shortly." },
+        { status: 429, headers: { "Retry-After": String(gate.retryAfterSeconds) } },
+      );
+    }
+
     const accessCode = typeof body?.accessCode === "string" ? body.accessCode : "";
     const valid =
       accessCode.length > 0 &&
       exam.accessCodeHash != null &&
       (await bcrypt.compare(accessCode, exam.accessCodeHash));
     if (!valid) {
+      await recordExamAccessCodeInvalidGuess(sourceIp, id);
       return NextResponse.json(
         { error: "Valid access code required to start this exam." },
         { status: 403 },
