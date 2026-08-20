@@ -393,8 +393,9 @@ describe("Lecturer invite generation + student acceptance", () => {
     expect(aBlocked.status).toBe(429);
 
     // A DIFFERENT student, same source, same exam, with the genuinely
-    // correct token, is completely unaffected — the first pass's
-    // source+examId-only key would have blocked this too.
+    // correct token, is completely unaffected — the limiter is keyed on
+    // source+studentId, so a different student's own budget is untouched
+    // regardless of exam id.
     mockAuth.mockResolvedValue(sessionFor(nullInstStudent, "STUDENT", null));
     const bAccepted = await accept(jsonRequest({ token: "shared-exam-real-token" }, "POST", { "X-Forwarded-For": sharedSource }), {
       params: Promise.resolve({ id: exam.id }),
@@ -428,7 +429,7 @@ describe("Lecturer invite generation + student acceptance", () => {
     expect(invalidCount + rateLimitedCount).toBe(STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS + 15);
   });
 
-  it("Auth and Token Abuse Protection v1 (security review v3): arbitrary/nonexistent examIds do NOT each create a SecurityRateLimitBucket row (storage-cardinality fix)", async () => {
+  it("Auth and Token Abuse Protection v1 (security review v4): arbitrary/nonexistent examIds from one student+source share ONE bucket, never one row per exam id (storage-cardinality fix)", async () => {
     const { STANDALONE_INVITE_SOURCE_SCOPE } = await import("@/lib/security/rateLimitScopes");
     mockAuth.mockResolvedValue(sessionFor(studentInA, "STUDENT", instA));
     const { POST: accept } = await import("@/app/api/exams/[id]/standalone-invite/accept/route");
@@ -437,10 +438,11 @@ describe("Lecturer invite generation + student acceptance", () => {
     const before = await prisma.securityRateLimitBucket.count({ where: { scope: STANDALONE_INVITE_SOURCE_SCOPE } });
 
     // Many DIFFERENT, entirely made-up exam ids from one authenticated
-    // student — eligibility (exam exists, published, STANDALONE, invite
-    // enabled, has a tokenHash) is now confirmed BEFORE any reservation,
-    // so none of these ever touch the rate-limit table at all.
-    for (let i = 0; i < 20; i++) {
+    // student+source — the limiter is now keyed on source+studentId
+    // ONLY (security review v4), reserved BEFORE the exam lookup, so
+    // every one of these draws from the SAME single bucket rather than
+    // creating a new row per arbitrary id.
+    for (let i = 0; i < 5; i++) {
       const arbitraryExamId = `nonexistent-exam-${stamp}-${i}-${Math.random().toString(36).slice(2)}`;
       const res = await accept(jsonRequest({ token: "whatever" }, "POST", { "X-Forwarded-For": sharedSource }), {
         params: Promise.resolve({ id: arbitraryExamId }),
@@ -449,10 +451,10 @@ describe("Lecturer invite generation + student acceptance", () => {
     }
 
     const after = await prisma.securityRateLimitBucket.count({ where: { scope: STANDALONE_INVITE_SOURCE_SCOPE } });
-    expect(after).toBe(before); // zero new rows from 20 requests against arbitrary nonexistent exam ids
+    expect(after).toBe(before + 1); // exactly ONE new bucket for this student+source, not 5
 
-    // Contrast: guessing against a REAL, eligible exam's token still
-    // rate-limits normally (creates exactly one row and counts up).
+    // A REAL exam's wrong-token guess from the SAME student+source draws
+    // from that SAME single bucket — no new row.
     const realExam = await createExam({
       institutionId: instA, createdById: lecturerA, assignmentMode: "STANDALONE",
       standaloneInviteEnabled: true, standaloneInviteTokenHash: hashStandaloneInviteToken("cardinality-real-token"),
@@ -462,10 +464,17 @@ describe("Lecturer invite generation + student acceptance", () => {
     });
     expect((await realGuess.json()).reason).toBe("invalid_invite");
     const afterRealGuess = await prisma.securityRateLimitBucket.count({ where: { scope: STANDALONE_INVITE_SOURCE_SCOPE } });
-    expect(afterRealGuess).toBe(before + 1);
+    expect(afterRealGuess).toBe(before + 1); // still exactly one row — same bucket, not a second one
   });
 
-  it("Auth and Token Abuse Protection v1: the same source can still use a DIFFERENT exam's legitimate invite after being limited on another exam (campus-NAT safety)", async () => {
+  it("Auth and Token Abuse Protection v1 (security review v4): the standalone budget is now shared PER STUDENT+SOURCE across DIFFERENT exams — being limited on one exam also limits a different exam from the same student+source", async () => {
+    // Intentional tradeoff documented in standaloneInviteRateLimit.ts:
+    // dropping examId from the key (to close the information oracle —
+    // see the information-hiding test below) means one student's
+    // guessing against ONE exam now also constrains their own attempts
+    // against a DIFFERENT exam from the same source. This does NOT
+    // affect a different student's own budget (see the per-student
+    // campus-NAT test above).
     const { STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
     const guessedExam = await createExam({
       institutionId: instA, createdById: lecturerA, assignmentMode: "STANDALONE",
@@ -480,7 +489,9 @@ describe("Lecturer invite generation + student acceptance", () => {
       });
     }
 
-    // A different, legitimate exam's own invite, from the exact same source.
+    // A different, legitimate exam's own invite, from the exact SAME
+    // student+source — now correctly rate-limited too, since the budget
+    // is shared per student+source, not per exam.
     const legitExam = await createExam({ institutionId: instA, createdById: lecturerA });
     mockAuth.mockResolvedValue(sessionFor(lecturerA, "LECTURER", instA));
     const { POST: generate } = await import("@/app/api/exams/[id]/standalone-invite/route");
@@ -491,8 +502,53 @@ describe("Lecturer invite generation + student acceptance", () => {
     const res = await accept(jsonRequest({ token: legitToken }, "POST", { "X-Forwarded-For": sharedSource }), {
       params: Promise.resolve({ id: legitExam.id }),
     });
-    expect(res.status).toBe(200);
-    expect((await res.json()).ok).toBe(true);
+    expect(res.status).toBe(429);
+    expect((await res.json()).reason).toBe("rate_limited");
+  });
+
+  it("Auth and Token Abuse Protection v1 (security review v4): information-hiding — nonexistent exam ids and wrong-token guesses against a REAL exam share the same budget and are indistinguishable by rate-limit behavior", async () => {
+    const { STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const realExam = await createExam({
+      institutionId: instA, createdById: lecturerA, assignmentMode: "STANDALONE",
+      standaloneInviteEnabled: true, standaloneInviteTokenHash: hashStandaloneInviteToken("oracle-test-real-token"),
+    });
+    mockAuth.mockResolvedValue(sessionFor(studentInA, "STUDENT", instA));
+    const { POST: accept } = await import("@/app/api/exams/[id]/standalone-invite/accept/route");
+    const sharedSource = randomTestSource();
+
+    // Interleave guesses against the REAL exam and against arbitrary,
+    // entirely nonexistent exam ids from the SAME student+source — both
+    // must return the identical invalid_invite response, and both must
+    // count against the exact same budget.
+    for (let i = 0; i < STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS; i++) {
+      const usingRealExam = i % 2 === 0;
+      const targetId = usingRealExam ? realExam.id : `oracle-nonexistent-${stamp}-${i}-${Math.random().toString(36).slice(2)}`;
+      const res = await accept(jsonRequest({ token: `wrong-${i}` }, "POST", { "X-Forwarded-For": sharedSource }), {
+        params: Promise.resolve({ id: targetId }),
+      });
+      expect((await res.json()).reason).toBe("invalid_invite"); // identical outcome either way, below threshold
+    }
+
+    // Budget now exhausted. A further request against a BRAND-NEW
+    // nonexistent exam id returns the SAME 429 a further request against
+    // the REAL exam would — an attacker gets no signal distinguishing
+    // "this exam id is real" from "it isn't" via whether rate limiting
+    // ever activates.
+    const afterThresholdNonexistent = await accept(
+      jsonRequest({ token: "whatever" }, "POST", { "X-Forwarded-For": sharedSource }),
+      { params: Promise.resolve({ id: `oracle-nonexistent-final-${stamp}-${Math.random().toString(36).slice(2)}` }) },
+    );
+    expect(afterThresholdNonexistent.status).toBe(429);
+    expect((await afterThresholdNonexistent.json()).reason).toBe("rate_limited");
+
+    const afterThresholdReal = await accept(
+      jsonRequest({ token: "oracle-test-real-token" }, "POST", { "X-Forwarded-For": sharedSource }),
+      { params: Promise.resolve({ id: realExam.id }) },
+    );
+    expect(afterThresholdReal.status).toBe(429);
+    expect((await afterThresholdReal.json()).reason).toBe("rate_limited");
+    // Even the genuinely CORRECT token against the REAL exam is blocked
+    // identically — no distinguishable behavior leaks the exam's realness.
   });
 
   it("Auth and Token Abuse Protection v1: a different source is independent from another source's guessing against the same exam", async () => {

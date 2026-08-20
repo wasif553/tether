@@ -126,22 +126,44 @@ export const COURSE_INVITATION_SOURCE_WINDOW_SECONDS = 5 * 60; // 5 minutes
 // -- Standalone Exam Link - invitation token ---------------------------------
 
 /**
- * Context: source + authenticated studentId + examId.
+ * Context: source + authenticated studentId - deliberately NOT
+ * + examId. Reserved atomically BEFORE the exam lookup even happens;
+ * released (exactly one slot, via its own window identity) only on a
+ * genuinely valid, accepted invite.
  *
  * Security review v2: the first pass keyed this on source + examId only,
  * which meant every student behind one campus NAT accessing the SAME
  * standalone exam shared one small bucket - ten wrong-token attempts by
  * any one student could lock out every other student on that network for
  * the same exam. Adding the authenticated student's own id (always taken
- * from the verified session, never from request JSON/query) gives each
- * student their own independent budget for a given exam, while an
- * attacker still cannot cheaply multiply their guessing budget by
- * spraying from many source addresses without ALSO controlling many
- * distinct authenticated student accounts. Reserved atomically before
- * token verification; released (exactly one slot) only on a genuinely
- * valid, accepted invite.
+ * from the verified session, never from request JSON/query) gave each
+ * student their own independent budget for a given exam.
+ *
+ * Security review v4: dropping examId from the key entirely (v2 still
+ * included it) fixes two more defects that keying on source+studentId+
+ * examId left behind:
+ *   1. Information oracle - reserving only AFTER confirming the exam id
+ *      was real and eligible meant a nonexistent/ineligible exam id
+ *      never rate-limited (always the same invalid_invite, forever),
+ *      while a real eligible exam's wrong-token guesses eventually
+ *      surfaced 429 - letting a caller distinguish "this id is a real
+ *      standalone exam" from "it isn't" purely by whether rate limiting
+ *      ever kicks in, without needing the actual token.
+ *   2. Unbounded DB lookups - arbitrary/nonexistent exam ids could still
+ *      trigger unlimited exam lookups, never touching the rate limiter at
+ *      all.
+ * Keying on source+studentId ONLY, reserved before the exam lookup, means
+ * every request from a given student+source - real exam, wrong token,
+ * nonexistent exam, ineligible exam - draws from the exact same budget
+ * and returns the identical invalid_invite response up to the threshold,
+ * then the identical 429 after it, regardless of whether the requested
+ * exam id was ever real. The tradeoff (one student's guessing against
+ * ONE exam now also constrains their own attempts against a DIFFERENT
+ * exam from the same source) is intentional and necessary to close the
+ * oracle; it does not affect a DIFFERENT student's budget, so campus-NAT
+ * independence between students is preserved.
  */
-export const STANDALONE_INVITE_SOURCE_SCOPE = "auth.standalone_invite.source_student_exam";
+export const STANDALONE_INVITE_SOURCE_SCOPE = "auth.standalone_invite.source_student";
 export const STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS = 10;
 export const STANDALONE_INVITE_SOURCE_WINDOW_SECONDS = 5 * 60; // 5 minutes
 

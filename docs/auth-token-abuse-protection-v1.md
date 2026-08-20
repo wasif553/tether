@@ -82,7 +82,7 @@ per-IP quota.
 | `auth.forgot_password.source` | source only | 30 | 10 min | Layered on top of the existing unchanged per-account 60s cooldown. |
 | `auth.reset_password.source` | source only | 30 | 5 min | Only invalid-token outcomes count; reserved before verification. |
 | `auth.course_invitation.source_invitation` | source+invitationId | 10 | 5 min | Not a global quota — different invitations from one NAT are independent. |
-| `auth.standalone_invite.source_student_exam` | source+studentId+examId | 10 | 5 min | Per-student — see v2 note below. |
+| `auth.standalone_invite.source_student` | source+studentId (NOT examId) | 10 | 5 min | Per-student; deliberately exam-agnostic — see v4 note below. |
 | `auth.exam_access_code.source_student_exam` | source+studentId+examId | 10 | 5 min | Per-student — see v2 note below. Separate bucket from the invite-token one above. |
 
 ### Security review v2 changes
@@ -171,6 +171,38 @@ fixed without any schema change:
    exam-access-code surface needed no equivalent change — its calling
    route already confirms the exam exists, returning 404 otherwise, well
    before reaching the access-code block.)
+
+### Security review v4 changes
+
+v3's storage-cardinality fix for standalone-invite (reserve only after
+confirming the exam id is real and eligible) introduced a new defect: an
+**information oracle**. A nonexistent/ineligible exam id never rate-
+limited at all — the exam lookup always short-circuited to the same
+`invalid_invite` response, forever — while a real, eligible exam's
+wrong-token guesses eventually surfaced `429`. Repeated requests could
+therefore learn "this id is a real standalone exam" purely from whether
+rate limiting ever activates, without ever needing the actual token.
+Course-invitation was not affected — an unknown `invitationId` and a bad
+token both already return the identical `"invalid"` reason regardless of
+reservation state, so there was no equivalent oracle there.
+
+Fixed by dropping `examId` from the standalone-invite scope's key
+entirely (`auth.standalone_invite.source_student_exam` →
+`auth.standalone_invite.source_student`) and reserving **before** the
+exam lookup happens at all. Every request from a given student+source —
+real exam, wrong token, nonexistent exam, ineligible exam — now draws
+from the exact same budget and produces the identical `invalid_invite`
+response up to the threshold, then the identical `429` after it,
+regardless of whether the requested exam id was ever real. This also
+closes the unbounded-DB-lookup gap the v3 ordering left for arbitrary
+exam ids (they never touched the rate limiter at all under v3).
+
+**Accepted tradeoff:** one student's guessing against ONE exam now also
+constrains their own attempts against a DIFFERENT exam from the same
+source (previously independent per-exam). This is intentional and
+necessary to close the oracle — it does not affect a *different*
+student's budget, so campus-NAT independence between students is fully
+preserved (see `standaloneExamLink.routes.test.ts`'s per-student test).
 
 ## Per-surface behavior
 
@@ -268,19 +300,25 @@ nonexistent `invitationId`s from the URL can no longer create a
 ### Standalone Exam Link (`/api/exams/[id]/standalone-invite/accept`)
 
 `src/lib/security/standaloneInviteRateLimit.ts` — keyed on
-source+**authenticated studentId**+examId (the student id always comes
-from `session.user.id`, never request JSON/query). **Security review v3:**
-every existing eligibility check (exam missing, unpublished, wrong
-assignment mode, invite disabled, missing tokenHash) is now resolved
-FIRST, and a slot is reserved ONLY once the exam id is confirmed real and
-eligible, immediately before verifying the token (429 + Retry-After if
-blocked; a generic `503` on an infrastructure error, without ever
-verifying the token); released (using its own `windowStartMs`) only on a
-genuine accept — every `invalidInvite()` outcome (bad/missing token, exam
-not published, not STANDALONE, invite disabled) leaves it consumed.
-Entitlement/`ExamAssignment` semantics unchanged. Arbitrary or
-nonexistent exam ids from the URL can no longer create a
-`SecurityRateLimitBucket` row at all.
+source+**authenticated studentId only** (the student id always comes
+from `session.user.id`, never request JSON/query — **security review
+v4: deliberately NOT +examId**, see below). A slot is reserved
+**before** the exam lookup even happens (429 + Retry-After if blocked; a
+generic `503` on an infrastructure error, without ever looking up the
+exam or verifying the token); released (using its own `windowStartMs`)
+only on a genuine accept — every `invalidInvite()` outcome (bad/missing
+token, exam not found, not published, not STANDALONE, invite disabled)
+leaves it consumed, identically whether the exam id was real or entirely
+made up. Entitlement/`ExamAssignment` semantics unchanged.
+
+**Security review v4 note:** v3 reserved only after confirming the exam
+was real and eligible, which fixed row-cardinality but let a caller
+distinguish real from nonexistent exam ids by whether rate limiting ever
+activated (see "Security review v4 changes" above). Reserving before the
+lookup, keyed on student+source only, closes that oracle: every request
+from one student+source shares one bucket regardless of which exam id it
+names, and arbitrary/nonexistent ids can still only ever touch that ONE
+bucket, never create a new row per id.
 
 ### Exam access code (`/api/exams/[id]/start`)
 
@@ -363,27 +401,43 @@ was incomplete — `invitationId`/`examId` ARE attacker-controlled URL
 input, and both course-invitation and standalone-invite reserved a slot
 BEFORE confirming those ids corresponded to real, eligible resources,
 letting an attacker create one row per arbitrary/nonexistent id simply by
-requesting it. Fixed (see "Security review v3 changes" above): the
-reservation now happens only immediately before actual token
-verification, after every existing eligibility/ownership check has
-already resolved. Exam-access-code needed no change — its calling route
-already confirms the exam exists before reaching the reservation point.
+requesting it. Fixed for course-invitation (see "Security review v3
+changes" above): the reservation happens only immediately before actual
+token verification, after every existing eligibility/ownership check has
+already resolved — bounded by real resource count, as (3) below
+describes. Exam-access-code needed no change — its calling route already
+confirms the exam exists before reaching the reservation point.
 
-Row growth is now bounded by the combination of: (1) opportunistic
-cleanup above, actually wired into production traffic; (2) every scope's
-own `maxAttempts` ceiling — a single source can create at most
-`maxAttempts` worth of NEW (scope, identifier) rows per window before its
-own bucket(s) start blocking further attempts from that source; and (3)
-for the resource-scoped surfaces, a reservation is now only ever taken
+**Security review v4 correction:** v3's identical fix for
+standalone-invite (reserve only after confirming the exam is real) turned
+out to introduce an information oracle (see "Security review v4 changes"
+above), so standalone-invite instead now reserves BEFORE the exam lookup,
+keyed on student+source only (no examId). Cardinality is bounded there by
+a DIFFERENT, simpler property: one bucket per (source, studentId) pair,
+full stop — arbitrary/nonexistent exam ids draw from that same one
+bucket rather than each creating a row, so cardinality for this surface
+is bounded by the number of distinct student+source pairs, not by
+anything exam-related at all.
+
+Row growth is bounded by the combination of: (1) opportunistic cleanup
+above, actually wired into production traffic; (2) every scope's own
+`maxAttempts` ceiling — a single source can create at most `maxAttempts`
+worth of NEW (scope, identifier) rows per window before its own
+bucket(s) start blocking further attempts from that source; and (3) for
+course-invitation and exam-access-code, a reservation is only ever taken
 against a resource CONFIRMED to exist and be eligible, so an attacker
-cannot multiply row count by inventing arbitrary identifiers — only by
-targeting real existing resources, each of which is itself independently
-capped by its own bucket's `maxAttempts`. Verified directly by
-`courseInvitationAcceptance.routes.test.ts` and
-`standaloneExamLink.routes.test.ts` (many arbitrary nonexistent ids
-create zero rows; a real resource still creates exactly one and rate-
-limits normally). No additional subsystem (Redis/Upstash, a separate
-quota table, etc.) was introduced.
+cannot multiply row count by inventing arbitrary identifiers there —
+only by targeting real existing resources, each independently capped by
+its own bucket's `maxAttempts`; standalone-invite instead structurally
+cannot have more than one row per (source, studentId) regardless of how
+many exam ids (real or invented) are tried against it. Verified directly
+by `courseInvitationAcceptance.routes.test.ts` (many arbitrary
+nonexistent invitation ids create zero rows; a real invitation still
+creates exactly one and rate-limits normally) and
+`standaloneExamLink.routes.test.ts` (many arbitrary nonexistent exam ids
+from one student+source create exactly one shared bucket, never one per
+id). No additional subsystem (Redis/Upstash, a separate quota table,
+etc.) was introduced.
 
 ## Privacy / logging
 
@@ -446,9 +500,13 @@ row.
   nonexistent invitation ids create zero rate-limit rows, while a real
   invitation still creates exactly one and rate-limits normally.
 - `src/lib/standaloneExamLink.routes.test.ts` (extended) — invite-token
-  guessing protection and independence across different exams, plus
-  (security review v2) per-student independence on the SAME exam+source
-  and a concurrent invalid-guess burst by one student; plus (security
-  review v3) many arbitrary nonexistent exam ids create zero rate-limit
-  rows, while a real exam still creates exactly one and rate-limits
-  normally.
+  guessing protection, plus (security review v2) per-student independence
+  on the SAME exam+source and a concurrent invalid-guess burst by one
+  student; plus (security review v4, superseding v3's version of these
+  tests) many arbitrary nonexistent exam ids from one student+source
+  share exactly ONE bucket (never one per id); being rate-limited on one
+  exam now also rate-limits a DIFFERENT exam from the same student+source
+  (the accepted tradeoff); and an information-hiding test proving
+  nonexistent exam ids and wrong-token guesses against a real exam are
+  indistinguishable by rate-limit behavior, both before and after the
+  threshold.
