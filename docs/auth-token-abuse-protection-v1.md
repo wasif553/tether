@@ -14,8 +14,8 @@ around the existing single-factor Credentials flow.
 
 A single generic, durable, PostgreSQL-backed rate limiter
 (`src/lib/security/rateLimiter.ts`), backed by one additive table
-(`SecurityRateLimitBucket`, migration ledger row 23 — **not applied in
-this pass**), shared by every surface below. Never an in-process
+(`SecurityRateLimitBucket`, migration ledger row 23 — **applied once,
+2026-08-20**), shared by every surface below. Never an in-process
 Map/counter — Tether runs as stateless, multi-instance Vercel serverless
 functions, so only a durable, shared store is a real security boundary.
 
@@ -451,12 +451,11 @@ ordinary allowed/blocked outcomes.
 ## Migration
 
 `docs/auth-token-abuse-protection-v1-migration.sql` — one additive table,
-no foreign keys, no column added to any existing table. **Not applied in
-this pass** — ledger row 23 is recorded as `NOT APPLIED / PENDING
-SECURITY REVIEW` and must remain that way until an independent review of
-this feature's code diff explicitly authorizes applying it. Row 22
-(`PasswordResetToken`) remains already-applied and is untouched by this
-row.
+no foreign keys, no column added to any existing table. **Applied once,
+2026-08-20**, after independent security review of this feature's code
+diff explicitly authorized it — ledger row 23 is recorded as `APPLIED
+ONCE — 2026-08-20`. Row 22 (`PasswordResetToken`) remains already-applied
+from an earlier feature and was untouched by this row.
 
 ## Tests
 

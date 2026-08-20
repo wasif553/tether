@@ -21,38 +21,41 @@
 -- or other sensitive field exists on this table.
 --
 -- ============================================================================
--- SECURITY REVIEW STATUS — READ BEFORE APPLYING
+-- SECURITY REVIEW STATUS — APPLIED
 -- ============================================================================
 --
--- THIS FILE IS NOT APPLIED. It must not be run against the shared
--- Preview/Production Supabase database until an independent security
--- review of the accompanying application-code diff has explicitly
--- authorized applying it. See docs/migration-ledger.md row 23 — its
--- status must read NOT APPLIED / PENDING SECURITY REVIEW until that
--- authorization happens, and this comment block must be updated (or the
--- ledger row marked applied) only at that point, exactly once.
+-- THIS FILE HAS BEEN APPLIED — ONCE — to the shared Preview/Production
+-- Supabase database on 2026-08-20, after independent security review of
+-- the accompanying application-code diff explicitly authorized it. See
+-- docs/migration-ledger.md row 23, now recorded as APPLIED ONCE —
+-- 2026-08-20, for the full pre-check/apply/verification record.
 --
--- Password Reset v1's migration (row 22, PasswordResetToken) is already
--- applied to the shared database — this file is unrelated to it and
--- must never be confused with, or substituted for, re-running that one.
--- NEVER re-apply row 22.
+-- DO NOT RUN THIS FILE AGAIN. It is not idempotent — re-running it will
+-- error ("relation already exists"). If the table is ever missing again
+-- (e.g. after a deliberate rollback), re-apply only after re-confirming
+-- via the pre-check query below, and update the ledger again.
+--
+-- Password Reset v1's migration (row 22, PasswordResetToken) was already
+-- applied to the shared database before this one — this file is
+-- unrelated to it and must never be confused with, or substituted for,
+-- re-running that one. NEVER re-apply row 22.
 --
 -- ============================================================================
 --
 -- IMPORTANT — shared database: Preview and Production currently point at
--- the SAME Supabase database (see docs/migration-ledger.md). Once
--- authorized, this migration must be applied ONCE, not once per
--- environment. Run the pre-check query below first; if it already shows
--- the table applied, do not re-run this file.
+-- the SAME Supabase database (see docs/migration-ledger.md). This
+-- migration was applied ONCE, not once per environment. Run the
+-- pre-check query below first if you ever need to re-verify state; it
+-- should now show the table present.
 --
--- Apply via a direct database connection (see docs/migration-ledger.md
--- row 20-22 for the established precedent) or the Supabase SQL Editor.
--- Do NOT run `prisma db push`, `prisma migrate deploy`, `prisma migrate
--- dev`, or `prisma migrate resolve`.
+-- Applied via a direct database connection (see docs/migration-ledger.md
+-- row 20-23 for the established precedent) — `pg`'s `Client` with the
+-- repository's existing `DATABASE_URL`. Never `prisma db push`,
+-- `prisma migrate deploy`, `prisma migrate dev`, `prisma migrate
+-- resolve`, or the Supabase SQL Editor.
 --
--- Idempotency: this file is NOT idempotent — it is a ONE-TIME script.
--- Re-running it after a successful apply will error ("relation already
--- exists"). Run the pre-check query first.
+-- Idempotency: this file is NOT idempotent — it was a ONE-TIME script,
+-- now consumed. Re-running it will error ("relation already exists").
 --
 -- Expand-first rollout: safe to apply BEFORE the application code from
 -- this feature is deployed — it only creates a new, currently-unused
