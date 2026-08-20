@@ -7,8 +7,16 @@
  * Request. Requires the local test Postgres instance (run via
  * `npm run release:validate`) — src/lib/prisma.ts's
  * assertSafeDatabaseUrlForTests guard blocks a plain `vitest run`.
+ *
+ * Security review v2: both login buckets now use reserve-atomically-
+ * before-verification / release-exactly-one-on-success (see
+ * loginAttempt.ts's own doc comment). Several tests below were updated
+ * or added to match: the "resets only its own bucket" test now expects
+ * a release of exactly one slot rather than a full clear; new tests
+ * cover a legitimate large concurrent login cohort, a concurrent spray
+ * burst across many accounts, and a rate-limiter infrastructure failure.
  */
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import bcrypt from "bcryptjs";
 
 const { prisma } = await import("../prisma");
@@ -33,8 +41,12 @@ async function createUser(emailOverride?: string) {
 }
 
 function uniqueSource(label: string): string {
-  return `198.51.100.${(Math.floor(Math.random() * 200) + 1)}-${label}-${stamp}`;
+  return `198.51.100.${(Math.floor(Math.random() * 200) + 1)}-${label}-${stamp}-${Math.random().toString(36).slice(2)}`;
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 afterAll(async () => {
   await prisma.securityRateLimitBucket.deleteMany({ where: { scope: { in: cleanupScopes } } });
@@ -120,32 +132,33 @@ describe("attemptCredentialsLogin", () => {
     expect(bStillWorks?.id).toBe(userB.id);
   });
 
-  it("a successful login resets only its own source+account bucket, not another account's bucket sharing the same source", async () => {
+  it("security review v2: a successful login releases exactly ONE slot from its own bucket — not a full clear, and never another account's bucket sharing the same source", async () => {
     const userA = await createUser();
     const userB = await createUser();
-    const source = uniqueSource("reset-scope");
+    const source = uniqueSource("release-scope");
 
     // Push B to exactly one failure short of its own limit.
     for (let i = 0; i < LOGIN_SOURCE_ACCOUNT_MAX_ATTEMPTS - 1; i++) {
       await attemptCredentialsLogin({ email: userB.email, password: "WrongPassword!", sourceIp: source });
     }
-    // A fails once, then succeeds — A's bucket should be reset to empty.
+    // A fails once (reserve -> count 1), then succeeds (reserve -> count
+    // 2, then release exactly one -> count back to 1). If this were a
+    // full bulk reset instead of a release-one, A's bucket would now sit
+    // at 0, not 1.
     await attemptCredentialsLogin({ email: userA.email, password: "WrongPassword!", sourceIp: source });
     const aSuccess = await attemptCredentialsLogin({ email: userA.email, password: "CorrectHorseBattery9!", sourceIp: source });
     expect(aSuccess?.id).toBe(userA.id);
 
-    // A can immediately be "attacked" again from scratch — proving its
-    // bucket was genuinely cleared, not just satisfied for one request.
+    // A's bucket sits at exactly 1 used slot (proven above), so exactly
+    // (MAX - 1) more failures exhaust it completely to MAX — a full bulk
+    // reset would instead have allowed (MAX - 1) failures to still leave
+    // one slot free. This distinguishes release-one from a bulk reset.
     for (let i = 0; i < LOGIN_SOURCE_ACCOUNT_MAX_ATTEMPTS - 1; i++) {
       const res = await attemptCredentialsLogin({ email: userA.email, password: "WrongPassword!", sourceIp: source });
       expect(res).toBeNull();
     }
-    const aStillHasOneAttemptLeft = await attemptCredentialsLogin({
-      email: userA.email,
-      password: "CorrectHorseBattery9!",
-      sourceIp: source,
-    });
-    expect(aStillHasOneAttemptLeft?.id).toBe(userA.id); // A's post-reset budget was the full amount, not partially consumed
+    const aNowBlocked = await attemptCredentialsLogin({ email: userA.email, password: "CorrectHorseBattery9!", sourceIp: source });
+    expect(aNowBlocked).toBeNull(); // blocked by the reservation itself — never even reaches bcrypt
 
     // B's own accumulated (near-limit) failure count was never touched by
     // any of A's activity — exactly one more failure now blocks B.
@@ -189,6 +202,49 @@ describe("attemptCredentialsLogin", () => {
     const freshUser = await createUser();
     const blocked = await attemptCredentialsLogin({ email: freshUser.email, password: "CorrectHorseBattery9!", sourceIp: source });
     expect(blocked).toBeNull();
+  }, 30_000);
+
+  it("security review v2: concurrent wrong-password attempts spraying MANY DIFFERENT accounts from one source cannot exceed the source-wide hard limit (Promise.all)", async () => {
+    // Reproduces the exact concurrent-burst bypass an independent review
+    // found in the first pass's peek-then-consume-on-failure pattern: a
+    // burst of concurrent requests across many DIFFERENT accounts could
+    // all observe "not yet blocked" before any of them committed a later
+    // consume, letting the burst exceed LOGIN_SOURCE_FAILURES_MAX_ATTEMPTS.
+    // The fix reserves the source-wide bucket atomically BEFORE any
+    // lookup/bcrypt work, so no more than the threshold can ever reach
+    // real verification from one burst — proven here by using distinct
+    // NONEXISTENT emails (no bcrypt cost, fast) well beyond the threshold.
+    const source = uniqueSource("spray-concurrency");
+    const burstSize = LOGIN_SOURCE_FAILURES_MAX_ATTEMPTS + 15;
+    const results = await Promise.all(
+      Array.from({ length: burstSize }, (_, i) =>
+        attemptCredentialsLogin({
+          email: `spray-concurrency-${stamp}-${i}@test.invalid`,
+          password: "WrongPassword!",
+          sourceIp: source,
+        }),
+      ),
+    );
+    expect(results.every((r) => r === null)).toBe(true); // every outcome is externally "null" either way — no oracle
+
+    // A fresh, brand-new account's correct password from this now-
+    // saturated source is still rejected — proves enforcement held.
+    const freshUser = await createUser();
+    const stillBlocked = await attemptCredentialsLogin({ email: freshUser.email, password: "CorrectHorseBattery9!", sourceIp: source });
+    expect(stillBlocked).toBeNull();
+  }, 30_000);
+
+  it("security review v2: fails CLOSED (returns null, never proceeds to verification) when the rate limiter's own database is unavailable", async () => {
+    const user = await createUser();
+    const source = uniqueSource("infra-fail");
+    const txSpy = vi.spyOn(prisma, "$transaction").mockRejectedValueOnce(new Error("simulated infrastructure failure"));
+    const result = await attemptCredentialsLogin({ email: user.email, password: "CorrectHorseBattery9!", sourceIp: source });
+    txSpy.mockRestore();
+    // Even with the genuinely CORRECT password, a limiter infrastructure
+    // failure must return the same externally-visible null as an
+    // ordinary failed login — never silently proceed to bcrypt as if the
+    // limiter had allowed the request.
+    expect(result).toBeNull();
   });
 });
 
@@ -200,5 +256,29 @@ describe("successful logins never consume the source-wide failure budget", () =>
       const result = await attemptCredentialsLogin({ email: user.email, password: "CorrectHorseBattery9!", sourceIp: source });
       expect(result?.id).toBe(user.id);
     }
-  });
+  }, 30_000);
+});
+
+describe("security review v2: legitimate concurrent login bursts behind one shared campus NAT", () => {
+  it("a substantial concurrent group of DISTINCT correct student accounts from one source all succeed, none falsely rejected", async () => {
+    // Under reserve-before-verify, EVERY concurrent attempt (successful
+    // or not) transiently occupies one source-wide slot for the
+    // duration of its bcrypt compare, not just permanent failures. This
+    // proves LOGIN_SOURCE_FAILURES_MAX_ATTEMPTS was raised generously
+    // enough that a large, entirely legitimate concurrent login burst
+    // (e.g. an exam cohort behind one shared institutional NAT) is never
+    // falsely rejected.
+    const cohortSize = Math.floor(LOGIN_SOURCE_FAILURES_MAX_ATTEMPTS * 0.75);
+    const source = uniqueSource("legit-cohort");
+    const users = [];
+    for (let i = 0; i < cohortSize; i++) {
+      users.push(await createUser(`cohort-${stamp}-${i}@test.invalid`));
+    }
+    const results = await Promise.all(
+      users.map((u) => attemptCredentialsLogin({ email: u.email, password: "CorrectHorseBattery9!", sourceIp: source })),
+    );
+    const succeededIds = results.map((r) => r?.id).filter(Boolean);
+    expect(succeededIds).toHaveLength(cohortSize);
+    expect(new Set(succeededIds).size).toBe(cohortSize); // each is genuinely their own account
+  }, 30_000);
 });

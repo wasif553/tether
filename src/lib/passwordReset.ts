@@ -22,7 +22,7 @@ import {
   PASSWORD_RESET_TOKEN_TTL_MS,
   PASSWORD_RESET_REQUEST_COOLDOWN_MS,
 } from "@/lib/passwordResetToken";
-import { safeConsumeRateLimit, safePeekRateLimitBlocked } from "@/lib/security/rateLimiter";
+import { reserveRateLimitSlot, safeReleaseRateLimitSlot } from "@/lib/security/rateLimiter";
 import {
   FORGOT_PASSWORD_SOURCE_SCOPE,
   FORGOT_PASSWORD_SOURCE_MAX_ATTEMPTS,
@@ -86,15 +86,23 @@ import {
  * source counts toward its spray budget regardless of outcome, which is
  * exactly what stops one caller from probing/emailing many different
  * accounts.
+ *
+ * Security review v2: a rate-limiter infrastructure failure while
+ * reserving this bucket (`infrastructure_error`) is treated exactly like
+ * "blocked" — a silent no-op, no token, no email. This route's caller
+ * (POST /api/auth/forgot-password) always returns the identical generic
+ * 200 response regardless of what happened here, so this fail-closed
+ * choice is invisible externally and never becomes a token/account
+ * existence oracle.
  */
 export async function requestPasswordReset(rawEmail: string, sourceIp: string): Promise<void> {
-  const sourceGate = await safeConsumeRateLimit({
+  const sourceReservation = await reserveRateLimitSlot({
     scope: FORGOT_PASSWORD_SOURCE_SCOPE,
     identifier: sourceIp,
     maxAttempts: FORGOT_PASSWORD_SOURCE_MAX_ATTEMPTS,
     windowSeconds: FORGOT_PASSWORD_SOURCE_WINDOW_SECONDS,
   });
-  if (!sourceGate.allowed) return; // source-limited — silent no-op; caller still returns the generic response
+  if (sourceReservation.status !== "reserved") return; // source-limited or limiter unavailable — silent no-op; caller still returns the generic response
 
   const email = normalizeIdentityEmail(rawEmail);
 
@@ -158,7 +166,7 @@ export async function requestPasswordReset(rawEmail: string, sourceIp: string): 
   }
 }
 
-export type ResetPasswordOutcome = "ok" | "invalid" | "rate_limited";
+export type ResetPasswordOutcome = "ok" | "invalid" | "rate_limited" | "unavailable";
 export type ResetPasswordResult = { outcome: ResetPasswordOutcome; retryAfterSeconds?: number };
 
 /**
@@ -189,38 +197,45 @@ export type ResetPasswordResult = { outcome: ResetPasswordOutcome; retryAfterSec
  *
  * Auth and Token Abuse Protection v1 — a source-level bucket (keyed on
  * `sourceIp` alone) guards against high-volume bogus-token submission.
- * Checked as a cheap, read-only fast-path FIRST (before the token-hash
- * lookup below), and only actually CONSUMED when this call's own outcome
- * ends up "invalid" — a genuinely valid reset never counts against it.
- * Distinct from "invalid": the route surfaces this as a conventional 429
- * with Retry-After, which is safe here specifically because it reveals
- * nothing about whether any particular token/account exists — only that
- * this source has made too many bad guesses.
+ * Reserved ATOMICALLY before the token-hash lookup below (security review
+ * v2 — the first pass used a non-atomic peek here, which a concurrent
+ * burst of bogus-token requests could bypass; see rateLimiter.ts's module
+ * doc comment). A genuinely valid reset releases its own one reservation;
+ * an invalid outcome leaves it consumed. Distinct from "invalid": the
+ * route surfaces exhaustion as a conventional 429 with Retry-After, which
+ * is safe here specifically because it reveals nothing about whether any
+ * particular token/account exists — only that this source has made too
+ * many bad guesses.
+ *
+ * Security review v2 — failure mode: if reserving this bucket reports
+ * `infrastructure_error`, this function fails CLOSED — returns
+ * "unavailable" WITHOUT ever calling resetPasswordWithTokenCore. The
+ * supplied token is never looked up or verified in this case, so a
+ * limiter outage can never become a token-validity oracle; the route
+ * surfaces this as a generic, sanitized 503.
  */
 export async function resetPasswordWithToken(
   rawToken: string,
   newPassword: string,
   sourceIp: string,
 ): Promise<ResetPasswordResult> {
-  const sourcePeek = await safePeekRateLimitBlocked({
+  const sourceReservation = await reserveRateLimitSlot({
     scope: RESET_PASSWORD_SOURCE_SCOPE,
     identifier: sourceIp,
     maxAttempts: RESET_PASSWORD_SOURCE_MAX_ATTEMPTS,
     windowSeconds: RESET_PASSWORD_SOURCE_WINDOW_SECONDS,
   });
-  if (sourcePeek.blocked) {
-    return { outcome: "rate_limited", retryAfterSeconds: sourcePeek.retryAfterSeconds };
+  if (sourceReservation.status === "blocked") {
+    return { outcome: "rate_limited", retryAfterSeconds: sourceReservation.retryAfterSeconds };
+  }
+  if (sourceReservation.status === "infrastructure_error") {
+    return { outcome: "unavailable" };
   }
 
   const result = await resetPasswordWithTokenCore(rawToken, newPassword);
 
-  if (result !== "ok") {
-    await safeConsumeRateLimit({
-      scope: RESET_PASSWORD_SOURCE_SCOPE,
-      identifier: sourceIp,
-      maxAttempts: RESET_PASSWORD_SOURCE_MAX_ATTEMPTS,
-      windowSeconds: RESET_PASSWORD_SOURCE_WINDOW_SECONDS,
-    });
+  if (result === "ok") {
+    await safeReleaseRateLimitSlot({ scope: RESET_PASSWORD_SOURCE_SCOPE, identifier: sourceIp });
   }
 
   return { outcome: result };

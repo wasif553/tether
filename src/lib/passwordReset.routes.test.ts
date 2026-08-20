@@ -295,6 +295,35 @@ describe("POST /api/auth/forgot-password", () => {
     expect(sendPasswordResetEmailMock).toHaveBeenCalledTimes(1);
   });
 
+  it("security review v2: a legitimate cohort of distinct accounts behind one shared source stays usable below the new, higher source threshold (campus-NAT safety)", async () => {
+    const { FORGOT_PASSWORD_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const { POST } = await import("@/app/api/auth/forgot-password/route");
+    const sharedSource = randomTestSource();
+    const cohortSize = Math.floor(FORGOT_PASSWORD_SOURCE_MAX_ATTEMPTS * 0.6);
+
+    for (let i = 0; i < cohortSize; i++) {
+      const user = await createUser("STUDENT", `nat-cohort-${stamp}-${i}@test.invalid`);
+      const res = await POST(forgotPasswordRequest(user.email, { "X-Forwarded-For": sharedSource }));
+      expect(res.status).toBe(200);
+    }
+    expect(sendPasswordResetEmailMock).toHaveBeenCalledTimes(cohortSize); // none were falsely blocked
+  }, 30_000);
+
+  it("security review v2: a rate-limiter infrastructure failure fails CLOSED without ever revealing that — same generic 200, no token, no email", async () => {
+    const user = await createUser("STUDENT");
+    const { POST } = await import("@/app/api/auth/forgot-password/route");
+    const txSpy = vi.spyOn(prisma, "$transaction").mockRejectedValueOnce(new Error("simulated infrastructure failure"));
+
+    const res = await POST(forgotPasswordRequest(user.email));
+    txSpy.mockRestore();
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).message).toBe(GENERIC_MESSAGE);
+    expect(sendPasswordResetEmailMock).not.toHaveBeenCalled();
+    const rows = await prisma.passwordResetToken.findMany({ where: { userId: user.id } });
+    expect(rows).toHaveLength(0);
+  });
+
   it("26. a provider send failure still returns the generic response and does not leave a live orphan token", async () => {
     sendPasswordResetEmailMock.mockRejectedValueOnce(new Error("simulated provider outage"));
     const user = await createUser("STUDENT");
@@ -425,6 +454,70 @@ describe("POST /api/auth/reset-password", () => {
     const res = await POST(resetPasswordRequest(token, "GenuineNewPassw0rd!", { "X-Forwarded-For": otherSource }));
     expect(res.status).toBe(200);
   });
+
+  it("security review v2: concurrent bogus-token attempts from one source cannot exceed the threshold (Promise.all)", async () => {
+    const { RESET_PASSWORD_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const { POST } = await import("@/app/api/auth/reset-password/route");
+    const sharedSource = randomTestSource();
+    const burstSize = RESET_PASSWORD_SOURCE_MAX_ATTEMPTS + 15;
+
+    // The first pass's peek-then-consume-on-invalid pattern let a
+    // concurrent burst like this all pass the peek before any of them
+    // committed their own later consume, exceeding the intended cap. The
+    // fix reserves atomically BEFORE the token-hash lookup.
+    const results = await Promise.all(
+      Array.from({ length: burstSize }, (_, i) =>
+        POST(resetPasswordRequest(`burst-bogus-${stamp}-${i}`, "SomePassw0rd!", { "X-Forwarded-For": sharedSource })),
+      ),
+    );
+    const statuses = results.map((r) => r.status);
+    const invalidCount = statuses.filter((s) => s === 400).length;
+    const rateLimitedCount = statuses.filter((s) => s === 429).length;
+    expect(invalidCount).toBeLessThanOrEqual(RESET_PASSWORD_SOURCE_MAX_ATTEMPTS);
+    expect(rateLimitedCount).toBeGreaterThan(0);
+    expect(invalidCount + rateLimitedCount).toBe(burstSize);
+  }, 30_000);
+
+  it("security review v2: a rate-limiter infrastructure failure fails CLOSED with a generic 503, WITHOUT ever looking up or verifying the supplied token", async () => {
+    const user = await createUser("STUDENT");
+    const token = await requestResetAndGetToken(user);
+    const { POST } = await import("@/app/api/auth/reset-password/route");
+    const txSpy = vi.spyOn(prisma, "$transaction").mockRejectedValueOnce(new Error("simulated infrastructure failure"));
+
+    const res = await POST(resetPasswordRequest(token, "ShouldNeverApplyPassw0rd!"));
+    txSpy.mockRestore();
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body).toEqual({ ok: false, error: "unavailable" });
+
+    // The genuinely valid token was never touched — still usable afterward.
+    const row = await prisma.passwordResetToken.findFirst({ where: { userId: user.id } });
+    expect(row!.consumedAt).toBeNull();
+    const stillWorks = await POST(resetPasswordRequest(token, "GenuinelyAppliedPassw0rd!"));
+    expect(stillWorks.status).toBe(200);
+  });
+
+  it("security review v2: a modest cohort of distinct legitimate resets from one shared source stays usable well below the new, higher threshold (campus-NAT safety, without a slow bcrypt-heavy 30-reset test)", async () => {
+    const { POST } = await import("@/app/api/auth/reset-password/route");
+    const sharedSource = randomTestSource();
+
+    // A few bogus guesses first — comfortably under the threshold.
+    for (let i = 0; i < 3; i++) {
+      await POST(resetPasswordRequest(`nat-bogus-${stamp}-${i}`, "SomePassw0rd!", { "X-Forwarded-For": sharedSource }));
+    }
+
+    // A handful of DIFFERENT real users each completing a genuine reset
+    // from the same source — kept small (not the full threshold) since
+    // each one pays a real bcrypt(cost=12) hash, unlike the bogus-token
+    // loop above (which never reaches bcrypt at all).
+    for (let i = 0; i < 5; i++) {
+      const user = await createUser("STUDENT", `nat-legit-${stamp}-${i}@test.invalid`);
+      const token = await requestResetAndGetToken(user);
+      const res = await POST(resetPasswordRequest(token, `LegitNewPassw0rd${i}!`, { "X-Forwarded-For": sharedSource }));
+      expect(res.status).toBe(200);
+    }
+  }, 30_000);
 
   it("20. a too-short password is rejected", async () => {
     const user = await createUser("STUDENT");

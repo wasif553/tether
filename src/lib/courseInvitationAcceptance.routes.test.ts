@@ -472,6 +472,43 @@ describe("GET preview + POST accept — /api/course-invitations/[invitationId]/[
     expect((await limited.json()).reason).toBe("rate_limited");
   });
 
+  it("Auth and Token Abuse Protection v1 (security review v2): concurrent invalid-token guesses cannot bypass the threshold (Promise.all)", async () => {
+    const { COURSE_INVITATION_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const student = await createUser(`acc-concurrency-${stamp}@test.invalid`, "STUDENT", null);
+    const { invitation } = await createInvitationRow({ courseId: courseA, studentId: student.id, invitedById: lecturerA });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", null));
+    const { POST: accept } = await import("@/app/api/course-invitations/[invitationId]/[token]/accept/route");
+    const sharedSource = randomTestSource();
+
+    // A burst of concurrent bogus-token guesses well beyond the
+    // threshold — the old peek-then-consume-on-invalid pattern let a
+    // burst like this all pass the peek before any of them committed
+    // their consume, exceeding the intended cap. The fix reserves
+    // atomically BEFORE verification, so no more than
+    // COURSE_INVITATION_SOURCE_MAX_ATTEMPTS can ever reach real
+    // verification (i.e. return the "invalid" reason) from one burst.
+    const results = await Promise.all(
+      Array.from({ length: COURSE_INVITATION_SOURCE_MAX_ATTEMPTS + 15 }, (_, i) =>
+        accept(jsonRequest({}, "POST", { "X-Forwarded-For": sharedSource }), {
+          params: Promise.resolve({ invitationId: invitation.id, token: `burst-guess-${i}` }),
+        }),
+      ),
+    );
+    const bodies = await Promise.all(results.map((r) => r.json()));
+    const invalidCount = bodies.filter((b) => b.reason === "invalid").length;
+    const rateLimitedCount = bodies.filter((b) => b.reason === "rate_limited").length;
+    expect(invalidCount).toBeLessThanOrEqual(COURSE_INVITATION_SOURCE_MAX_ATTEMPTS);
+    expect(rateLimitedCount).toBeGreaterThan(0);
+    expect(invalidCount + rateLimitedCount).toBe(COURSE_INVITATION_SOURCE_MAX_ATTEMPTS + 15);
+
+    // A subsequent sequential attempt remains blocked — the burst did not
+    // permanently break enforcement.
+    const stillBlocked = await accept(jsonRequest({}, "POST", { "X-Forwarded-For": sharedSource }), {
+      params: Promise.resolve({ invitationId: invitation.id, token: "after-burst" }),
+    });
+    expect(stillBlocked.status).toBe(429);
+  });
+
   it("Auth and Token Abuse Protection v1: the same source can still use a DIFFERENT legitimate invitation after being limited on another one (campus-NAT safety)", async () => {
     const { COURSE_INVITATION_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
     const guessedStudent = await createUser(`acc-nat-guessed-${stamp}@test.invalid`, "STUDENT", null);

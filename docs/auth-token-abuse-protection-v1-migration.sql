@@ -123,10 +123,15 @@ CREATE INDEX "SecurityRateLimitBucket_windowStart_idx" ON "SecurityRateLimitBuck
 --    table until a real abuse-sensitive request happens):
 -- SELECT count(*) FROM "SecurityRateLimitBucket";
 
--- 5. Indexes landed as expected (expect 2 rows — the unique index on
---    (scope, keyHash) and the plain index on windowStart used for
---    opportunistic cleanup):
+-- 5. Indexes landed as expected (expect 3 rows — the implicit primary-key
+--    index on "id" created by the PRIMARY KEY constraint above, the
+--    unique index on (scope, keyHash), and the plain index on
+--    windowStart used for opportunistic cleanup):
 -- SELECT indexname FROM pg_indexes WHERE tablename = 'SecurityRateLimitBucket';
+-- Security review v2 correction: the first pass's comment here said
+-- "expect 2 rows", omitting the primary-key index that PostgreSQL always
+-- creates implicitly for a PRIMARY KEY constraint. No executable SQL in
+-- this file changed — only this verification comment.
 
 -- 6. No foreign keys exist on this table by design (expect 0 rows) —
 --    buckets are deliberately decoupled from any specific User/Exam/
@@ -146,10 +151,14 @@ CREATE INDEX "SecurityRateLimitBucket_windowStart_idx" ON "SecurityRateLimitBuck
 -- opaque, short-lived rate-limit windows (not a durable record of
 -- anything), the practical "rollback" for almost any issue is simply
 -- not shipping the application code that writes to it, rather than
--- dropping the schema — a dropped or empty table only makes every rate
--- limiter fail open (see src/lib/security/rateLimiter.ts's documented
--- fail-open-on-error policy), never fail in a way that blocks
--- legitimate authentication/reset/invitation/exam-start flows.
+-- dropping the schema. Note (security review v2): dropping or emptying
+-- this table does NOT make the limiter fail open — enforcement now
+-- fails CLOSED on an unexpected DB error (see
+-- src/lib/security/rateLimiter.ts's reserveRateLimitSlot), so a missing
+-- table would instead cause every abuse-sensitive route this feature
+-- protects to return a generic "temporarily unavailable" response rather
+-- than silently disabling protection. Do not drop this table while the
+-- application code that depends on it is still deployed.
 
 -- ============================================================================
 -- Legacy compatibility and in-progress attempts

@@ -370,6 +370,64 @@ describe("Lecturer invite generation + student acceptance", () => {
     expect(evenCorrectToken.status).toBe(429);
   });
 
+  it("Auth and Token Abuse Protection v1 (security review v2): the same source+exam is independent PER STUDENT — one student exhausting their guesses does not block a different student on the same exam (campus-NAT safety)", async () => {
+    const { STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const exam = await createExam({
+      institutionId: instA, createdById: lecturerA, assignmentMode: "STANDALONE",
+      standaloneInviteEnabled: true, standaloneInviteTokenHash: hashStandaloneInviteToken("shared-exam-real-token"),
+    });
+    const { POST: accept } = await import("@/app/api/exams/[id]/standalone-invite/accept/route");
+    const sharedSource = randomTestSource();
+
+    // Student A exhausts their own per-student guessing budget against
+    // this exam from this shared source.
+    mockAuth.mockResolvedValue(sessionFor(studentInA, "STUDENT", instA));
+    for (let i = 0; i < STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS; i++) {
+      await accept(jsonRequest({ token: `wrong-guess-${i}` }, "POST", { "X-Forwarded-For": sharedSource }), {
+        params: Promise.resolve({ id: exam.id }),
+      });
+    }
+    const aBlocked = await accept(jsonRequest({ token: "shared-exam-real-token" }, "POST", { "X-Forwarded-For": sharedSource }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    expect(aBlocked.status).toBe(429);
+
+    // A DIFFERENT student, same source, same exam, with the genuinely
+    // correct token, is completely unaffected — the first pass's
+    // source+examId-only key would have blocked this too.
+    mockAuth.mockResolvedValue(sessionFor(nullInstStudent, "STUDENT", null));
+    const bAccepted = await accept(jsonRequest({ token: "shared-exam-real-token" }, "POST", { "X-Forwarded-For": sharedSource }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    expect(bAccepted.status).toBe(200);
+    expect((await bAccepted.json()).ok).toBe(true);
+  });
+
+  it("Auth and Token Abuse Protection v1 (security review v2): concurrent invalid-token guesses by ONE student cannot bypass the threshold (Promise.all)", async () => {
+    const { STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
+    const exam = await createExam({
+      institutionId: instA, createdById: lecturerA, assignmentMode: "STANDALONE",
+      standaloneInviteEnabled: true, standaloneInviteTokenHash: hashStandaloneInviteToken("concurrency-real-token"),
+    });
+    mockAuth.mockResolvedValue(sessionFor(studentInA, "STUDENT", instA));
+    const { POST: accept } = await import("@/app/api/exams/[id]/standalone-invite/accept/route");
+    const sharedSource = randomTestSource();
+
+    const results = await Promise.all(
+      Array.from({ length: STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS + 15 }, (_, i) =>
+        accept(jsonRequest({ token: `burst-guess-${i}` }, "POST", { "X-Forwarded-For": sharedSource }), {
+          params: Promise.resolve({ id: exam.id }),
+        }),
+      ),
+    );
+    const bodies = await Promise.all(results.map((r) => r.json()));
+    const invalidCount = bodies.filter((b) => b.reason === "invalid_invite").length;
+    const rateLimitedCount = bodies.filter((b) => b.reason === "rate_limited").length;
+    expect(invalidCount).toBeLessThanOrEqual(STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS);
+    expect(rateLimitedCount).toBeGreaterThan(0);
+    expect(invalidCount + rateLimitedCount).toBe(STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS + 15);
+  });
+
   it("Auth and Token Abuse Protection v1: the same source can still use a DIFFERENT exam's legitimate invite after being limited on another exam (campus-NAT safety)", async () => {
     const { STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
     const guessedExam = await createExam({

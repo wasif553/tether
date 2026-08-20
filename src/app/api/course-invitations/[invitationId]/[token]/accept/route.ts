@@ -29,7 +29,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { verifyCourseInvitationToken } from "@/lib/courseInvitationToken";
 import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
-import { courseInvitationRateLimitGate, recordCourseInvitationInvalidGuess } from "@/lib/security/courseInvitationRateLimit";
+import { reserveCourseInvitationSlot, releaseCourseInvitationSlot } from "@/lib/security/courseInvitationRateLimit";
 
 type AcceptOutcome =
   | { kind: "invalid" }
@@ -59,12 +59,18 @@ export async function POST(
   const studentId = session.user.id;
 
   const sourceIp = resolveTrustedRequestSource(req);
-  const gate = await courseInvitationRateLimitGate(sourceIp, invitationId);
-  if (!gate.allowed) {
+  const reservation = await reserveCourseInvitationSlot(sourceIp, invitationId);
+  if (reservation.status === "blocked") {
     return NextResponse.json(
       { ok: false, reason: "rate_limited" },
-      { status: 429, headers: { "Retry-After": String(gate.retryAfterSeconds) } },
+      { status: 429, headers: { "Retry-After": String(reservation.retryAfterSeconds) } },
     );
+  }
+  if (reservation.status === "infrastructure_error") {
+    // Security review v2 — fail closed without ever verifying the
+    // invitation/token, so a limiter outage can never become an
+    // existence oracle.
+    return NextResponse.json({ ok: false, reason: "unavailable" }, { status: 503 });
   }
 
   const outcome: AcceptOutcome = await prisma.$transaction(async (tx): Promise<AcceptOutcome> => {
@@ -169,8 +175,13 @@ export async function POST(
     throw err;
   });
 
-  if (outcome.kind === "invalid") {
-    await recordCourseInvitationInvalidGuess(sourceIp, invitationId);
+  // Genuinely invalid (unknown invitation / bad token) leaves the
+  // reservation consumed; every other outcome releases it — including
+  // wrong_account/expired/revoked/different_institution, which are
+  // existing, legitimate denials this feature must not start counting
+  // toward the abuse budget.
+  if (outcome.kind !== "invalid") {
+    await releaseCourseInvitationSlot(sourceIp, invitationId);
   }
 
   if (outcome.kind === "accepted" || outcome.kind === "already_ok") {

@@ -21,14 +21,13 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { verifyStandaloneInviteToken } from "@/lib/standaloneInvite";
 import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
-import { standaloneInviteRateLimitGate, recordStandaloneInviteInvalidGuess } from "@/lib/security/standaloneInviteRateLimit";
+import { reserveStandaloneInviteSlot, releaseStandaloneInviteSlot } from "@/lib/security/standaloneInviteRateLimit";
 
 const acceptSchema = z.object({
   token: z.string().min(1),
 });
 
-async function invalidInvite(sourceIp: string, examId: string) {
-  await recordStandaloneInviteInvalidGuess(sourceIp, examId);
+function invalidInvite() {
   return NextResponse.json({ ok: false, reason: "invalid_invite" });
 }
 
@@ -43,18 +42,28 @@ export async function POST(
 
   const { id } = await params;
   const sourceIp = resolveTrustedRequestSource(req);
-  const gate = await standaloneInviteRateLimitGate(sourceIp, id);
-  if (!gate.allowed) {
+  // Security review v2 — keyed on source + THIS authenticated student
+  // (never client-supplied) + exam, so one student's guessing can never
+  // affect another student's ability to accept a different invite for
+  // the same exam from the same shared network.
+  const studentId = session.user.id;
+  const reservation = await reserveStandaloneInviteSlot(sourceIp, studentId, id);
+  if (reservation.status === "blocked") {
     return NextResponse.json(
       { ok: false, reason: "rate_limited" },
-      { status: 429, headers: { "Retry-After": String(gate.retryAfterSeconds) } },
+      { status: 429, headers: { "Retry-After": String(reservation.retryAfterSeconds) } },
     );
+  }
+  if (reservation.status === "infrastructure_error") {
+    // Fail closed without ever verifying the invite token, so a limiter
+    // outage can never become a token-validity oracle.
+    return NextResponse.json({ ok: false, reason: "unavailable" }, { status: 503 });
   }
 
   const body = await req.json().catch(() => null);
   const parsed = acceptSchema.safeParse(body);
   if (!parsed.success) {
-    return invalidInvite(sourceIp, id);
+    return invalidInvite();
   }
 
   const exam = await prisma.exam.findUnique({
@@ -75,12 +84,14 @@ export async function POST(
     !exam.standaloneInviteEnabled ||
     !exam.standaloneInviteTokenHash
   ) {
-    return invalidInvite(sourceIp, id);
+    return invalidInvite();
   }
 
   if (!verifyStandaloneInviteToken(parsed.data.token, exam.standaloneInviteTokenHash)) {
-    return invalidInvite(sourceIp, id);
+    return invalidInvite();
   }
+
+  await releaseStandaloneInviteSlot(sourceIp, studentId, id);
 
   // The userId is always the authenticated caller — never client-
   // supplied. Idempotent via the existing @@unique([examId, studentId])

@@ -8,41 +8,45 @@
  * so many students behind one institutional NAT using their own,
  * different, legitimate invitations never affect each other. The token
  * itself is never part of the limiter key or persisted here.
+ *
+ * Security review v2: reserve/release replaced the first pass's
+ * peek-then-consume-on-invalid pattern (a concurrent-burst bypass — see
+ * rateLimiter.ts's module doc comment). Every caller must:
+ *   1. call reserveCourseInvitationSlot() BEFORE looking up the
+ *      invitation or verifying its token;
+ *   2. on `blocked`, return 429 immediately without touching the DB;
+ *   3. on `infrastructure_error`, return a generic 503 WITHOUT looking up
+ *      the invitation or verifying the token (never an existence oracle);
+ *   4. on `reserved`, proceed, then call releaseCourseInvitationSlot()
+ *      for every outcome that must NOT count (valid, wrong_account,
+ *      already_accepted, revoked, expired) — never for a genuinely
+ *      invalid invitation/token, which leaves the reservation consumed.
  */
-import { safeConsumeRateLimit, safePeekRateLimitBlocked } from "./rateLimiter";
+import { reserveRateLimitSlot, safeReleaseRateLimitSlot, type RateLimitReservation } from "./rateLimiter";
 import {
   COURSE_INVITATION_SOURCE_SCOPE,
   COURSE_INVITATION_SOURCE_MAX_ATTEMPTS,
   COURSE_INVITATION_SOURCE_WINDOW_SECONDS,
 } from "./rateLimitScopes";
 
-export type CourseInvitationRateLimitGateResult = { allowed: true } | { allowed: false; retryAfterSeconds: number };
-
 function identifierFor(sourceIp: string, invitationId: string): string {
   return `${sourceIp}|${invitationId}`;
 }
 
-/** Read-only fast-path check — call before doing any invitation lookup. */
-export async function courseInvitationRateLimitGate(
-  sourceIp: string,
-  invitationId: string,
-): Promise<CourseInvitationRateLimitGateResult> {
-  const peek = await safePeekRateLimitBlocked({
+/** Call BEFORE any invitation lookup or token verification. */
+export async function reserveCourseInvitationSlot(sourceIp: string, invitationId: string): Promise<RateLimitReservation> {
+  return reserveRateLimitSlot({
     scope: COURSE_INVITATION_SOURCE_SCOPE,
     identifier: identifierFor(sourceIp, invitationId),
     maxAttempts: COURSE_INVITATION_SOURCE_MAX_ATTEMPTS,
     windowSeconds: COURSE_INVITATION_SOURCE_WINDOW_SECONDS,
   });
-  if (peek.blocked) return { allowed: false, retryAfterSeconds: peek.retryAfterSeconds };
-  return { allowed: true };
 }
 
-/** Call only when the verification outcome was genuinely invalid (unknown invitation or bad token) — never for wrong_account/expired/revoked/already_accepted. */
-export async function recordCourseInvitationInvalidGuess(sourceIp: string, invitationId: string): Promise<void> {
-  await safeConsumeRateLimit({
+/** Call only for outcomes that must NOT count against the budget — never for a genuinely invalid invitation/token. */
+export async function releaseCourseInvitationSlot(sourceIp: string, invitationId: string): Promise<void> {
+  await safeReleaseRateLimitSlot({
     scope: COURSE_INVITATION_SOURCE_SCOPE,
     identifier: identifierFor(sourceIp, invitationId),
-    maxAttempts: COURSE_INVITATION_SOURCE_MAX_ATTEMPTS,
-    windowSeconds: COURSE_INVITATION_SOURCE_WINDOW_SECONDS,
   });
 }

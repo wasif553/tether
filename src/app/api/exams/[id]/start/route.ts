@@ -45,7 +45,7 @@ import {
   type ExamTimeAccommodationAdjustment,
 } from "@/lib/examTimeAccommodation";
 import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
-import { examAccessCodeRateLimitGate, recordExamAccessCodeInvalidGuess } from "@/lib/security/examAccessCodeRateLimit";
+import { reserveExamAccessCodeSlot, releaseExamAccessCodeSlot } from "@/lib/security/examAccessCodeRateLimit";
 
 // Tether launch/install flow v1 — Requirement 9 ("Production start
 // protection"). Additive response field: `{required: false}` for every
@@ -248,19 +248,30 @@ export async function POST(
   // Student Onboarding and Exam Access v1 — see
   // docs/student-onboarding-and-exam-access.md.
   if (exam.accessCodeRequired) {
-    // Auth and Token Abuse Protection v1 — a source+examId bucket guards
-    // this comparison against high-volume access-code guessing. Checked
-    // only when a code is actually required (never for exams without
-    // one), and only ever counted against on a genuinely WRONG code —
-    // see src/lib/security/examAccessCodeRateLimit.ts. Purely additive:
-    // no other exam-start behavior below this block is touched.
+    // Auth and Token Abuse Protection v1 — a source+studentId+examId
+    // bucket guards this comparison against high-volume access-code
+    // guessing, reserved BEFORE the bcrypt comparison and released only
+    // on a correct code (security review v2 — keying on the
+    // authenticated student, not just source+examId, means one
+    // student's wrong guesses can never lock out a different student
+    // behind the same shared exam-room network; reserve-before-compare
+    // closes a concurrent-burst bypass the first pass's peek-based
+    // check allowed — see examAccessCodeRateLimit.ts). Checked only when
+    // a code is actually required (never for exams without one).
+    // Purely additive: no other exam-start behavior below this block is
+    // touched.
     const sourceIp = resolveTrustedRequestSource(req);
-    const gate = await examAccessCodeRateLimitGate(sourceIp, id);
-    if (!gate.allowed) {
+    const reservation = await reserveExamAccessCodeSlot(sourceIp, session.user.id, id);
+    if (reservation.status === "blocked") {
       return NextResponse.json(
         { error: "Too many attempts. Please try again shortly." },
-        { status: 429, headers: { "Retry-After": String(gate.retryAfterSeconds) } },
+        { status: 429, headers: { "Retry-After": String(reservation.retryAfterSeconds) } },
       );
+    }
+    if (reservation.status === "infrastructure_error") {
+      // Fail closed without ever comparing the supplied code, so a
+      // limiter outage can never become an access-code oracle.
+      return NextResponse.json({ error: "Temporarily unavailable. Please try again shortly." }, { status: 503 });
     }
 
     const accessCode = typeof body?.accessCode === "string" ? body.accessCode : "";
@@ -269,12 +280,12 @@ export async function POST(
       exam.accessCodeHash != null &&
       (await bcrypt.compare(accessCode, exam.accessCodeHash));
     if (!valid) {
-      await recordExamAccessCodeInvalidGuess(sourceIp, id);
       return NextResponse.json(
         { error: "Valid access code required to start this exam." },
         { status: 403 },
       );
     }
+    await releaseExamAccessCodeSlot(sourceIp, session.user.id, id);
   }
 
   // Exam Design Policy v1 (Part 7/8) — see docs/exam-design-policy-v1.md.

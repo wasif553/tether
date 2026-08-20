@@ -35,6 +35,12 @@ export async function POST(req: Request) {
       { status: 429, headers: retryAfterSeconds ? { "Retry-After": String(retryAfterSeconds) } : undefined },
     );
   }
+  if (outcome === "unavailable") {
+    // Security review v2 — rate-limiter enforcement failure: the token
+    // was never looked up or verified, so this can never leak whether it
+    // is valid. Sanitized, generic — no raw error detail.
+    return NextResponse.json({ ok: false, error: "unavailable" }, { status: 503 });
+  }
   if (outcome !== "ok") {
     return NextResponse.json({ ok: false, error: "invalid" }, { status: 400 });
   }

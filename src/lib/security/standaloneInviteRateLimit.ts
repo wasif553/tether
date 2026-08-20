@@ -3,45 +3,56 @@
  * docs/auth-token-abuse-protection-v1.md.
  *
  * Guards POST /api/exams/[id]/standalone-invite/accept with a
- * source+examId bucket — never a global per-source quota, so many
- * students behind one institutional NAT using different exams' links
- * never affect each other. The invite token itself is never part of the
- * limiter key or persisted here.
+ * source+authenticatedStudentId+examId bucket. The invite token itself
+ * is never part of the limiter key or persisted here.
+ *
+ * Security review v2: two changes from the first pass —
+ *
+ * 1. Identity now includes the AUTHENTICATED student id (always taken
+ *    from the verified session — see the route — never from request
+ *    JSON/query), not just source+examId. Keying on source+examId alone
+ *    meant every student behind one institutional NAT accessing the SAME
+ *    standalone exam shared one small bucket — one student's repeated
+ *    wrong-token guesses could lock out every other student on that
+ *    network for that exam. Per-student keying gives each student their
+ *    own independent budget.
+ * 2. Reserve/release replaced the first pass's peek-then-consume-on-
+ *    invalid pattern (a concurrent-burst bypass — see rateLimiter.ts's
+ *    module doc comment). Callers must: reserve BEFORE verifying the
+ *    token; on `blocked`, return 429 without touching the DB; on
+ *    `infrastructure_error`, return a generic 503 without verifying the
+ *    token; on `reserved`, verify, then release on a genuine accept —
+ *    never release on an invalid outcome.
  */
-import { safeConsumeRateLimit, safePeekRateLimitBlocked } from "./rateLimiter";
+import { reserveRateLimitSlot, safeReleaseRateLimitSlot, type RateLimitReservation } from "./rateLimiter";
 import {
   STANDALONE_INVITE_SOURCE_SCOPE,
   STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS,
   STANDALONE_INVITE_SOURCE_WINDOW_SECONDS,
 } from "./rateLimitScopes";
 
-export type StandaloneInviteRateLimitGateResult = { allowed: true } | { allowed: false; retryAfterSeconds: number };
-
-function identifierFor(sourceIp: string, examId: string): string {
-  return `${sourceIp}|${examId}`;
+function identifierFor(sourceIp: string, studentId: string, examId: string): string {
+  return `${sourceIp}|${studentId}|${examId}`;
 }
 
-/** Read-only fast-path check — call before doing any exam/token lookup. */
-export async function standaloneInviteRateLimitGate(
+/** Call BEFORE verifying the invite token. */
+export async function reserveStandaloneInviteSlot(
   sourceIp: string,
+  studentId: string,
   examId: string,
-): Promise<StandaloneInviteRateLimitGateResult> {
-  const peek = await safePeekRateLimitBlocked({
+): Promise<RateLimitReservation> {
+  return reserveRateLimitSlot({
     scope: STANDALONE_INVITE_SOURCE_SCOPE,
-    identifier: identifierFor(sourceIp, examId),
+    identifier: identifierFor(sourceIp, studentId, examId),
     maxAttempts: STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS,
     windowSeconds: STANDALONE_INVITE_SOURCE_WINDOW_SECONDS,
   });
-  if (peek.blocked) return { allowed: false, retryAfterSeconds: peek.retryAfterSeconds };
-  return { allowed: true };
 }
 
-/** Call only when the invite was rejected as invalid (wrong/expired token, disabled invite, unpublished exam, etc.) — never on a genuine accept. */
-export async function recordStandaloneInviteInvalidGuess(sourceIp: string, examId: string): Promise<void> {
-  await safeConsumeRateLimit({
+/** Call only on a genuine accept — never on an invalid/rejected invite. */
+export async function releaseStandaloneInviteSlot(sourceIp: string, studentId: string, examId: string): Promise<void> {
+  await safeReleaseRateLimitSlot({
     scope: STANDALONE_INVITE_SOURCE_SCOPE,
-    identifier: identifierFor(sourceIp, examId),
-    maxAttempts: STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS,
-    windowSeconds: STANDALONE_INVITE_SOURCE_WINDOW_SECONDS,
+    identifier: identifierFor(sourceIp, studentId, examId),
   });
 }

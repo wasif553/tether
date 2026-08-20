@@ -27,12 +27,48 @@
  * reset to now). There is no sliding-window smoothing; this is a
  * deliberately simple, easy-to-reason-about design, matching the
  * "bounded/simple" requirement.
+ *
+ * Security review v2 (independent review of the first pass) changed two
+ * things at this layer:
+ *
+ * 1. A generic reserve/release-one pair replaced the old
+ *    "peek-then-consume-only-on-invalid" pattern every call site used to
+ *    follow. Peeking is a non-atomic read: a burst of concurrent requests
+ *    can all observe "not yet blocked" before any of them commits its
+ *    own later consume, letting the burst exceed the intended threshold
+ *    (a TOCTOU/concurrent-burst bypass). The fix is to RESERVE atomically
+ *    (consumeRateLimit already is atomic) BEFORE doing any sensitive
+ *    verification, and, for outcomes that should not count against the
+ *    caller's budget (a genuinely correct password, a genuinely valid
+ *    token), RELEASE exactly the one reservation this request took -
+ *    never a bulk reset of the whole bucket. See releaseRateLimitSlot's
+ *    own doc comment for why a bulk reset is unsafe on a bucket shared by
+ *    concurrent callers. `peekRateLimitBlocked` (the old read-only
+ *    fast-path this pattern relied on) has been removed entirely, so the
+ *    unsafe pattern cannot be reintroduced by accident at a new call
+ *    site.
+ *
+ * 2. Enforcement failures (an unexpected DB/infrastructure error while
+ *    RESERVING a slot) now fail CLOSED, not open. The first pass's
+ *    fail-open wrappers (removed here) meant a broken advisory-lock
+ *    query - the exact bug an earlier session in this project hit -
+ *    silently turned the entire limiter into a no-op instead of
+ *    surfacing anywhere. `reserveRateLimitSlot` below now returns an
+ *    explicit `infrastructure_error` status, and every call site is
+ *    responsible for applying its own surface-appropriate fail-closed
+ *    behavior (see loginAttempt.ts, passwordReset.ts, and the
+ *    course-invitation/standalone-invite/exam-access-code rate-limit
+ *    helper modules for what each surface does on this status).
+ *    Best-effort operations that can only ever make enforcement MORE
+ *    conservative if they fail - releasing a reservation, opportunistic
+ *    cleanup - remain fail-open/best-effort, since a failure there can
+ *    never weaken a security boundary.
  */
 import { prisma } from "@/lib/prisma";
 import { hashRateLimitIdentifier } from "./rateLimitKey";
+import { RATE_LIMIT_BUCKET_STALE_AFTER_SECONDS } from "./rateLimitScopes";
 
 export type RateLimitResult = { allowed: true } | { allowed: false; retryAfterSeconds: number };
-export type RateLimitPeekResult = { blocked: false } | { blocked: true; retryAfterSeconds: number };
 
 type RateLimitParams = {
   scope: string;
@@ -46,11 +82,28 @@ function buildKeyHash(scope: string, identifier: string): string {
 }
 
 /**
+ * Every bucket-mutating transaction below serializes on one advisory
+ * lock per (scope, identifier) - a large legitimate concurrent burst
+ * against the SAME bucket (e.g. many students behind one shared campus
+ * NAT all logging in within the same second) queues up waiting for both
+ * a free pool connection and the lock, not just the lock itself.
+ * Prisma's interactive-transaction defaults (2s to acquire a connection,
+ * 5s transaction body budget) are too tight for that queue to fully
+ * drain under a large burst, which would otherwise surface as spurious
+ * "unable to start a transaction in time" errors - i.e. this feature's
+ * own limiter becoming the outage it exists to prevent. Widened here,
+ * not globally, since this is the one place in the codebase that
+ * deliberately serializes many concurrent callers onto a single lock key.
+ */
+const RATE_LIMIT_TRANSACTION_OPTIONS = { maxWait: 15_000, timeout: 15_000 };
+
+/**
  * Atomically checks the bucket for (scope, identifier) and, if under
  * maxAttempts for the current window, increments it and returns
- * {allowed: true}. If already at or over maxAttempts for a window that
- * has not yet elapsed, does NOT increment further (count stays capped,
- * never grows unboundedly) and returns {allowed: false,
+ * {allowed: true} - this IS the "reserve a slot" operation; there is no
+ * separate primitive for it. If already at or over maxAttempts for a
+ * window that has not yet elapsed, does NOT increment further (count
+ * stays capped, never grows unboundedly) and returns {allowed: false,
  * retryAfterSeconds}. An expired window is treated as fresh (count reset
  * to 1, allowed).
  *
@@ -61,8 +114,9 @@ function buildKeyHash(scope: string, identifier: string): string {
  * by N.
  *
  * Throws on a genuine database/infrastructure error - this function
- * never silently reports "allowed" on failure. See safeConsumeRateLimit
- * below for the fail-open-with-logging policy used at actual call sites.
+ * never silently reports "allowed" on failure. See reserveRateLimitSlot
+ * below for the fail-closed-with-logging policy used at actual call
+ * sites.
  */
 export async function consumeRateLimit(params: RateLimitParams): Promise<RateLimitResult> {
   const keyHash = buildKeyHash(params.scope, params.identifier);
@@ -99,108 +153,104 @@ export async function consumeRateLimit(params: RateLimitParams): Promise<RateLim
       data: { count: { increment: 1 } },
     });
     return { allowed: true };
-  });
+  }, RATE_LIMIT_TRANSACTION_OPTIONS);
 }
 
 /**
- * Read-only fast-path check - does NOT modify the bucket. Used as a
- * cheap pre-check before expensive/sensitive work (e.g. a bcrypt
- * comparison) so an already-saturated bucket can short-circuit without
- * paying that cost. This is an optimization only, not the correctness
- * guarantee (that's consumeRateLimit's atomic check-and-increment) - a
- * TOCTOU gap between this peek and a later consumeRateLimit call is
- * expected and harmless (bounded by the size of one concurrent request
- * burst, never unbounded).
+ * Releases EXACTLY ONE reservation on (scope, identifier) - decrements
+ * count by 1, floored at 0, never below. Deliberately NOT a bulk clear:
+ * a bucket is shared by every concurrent caller using the same
+ * (scope, identifier) pair, so unconditionally deleting/zeroing the
+ * whole row (resetRateLimitBucket) on one request's success would also
+ * erase every OTHER concurrent request's still-legitimate reservation -
+ * e.g. an attacker's several in-flight guesses against the same account,
+ * reserved a moment earlier by other requests, would be silently wiped
+ * out by one coincidental concurrent success. Releasing exactly one slot
+ * (guarded by the same advisory lock as consumeRateLimit, so it can
+ * never race with a concurrent reserve/release on the same bucket) is
+ * always safe: it can only ever return budget this ONE resolved request
+ * itself reserved.
+ *
+ * Never throws on a missing/already-empty bucket - releasing a
+ * reservation that (for whatever reason) is no longer there is a no-op,
+ * not an error.
  */
-export async function peekRateLimitBlocked(
-  params: Omit<RateLimitParams, "identifier"> & { identifier: string },
-): Promise<RateLimitPeekResult> {
+export async function releaseRateLimitSlot(params: { scope: string; identifier: string }): Promise<void> {
   const keyHash = buildKeyHash(params.scope, params.identifier);
-  const bucket = await prisma.securityRateLimitBucket.findUnique({
-    where: { scope_keyHash: { scope: params.scope, keyHash } },
-  });
-  if (!bucket) return { blocked: false };
-
-  const now = Date.now();
-  if (now - bucket.windowStart.getTime() >= params.windowSeconds * 1000) return { blocked: false };
-  if (bucket.count < params.maxAttempts) return { blocked: false };
-
-  const retryAfterSeconds = Math.max(
-    1,
-    Math.ceil((bucket.windowStart.getTime() + params.windowSeconds * 1000 - now) / 1000),
-  );
-  return { blocked: true, retryAfterSeconds };
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${params.scope}), hashtext(${keyHash}))`;
+    const bucket = await tx.securityRateLimitBucket.findUnique({
+      where: { scope_keyHash: { scope: params.scope, keyHash } },
+    });
+    if (!bucket || bucket.count <= 0) return;
+    await tx.securityRateLimitBucket.update({
+      where: { scope_keyHash: { scope: params.scope, keyHash } },
+      data: { count: { decrement: 1 } },
+    });
+  }, RATE_LIMIT_TRANSACTION_OPTIONS);
 }
 
 /**
- * Clears a specific (scope, identifier) bucket - used on a confirmed
- * success (e.g. a correct password) to release the slot a pre-emptive
- * consumeRateLimit reservation took, WITHOUT touching any other bucket
- * (a different account, or a source-wide bucket, sharing the same
- * source address) - see src/lib/security/loginAttempt.ts for why only
- * the narrow source+account bucket is ever reset this way, never the
- * source-wide failure bucket.
+ * Clears an ENTIRE (scope, identifier) bucket unconditionally. Kept as a
+ * generic, independently useful, already-tested primitive (e.g. for a
+ * future admin "clear this block" action) - but no production call site
+ * in this feature uses it as a way to release one request's reservation;
+ * see releaseRateLimitSlot's doc comment for exactly why that would be
+ * unsafe on a bucket shared by concurrent callers.
  */
 export async function resetRateLimitBucket(params: { scope: string; identifier: string }): Promise<void> {
   const keyHash = buildKeyHash(params.scope, params.identifier);
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${params.scope}), hashtext(${keyHash}))`;
     await tx.securityRateLimitBucket.deleteMany({ where: { scope: params.scope, keyHash } });
-  });
+  }, RATE_LIMIT_TRANSACTION_OPTIONS);
 }
 
-// Fail-open-with-logging wrappers - the policy call sites should use these.
-//
-// Failure-mode design (see docs/auth-token-abuse-protection-v1.md,
-// "Limiter infrastructure failure"): a transient failure of THIS table
-// (or the database generally) must never turn into a platform-wide
-// authentication/reset/invitation outage layered on top of whatever
-// infrastructure problem already exists - the actual security boundary
-// for every surface these wrappers guard (bcrypt comparison, token-hash
-// comparison, access-code comparison) is completely independent of this
-// table. So enforcement failures fail OPEN. But failing open silently
-// would be indistinguishable from "no attack happening" - so every
-// failure is logged with a distinct, greppable message, never swallowed.
-// This is a deliberate availability-over-defense-in-depth tradeoff for
-// this ONE supplementary control; it does not weaken any of the
-// underlying credential/token verification these surfaces still perform
-// unconditionally.
+export type RateLimitReservation =
+  | { status: "reserved" }
+  | { status: "blocked"; retryAfterSeconds: number }
+  | { status: "infrastructure_error" };
 
-/** Enforcement path - logs and fails OPEN (allowed) on an unexpected error. */
-export async function safeConsumeRateLimit(params: RateLimitParams): Promise<RateLimitResult> {
+/**
+ * The enforcement entry point every call site uses. Reserves a slot
+ * atomically BEFORE the caller does any sensitive verification (bcrypt
+ * compare, token-hash lookup, access-code compare). On an unexpected
+ * DB/infrastructure error, logs a distinct, greppable message and fails
+ * CLOSED - returns `infrastructure_error` rather than silently allowing
+ * the request through. Callers must treat `infrastructure_error` as "do
+ * not proceed with verification" and apply their own surface-appropriate
+ * safe response (see each call site for its specific choice).
+ *
+ * Also opportunistically (and cheaply - see maybeRunOpportunisticCleanup
+ * below) reclaims long-expired buckets, since this function is the one
+ * place every abuse-sensitive request path in this feature already
+ * passes through.
+ */
+export async function reserveRateLimitSlot(params: RateLimitParams): Promise<RateLimitReservation> {
+  await maybeRunOpportunisticCleanup();
   try {
-    return await consumeRateLimit(params);
+    const result = await consumeRateLimit(params);
+    return result.allowed ? { status: "reserved" } : { status: "blocked", retryAfterSeconds: result.retryAfterSeconds };
   } catch (err) {
     console.error(
-      "Rate limit ENFORCEMENT failed for scope \"" + params.scope + "\" - failing open",
+      "Rate limit ENFORCEMENT failed for scope \"" + params.scope + "\" - failing CLOSED",
       err instanceof Error ? err.message : "unknown error",
     );
-    return { allowed: true };
+    return { status: "infrastructure_error" };
   }
 }
 
-/** Enforcement fast-path - logs and fails OPEN (not blocked) on an unexpected error. */
-export async function safePeekRateLimitBlocked(
-  params: Omit<RateLimitParams, "identifier"> & { identifier: string },
-): Promise<RateLimitPeekResult> {
+/**
+ * Best-effort release - logs but never throws. A failed release simply
+ * leaves the reservation consumed, which can only make enforcement MORE
+ * conservative (never weaker) than intended, so this is safe to swallow.
+ */
+export async function safeReleaseRateLimitSlot(params: { scope: string; identifier: string }): Promise<void> {
   try {
-    return await peekRateLimitBlocked(params);
+    await releaseRateLimitSlot(params);
   } catch (err) {
     console.error(
-      "Rate limit ENFORCEMENT peek failed for scope \"" + params.scope + "\" - failing open",
-      err instanceof Error ? err.message : "unknown error",
-    );
-    return { blocked: false };
-  }
-}
-
-/** Best-effort cleanup path - logs but never throws; a failed reset simply means the bucket expires naturally instead. */
-export async function safeResetRateLimitBucket(params: { scope: string; identifier: string }): Promise<void> {
-  try {
-    await resetRateLimitBucket(params);
-  } catch (err) {
-    console.error(
-      "Rate limit bucket cleanup failed for scope \"" + params.scope + "\" (best-effort, non-fatal)",
+      "Rate limit slot release failed for scope \"" + params.scope + "\" (best-effort, non-fatal)",
       err instanceof Error ? err.message : "unknown error",
     );
   }
@@ -211,12 +261,21 @@ export async function safeResetRateLimitBucket(params: { scope: string; identifi
  * intentionally NOT a scheduled/cron job (out of scope for this pass;
  * see docs/auth-token-abuse-protection-v1.md). Deletes a small bounded
  * batch of rows whose window closed more than staleAfterSeconds ago.
- * Safe to call opportunistically (e.g. occasionally, best-effort) from
- * any request path - deleting a stale bucket can only ever make a
- * future check MORE permissive (a fresh window), never less, so this can
- * never affect authentication/verification correctness. Never awaited in
- * a way that blocks a real request's response; callers fire-and-forget
- * this with a caught promise.
+ *
+ * Race safety (security review v2 fix): the DELETE below re-checks
+ * `windowStart < cutoff` directly in its own WHERE clause, not merely
+ * "id was in an earlier SELECT's result list". Postgres evaluates a
+ * DELETE's WHERE clause against each row's CURRENT committed state at
+ * execution time, so a row that a real concurrent request refreshed
+ * (via consumeRateLimit/releaseRateLimitSlot) in the gap between the
+ * SELECT above and this DELETE no longer matches `windowStart < cutoff`
+ * and survives - the earlier find-by-id-list-only version could delete
+ * such a row, destroying live rate-limit state.
+ *
+ * Deleting a stale bucket can only ever make a future check MORE
+ * permissive (a fresh window), never less, so this can never affect
+ * authentication/verification correctness. Safe to call opportunistically
+ * from any request path.
  */
 export async function cleanupExpiredRateLimitBuckets(staleAfterSeconds: number, batchSize = 200): Promise<number> {
   const cutoff = new Date(Date.now() - staleAfterSeconds * 1000);
@@ -227,7 +286,30 @@ export async function cleanupExpiredRateLimitBuckets(staleAfterSeconds: number, 
   });
   if (stale.length === 0) return 0;
   const result = await prisma.securityRateLimitBucket.deleteMany({
-    where: { id: { in: stale.map((row) => row.id) } },
+    where: { id: { in: stale.map((row) => row.id) }, windowStart: { lt: cutoff } },
   });
   return result.count;
+}
+
+// Security review v2: cleanup is now actually wired into the real
+// enforcement path (reserveRateLimitSlot above), not merely defined and
+// tested in isolation. Deliberately low-frequency (not every request -
+// unnecessary DB cost for a purely cosmetic retention concern) and
+// deliberately AWAITED to completion when it does run - a serverless
+// function is not guaranteed to keep running unawaited work after this
+// call returns, so a fire-and-forget cleanup could simply never execute.
+// Always wrapped in its own try/catch: a cleanup failure is best-effort
+// and must never affect the enforcement decision it rides along with.
+const OPPORTUNISTIC_CLEANUP_PROBABILITY = 1 / 500;
+
+async function maybeRunOpportunisticCleanup(): Promise<void> {
+  if (Math.random() >= OPPORTUNISTIC_CLEANUP_PROBABILITY) return;
+  try {
+    await cleanupExpiredRateLimitBuckets(RATE_LIMIT_BUCKET_STALE_AFTER_SECONDS);
+  } catch (err) {
+    console.error(
+      "Rate limit bucket opportunistic cleanup failed (best-effort, non-fatal)",
+      err instanceof Error ? err.message : "unknown error",
+    );
+  }
 }

@@ -16,7 +16,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { verifyCourseInvitationToken } from "@/lib/courseInvitationToken";
 import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
-import { courseInvitationRateLimitGate, recordCourseInvitationInvalidGuess } from "@/lib/security/courseInvitationRateLimit";
+import { reserveCourseInvitationSlot, releaseCourseInvitationSlot } from "@/lib/security/courseInvitationRateLimit";
 
 export async function GET(
   req: Request,
@@ -29,12 +29,18 @@ export async function GET(
 
   const { invitationId, token } = await params;
   const sourceIp = resolveTrustedRequestSource(req);
-  const gate = await courseInvitationRateLimitGate(sourceIp, invitationId);
-  if (!gate.allowed) {
+  const reservation = await reserveCourseInvitationSlot(sourceIp, invitationId);
+  if (reservation.status === "blocked") {
     return NextResponse.json(
       { ok: false, reason: "rate_limited" },
-      { status: 429, headers: { "Retry-After": String(gate.retryAfterSeconds) } },
+      { status: 429, headers: { "Retry-After": String(reservation.retryAfterSeconds) } },
     );
+  }
+  if (reservation.status === "infrastructure_error") {
+    // Security review v2 — fail closed without ever looking up the
+    // invitation or verifying its token, so a limiter outage can never
+    // become an existence oracle.
+    return NextResponse.json({ ok: false, reason: "unavailable" }, { status: 503 });
   }
 
   const invitation = await prisma.courseEnrollmentInvitation.findUnique({
@@ -43,25 +49,31 @@ export async function GET(
   });
 
   if (!invitation) {
-    await recordCourseInvitationInvalidGuess(sourceIp, invitationId);
+    // Genuinely invalid — reservation stays consumed.
     return NextResponse.json({ ok: false, reason: "invalid" });
   }
   if (invitation.studentId !== session.user.id) {
+    await releaseCourseInvitationSlot(sourceIp, invitationId);
     return NextResponse.json({ ok: false, reason: "wrong_account" });
   }
   if (invitation.acceptedAt) {
+    await releaseCourseInvitationSlot(sourceIp, invitationId);
     return NextResponse.json({ ok: false, reason: "already_accepted" });
   }
   if (invitation.revokedAt) {
+    await releaseCourseInvitationSlot(sourceIp, invitationId);
     return NextResponse.json({ ok: false, reason: "revoked" });
   }
   if (invitation.expiresAt < new Date()) {
+    await releaseCourseInvitationSlot(sourceIp, invitationId);
     return NextResponse.json({ ok: false, reason: "expired" });
   }
   if (!invitation.tokenHash || !verifyCourseInvitationToken(token, invitation.tokenHash)) {
-    await recordCourseInvitationInvalidGuess(sourceIp, invitationId);
+    // Genuinely invalid token — reservation stays consumed.
     return NextResponse.json({ ok: false, reason: "invalid" });
   }
+
+  await releaseCourseInvitationSlot(sourceIp, invitationId);
 
   // Only the minimum useful invitation information — no institution id,
   // no internal fields.
