@@ -37,6 +37,21 @@
  *   visible outcome as an ordinary wrong-password failure, and never
  *   attempts the real credential lookup/bcrypt compare. A rate-limiter
  *   outage must never silently disable login protection.
+ *
+ * Security review v3 fixed a partial-reservation leak: if the
+ * source-wide slot was successfully reserved but the account-specific
+ * reservation right after it was `blocked` or `infrastructure_error`,
+ * the source-wide reservation was previously left dangling (never
+ * released, since it wasn't a "confirmed failure" either - no
+ * lookup/bcrypt ever ran). Repeated traffic against one already-blocked
+ * account could therefore burn the campus-wide source-wide budget
+ * without ever attempting real verification. Now, whenever the account
+ * reservation does NOT succeed, the source-wide reservation this
+ * request itself just took is released (exactly one slot, using its own
+ * window identity - see releaseRateLimitSlot) before returning `null`.
+ * This only ever gives back THIS request's own just-taken reservation;
+ * it can never touch a genuine prior failure recorded by a different
+ * request, and never bulk-resets the bucket.
  */
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
@@ -110,7 +125,19 @@ export async function attemptCredentialsLogin(params: {
     maxAttempts: LOGIN_SOURCE_ACCOUNT_MAX_ATTEMPTS,
     windowSeconds: LOGIN_SOURCE_ACCOUNT_WINDOW_SECONDS,
   });
-  if (accountReservation.status !== "reserved") return null;
+  if (accountReservation.status !== "reserved") {
+    // Security review v3: this request never attempted real
+    // verification (blocked by the account's own budget, or the limiter
+    // was unavailable) - give back the source-wide slot THIS request
+    // just took, so hammering an already-blocked account cannot burn
+    // the shared campus-wide budget for no reason.
+    await safeReleaseRateLimitSlot({
+      scope: LOGIN_SOURCE_FAILURES_SCOPE,
+      identifier: sourceIp,
+      windowStartMs: sourceReservation.windowStartMs,
+    });
+    return null;
+  }
 
   const user = await prisma.user.findUnique({ where: { email } });
   const valid = user ? await bcrypt.compare(password, user.passwordHash) : false;
@@ -129,8 +156,16 @@ export async function attemptCredentialsLogin(params: {
   // recorded against OTHER accounts sharing this source (source-wide
   // bucket) or concurrent guesses in flight against this SAME account
   // from another request (account bucket).
-  await safeReleaseRateLimitSlot({ scope: LOGIN_SOURCE_ACCOUNT_SCOPE, identifier: accountIdentifier });
-  await safeReleaseRateLimitSlot({ scope: LOGIN_SOURCE_FAILURES_SCOPE, identifier: sourceIp });
+  await safeReleaseRateLimitSlot({
+    scope: LOGIN_SOURCE_ACCOUNT_SCOPE,
+    identifier: accountIdentifier,
+    windowStartMs: accountReservation.windowStartMs,
+  });
+  await safeReleaseRateLimitSlot({
+    scope: LOGIN_SOURCE_FAILURES_SCOPE,
+    identifier: sourceIp,
+    windowStartMs: sourceReservation.windowStartMs,
+  });
 
   return {
     id: user.id,

@@ -11,16 +11,33 @@
  *
  * Security review v2: reserve/release replaced the first pass's
  * peek-then-consume-on-invalid pattern (a concurrent-burst bypass — see
- * rateLimiter.ts's module doc comment). Every caller must:
- *   1. call reserveCourseInvitationSlot() BEFORE looking up the
- *      invitation or verifying its token;
- *   2. on `blocked`, return 429 immediately without touching the DB;
- *   3. on `infrastructure_error`, return a generic 503 WITHOUT looking up
- *      the invitation or verifying the token (never an existence oracle);
- *   4. on `reserved`, proceed, then call releaseCourseInvitationSlot()
- *      for every outcome that must NOT count (valid, wrong_account,
- *      already_accepted, revoked, expired) — never for a genuinely
- *      invalid invitation/token, which leaves the reservation consumed.
+ * rateLimiter.ts's module doc comment).
+ *
+ * Security review v3: two more fixes —
+ *   1. Callers must now reserve ONLY immediately before actual
+ *      tokenHash verification, never before the invitation lookup — see
+ *      the calling routes' own doc comments for why (storage-cardinality:
+ *      invitationId is attacker-controlled URL input, so reserving
+ *      earlier would let arbitrary/nonexistent ids each create a bucket
+ *      row).
+ *   2. `releaseCourseInvitationSlot` now requires the exact
+ *      `windowStartMs` the reservation returned, so a delayed release can
+ *      never accidentally decrement a newer window's count (see
+ *      rateLimiter.ts's `releaseRateLimitSlot` doc comment).
+ *
+ * Every caller must:
+ *   1. resolve every existing, non-secret-guessing outcome first
+ *      (invitation absent, wrong_account, already_accepted, revoked,
+ *      expired) — none of these ever reserve a slot;
+ *   2. call reserveCourseInvitationSlot() ONLY once genuinely about to
+ *      verify the token against a real invitation row;
+ *   3. on `blocked`, return 429 immediately without verifying the token;
+ *   4. on `infrastructure_error`, return a generic 503 WITHOUT verifying
+ *      the token (never an existence/validity oracle);
+ *   5. on `reserved`, verify the token, then call
+ *      releaseCourseInvitationSlot() (with the reservation's own
+ *      `windowStartMs`) only on a genuinely valid token — never for an
+ *      invalid one, which leaves the reservation consumed.
  */
 import { reserveRateLimitSlot, safeReleaseRateLimitSlot, type RateLimitReservation } from "./rateLimiter";
 import {
@@ -33,7 +50,7 @@ function identifierFor(sourceIp: string, invitationId: string): string {
   return `${sourceIp}|${invitationId}`;
 }
 
-/** Call BEFORE any invitation lookup or token verification. */
+/** Call ONLY when genuinely about to verify a real invitation's token. */
 export async function reserveCourseInvitationSlot(sourceIp: string, invitationId: string): Promise<RateLimitReservation> {
   return reserveRateLimitSlot({
     scope: COURSE_INVITATION_SOURCE_SCOPE,
@@ -43,10 +60,11 @@ export async function reserveCourseInvitationSlot(sourceIp: string, invitationId
   });
 }
 
-/** Call only for outcomes that must NOT count against the budget — never for a genuinely invalid invitation/token. */
-export async function releaseCourseInvitationSlot(sourceIp: string, invitationId: string): Promise<void> {
+/** Call only on a genuinely valid token — `windowStartMs` must be the exact value the matching reservation returned. */
+export async function releaseCourseInvitationSlot(sourceIp: string, invitationId: string, windowStartMs: number): Promise<void> {
   await safeReleaseRateLimitSlot({
     scope: COURSE_INVITATION_SOURCE_SCOPE,
     identifier: identifierFor(sourceIp, invitationId),
+    windowStartMs,
   });
 }

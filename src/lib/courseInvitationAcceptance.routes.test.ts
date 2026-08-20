@@ -509,6 +509,46 @@ describe("GET preview + POST accept — /api/course-invitations/[invitationId]/[
     expect(stillBlocked.status).toBe(429);
   });
 
+  it("Auth and Token Abuse Protection v1 (security review v3): arbitrary/nonexistent invitationIds do NOT each create a SecurityRateLimitBucket row (storage-cardinality fix)", async () => {
+    const { COURSE_INVITATION_SOURCE_SCOPE } = await import("@/lib/security/rateLimitScopes");
+    const student = await createUser(`acc-cardinality-${stamp}@test.invalid`, "STUDENT", null);
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", null));
+    const { POST: accept } = await import("@/app/api/course-invitations/[invitationId]/[token]/accept/route");
+    const { GET: preview } = await import("@/app/api/course-invitations/[invitationId]/[token]/route");
+    const sharedSource = randomTestSource();
+
+    const before = await prisma.securityRateLimitBucket.count({ where: { scope: COURSE_INVITATION_SOURCE_SCOPE } });
+
+    // Many DIFFERENT, entirely made-up invitation ids from one
+    // authenticated student — the reservation now happens only AFTER a
+    // real invitation row is confirmed to exist, so none of these ever
+    // touch the rate-limit table at all.
+    for (let i = 0; i < 20; i++) {
+      const arbitraryId = `nonexistent-invitation-${stamp}-${i}-${Math.random().toString(36).slice(2)}`;
+      const acceptRes = await accept(jsonRequest({}, "POST", { "X-Forwarded-For": sharedSource }), {
+        params: Promise.resolve({ invitationId: arbitraryId, token: "whatever" }),
+      });
+      expect((await acceptRes.json()).reason).toBe("invalid");
+      const previewRes = await preview(jsonRequest(undefined, "GET", { "X-Forwarded-For": sharedSource }), {
+        params: Promise.resolve({ invitationId: arbitraryId, token: "whatever" }),
+      });
+      expect((await previewRes.json()).reason).toBe("invalid");
+    }
+
+    const after = await prisma.securityRateLimitBucket.count({ where: { scope: COURSE_INVITATION_SOURCE_SCOPE } });
+    expect(after).toBe(before); // zero new rows from 40 requests against arbitrary nonexistent ids
+
+    // Contrast: guessing against a REAL invitation's token still rate-
+    // limits normally (creates exactly one row and counts up).
+    const { invitation } = await createInvitationRow({ courseId: courseA, studentId: student.id, invitedById: lecturerA });
+    const realGuess = await accept(jsonRequest({}, "POST", { "X-Forwarded-For": sharedSource }), {
+      params: Promise.resolve({ invitationId: invitation.id, token: "wrong-guess" }),
+    });
+    expect((await realGuess.json()).reason).toBe("invalid");
+    const afterRealGuess = await prisma.securityRateLimitBucket.count({ where: { scope: COURSE_INVITATION_SOURCE_SCOPE } });
+    expect(afterRealGuess).toBe(before + 1);
+  });
+
   it("Auth and Token Abuse Protection v1: the same source can still use a DIFFERENT legitimate invitation after being limited on another one (campus-NAT safety)", async () => {
     const { COURSE_INVITATION_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
     const guessedStudent = await createUser(`acc-nat-guessed-${stamp}@test.invalid`, "STUDENT", null);

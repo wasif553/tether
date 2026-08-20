@@ -14,6 +14,15 @@
  * wrong token, exam unpublished) returns the exact same generic denial
  * — never reveals which specific check failed, matching the existing
  * access-check route's information-hiding convention.
+ *
+ * Security review v3 — storage-cardinality fix: `id` (the exam id) is
+ * attacker-controlled URL input. Every existing eligibility check
+ * (exam missing, unpublished, wrong assignment mode, invite disabled,
+ * missing tokenHash) is now resolved BEFORE any rate-limit reservation
+ * is attempted, so arbitrary/nonexistent exam ids can never each create
+ * a SecurityRateLimitBucket row. A reservation is taken ONLY once the
+ * request is genuinely about to verify a real, eligible standalone
+ * invite's token.
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -47,18 +56,6 @@ export async function POST(
   // affect another student's ability to accept a different invite for
   // the same exam from the same shared network.
   const studentId = session.user.id;
-  const reservation = await reserveStandaloneInviteSlot(sourceIp, studentId, id);
-  if (reservation.status === "blocked") {
-    return NextResponse.json(
-      { ok: false, reason: "rate_limited" },
-      { status: 429, headers: { "Retry-After": String(reservation.retryAfterSeconds) } },
-    );
-  }
-  if (reservation.status === "infrastructure_error") {
-    // Fail closed without ever verifying the invite token, so a limiter
-    // outage can never become a token-validity oracle.
-    return NextResponse.json({ ok: false, reason: "unavailable" }, { status: 503 });
-  }
 
   const body = await req.json().catch(() => null);
   const parsed = acceptSchema.safeParse(body);
@@ -84,14 +81,31 @@ export async function POST(
     !exam.standaloneInviteEnabled ||
     !exam.standaloneInviteTokenHash
   ) {
+    // No real, eligible standalone invite exists for this id — never
+    // reserve a slot for an arbitrary/nonexistent/ineligible exam id.
     return invalidInvite();
+  }
+
+  // Genuinely about to verify a real, eligible standalone invite's
+  // token — only now is a contextual slot reserved.
+  const reservation = await reserveStandaloneInviteSlot(sourceIp, studentId, id);
+  if (reservation.status === "blocked") {
+    return NextResponse.json(
+      { ok: false, reason: "rate_limited" },
+      { status: 429, headers: { "Retry-After": String(reservation.retryAfterSeconds) } },
+    );
+  }
+  if (reservation.status === "infrastructure_error") {
+    // Fail closed without ever verifying the invite token, so a limiter
+    // outage can never become a token-validity oracle.
+    return NextResponse.json({ ok: false, reason: "unavailable" }, { status: 503 });
   }
 
   if (!verifyStandaloneInviteToken(parsed.data.token, exam.standaloneInviteTokenHash)) {
     return invalidInvite();
   }
 
-  await releaseStandaloneInviteSlot(sourceIp, studentId, id);
+  await releaseStandaloneInviteSlot(sourceIp, studentId, id, reservation.windowStartMs);
 
   // The userId is always the authenticated caller — never client-
   // supplied. Idempotent via the existing @@unique([examId, studentId])

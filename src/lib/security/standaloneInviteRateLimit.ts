@@ -18,11 +18,18 @@
  *    own independent budget.
  * 2. Reserve/release replaced the first pass's peek-then-consume-on-
  *    invalid pattern (a concurrent-burst bypass — see rateLimiter.ts's
- *    module doc comment). Callers must: reserve BEFORE verifying the
- *    token; on `blocked`, return 429 without touching the DB; on
- *    `infrastructure_error`, return a generic 503 without verifying the
- *    token; on `reserved`, verify, then release on a genuine accept —
- *    never release on an invalid outcome.
+ *    module doc comment).
+ *
+ * Security review v3: two more fixes —
+ *
+ * 1. The calling route now reserves ONLY once it has already confirmed
+ *    the exam id is real and eligible for a standalone invite —
+ *    reserving before that would let an attacker create a bucket row per
+ *    arbitrary/nonexistent exam id (storage-cardinality).
+ * 2. `releaseStandaloneInviteSlot` now requires the exact `windowStartMs`
+ *    the reservation returned, so a delayed release can never
+ *    accidentally decrement a newer window's count (see rateLimiter.ts's
+ *    `releaseRateLimitSlot` doc comment).
  */
 import { reserveRateLimitSlot, safeReleaseRateLimitSlot, type RateLimitReservation } from "./rateLimiter";
 import {
@@ -35,7 +42,7 @@ function identifierFor(sourceIp: string, studentId: string, examId: string): str
   return `${sourceIp}|${studentId}|${examId}`;
 }
 
-/** Call BEFORE verifying the invite token. */
+/** Call ONLY once the exam id is confirmed real and eligible, immediately before verifying the invite token. */
 export async function reserveStandaloneInviteSlot(
   sourceIp: string,
   studentId: string,
@@ -49,10 +56,16 @@ export async function reserveStandaloneInviteSlot(
   });
 }
 
-/** Call only on a genuine accept — never on an invalid/rejected invite. */
-export async function releaseStandaloneInviteSlot(sourceIp: string, studentId: string, examId: string): Promise<void> {
+/** Call only on a genuine accept — `windowStartMs` must be the exact value the matching reservation returned. */
+export async function releaseStandaloneInviteSlot(
+  sourceIp: string,
+  studentId: string,
+  examId: string,
+  windowStartMs: number,
+): Promise<void> {
   await safeReleaseRateLimitSlot({
     scope: STANDALONE_INVITE_SOURCE_SCOPE,
     identifier: identifierFor(sourceIp, studentId, examId),
+    windowStartMs,
   });
 }

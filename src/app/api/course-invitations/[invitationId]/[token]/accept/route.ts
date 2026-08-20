@@ -23,6 +23,20 @@
  * institution) for the same null-institution student, can never both
  * "win" a race through the gap between read and write. See the two
  * `updateMany` calls below for the exact mechanism.
+ *
+ * Security review v3 — storage-cardinality fix: a cheap, non-
+ * transactional pre-check resolves every existing, non-secret-guessing
+ * outcome (unknown invitation, wrong_account, already_accepted, revoked,
+ * expired) BEFORE any rate-limit reservation is attempted — invitationId
+ * is attacker-controlled URL input, so reserving before even knowing the
+ * invitation exists would let arbitrary/nonexistent ids each create a
+ * SecurityRateLimitBucket row. A reservation is taken ONLY once this
+ * pre-check confirms the request is genuinely about to verify a real,
+ * eligible invitation's token. The transaction below remains the sole
+ * AUTHORITATIVE, race-safe re-check (state can still have changed in the
+ * gap between the pre-check and the transaction, e.g. a concurrent
+ * revoke) — the pre-check exists purely to gate the reservation, never
+ * to replace the transaction's own verification.
  */
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
@@ -57,8 +71,29 @@ export async function POST(
 
   const { invitationId, token } = await params;
   const studentId = session.user.id;
-
   const sourceIp = resolveTrustedRequestSource(req);
+
+  // Pre-check (non-transactional, non-authoritative) — resolves every
+  // existing, non-secret-guessing outcome without ever reserving a slot.
+  const precheck = await prisma.courseEnrollmentInvitation.findUnique({ where: { id: invitationId } });
+  if (!precheck) {
+    return NextResponse.json({ ok: false, reason: "invalid" });
+  }
+  if (precheck.studentId !== studentId) {
+    return NextResponse.json({ ok: false, reason: "wrong_account" });
+  }
+  if (precheck.acceptedAt) {
+    return NextResponse.json({ ok: true }); // idempotent — matches the transaction's own already_ok -> {ok:true} mapping below
+  }
+  if (precheck.revokedAt) {
+    return NextResponse.json({ ok: false, reason: "revoked" });
+  }
+  if (precheck.expiresAt < new Date()) {
+    return NextResponse.json({ ok: false, reason: "expired" });
+  }
+
+  // Genuinely about to verify a real, eligible invitation's token — only
+  // now is a contextual slot reserved.
   const reservation = await reserveCourseInvitationSlot(sourceIp, invitationId);
   if (reservation.status === "blocked") {
     return NextResponse.json(
@@ -67,9 +102,8 @@ export async function POST(
     );
   }
   if (reservation.status === "infrastructure_error") {
-    // Security review v2 — fail closed without ever verifying the
-    // invitation/token, so a limiter outage can never become an
-    // existence oracle.
+    // Fail closed without ever verifying the token, so a limiter outage
+    // can never become an existence/validity oracle.
     return NextResponse.json({ ok: false, reason: "unavailable" }, { status: 503 });
   }
 
@@ -181,7 +215,7 @@ export async function POST(
   // existing, legitimate denials this feature must not start counting
   // toward the abuse budget.
   if (outcome.kind !== "invalid") {
-    await releaseCourseInvitationSlot(sourceIp, invitationId);
+    await releaseCourseInvitationSlot(sourceIp, invitationId, reservation.windowStartMs);
   }
 
   if (outcome.kind === "accepted" || outcome.kind === "already_ok") {

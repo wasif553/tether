@@ -123,24 +123,28 @@ describe("releaseRateLimitSlot", () => {
     const scope = uniqueScope("release-one");
     await consumeRateLimit({ scope, identifier: "id-a", maxAttempts: 5, windowSeconds: 300 });
     await consumeRateLimit({ scope, identifier: "id-a", maxAttempts: 5, windowSeconds: 300 });
-    await consumeRateLimit({ scope, identifier: "id-a", maxAttempts: 5, windowSeconds: 300 });
-    await releaseRateLimitSlot({ scope, identifier: "id-a" });
+    const third = await consumeRateLimit({ scope, identifier: "id-a", maxAttempts: 5, windowSeconds: 300 });
+    if (!third.allowed) throw new Error("expected allowed");
+    await releaseRateLimitSlot({ scope, identifier: "id-a", windowStartMs: third.windowStartMs });
     const row = await prisma.securityRateLimitBucket.findFirst({ where: { scope } });
     expect(row?.count).toBe(2);
   });
 
   it("never underflows below zero", async () => {
     const scope = uniqueScope("release-floor");
-    await consumeRateLimit({ scope, identifier: "id-a", maxAttempts: 5, windowSeconds: 300 });
-    await releaseRateLimitSlot({ scope, identifier: "id-a" });
-    await releaseRateLimitSlot({ scope, identifier: "id-a" }); // one extra release beyond what was reserved
+    const reserved = await consumeRateLimit({ scope, identifier: "id-a", maxAttempts: 5, windowSeconds: 300 });
+    if (!reserved.allowed) throw new Error("expected allowed");
+    await releaseRateLimitSlot({ scope, identifier: "id-a", windowStartMs: reserved.windowStartMs });
+    await releaseRateLimitSlot({ scope, identifier: "id-a", windowStartMs: reserved.windowStartMs }); // one extra release beyond what was reserved
     const row = await prisma.securityRateLimitBucket.findFirst({ where: { scope } });
     expect(row?.count).toBe(0);
   });
 
   it("releasing a nonexistent bucket is a safe no-op", async () => {
     const scope = uniqueScope("release-missing");
-    await expect(releaseRateLimitSlot({ scope, identifier: "never-reserved" })).resolves.toBeUndefined();
+    await expect(
+      releaseRateLimitSlot({ scope, identifier: "never-reserved", windowStartMs: Date.now() }),
+    ).resolves.toBeUndefined();
   });
 
   it("never clears a DIFFERENT concurrent reservation on the same shared bucket — only ever its own one slot", async () => {
@@ -152,22 +156,61 @@ describe("releaseRateLimitSlot", () => {
     // one bucket; releasing the legitimate one must free exactly one
     // slot, leaving the other two concurrent reservations' budget intact.
     const scope = uniqueScope("release-shared");
+    let last: Awaited<ReturnType<typeof consumeRateLimit>> | undefined;
     for (let i = 0; i < 3; i++) {
-      await consumeRateLimit({ scope, identifier: "shared", maxAttempts: 5, windowSeconds: 300 });
+      last = await consumeRateLimit({ scope, identifier: "shared", maxAttempts: 5, windowSeconds: 300 });
     }
-    await releaseRateLimitSlot({ scope, identifier: "shared" });
+    if (!last?.allowed) throw new Error("expected allowed");
+    await releaseRateLimitSlot({ scope, identifier: "shared", windowStartMs: last.windowStartMs });
     const row = await prisma.securityRateLimitBucket.findFirst({ where: { scope } });
     expect(row?.count).toBe(2); // the other two "in-flight" reservations are untouched
   });
 
   it("concurrent releases cannot underflow the count (Promise.all)", async () => {
     const scope = uniqueScope("release-concurrency");
+    let last: Awaited<ReturnType<typeof consumeRateLimit>> | undefined;
     for (let i = 0; i < 5; i++) {
-      await consumeRateLimit({ scope, identifier: "id-a", maxAttempts: 10, windowSeconds: 300 });
+      last = await consumeRateLimit({ scope, identifier: "id-a", maxAttempts: 10, windowSeconds: 300 });
     }
-    await Promise.all(Array.from({ length: 8 }, () => releaseRateLimitSlot({ scope, identifier: "id-a" })));
+    if (!last?.allowed) throw new Error("expected allowed");
+    const windowStartMs = last.windowStartMs;
+    await Promise.all(
+      Array.from({ length: 8 }, () => releaseRateLimitSlot({ scope, identifier: "id-a", windowStartMs })),
+    );
     const row = await prisma.securityRateLimitBucket.findFirst({ where: { scope } });
     expect(row?.count).toBe(0); // floored at zero even though 8 releases raced against only 5 reservations
+  });
+
+  it("security review v3 (window-rollover fix): a delayed release belonging to an EXPIRED window never decrements a newer window's count", async () => {
+    // 1. Reserve one slot in Window A (a short 2-second window).
+    const scope = uniqueScope("window-rollover");
+    const windowA = await consumeRateLimit({ scope, identifier: "id-a", maxAttempts: 5, windowSeconds: 2 });
+    if (!windowA.allowed) throw new Error("expected allowed");
+
+    // 2. Force Window A to expire.
+    await new Promise((resolve) => setTimeout(resolve, 2100));
+
+    // 3. Create/reserve a slot in a brand-new Window B (the same
+    // scope+identifier, but the window has genuinely rolled over —
+    // fresh windowStart, fresh count).
+    const windowB = await consumeRateLimit({ scope, identifier: "id-a", maxAttempts: 5, windowSeconds: 2 });
+    if (!windowB.allowed) throw new Error("expected allowed");
+    expect(windowB.windowStartMs).not.toBe(windowA.windowStartMs);
+    const rowAfterB = await prisma.securityRateLimitBucket.findFirst({ where: { scope } });
+    expect(rowAfterB?.count).toBe(1); // Window B's own fresh count
+
+    // 4. Issue the delayed release belonging to WINDOW A (its own, now-
+    // stale windowStartMs) — this must be a no-op against the CURRENT
+    // (Window B) bucket state.
+    await releaseRateLimitSlot({ scope, identifier: "id-a", windowStartMs: windowA.windowStartMs });
+    const rowAfterStaleRelease = await prisma.securityRateLimitBucket.findFirst({ where: { scope } });
+    expect(rowAfterStaleRelease?.count).toBe(1); // UNCHANGED — Window B's count was not touched
+
+    // 5. Release Window B using its OWN reservation identity — exactly
+    // one slot is released.
+    await releaseRateLimitSlot({ scope, identifier: "id-a", windowStartMs: windowB.windowStartMs });
+    const rowAfterRealRelease = await prisma.securityRateLimitBucket.findFirst({ where: { scope } });
+    expect(rowAfterRealRelease?.count).toBe(0);
   });
 });
 
@@ -237,7 +280,9 @@ describe("safeReleaseRateLimitSlot", () => {
   it("swallows an unexpected database error and never throws (best-effort)", async () => {
     const scope = uniqueScope("safe-release-fail");
     const txSpy = vi.spyOn(prisma, "$transaction").mockRejectedValueOnce(new Error("simulated infrastructure failure"));
-    await expect(safeReleaseRateLimitSlot({ scope, identifier: "id-a" })).resolves.toBeUndefined();
+    await expect(
+      safeReleaseRateLimitSlot({ scope, identifier: "id-a", windowStartMs: Date.now() }),
+    ).resolves.toBeUndefined();
     txSpy.mockRestore();
   });
 });

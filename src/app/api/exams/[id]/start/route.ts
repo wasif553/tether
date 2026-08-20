@@ -285,7 +285,7 @@ export async function POST(
         { status: 403 },
       );
     }
-    await releaseExamAccessCodeSlot(sourceIp, session.user.id, id);
+    await releaseExamAccessCodeSlot(sourceIp, session.user.id, id, reservation.windowStartMs);
   }
 
   // Exam Design Policy v1 (Part 7/8) — see docs/exam-design-policy-v1.md.

@@ -235,7 +235,11 @@ export async function resetPasswordWithToken(
   const result = await resetPasswordWithTokenCore(rawToken, newPassword);
 
   if (result === "ok") {
-    await safeReleaseRateLimitSlot({ scope: RESET_PASSWORD_SOURCE_SCOPE, identifier: sourceIp });
+    await safeReleaseRateLimitSlot({
+      scope: RESET_PASSWORD_SOURCE_SCOPE,
+      identifier: sourceIp,
+      windowStartMs: sourceReservation.windowStartMs,
+    });
   }
 
   return { outcome: result };

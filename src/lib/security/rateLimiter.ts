@@ -63,12 +63,26 @@
  *    conservative if they fail - releasing a reservation, opportunistic
  *    cleanup - remain fail-open/best-effort, since a failure there can
  *    never weaken a security boundary.
+ *
+ * Security review v3 fixed a window-rollover bug in release: a
+ * reservation taken in one fixed window, released after that window has
+ * since expired and been replaced by a brand-new one (same
+ * scope+identifier, fresh windowStart, fresh count), would decrement the
+ * NEW window's count instead of doing nothing - a stale, delayed release
+ * could silently steal budget from unrelated, later traffic. Every
+ * reservation now carries its own `windowStartMs` (the bucket row's exact
+ * `windowStart` at the moment it was reserved), and `releaseRateLimitSlot`
+ * only decrements when the bucket's CURRENT windowStart still matches -
+ * otherwise it is a no-op. No schema change: `windowStartMs` is read
+ * from the existing `windowStart` column, never stored anywhere new.
  */
 import { prisma } from "@/lib/prisma";
 import { hashRateLimitIdentifier } from "./rateLimitKey";
 import { RATE_LIMIT_BUCKET_STALE_AFTER_SECONDS } from "./rateLimitScopes";
 
-export type RateLimitResult = { allowed: true } | { allowed: false; retryAfterSeconds: number };
+export type RateLimitResult =
+  | { allowed: true; windowStartMs: number }
+  | { allowed: false; retryAfterSeconds: number };
 
 type RateLimitParams = {
   scope: string;
@@ -113,6 +127,14 @@ const RATE_LIMIT_TRANSACTION_OPTIONS = { maxWait: 15_000, timeout: 15_000 };
  * bucket's final count after any burst is bounded by maxAttempts, never
  * by N.
  *
+ * The returned `windowStartMs` on an allowed result is the EXACT
+ * `windowStart` of the bucket row this reservation landed in (a fresh
+ * value for a new/expired window, the existing row's value otherwise).
+ * Callers that intend to release this reservation later must carry this
+ * value forward and pass it to releaseRateLimitSlot - see that
+ * function's own doc comment for why (security review v3's
+ * window-rollover fix).
+ *
  * Throws on a genuine database/infrastructure error - this function
  * never silently reports "allowed" on failure. See reserveRateLimitSlot
  * below for the fail-closed-with-logging policy used at actual call
@@ -137,7 +159,7 @@ export async function consumeRateLimit(params: RateLimitParams): Promise<RateLim
         create: { scope: params.scope, keyHash, windowStart: now, count: 1 },
         update: { windowStart: now, count: 1 },
       });
-      return { allowed: true };
+      return { allowed: true, windowStartMs: now.getTime() };
     }
 
     if (bucket.count >= params.maxAttempts) {
@@ -152,7 +174,7 @@ export async function consumeRateLimit(params: RateLimitParams): Promise<RateLim
       where: { scope_keyHash: { scope: params.scope, keyHash } },
       data: { count: { increment: 1 } },
     });
-    return { allowed: true };
+    return { allowed: true, windowStartMs: bucket.windowStart.getTime() };
   }, RATE_LIMIT_TRANSACTION_OPTIONS);
 }
 
@@ -171,11 +193,22 @@ export async function consumeRateLimit(params: RateLimitParams): Promise<RateLim
  * always safe: it can only ever return budget this ONE resolved request
  * itself reserved.
  *
+ * Security review v3 (window-rollover fix): `windowStartMs` MUST be the
+ * exact value returned by the consumeRateLimit/reserveRateLimitSlot call
+ * this release corresponds to. Before decrementing, this function
+ * re-checks that the bucket's CURRENT windowStart still equals
+ * `windowStartMs` - if the window has since expired and been replaced by
+ * a brand-new one (fresh windowStart, fresh count, same scope+identifier),
+ * this is a no-op. Without this check, a delayed release belonging to an
+ * OLD, already-expired window would incorrectly decrement a NEWER
+ * window's count - silently handing budget to unrelated, later traffic
+ * that never earned it.
+ *
  * Never throws on a missing/already-empty bucket - releasing a
  * reservation that (for whatever reason) is no longer there is a no-op,
  * not an error.
  */
-export async function releaseRateLimitSlot(params: { scope: string; identifier: string }): Promise<void> {
+export async function releaseRateLimitSlot(params: { scope: string; identifier: string; windowStartMs: number }): Promise<void> {
   const keyHash = buildKeyHash(params.scope, params.identifier);
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${params.scope}), hashtext(${keyHash}))`;
@@ -183,6 +216,7 @@ export async function releaseRateLimitSlot(params: { scope: string; identifier: 
       where: { scope_keyHash: { scope: params.scope, keyHash } },
     });
     if (!bucket || bucket.count <= 0) return;
+    if (bucket.windowStart.getTime() !== params.windowStartMs) return; // a different (newer) window now owns this bucket - never touch it
     await tx.securityRateLimitBucket.update({
       where: { scope_keyHash: { scope: params.scope, keyHash } },
       data: { count: { decrement: 1 } },
@@ -207,7 +241,7 @@ export async function resetRateLimitBucket(params: { scope: string; identifier: 
 }
 
 export type RateLimitReservation =
-  | { status: "reserved" }
+  | { status: "reserved"; windowStartMs: number }
   | { status: "blocked"; retryAfterSeconds: number }
   | { status: "infrastructure_error" };
 
@@ -230,7 +264,9 @@ export async function reserveRateLimitSlot(params: RateLimitParams): Promise<Rat
   await maybeRunOpportunisticCleanup();
   try {
     const result = await consumeRateLimit(params);
-    return result.allowed ? { status: "reserved" } : { status: "blocked", retryAfterSeconds: result.retryAfterSeconds };
+    return result.allowed
+      ? { status: "reserved", windowStartMs: result.windowStartMs }
+      : { status: "blocked", retryAfterSeconds: result.retryAfterSeconds };
   } catch (err) {
     console.error(
       "Rate limit ENFORCEMENT failed for scope \"" + params.scope + "\" - failing CLOSED",
@@ -245,7 +281,7 @@ export async function reserveRateLimitSlot(params: RateLimitParams): Promise<Rat
  * leaves the reservation consumed, which can only make enforcement MORE
  * conservative (never weaker) than intended, so this is safe to swallow.
  */
-export async function safeReleaseRateLimitSlot(params: { scope: string; identifier: string }): Promise<void> {
+export async function safeReleaseRateLimitSlot(params: { scope: string; identifier: string; windowStartMs: number }): Promise<void> {
   try {
     await releaseRateLimitSlot(params);
   } catch (err) {

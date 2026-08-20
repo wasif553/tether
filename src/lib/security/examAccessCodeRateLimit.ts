@@ -23,12 +23,17 @@
  *    network.
  * 2. Reserve/release replaced the first pass's peek-then-consume-on-
  *    invalid pattern (a concurrent-burst bypass — see rateLimiter.ts's
- *    module doc comment). Callers must: reserve BEFORE the bcrypt
- *    comparison; on `blocked`, return 429 without comparing anything; on
- *    `infrastructure_error`, return a generic 503 without comparing
- *    anything; on `reserved`, compare, then release on a correct code
- *    (before continuing into the rest of exam start) — never release on
- *    a wrong code.
+ *    module doc comment).
+ *
+ * Security review v3: `releaseExamAccessCodeSlot` now requires the exact
+ * `windowStartMs` the reservation returned, so a delayed release can
+ * never accidentally decrement a newer window's count (see
+ * rateLimiter.ts's `releaseRateLimitSlot` doc comment). No
+ * storage-cardinality restructuring was needed here — the calling route
+ * (POST /api/exams/[id]/start) already looks up and confirms the exam
+ * exists (returning 404 otherwise) well before reaching the
+ * accessCodeRequired block this reserves around, so a reservation is
+ * already only ever taken against a real, existing exam.
  */
 import { reserveRateLimitSlot, safeReleaseRateLimitSlot, type RateLimitReservation } from "./rateLimiter";
 import {
@@ -55,10 +60,16 @@ export async function reserveExamAccessCodeSlot(
   });
 }
 
-/** Call only when the supplied access code was CORRECT — never on a wrong code. */
-export async function releaseExamAccessCodeSlot(sourceIp: string, studentId: string, examId: string): Promise<void> {
+/** Call only when the supplied access code was CORRECT — `windowStartMs` must be the exact value the matching reservation returned. */
+export async function releaseExamAccessCodeSlot(
+  sourceIp: string,
+  studentId: string,
+  examId: string,
+  windowStartMs: number,
+): Promise<void> {
   await safeReleaseRateLimitSlot({
     scope: EXAM_ACCESS_CODE_SOURCE_SCOPE,
     identifier: identifierFor(sourceIp, studentId, examId),
+    windowStartMs,
   });
 }

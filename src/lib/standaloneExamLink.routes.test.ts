@@ -428,6 +428,43 @@ describe("Lecturer invite generation + student acceptance", () => {
     expect(invalidCount + rateLimitedCount).toBe(STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS + 15);
   });
 
+  it("Auth and Token Abuse Protection v1 (security review v3): arbitrary/nonexistent examIds do NOT each create a SecurityRateLimitBucket row (storage-cardinality fix)", async () => {
+    const { STANDALONE_INVITE_SOURCE_SCOPE } = await import("@/lib/security/rateLimitScopes");
+    mockAuth.mockResolvedValue(sessionFor(studentInA, "STUDENT", instA));
+    const { POST: accept } = await import("@/app/api/exams/[id]/standalone-invite/accept/route");
+    const sharedSource = randomTestSource();
+
+    const before = await prisma.securityRateLimitBucket.count({ where: { scope: STANDALONE_INVITE_SOURCE_SCOPE } });
+
+    // Many DIFFERENT, entirely made-up exam ids from one authenticated
+    // student — eligibility (exam exists, published, STANDALONE, invite
+    // enabled, has a tokenHash) is now confirmed BEFORE any reservation,
+    // so none of these ever touch the rate-limit table at all.
+    for (let i = 0; i < 20; i++) {
+      const arbitraryExamId = `nonexistent-exam-${stamp}-${i}-${Math.random().toString(36).slice(2)}`;
+      const res = await accept(jsonRequest({ token: "whatever" }, "POST", { "X-Forwarded-For": sharedSource }), {
+        params: Promise.resolve({ id: arbitraryExamId }),
+      });
+      expect((await res.json()).reason).toBe("invalid_invite");
+    }
+
+    const after = await prisma.securityRateLimitBucket.count({ where: { scope: STANDALONE_INVITE_SOURCE_SCOPE } });
+    expect(after).toBe(before); // zero new rows from 20 requests against arbitrary nonexistent exam ids
+
+    // Contrast: guessing against a REAL, eligible exam's token still
+    // rate-limits normally (creates exactly one row and counts up).
+    const realExam = await createExam({
+      institutionId: instA, createdById: lecturerA, assignmentMode: "STANDALONE",
+      standaloneInviteEnabled: true, standaloneInviteTokenHash: hashStandaloneInviteToken("cardinality-real-token"),
+    });
+    const realGuess = await accept(jsonRequest({ token: "wrong-guess" }, "POST", { "X-Forwarded-For": sharedSource }), {
+      params: Promise.resolve({ id: realExam.id }),
+    });
+    expect((await realGuess.json()).reason).toBe("invalid_invite");
+    const afterRealGuess = await prisma.securityRateLimitBucket.count({ where: { scope: STANDALONE_INVITE_SOURCE_SCOPE } });
+    expect(afterRealGuess).toBe(before + 1);
+  });
+
   it("Auth and Token Abuse Protection v1: the same source can still use a DIFFERENT exam's legitimate invite after being limited on another exam (campus-NAT safety)", async () => {
     const { STANDALONE_INVITE_SOURCE_MAX_ATTEMPTS } = await import("@/lib/security/rateLimitScopes");
     const guessedExam = await createExam({

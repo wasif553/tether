@@ -21,8 +21,10 @@ import bcrypt from "bcryptjs";
 
 const { prisma } = await import("../prisma");
 const { attemptCredentialsLogin } = await import("./loginAttempt");
+const { hashRateLimitIdentifier } = await import("./rateLimitKey");
 const {
   LOGIN_SOURCE_ACCOUNT_MAX_ATTEMPTS,
+  LOGIN_SOURCE_FAILURES_SCOPE,
   LOGIN_SOURCE_FAILURES_MAX_ATTEMPTS,
 } = await import("./rateLimitScopes");
 
@@ -170,6 +172,54 @@ describe("attemptCredentialsLogin", () => {
       sourceIp: source,
     });
     expect(bStillBlockedWithCorrectPassword).toBeNull();
+  });
+
+  it("security review v3: repeated attempts against an ALREADY-BLOCKED account do not leak reservations into the source-wide budget", async () => {
+    const user = await createUser();
+    const source = uniqueSource("partial-reservation-leak");
+
+    // Exhaust the 5-attempt source+account budget with 5 GENUINE
+    // verification attempts — these are the only ones that should ever
+    // count against the source-wide bucket.
+    for (let i = 0; i < LOGIN_SOURCE_ACCOUNT_MAX_ATTEMPTS; i++) {
+      const res = await attemptCredentialsLogin({ email: user.email, password: "WrongPassword!", sourceIp: source });
+      expect(res).toBeNull();
+    }
+
+    // Continue sending many additional attempts against that SAME
+    // already-blocked account. Each of these reserves a source-wide slot
+    // FIRST, then finds the account reservation blocked, and returns
+    // null WITHOUT ever running bcrypt — the bug this test targets is
+    // whether that source-wide reservation is correctly given back.
+    const additionalAttempts = 25;
+    for (let i = 0; i < additionalAttempts; i++) {
+      const res = await attemptCredentialsLogin({ email: user.email, password: "WrongPassword!", sourceIp: source });
+      expect(res).toBeNull();
+    }
+
+    // The source-wide bucket's count must still equal exactly the 5
+    // GENUINE failures above — none of the 25 rejected-before-
+    // verification attempts against the blocked account may have leaked
+    // into it. Without the fix, this would read 5 + 25 = 30. Looked up
+    // precisely by re-deriving this source's own keyHash (the exact same
+    // formula rateLimiter.ts's buildKeyHash uses), not by "most recent
+    // row", since many other sources' rows exist elsewhere in this file.
+    const keyHash = hashRateLimitIdentifier(`${LOGIN_SOURCE_FAILURES_SCOPE}:${source}`);
+    const sourceWideRow = await prisma.securityRateLimitBucket.findUnique({
+      where: { scope_keyHash: { scope: LOGIN_SOURCE_FAILURES_SCOPE, keyHash } },
+    });
+    expect(sourceWideRow?.count).toBe(LOGIN_SOURCE_ACCOUNT_MAX_ATTEMPTS);
+
+    // A DIFFERENT, valid account from this exact same source can still
+    // log in — the wasted traffic against the blocked account never
+    // consumed budget that would otherwise protect this account.
+    const otherUser = await createUser();
+    const otherResult = await attemptCredentialsLogin({
+      email: otherUser.email,
+      password: "CorrectHorseBattery9!",
+      sourceIp: source,
+    });
+    expect(otherResult?.id).toBe(otherUser.id);
   });
 
   it("concurrent wrong-password attempts cannot bypass the limit (Promise.all)", async () => {

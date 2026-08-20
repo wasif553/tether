@@ -58,10 +58,12 @@ describe("exam access-code rate limit", () => {
 
   it("a released reservation frees exactly one slot, not the whole bucket", async () => {
     const source = uniqueSource("release");
+    let last: Awaited<ReturnType<typeof reserveExamAccessCodeSlot>> | undefined;
     for (let i = 0; i < EXAM_ACCESS_CODE_SOURCE_MAX_ATTEMPTS; i++) {
-      await reserveExamAccessCodeSlot(source, "student-release", "exam-release");
+      last = await reserveExamAccessCodeSlot(source, "student-release", "exam-release");
     }
-    await releaseExamAccessCodeSlot(source, "student-release", "exam-release");
+    if (last?.status !== "reserved") throw new Error("expected reserved");
+    await releaseExamAccessCodeSlot(source, "student-release", "exam-release", last.windowStartMs);
     const afterOneRelease = await reserveExamAccessCodeSlot(source, "student-release", "exam-release");
     expect(afterOneRelease.status).toBe("reserved"); // exactly one slot freed, one more fits
     const blockedAgain = await reserveExamAccessCodeSlot(source, "student-release", "exam-release");

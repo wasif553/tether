@@ -10,6 +10,16 @@
  * deliberately more specific than Standalone Exam Link v1's blanket
  * denial, since here the invitation is bound to an account, not merely
  * to an exam).
+ *
+ * Security review v3 — storage-cardinality fix: the rate-limit
+ * reservation now happens ONLY immediately before actual tokenHash
+ * verification, not up front. `invitationId` comes straight from the
+ * URL, so reserving before the invitation lookup would let anyone create
+ * a SecurityRateLimitBucket row per arbitrary/nonexistent id they type,
+ * with no bound tied to a real resource. Every other existing, non-
+ * secret-guessing outcome (invitation absent, wrong_account,
+ * already_accepted, revoked, expired) is resolved BEFORE any reservation
+ * is attempted and never creates one.
  */
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
@@ -29,6 +39,32 @@ export async function GET(
 
   const { invitationId, token } = await params;
   const sourceIp = resolveTrustedRequestSource(req);
+
+  const invitation = await prisma.courseEnrollmentInvitation.findUnique({
+    where: { id: invitationId },
+    include: { course: { include: { institution: { select: { name: true } } } } },
+  });
+
+  if (!invitation) {
+    // Unknown invitation id — no rate-limit reservation is ever attempted
+    // for an id that doesn't correspond to a real row.
+    return NextResponse.json({ ok: false, reason: "invalid" });
+  }
+  if (invitation.studentId !== session.user.id) {
+    return NextResponse.json({ ok: false, reason: "wrong_account" });
+  }
+  if (invitation.acceptedAt) {
+    return NextResponse.json({ ok: false, reason: "already_accepted" });
+  }
+  if (invitation.revokedAt) {
+    return NextResponse.json({ ok: false, reason: "revoked" });
+  }
+  if (invitation.expiresAt < new Date()) {
+    return NextResponse.json({ ok: false, reason: "expired" });
+  }
+
+  // Only now — genuinely about to verify a real invitation's token — is a
+  // contextual slot reserved.
   const reservation = await reserveCourseInvitationSlot(sourceIp, invitationId);
   if (reservation.status === "blocked") {
     return NextResponse.json(
@@ -37,43 +73,17 @@ export async function GET(
     );
   }
   if (reservation.status === "infrastructure_error") {
-    // Security review v2 — fail closed without ever looking up the
-    // invitation or verifying its token, so a limiter outage can never
-    // become an existence oracle.
+    // Fail closed without ever verifying the token, so a limiter outage
+    // can never become an existence/validity oracle.
     return NextResponse.json({ ok: false, reason: "unavailable" }, { status: 503 });
   }
 
-  const invitation = await prisma.courseEnrollmentInvitation.findUnique({
-    where: { id: invitationId },
-    include: { course: { include: { institution: { select: { name: true } } } } },
-  });
-
-  if (!invitation) {
-    // Genuinely invalid — reservation stays consumed.
-    return NextResponse.json({ ok: false, reason: "invalid" });
-  }
-  if (invitation.studentId !== session.user.id) {
-    await releaseCourseInvitationSlot(sourceIp, invitationId);
-    return NextResponse.json({ ok: false, reason: "wrong_account" });
-  }
-  if (invitation.acceptedAt) {
-    await releaseCourseInvitationSlot(sourceIp, invitationId);
-    return NextResponse.json({ ok: false, reason: "already_accepted" });
-  }
-  if (invitation.revokedAt) {
-    await releaseCourseInvitationSlot(sourceIp, invitationId);
-    return NextResponse.json({ ok: false, reason: "revoked" });
-  }
-  if (invitation.expiresAt < new Date()) {
-    await releaseCourseInvitationSlot(sourceIp, invitationId);
-    return NextResponse.json({ ok: false, reason: "expired" });
-  }
   if (!invitation.tokenHash || !verifyCourseInvitationToken(token, invitation.tokenHash)) {
     // Genuinely invalid token — reservation stays consumed.
     return NextResponse.json({ ok: false, reason: "invalid" });
   }
 
-  await releaseCourseInvitationSlot(sourceIp, invitationId);
+  await releaseCourseInvitationSlot(sourceIp, invitationId, reservation.windowStartMs);
 
   // Only the minimum useful invitation information — no institution id,
   // no internal fields.

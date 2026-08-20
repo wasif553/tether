@@ -128,6 +128,50 @@ substantial concurrent cohort of legitimate logins is not falsely
 rejected. Forgot-password and reset-password thresholds were also raised
 (10 → 30) — see their own scope comments.
 
+### Security review v3 changes
+
+A further independent review of v2 found three more correctness defects,
+fixed without any schema change:
+
+1. **Window-rollover release bug.** A reservation taken in fixed Window A,
+   released after Window A had already expired and been replaced by a
+   brand-new Window B (same scope+identifier, fresh `windowStart`, fresh
+   `count`), would decrement WINDOW B's count instead of doing nothing —
+   a delayed release could silently hand budget to unrelated, later
+   traffic. Fixed by having every reservation carry its own
+   `windowStartMs` (the bucket row's exact `windowStart` at the moment it
+   was reserved, read from the existing `windowStart` column — no new
+   column), and having `releaseRateLimitSlot` only decrement when the
+   bucket's CURRENT `windowStart` still matches. Every call site
+   (login, reset-password, course-invitation, standalone-invite,
+   exam-access-code) now threads this identity from reservation through
+   to release.
+2. **Login partial-reservation leak.** `attemptCredentialsLogin` reserves
+   the source-wide bucket, then the source+account bucket. If the
+   source-wide reservation succeeded but the account-specific one was
+   `blocked` or `infrastructure_error`, the source-wide reservation was
+   left dangling — never released (it wasn't a "confirmed failure";
+   verification never ran) and never reclaimed. Repeated traffic against
+   one already-blocked account could therefore burn the campus-wide
+   200-attempt safety net for free. Fixed: whenever the account
+   reservation does not succeed, the source-wide reservation this request
+   itself just took is released (its own one slot, via its own window
+   identity) before returning `null` — never touching a genuine prior
+   failure recorded by a different request.
+3. **Storage-cardinality via attacker-controlled resource ids.**
+   Course-invitation and standalone-invite reserved a contextual slot
+   BEFORE confirming the URL-supplied `invitationId`/`examId` corresponded
+   to a real, eligible resource — an attacker could create one
+   `SecurityRateLimitBucket` row per arbitrary/nonexistent id simply by
+   requesting it. Fixed by moving the reservation to immediately before
+   actual token verification: every existing, non-secret-guessing outcome
+   (invitation/exam absent, wrong_account, already_accepted, revoked,
+   expired, unpublished, wrong assignment mode, invite disabled, missing
+   tokenHash) is now resolved first and never reserves a slot. (The
+   exam-access-code surface needed no equivalent change — its calling
+   route already confirms the exam exists, returning 404 otherwise, well
+   before reaching the access-code block.)
+
 ## Per-surface behavior
 
 ### Login (`src/auth.ts`, `src/lib/security/loginAttempt.ts`)
@@ -148,10 +192,19 @@ from its routes. Flow:
    timing characteristic).
 4. Failure (no user OR wrong password) → both reservations stay
    consumed → `null`.
-5. Success → release exactly ONE slot from EACH bucket (never a bulk
-   reset) — this can never erase failures recorded against OTHER
-   accounts sharing the source-wide bucket, or concurrent guesses in
-   flight against this SAME account from another request.
+5. Success → release exactly ONE slot from EACH bucket, using each
+   reservation's own `windowStartMs` (never a bulk reset, never a release
+   that could land in the wrong window) — this can never erase failures
+   recorded against OTHER accounts sharing the source-wide bucket, or
+   concurrent guesses in flight against this SAME account from another
+   request.
+
+**Security review v3:** if step 2 (the account-specific reservation) is
+`blocked` or `infrastructure_error`, step 1's source-wide reservation —
+which this exact request just took — is released before returning `null`,
+using its own `windowStartMs`. Without this, repeated traffic against an
+already-blocked account would leak reservations into the source-wide
+bucket for free, without verification ever running.
 
 A rate-limited attempt returns exactly the same `null` NextAuth already
 returned for a wrong password — no new "too many attempts"/"account
@@ -193,26 +246,41 @@ the existing, unchanged `400 { ok: false, error: "invalid" }`.
 source+invitationId, never a global quota, so many students behind one
 NAT using their own different invitations stay independent (no
 additional per-student key component is needed — `invitationId` is
-already bound to one specific student at creation). Both routes reserve
-atomically before doing any invitation lookup (429 + Retry-After if
-blocked; a generic `503` on an infrastructure error, without ever looking
-up the invitation), and release the reservation for every outcome except
-the collapsed `"invalid"` reason (unknown invitation or bad token) —
-including `wrong_account`/`already_accepted`/`revoked`/`expired`, which
-are existing, legitimate denials this feature does not start counting as
+already bound to one specific student at creation). **Security review
+v3:** both routes now resolve every existing, non-secret-guessing outcome
+FIRST — unknown invitation, `wrong_account`, `already_accepted`,
+`revoked`, `expired` — via a cheap (non-authoritative) pre-check, and
+reserve a slot ONLY once genuinely about to verify a real, eligible
+invitation's token (429 + Retry-After if blocked; a generic `503` on an
+infrastructure error, without ever verifying the token). The accept
+route's transaction remains the sole AUTHORITATIVE, race-safe re-check —
+the pre-check only gates the reservation, it never replaces the
+transaction. The reservation is released (using its own `windowStartMs`)
+for every transaction outcome except the collapsed `"invalid"` reason
+(unknown invitation or bad token) — including
+`wrong_account`/`already_accepted`/`revoked`/`expired`/`different_institution`,
+which remain existing, legitimate denials this feature does not count as
 abuse. Token verification, single-use/acceptance semantics, and the
-cross-institution race protection are completely unchanged.
+cross-institution race protection are completely unchanged. Arbitrary or
+nonexistent `invitationId`s from the URL can no longer create a
+`SecurityRateLimitBucket` row at all.
 
 ### Standalone Exam Link (`/api/exams/[id]/standalone-invite/accept`)
 
 `src/lib/security/standaloneInviteRateLimit.ts` — keyed on
 source+**authenticated studentId**+examId (the student id always comes
-from `session.user.id`, never request JSON/query). Reserved atomically
-before any exam/token lookup (429 + Retry-After if blocked; a generic
-`503` on an infrastructure error, without ever verifying the token);
-released only on a genuine accept — every `invalidInvite()` outcome
-(bad/missing token, exam not published, not STANDALONE, invite disabled)
-leaves it consumed. Entitlement/`ExamAssignment` semantics unchanged.
+from `session.user.id`, never request JSON/query). **Security review v3:**
+every existing eligibility check (exam missing, unpublished, wrong
+assignment mode, invite disabled, missing tokenHash) is now resolved
+FIRST, and a slot is reserved ONLY once the exam id is confirmed real and
+eligible, immediately before verifying the token (429 + Retry-After if
+blocked; a generic `503` on an infrastructure error, without ever
+verifying the token); released (using its own `windowStartMs`) only on a
+genuine accept — every `invalidInvite()` outcome (bad/missing token, exam
+not published, not STANDALONE, invite disabled) leaves it consumed.
+Entitlement/`ExamAssignment` semantics unchanged. Arbitrary or
+nonexistent exam ids from the URL can no longer create a
+`SecurityRateLimitBucket` row at all.
 
 ### Exam access code (`/api/exams/[id]/start`)
 
@@ -290,21 +358,32 @@ caught, logged, and swallowed (see "Failure-mode policy" above).
 
 ## Storage cardinality
 
-Row growth for this table is bounded by the combination of: (1)
-opportunistic cleanup above, now actually wired into production traffic;
-(2) every scope's own `maxAttempts` ceiling — a single source can create
-at most `maxAttempts` worth of NEW (scope, identifier) rows per window
-before its own bucket(s) start blocking further attempts from that
-source; and (3) for the resource-scoped surfaces (course invitation,
-standalone invite, exam access code), the resource-identifier component
-of the key (`invitationId`/`examId`) is a real, DB-backed entity id, not
-an attacker-controlled arbitrary string — an attacker cannot multiply
-row count by inventing new identifiers, only by targeting real existing
-resources, each of which is itself independently capped by its own
-bucket's `maxAttempts`. No additional subsystem (Redis/Upstash, a
-separate quota table, etc.) was introduced to bound this further — the
-existing per-scope thresholds plus cleanup are sufficient for this
-pass's scale.
+**Security review v3 correction:** the first two passes' reasoning here
+was incomplete — `invitationId`/`examId` ARE attacker-controlled URL
+input, and both course-invitation and standalone-invite reserved a slot
+BEFORE confirming those ids corresponded to real, eligible resources,
+letting an attacker create one row per arbitrary/nonexistent id simply by
+requesting it. Fixed (see "Security review v3 changes" above): the
+reservation now happens only immediately before actual token
+verification, after every existing eligibility/ownership check has
+already resolved. Exam-access-code needed no change — its calling route
+already confirms the exam exists before reaching the reservation point.
+
+Row growth is now bounded by the combination of: (1) opportunistic
+cleanup above, actually wired into production traffic; (2) every scope's
+own `maxAttempts` ceiling — a single source can create at most
+`maxAttempts` worth of NEW (scope, identifier) rows per window before its
+own bucket(s) start blocking further attempts from that source; and (3)
+for the resource-scoped surfaces, a reservation is now only ever taken
+against a resource CONFIRMED to exist and be eligible, so an attacker
+cannot multiply row count by inventing arbitrary identifiers — only by
+targeting real existing resources, each of which is itself independently
+capped by its own bucket's `maxAttempts`. Verified directly by
+`courseInvitationAcceptance.routes.test.ts` and
+`standaloneExamLink.routes.test.ts` (many arbitrary nonexistent ids
+create zero rows; a real resource still creates exactly one and rate-
+limits normally). No additional subsystem (Redis/Upstash, a separate
+quota table, etc.) was introduced.
 
 ## Privacy / logging
 
@@ -333,7 +412,9 @@ row.
   v2) `releaseRateLimitSlot`'s exactly-one/never-underflow/never-erases-
   concurrent-reservations behavior, `reserveRateLimitSlot`'s fail-closed
   `infrastructure_error` path and its opportunistic-cleanup wiring, and
-  the cleanup race-condition fix.
+  the cleanup race-condition fix; plus (security review v3) the
+  window-rollover regression: a delayed release belonging to an expired
+  window must never decrement a newer window's count.
 - `src/lib/security/rateLimitKey.test.ts` — HMAC opacity (same input →
   same hash; different scope → different hash; not a plain SHA-256 of
   the raw identifier).
@@ -344,7 +425,9 @@ row.
   enumeration signal, plus (security review v2) a concurrent spray burst
   across many distinct accounts cannot exceed the source-wide threshold,
   a substantial legitimate concurrent login cohort is never falsely
-  rejected, and a rate-limiter infrastructure failure fails closed.
+  rejected, and a rate-limiter infrastructure failure fails closed; plus
+  (security review v3) repeated attempts against an already-blocked
+  account must not leak reservations into the source-wide budget.
 - `src/lib/security/examAccessCodeRateLimit.test.ts` — the dedicated
   reserve/release helper (see its own doc comment for why this surface is
   tested at the helper boundary rather than through the large, protected
@@ -359,8 +442,13 @@ row.
 - `src/lib/courseInvitationAcceptance.routes.test.ts` (extended) —
   invitation-scoped guessing protection and campus-NAT independence
   across different invitations, plus (security review v2) a concurrent
-  invalid-guess burst.
+  invalid-guess burst; plus (security review v3) many arbitrary
+  nonexistent invitation ids create zero rate-limit rows, while a real
+  invitation still creates exactly one and rate-limits normally.
 - `src/lib/standaloneExamLink.routes.test.ts` (extended) — invite-token
   guessing protection and independence across different exams, plus
   (security review v2) per-student independence on the SAME exam+source
-  and a concurrent invalid-guess burst by one student.
+  and a concurrent invalid-guess burst by one student; plus (security
+  review v3) many arbitrary nonexistent exam ids create zero rate-limit
+  rows, while a real exam still creates exactly one and rate-limits
+  normally.
