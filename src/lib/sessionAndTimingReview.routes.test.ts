@@ -8,7 +8,7 @@
  * timeAnomalyDetection.test.ts, and combinedReviewRecommendation.test.ts,
  * with no DB dependency at all.
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import bcrypt from "bcryptjs";
 
 const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
@@ -17,6 +17,7 @@ vi.mock("@/auth", () => ({ auth: mockAuth }));
 const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
 const { BROWSER_SESSION_COOKIE_NAME, DEVICE_TOKEN_COOKIE_NAME } = await import("./sessionBinding");
+const { recordExamAttemptHeartbeat } = await import("./examAttemptSessionRunner");
 const heartbeatRoute = await import("../app/api/submissions/[id]/session-heartbeat/route");
 const sessionReviewRoute = await import("../app/api/lecturer/submissions/[id]/session-review/route");
 const timingAnalysisRoute = await import("../app/api/lecturer/submissions/[id]/timing-analysis/route");
@@ -189,8 +190,78 @@ describe("Concurrent session detection", () => {
   });
 });
 
+describe("Session binding fail-closed — cryptography audit v1, P1 fix", () => {
+  const ENV_KEY = "EXAM_BINDING_HMAC_SECRET";
+  let originalSecret: string | undefined;
+
+  beforeEach(() => {
+    originalSecret = process.env[ENV_KEY];
+  });
+
+  afterEach(() => {
+    if (originalSecret === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = originalSecret;
+  });
+
+  it("6. missing EXAM_BINDING_HMAC_SECRET: the heartbeat route still succeeds (exam-taking flow is never blocked) but creates no ExamAttemptSession row", async () => {
+    const { submission } = await createExamWithSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    delete process.env[ENV_KEY];
+
+    const res = await heartbeatRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(JSON.stringify(body)).not.toMatch(/hash/i);
+    expect(JSON.stringify(body)).not.toContain(ENV_KEY);
+
+    const sessions = await prisma.examAttemptSession.findMany({ where: { submissionId: submission.id } });
+    expect(sessions.length).toBe(0);
+    const signals = await prisma.sessionIntegritySignal.findMany({ where: { submissionId: submission.id } });
+    expect(signals.length).toBe(0);
+  });
+
+  it("7. missing EXAM_BINDING_HMAC_SECRET: recordExamAttemptHeartbeat reports bindingAvailable:false and a null sessionId — never a fabricated or insecurely-bound session", async () => {
+    const { submission } = await createExamWithSubmission();
+    delete process.env[ENV_KEY];
+
+    const result = await recordExamAttemptHeartbeat(jsonRequest("POST", {}), submission.id, studentA.id, {});
+    expect(result.bindingAvailable).toBe(false);
+    expect(result.sessionId).toBeNull();
+    // Cookie issuance is independent of the secret and must keep working.
+    expect(result.browserSessionToken).toBeTruthy();
+    expect(result.deviceToken).toBeTruthy();
+
+    const sessions = await prisma.examAttemptSession.findMany({ where: { submissionId: submission.id } });
+    expect(sessions.length).toBe(0);
+  });
+
+  it("8. an empty-string EXAM_BINDING_HMAC_SECRET (malformed, not merely unset) also fails closed the same way", async () => {
+    const { submission } = await createExamWithSubmission();
+    process.env[ENV_KEY] = "";
+
+    const result = await recordExamAttemptHeartbeat(jsonRequest("POST", {}), submission.id, studentA.id, {});
+    expect(result.bindingAvailable).toBe(false);
+    expect(result.sessionId).toBeNull();
+
+    const sessions = await prisma.examAttemptSession.findMany({ where: { submissionId: submission.id } });
+    expect(sessions.length).toBe(0);
+  });
+
+  it("9. once a valid secret is restored, session binding resumes normally — the fail-closed path is not a permanent break", async () => {
+    const { submission } = await createExamWithSubmission();
+    process.env[ENV_KEY] = "a-valid-synthetic-test-secret-for-restore-check";
+
+    const result = await recordExamAttemptHeartbeat(jsonRequest("POST", {}), submission.id, studentA.id, {});
+    expect(result.bindingAvailable).toBe(true);
+    expect(result.sessionId).toBeTruthy();
+
+    const sessions = await prisma.examAttemptSession.findMany({ where: { submissionId: submission.id } });
+    expect(sessions.length).toBe(1);
+  });
+});
+
 describe("GET /api/lecturer/submissions/[id]/session-review — access control and safe DTOs", () => {
-  it("6. authorised lecturer can read results", async () => {
+  it("10. authorised lecturer can read results", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     await heartbeatRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
@@ -202,28 +273,28 @@ describe("GET /api/lecturer/submissions/[id]/session-review — access control a
     expect(body.sessions.length).toBeGreaterThan(0);
   });
 
-  it("7. an unrelated lecturer at the same institution cannot read results", async () => {
+  it("11. an unrelated lecturer at the same institution cannot read results", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(otherLecturerSameInst.id, "LECTURER", instA));
     const res = await sessionReviewRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect(res.status).toBe(404);
   });
 
-  it("8. a cross-institution lecturer cannot read results", async () => {
+  it("12. a cross-institution lecturer cannot read results", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(lecturerB.id, "LECTURER", instB));
     const res = await sessionReviewRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect([403, 404]).toContain(res.status);
   });
 
-  it("9. a student cannot read session-review results", async () => {
+  it("13. a student cannot read session-review results", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     const res = await sessionReviewRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     expect(res.status).toBe(401);
   });
 
-  it("10. never returns raw IP/token/user-agent/fingerprint hashes in the session DTO", async () => {
+  it("14. never returns raw IP/token/user-agent/fingerprint hashes in the session DTO", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     await heartbeatRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
@@ -241,7 +312,7 @@ describe("GET /api/lecturer/submissions/[id]/session-review — access control a
 });
 
 describe("Answer-save telemetry", () => {
-  it("11. an answer save creates coarse activity telemetry without the full response text", async () => {
+  it("15. an answer save creates coarse activity telemetry without the full response text", async () => {
     const { submission, question } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     const secretText = "This is my confidential exam answer about the topic in detail.";
@@ -259,7 +330,7 @@ describe("Answer-save telemetry", () => {
     expect(JSON.stringify(events)).not.toContain(secretText);
   });
 
-  it("12. answer save still succeeds even though telemetry runs fire-and-forget after the response", async () => {
+  it("16. answer save still succeeds even though telemetry runs fire-and-forget after the response", async () => {
     const { submission, question } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     const res = await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "Quick answer." }), {
@@ -272,7 +343,7 @@ describe("Answer-save telemetry", () => {
 });
 
 describe("POST/GET /api/lecturer/submissions/[id]/timing-analysis", () => {
-  it("13. authorised lecturer can run timing analysis", async () => {
+  it("17. authorised lecturer can run timing analysis", async () => {
     const { submission, question } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "An answer with enough words to be meaningful for analysis." }), {
@@ -284,7 +355,7 @@ describe("POST/GET /api/lecturer/submissions/[id]/timing-analysis", () => {
     expect(res.status).toBe(200);
   });
 
-  it("14. a student cannot run or read timing analysis", async () => {
+  it("18. a student cannot run or read timing analysis", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     const postRes = await timingAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
@@ -293,14 +364,14 @@ describe("POST/GET /api/lecturer/submissions/[id]/timing-analysis", () => {
     expect(getRes.status).toBe(401);
   });
 
-  it("15. an unrelated lecturer cannot run timing analysis", async () => {
+  it("19. an unrelated lecturer cannot run timing analysis", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(otherLecturerSameInst.id, "LECTURER", instA));
     const res = await timingAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
     expect(res.status).toBe(404);
   });
 
-  it("16. never returns the correct answer in the timing-analysis response", async () => {
+  it("20. never returns the correct answer in the timing-analysis response", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
     await timingAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
@@ -309,7 +380,7 @@ describe("POST/GET /api/lecturer/submissions/[id]/timing-analysis", () => {
     expect(JSON.stringify(body)).not.toContain("The correct model answer text");
   });
 
-  it("17. recommendation is always one of the allowed named values", async () => {
+  it("21. recommendation is always one of the allowed named values", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
     await timingAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
@@ -320,7 +391,7 @@ describe("POST/GET /api/lecturer/submissions/[id]/timing-analysis", () => {
     );
   });
 
-  it("18. timing analysis never creates an OralVerification record on its own", async () => {
+  it("22. timing analysis never creates an OralVerification record on its own", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
     await timingAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
@@ -330,7 +401,7 @@ describe("POST/GET /api/lecturer/submissions/[id]/timing-analysis", () => {
 });
 
 describe("PATCH session-signals/[signalId]/review and timing-signals/[signalId]/review", () => {
-  it("19. authorised lecturer can review a session signal, and it is audited", async () => {
+  it("23. authorised lecturer can review a session signal, and it is audited", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     await heartbeatRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
@@ -354,7 +425,7 @@ describe("PATCH session-signals/[signalId]/review and timing-signals/[signalId]/
     expect(JSON.stringify(log?.metadata ?? {})).not.toContain("Private note text");
   });
 
-  it("20. a student cannot change a session signal's review status", async () => {
+  it("24. a student cannot change a session signal's review status", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     await heartbeatRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
@@ -367,7 +438,7 @@ describe("PATCH session-signals/[signalId]/review and timing-signals/[signalId]/
     expect(res.status).toBe(401);
   });
 
-  it("21. authorised lecturer can review a timing signal, and it is audited", async () => {
+  it("25. authorised lecturer can review a timing signal, and it is audited", async () => {
     const { submission, question } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     await answersRoute.PATCH(jsonRequest("PATCH", { questionId: question.id, response: "A" }), { params: Promise.resolve({ id: submission.id }) });
@@ -394,7 +465,7 @@ describe("PATCH session-signals/[signalId]/review and timing-signals/[signalId]/
     }
   });
 
-  it("22. a cross-institution lecturer cannot review a timing signal", async () => {
+  it("26. a cross-institution lecturer cannot review a timing signal", async () => {
     const { submission } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
     await timingAnalysisRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id }) });
@@ -410,7 +481,7 @@ describe("PATCH session-signals/[signalId]/review and timing-signals/[signalId]/
 });
 
 describe("Regression: session/timing features never affect grading or submission", () => {
-  it("23. submission succeeds even with active session/telemetry rows present", async () => {
+  it("27. submission succeeds even with active session/telemetry rows present", async () => {
     const { submission, question } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     await heartbeatRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });
@@ -424,7 +495,7 @@ describe("Regression: session/timing features never affect grading or submission
     expect(["SUBMITTED", "GRADED"]).toContain(body.status);
   });
 
-  it("24. ending sessions at submit does not alter Answer.score/isCorrect", async () => {
+  it("28. ending sessions at submit does not alter Answer.score/isCorrect", async () => {
     const { submission, question } = await createExamWithSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
     await heartbeatRoute.POST(jsonRequest("POST", {}), { params: Promise.resolve({ id: submission.id }) });

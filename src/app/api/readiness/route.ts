@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getRequiredEnvStatus, getLtiEnvStatus, getAiEnvStatus, getSecureLaunchSigningEnvStatus, getEvidenceStorageEnvStatus, detectDangerousEnvCombinations } from "@/lib/env/readiness";
+import { getRequiredEnvStatus, getLtiEnvStatus, getAiEnvStatus, getSecureLaunchSigningEnvStatus, getEvidenceStorageEnvStatus, getSessionBindingEnvStatus, getNetworkEvidenceEnvStatus, detectDangerousEnvCombinations } from "@/lib/env/readiness";
 import { deploymentEnvironment } from "@/lib/secureClientAvailability";
 import { resolveTetherReleaseMetadata } from "@/lib/tetherReleaseMetadata";
 
@@ -24,6 +24,14 @@ export async function GET() {
   // unavailable," and vice versa.
   const secureLaunchSigning = getSecureLaunchSigningEnvStatus();
   const evidenceStorage = getEvidenceStorageEnvStatus();
+  // Cryptography audit v1, P1 fix — previously had no readiness
+  // visibility at all (both HMAC secrets used to silently fall back to
+  // an insecure per-process random key instead). Reported separately,
+  // same as secureLaunchSigning/evidenceStorage above, so a missing
+  // value here reads as "this specific evidence/session-binding
+  // capability is unavailable," never as "Tether itself is unavailable."
+  const sessionBinding = getSessionBindingEnvStatus();
+  const networkEvidence = getNetworkEvidenceEnvStatus();
   const releaseMetadata = resolveTetherReleaseMetadata();
   const dangerousCombinations = detectDangerousEnvCombinations(deploymentEnvironment());
 
@@ -35,6 +43,8 @@ export async function GET() {
     authSecretConfigured: required.checks.find((c) => c.key === "AUTH_SECRET")?.present ?? false,
     secureLaunchSigningConfigured: secureLaunchSigning.allPresent,
     evidenceStorageConfigured: evidenceStorage.allPresent,
+    sessionBindingConfigured: sessionBinding.allPresent,
+    networkEvidenceConfigured: networkEvidence.allPresent,
     // Non-secret, already-safe-to-expose fields only (see
     // resolveTetherReleaseMetadata's own doc comment) — never the
     // installer URL's internal validity details or anything beyond what

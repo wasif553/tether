@@ -4,7 +4,7 @@
  * report, cross-institution isolation, and CSV export.
  */
 
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from "vitest";
 import bcrypt from "bcryptjs";
 
 // ── Auth mock (must be hoisted before any imports) ───────────────────────────
@@ -135,6 +135,104 @@ describe("Network evidence — exam start (POST /api/exams/[id]/start)", () => {
     const body = await res.json();
     cleanupSubmissionIds.push(body.id);
     expect(JSON.stringify(body)).not.toContain("203.0.113.99");
+  });
+});
+
+// ── Fail-closed on missing NETWORK_EVIDENCE_SALT — cryptography audit v1, P1 fix ──
+
+describe("Network evidence — fail-closed when NETWORK_EVIDENCE_SALT is unavailable", () => {
+  const ENV_KEY = "NETWORK_EVIDENCE_SALT";
+  const originalSalt = process.env[ENV_KEY];
+
+  afterEach(() => {
+    if (originalSalt === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = originalSalt;
+  });
+
+  it("missing salt: exam-start still succeeds (201) but captures no NetworkEvidence row at all — never a row with a fabricated/insecure ipHash", async () => {
+    const exam = await createExam(`NE No Salt ${stamp}`, lecturerId, instId);
+    mockAuth.mockResolvedValue(sessionFor(studentId, "STUDENT", instId));
+    delete process.env[ENV_KEY];
+
+    const { POST } = await import("@/app/api/exams/[id]/start/route");
+    const req = new Request(`http://localhost/api/exams/${exam.id}/start`, {
+      method: "POST",
+      headers: {
+        "x-forwarded-for": "203.0.113.7",
+        "user-agent": "Mozilla/5.0 Chrome/120",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ policyAcknowledged: true }),
+    });
+    const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    const submissionId = body.id;
+    cleanupSubmissionIds.push(submissionId);
+    expect(JSON.stringify(body)).not.toContain(ENV_KEY);
+
+    await new Promise((r) => setTimeout(r, 80));
+
+    const evidence = await prisma.networkEvidence.findFirst({
+      where: { submissionId, source: "EXAM_START" },
+    });
+    expect(evidence).toBeNull();
+  });
+
+  it("empty-string salt (malformed, not merely unset) also fails closed — no NetworkEvidence row created", async () => {
+    const exam = await createExam(`NE Empty Salt ${stamp}`, lecturerId, instId);
+    mockAuth.mockResolvedValue(sessionFor(studentId, "STUDENT", instId));
+    process.env[ENV_KEY] = "";
+
+    const { POST } = await import("@/app/api/exams/[id]/start/route");
+    const req = new Request(`http://localhost/api/exams/${exam.id}/start`, {
+      method: "POST",
+      headers: {
+        "x-forwarded-for": "203.0.113.8",
+        "user-agent": "Mozilla/5.0 Chrome/120",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ policyAcknowledged: true }),
+    });
+    const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    cleanupSubmissionIds.push(body.id);
+
+    await new Promise((r) => setTimeout(r, 80));
+
+    const evidence = await prisma.networkEvidence.findFirst({
+      where: { submissionId: body.id, source: "EXAM_START" },
+    });
+    expect(evidence).toBeNull();
+  });
+
+  it("once a valid salt is restored, network evidence capture resumes normally", async () => {
+    const exam = await createExam(`NE Salt Restored ${stamp}`, lecturerId, instId);
+    mockAuth.mockResolvedValue(sessionFor(studentId, "STUDENT", instId));
+    process.env[ENV_KEY] = "a-valid-synthetic-test-salt-for-restore-check";
+
+    const { POST } = await import("@/app/api/exams/[id]/start/route");
+    const req = new Request(`http://localhost/api/exams/${exam.id}/start`, {
+      method: "POST",
+      headers: {
+        "x-forwarded-for": "203.0.113.9",
+        "user-agent": "Mozilla/5.0 Chrome/120",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ policyAcknowledged: true }),
+    });
+    const res = await POST(req, { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    cleanupSubmissionIds.push(body.id);
+
+    await new Promise((r) => setTimeout(r, 80));
+
+    const evidence = await prisma.networkEvidence.findFirst({
+      where: { submissionId: body.id, source: "EXAM_START" },
+    });
+    expect(evidence).not.toBeNull();
   });
 });
 

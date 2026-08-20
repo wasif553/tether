@@ -21,21 +21,68 @@ import { parseUserAgent } from "@/lib/networkEvidence";
 // ---------------------------------------------------------------------------
 
 /**
- * Falls back to a random per-process secret (consistent within one server
- * process, changes on restart/redeploy) exactly like NETWORK_EVIDENCE_SALT
- * in src/lib/networkEvidence.ts — intentional for the pilot. Set
- * EXAM_BINDING_HMAC_SECRET in production for hashes stable across
- * restarts. Deliberately a distinct secret from AUTH_SECRET (never reused)
- * so rotating one never invalidates the other.
+ * Cryptography audit v1, P1 fix — this module used to fall back to a
+ * random per-process secret when EXAM_BINDING_HMAC_SECRET was unset. On
+ * Vercel's stateless, multi-instance serverless deployment that fallback
+ * is far more damaging than "hashes reset on restart": browserSessionToken/
+ * deviceToken hashes (examAttemptSessionRunner.ts) are used to LOOK UP an
+ * existing ExamAttemptSession row across requests, so a per-instance
+ * random secret would make session-continuity/device-change/concurrent-
+ * session detection silently, permanently non-functional in production
+ * (every heartbeat would fail to match its own prior session) while
+ * still writing new rows and cookies as if it were working — a "best-
+ * effort, looks-fine" security-signal system that has quietly stopped
+ * detecting anything. That is exactly the "silently becomes best-effort"
+ * failure mode this fix closes. Deliberately a distinct secret from
+ * AUTH_SECRET (never reused) so rotating one never invalidates the other.
  */
-const _fallbackHmacSecret = crypto.randomBytes(32).toString("hex");
-function getHmacSecret(): string {
-  return process.env.EXAM_BINDING_HMAC_SECRET ?? _fallbackHmacSecret;
+export class ExamBindingSecretUnavailableError extends Error {
+  constructor() {
+    super("EXAM_BINDING_HMAC_SECRET is not configured or is malformed.");
+    this.name = "ExamBindingSecretUnavailableError";
+  }
 }
 
-/** HMAC-SHA256 of a value with the server secret — never an unsalted hash. */
+const ENV_EXAM_BINDING_HMAC_SECRET = "EXAM_BINDING_HMAC_SECRET";
+
+/** Presence/shape check only — never returns or logs the value. Safe to expose as a boolean via a readiness endpoint. */
+export function isExamBindingHmacConfigured(): boolean {
+  const value = process.env[ENV_EXAM_BINDING_HMAC_SECRET];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+let _loggedMissingHmacSecretOnce = false;
+
+/**
+ * Fails CLOSED: throws ExamBindingSecretUnavailableError — never a
+ * fallback/generated/hardcoded secret — when the configured value is
+ * missing, undefined, empty, or whitespace-only. Logs once per server
+ * process (not per call — this is invoked on every ~20-30s heartbeat, so
+ * per-call logging would flood production logs) with a sanitized
+ * message; never the secret name's value or any request data.
+ */
+function resolveHmacSecret(): string {
+  const value = process.env[ENV_EXAM_BINDING_HMAC_SECRET];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    if (!_loggedMissingHmacSecretOnce) {
+      _loggedMissingHmacSecretOnce = true;
+      console.error("Required signing configuration unavailable: exam session-binding HMAC secret is not configured.");
+    }
+    throw new ExamBindingSecretUnavailableError();
+  }
+  return value;
+}
+
+/**
+ * HMAC-SHA256 of a value with the server secret — never an unsalted
+ * hash. Throws ExamBindingSecretUnavailableError (never silently
+ * substitutes a fallback key) if the secret is unavailable — callers
+ * that can tolerate this capability being temporarily unavailable
+ * (examAttemptSessionRunner.ts, answerActivityTelemetry.ts) catch it
+ * explicitly; see each caller's own handling.
+ */
 export function hmacHash(value: string): string {
-  return crypto.createHmac("sha256", getHmacSecret()).update(value).digest("hex");
+  return crypto.createHmac("sha256", resolveHmacSecret()).update(value).digest("hex");
 }
 
 /** Cryptographically random, URL-safe token for a browser-session or device cookie. */

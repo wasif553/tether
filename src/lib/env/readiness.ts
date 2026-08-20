@@ -91,6 +91,21 @@ export function getEvidenceStorageEnvStatus(): EnvGroupStatus {
   ]);
 }
 
+/**
+ * Cryptography audit v1, P1 fix. Both of these HMAC secrets previously
+ * had no readiness visibility at all — a gap the audit specifically
+ * flagged, since every other secret in this module already had one.
+ * Presence/shape-only, matching the rest of this file's contract: never
+ * returns or logs the value.
+ */
+export function getSessionBindingEnvStatus(): EnvGroupStatus {
+  return group([check("EXAM_BINDING_HMAC_SECRET", "Exam session-binding HMAC secret")]);
+}
+
+export function getNetworkEvidenceEnvStatus(): EnvGroupStatus {
+  return group([check("NETWORK_EVIDENCE_SALT", "Network evidence IP-hash salt")]);
+}
+
 /** Aggregate view used for a quick "is this deployment configured" check. */
 export function getDeploymentEnvStatus(): EnvGroupStatus & {
   required: EnvGroupStatus;
@@ -98,21 +113,35 @@ export function getDeploymentEnvStatus(): EnvGroupStatus & {
   ai: EnvGroupStatus;
   secureLaunchSigning: EnvGroupStatus;
   evidenceStorage: EnvGroupStatus;
+  sessionBinding: EnvGroupStatus;
+  networkEvidence: EnvGroupStatus;
 } {
   const required = getRequiredEnvStatus();
   const lti = getLtiEnvStatus();
   const ai = getAiEnvStatus();
   const secureLaunchSigning = getSecureLaunchSigningEnvStatus();
   const evidenceStorage = getEvidenceStorageEnvStatus();
+  const sessionBinding = getSessionBindingEnvStatus();
+  const networkEvidence = getNetworkEvidenceEnvStatus();
 
   return {
-    checks: [...required.checks, ...lti.checks, ...ai.checks, ...secureLaunchSigning.checks, ...evidenceStorage.checks],
+    checks: [
+      ...required.checks,
+      ...lti.checks,
+      ...ai.checks,
+      ...secureLaunchSigning.checks,
+      ...evidenceStorage.checks,
+      ...sessionBinding.checks,
+      ...networkEvidence.checks,
+    ],
     allPresent: required.allPresent && lti.allPresent && ai.allPresent,
     required,
     lti,
     ai,
     secureLaunchSigning,
     evidenceStorage,
+    sessionBinding,
+    networkEvidence,
   };
 }
 

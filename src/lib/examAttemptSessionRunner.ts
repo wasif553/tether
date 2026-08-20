@@ -27,6 +27,7 @@ import {
   normalizeCameraPermissionState,
   BROWSER_SESSION_COOKIE_NAME,
   DEVICE_TOKEN_COOKIE_NAME,
+  ExamBindingSecretUnavailableError,
 } from "@/lib/sessionBinding";
 import {
   detectConcurrentActiveSessions,
@@ -67,13 +68,25 @@ export type HeartbeatClientHints = {
 };
 
 export type HeartbeatResult = {
-  sessionId: string;
+  /** null when session binding is unavailable (see bindingAvailable) — no ExamAttemptSession row was created/updated for this call. */
+  sessionId: string | null;
   cameraPermissionState: string;
   concurrentSessionDetected: boolean;
   browserSessionToken: string;
   deviceToken: string;
   browserSessionIsNew: boolean;
   deviceTokenIsNew: boolean;
+  /**
+   * Cryptography audit v1, P1 fix. False only when
+   * EXAM_BINDING_HMAC_SECRET is missing/malformed — session-binding and
+   * session-integrity-signal detection are skipped entirely for this
+   * call rather than continuing with an insecure/unstable fallback hash.
+   * The heartbeat route's other responsibilities (lease renewal, secure-
+   * client heartbeat, cookie issuance) are unaffected — this capability
+   * is optional evidence/review-signal detection, never a gate on exam
+   * access, so its absence must not block the exam-taking flow.
+   */
+  bindingAvailable: boolean;
 };
 
 /**
@@ -85,6 +98,14 @@ export type HeartbeatResult = {
  * failure path beyond what Prisma itself would throw for the core
  * upsert; callers should still treat this as best-effort where called
  * from a non-heartbeat route (see wiring in answers/submit routes).
+ *
+ * Cryptography audit v1, P1 fix: if EXAM_BINDING_HMAC_SECRET is
+ * unavailable, hmacHash() throws ExamBindingSecretUnavailableError.
+ * Caught here, deliberately narrowly, around ONLY the hashing +
+ * DB session-binding/signal-detection work — never around cookie
+ * issuance, which does not depend on the secret and must keep working
+ * regardless, and never silently swallowed into a generic catch that
+ * could also hide an unrelated bug.
  */
 export async function recordExamAttemptHeartbeat(
   req: Request,
@@ -102,9 +123,28 @@ export async function recordExamAttemptHeartbeat(
   const deviceTokenIsNew = !existingDeviceToken;
   const browserSessionToken = existingBrowserSessionToken || generateRandomToken();
   const deviceToken = existingDeviceToken || generateRandomToken();
+  const cameraPermissionState = normalizeCameraPermissionState(hints.cameraPermissionState);
 
-  const browserSessionTokenHash = hmacHash(browserSessionToken);
-  const deviceTokenHash = hmacHash(deviceToken);
+  let browserSessionTokenHash: string;
+  let deviceTokenHash: string;
+  try {
+    browserSessionTokenHash = hmacHash(browserSessionToken);
+    deviceTokenHash = hmacHash(deviceToken);
+  } catch (err) {
+    if (err instanceof ExamBindingSecretUnavailableError) {
+      return {
+        sessionId: null,
+        cameraPermissionState,
+        concurrentSessionDetected: false,
+        browserSessionToken,
+        deviceToken,
+        browserSessionIsNew,
+        deviceTokenIsNew,
+        bindingAvailable: false,
+      };
+    }
+    throw err;
+  }
 
   const ua = req.headers.get("user-agent");
   const { browserFamily, operatingSystemFamily, deviceCategory, userAgentHash } = classifyUserAgent(ua);
@@ -120,7 +160,6 @@ export async function recordExamAttemptHeartbeat(
     timezone: hints.timezone ?? null,
     screenBucket,
   });
-  const cameraPermissionState = normalizeCameraPermissionState(hints.cameraPermissionState);
 
   // Bounded to this one submission's own sessions — never institution-wide.
   const existingSessions = await prisma.examAttemptSession.findMany({ where: { submissionId } });
@@ -257,6 +296,7 @@ export async function recordExamAttemptHeartbeat(
     deviceToken,
     browserSessionIsNew,
     deviceTokenIsNew,
+    bindingAvailable: true,
   };
 }
 

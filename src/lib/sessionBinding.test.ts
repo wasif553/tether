@@ -2,7 +2,7 @@
  * Exam Session Binding v1 — crypto/classification helper tests. See
  * docs/exam-session-binding-v1.md and src/lib/sessionBinding.ts.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   hmacHash,
   generateRandomToken,
@@ -13,7 +13,17 @@ import {
   computeCoarseFingerprintHash,
   normalizeCameraPermissionState,
   isValidExamAttemptSessionStatus,
+  isExamBindingHmacConfigured,
+  ExamBindingSecretUnavailableError,
 } from "./sessionBinding";
+
+const ENV_KEY = "EXAM_BINDING_HMAC_SECRET";
+const originalSecret = process.env[ENV_KEY];
+
+afterEach(() => {
+  if (originalSecret === undefined) delete process.env[ENV_KEY];
+  else process.env[ENV_KEY] = originalSecret;
+});
 
 describe("hmacHash / generateRandomToken", () => {
   it("produces a deterministic hash for the same input", () => {
@@ -33,6 +43,71 @@ describe("hmacHash / generateRandomToken", () => {
     const b = generateRandomToken();
     expect(a).not.toBe(b);
     expect(a.length).toBeGreaterThan(20);
+  });
+});
+
+describe("hmacHash — cryptography audit v1, P1 fail-closed fix", () => {
+  it("succeeds and produces a stable hash when the secret is explicitly configured", () => {
+    process.env[ENV_KEY] = "a-valid-synthetic-test-secret";
+    const a = hmacHash("some-value");
+    const b = hmacHash("some-value");
+    expect(a).toBe(b);
+    expect(a).not.toContain("a-valid-synthetic-test-secret");
+  });
+
+  it("fails CLOSED (throws ExamBindingSecretUnavailableError) when the secret is unset — never a silent fallback", () => {
+    delete process.env[ENV_KEY];
+    expect(() => hmacHash("some-value")).toThrow(ExamBindingSecretUnavailableError);
+  });
+
+  it("fails CLOSED when the secret is an empty string", () => {
+    process.env[ENV_KEY] = "";
+    expect(() => hmacHash("some-value")).toThrow(ExamBindingSecretUnavailableError);
+  });
+
+  it("fails CLOSED when the secret is whitespace-only", () => {
+    process.env[ENV_KEY] = "   ";
+    expect(() => hmacHash("some-value")).toThrow(ExamBindingSecretUnavailableError);
+  });
+
+  it("a missing secret never silently substitutes a different key that happens to also produce SOME hash — the call throws instead of returning a value", () => {
+    delete process.env[ENV_KEY];
+    let threw = false;
+    try {
+      hmacHash("some-value");
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
+
+  it("the thrown error never contains the (missing) secret value or any raw request data", () => {
+    delete process.env[ENV_KEY];
+    try {
+      hmacHash("student-answer-text-should-never-appear");
+    } catch (err) {
+      expect((err as Error).message).not.toContain("student-answer-text-should-never-appear");
+      expect((err as Error).message.length).toBeLessThan(200); // sanitized, not a raw config dump
+    }
+  });
+});
+
+describe("isExamBindingHmacConfigured", () => {
+  it("returns true when a non-empty secret is set", () => {
+    process.env[ENV_KEY] = "a-valid-synthetic-test-secret";
+    expect(isExamBindingHmacConfigured()).toBe(true);
+  });
+
+  it("returns false when unset, empty, or whitespace-only — and never exposes the value either way", () => {
+    delete process.env[ENV_KEY];
+    expect(isExamBindingHmacConfigured()).toBe(false);
+    process.env[ENV_KEY] = "";
+    expect(isExamBindingHmacConfigured()).toBe(false);
+    process.env[ENV_KEY] = "   ";
+    expect(isExamBindingHmacConfigured()).toBe(false);
+
+    process.env[ENV_KEY] = "a-valid-synthetic-test-secret";
+    expect(JSON.stringify(isExamBindingHmacConfigured())).not.toContain("a-valid-synthetic-test-secret");
   });
 });
 

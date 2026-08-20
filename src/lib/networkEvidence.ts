@@ -53,15 +53,47 @@ export function getClientIpFromRequest(req: Request): string | null {
 }
 
 /**
- * Hashes an IP address with a server-side salt (NETWORK_EVIDENCE_SALT
- * env var) for pseudonymisation. Falls back to a process-local random
- * salt if the env var is absent, so hashes are consistent within a
- * server process but not across restarts. This is intentional for the
- * pilot — a configurable persistent salt can be added later.
+ * Cryptography audit v1, P1 fix — this used to fall back to a
+ * process-local random salt when NETWORK_EVIDENCE_SALT was unset,
+ * "consistent within a server process." On Vercel's stateless,
+ * multi-instance deployment that is not a mild inconsistency — it means
+ * the SAME student's IP would very likely hash differently across
+ * separate serverless invocations, silently defeating the entire
+ * purpose of pseudonymised-but-comparable evidence (e.g. detecting a
+ * network change between exam start and submit) while still writing a
+ * confident-looking hash to the database. Fails CLOSED instead: throws,
+ * and captureNetworkEvidence's own pre-existing "never throws — evidence
+ * capture must never break exam flow" catch-all (unchanged, below)
+ * means this results in no NetworkEvidence row for that call rather than
+ * a misleadingly unstable one — never in silently using an insecure
+ * fallback secret.
  */
-const _fallbackSalt = crypto.randomBytes(16).toString("hex");
+export class NetworkEvidenceSaltUnavailableError extends Error {
+  constructor() {
+    super("NETWORK_EVIDENCE_SALT is not configured or is malformed.");
+    this.name = "NetworkEvidenceSaltUnavailableError";
+  }
+}
+
+const ENV_NETWORK_EVIDENCE_SALT = "NETWORK_EVIDENCE_SALT";
+
+/** Presence/shape check only — never returns or logs the value. Safe to expose as a boolean via a readiness endpoint. */
+export function isNetworkEvidenceSaltConfigured(): boolean {
+  const value = process.env[ENV_NETWORK_EVIDENCE_SALT];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+let _loggedMissingSaltOnce = false;
+
 function hashIp(ip: string): string {
-  const salt = process.env.NETWORK_EVIDENCE_SALT ?? _fallbackSalt;
+  const salt = process.env[ENV_NETWORK_EVIDENCE_SALT];
+  if (typeof salt !== "string" || salt.trim().length === 0) {
+    if (!_loggedMissingSaltOnce) {
+      _loggedMissingSaltOnce = true;
+      console.error("Required signing configuration unavailable: network evidence IP-hash salt is not configured.");
+    }
+    throw new NetworkEvidenceSaltUnavailableError();
+  }
   return crypto.createHmac("sha256", salt).update(ip).digest("hex");
 }
 

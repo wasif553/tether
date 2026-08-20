@@ -6,6 +6,8 @@ import {
   getDeploymentEnvStatus,
   getSecureLaunchSigningEnvStatus,
   getEvidenceStorageEnvStatus,
+  getSessionBindingEnvStatus,
+  getNetworkEvidenceEnvStatus,
   detectDangerousEnvCombinations,
 } from "./readiness";
 
@@ -33,6 +35,8 @@ const ENV_KEYS = [
   "EVIDENCE_STORAGE_BUCKET",
   "TETHER_MOCK_SECURE_CLIENT_ENABLED",
   "TETHER_SECURE_CLIENT_BYPASS_ENABLED",
+  "EXAM_BINDING_HMAC_SECRET",
+  "NETWORK_EVIDENCE_SALT",
 ];
 
 let savedEnv: Record<string, string | undefined>;
@@ -154,6 +158,53 @@ describe("getEvidenceStorageEnvStatus", () => {
   });
 });
 
+describe("getSessionBindingEnvStatus / getNetworkEvidenceEnvStatus — cryptography audit v1, P1 fix", () => {
+  it("getSessionBindingEnvStatus is present only when EXAM_BINDING_HMAC_SECRET is set", () => {
+    clearAll();
+    expect(getSessionBindingEnvStatus().allPresent).toBe(false);
+    process.env.EXAM_BINDING_HMAC_SECRET = "a-secret";
+    expect(getSessionBindingEnvStatus().allPresent).toBe(true);
+  });
+
+  it("getNetworkEvidenceEnvStatus is present only when NETWORK_EVIDENCE_SALT is set", () => {
+    clearAll();
+    expect(getNetworkEvidenceEnvStatus().allPresent).toBe(false);
+    process.env.NETWORK_EVIDENCE_SALT = "a-salt";
+    expect(getNetworkEvidenceEnvStatus().allPresent).toBe(true);
+  });
+
+  it("neither function ever returns the actual secret/salt value", () => {
+    clearAll();
+    process.env.EXAM_BINDING_HMAC_SECRET = "TOP-SECRET-HMAC-VALUE";
+    process.env.NETWORK_EVIDENCE_SALT = "TOP-SECRET-SALT-VALUE";
+    const serialized = JSON.stringify([getSessionBindingEnvStatus(), getNetworkEvidenceEnvStatus()]);
+    expect(serialized).not.toContain("TOP-SECRET-HMAC-VALUE");
+    expect(serialized).not.toContain("TOP-SECRET-SALT-VALUE");
+  });
+
+  it("getDeploymentEnvStatus includes both groups in its checks, but does not fold them into the hard allPresent gate", () => {
+    clearAll();
+    process.env.DATABASE_URL = "x";
+    process.env.AUTH_SECRET = "x";
+    process.env.APP_URL = "x";
+    process.env.ANTHROPIC_API_KEY = "x";
+    // Deliberately leave EXAM_BINDING_HMAC_SECRET/NETWORK_EVIDENCE_SALT unset.
+
+    const status = getDeploymentEnvStatus();
+    expect(status.sessionBinding.allPresent).toBe(false);
+    expect(status.networkEvidence.allPresent).toBe(false);
+    expect(status.checks.some((c) => c.key === "EXAM_BINDING_HMAC_SECRET")).toBe(true);
+    expect(status.checks.some((c) => c.key === "NETWORK_EVIDENCE_SALT")).toBe(true);
+    // required + lti(N/A here, LTI is genuinely optional) + ai all present
+    // means allPresent should reflect only required/lti/ai, matching the
+    // documented secureLaunchSigning/evidenceStorage precedent — a missing
+    // session-binding/network-evidence secret must never read as "Tether
+    // itself is unavailable."
+    expect(status.required.allPresent).toBe(true);
+    expect(status.ai.allPresent).toBe(true);
+  });
+});
+
 describe("GET /api/readiness — Canvas/LTI must never gate standalone Tether readiness", () => {
   it("the route source reports ltiKeysConfigured/aiKeyConfigured as independent fields, never ANDed into secureLaunchSigningConfigured/evidenceStorageConfigured/databaseConnected", async () => {
     // Static, source-level check (mirrors the established pattern in
@@ -166,6 +217,12 @@ describe("GET /api/readiness — Canvas/LTI must never gate standalone Tether re
     const source = fs.readFileSync(path.join(process.cwd(), "src/app/api/readiness/route.ts"), "utf8");
     expect(source).toContain("ltiKeysConfigured: lti.allPresent");
     expect(source).toContain("secureLaunchSigningConfigured: secureLaunchSigning.allPresent");
+    // Cryptography audit v1, P1 fix — same independent-field contract
+    // applies to the two HMAC secrets: a missing session-binding/network-
+    // evidence secret must read as its own capability being unavailable,
+    // never as the whole deployment being unready.
+    expect(source).toContain("sessionBindingConfigured: sessionBinding.allPresent");
+    expect(source).toContain("networkEvidenceConfigured: networkEvidence.allPresent");
     // The combined getDeploymentEnvStatus().allPresent aggregate (which
     // DOES fold lti/ai into one boolean) must never be imported/used by
     // this route — only the independent per-group functions.
