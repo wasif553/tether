@@ -710,11 +710,68 @@ describe("Exam layout stability — RecoveryStatusBanner call site never re-gate
     expect(between).not.toMatch(/pendingCount|connectionStatus|resilientAutosave\.status/);
   });
 
-  it("RecoveryStatusBanner is passed resilientAutosave.status/pendingCount as PROPS (so it can render its own stable box), never used to gate whether it renders at all", () => {
+  it("RecoveryStatusBanner is passed resilientAutosave.status/pendingCount as PROPS (so the component itself can decide silent-vs-visible), never used to gate whether it renders at all", () => {
     const usageIdx = source.indexOf("<RecoveryStatusBanner");
     const closeIdx = source.indexOf("/>", usageIdx);
     const propsBlock = source.slice(usageIdx, closeIdx);
     expect(propsBlock).toContain("connectionStatus={resilientAutosave.status}");
     expect(propsBlock).toContain("pendingCount={resilientAutosave.pendingCount}");
+  });
+
+  it("RecoveryStatusBanner is not wrapped in a layout-participating container at the call site — no enclosing div with margin/padding classes between the IN_PROGRESS check and the component", () => {
+    const usageIdx = source.indexOf("<RecoveryStatusBanner");
+    expect(usageIdx).toBeGreaterThan(-1);
+    // The NEAREST preceding IN_PROGRESS check, not necessarily the first
+    // occurrence in the whole file (submissionStatus === "IN_PROGRESS" is
+    // also used elsewhere, e.g. for screen-share/camera warnings).
+    const conditionIdx = source.slice(0, usageIdx).lastIndexOf('submissionStatus === "IN_PROGRESS"');
+    expect(conditionIdx).toBeGreaterThan(-1);
+    const between = source.slice(conditionIdx, usageIdx);
+    // Exactly the JSX-conditional wrapper `&& (` and whitespace/comments —
+    // no `<div` of any kind between the condition and the component itself.
+    expect(between).not.toContain("<div");
+  });
+});
+
+// Exam workspace stability pass — desktop two-column layout: navigator
+// LEFT (stable, bounded width), active question RIGHT (flexible width).
+// See the JSX's own doc comments for the CSS-grid mechanics.
+describe("Exam workspace — desktop left-navigator two-column layout", () => {
+  it("the one-question-mode workspace wrapper uses a bounded-navigator/flexible-question grid at lg: and above, with items-start to prevent column-height stretching", () => {
+    const wrapperIdx = source.indexOf('mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)]');
+    expect(wrapperIdx).toBeGreaterThan(-1);
+    const line = source.slice(wrapperIdx, wrapperIdx + 120);
+    expect(line).toContain("lg:items-start");
+    expect(line).toContain("lg:gap-6");
+  });
+
+  it("the navigator appears BEFORE the question column in the DOM (so CSS grid auto-placement puts it in the first/left column) and is wrapped separately from the question content", () => {
+    const wrapperIdx = source.indexOf('mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)]');
+    const navigatorIdx = source.indexOf("<QuestionNavigatorPanel", wrapperIdx);
+    const questionColumnIdx = source.indexOf('<div className="min-w-0">', wrapperIdx);
+    expect(navigatorIdx).toBeGreaterThan(wrapperIdx);
+    expect(questionColumnIdx).toBeGreaterThan(navigatorIdx);
+  });
+
+  it("the navigator's own wrapper is sticky only at lg: and above — never introduces sticky positioning (or a competing scroll container) on mobile/tablet", () => {
+    const idx = source.indexOf('className="mb-4 lg:sticky lg:top-4 lg:mb-0"');
+    expect(idx).toBeGreaterThan(-1);
+  });
+
+  it("the question column has min-w-0 so a long unbroken answer/question string wraps instead of forcing the grid wider than the viewport", () => {
+    const idx = source.indexOf('<div className="min-w-0">');
+    expect(idx).toBeGreaterThan(-1);
+  });
+
+  it("the previously-established min-h-[280px] question-card floor is preserved unchanged by this layout pass", () => {
+    expect(source).toContain('min-h-[280px] rounded border border-gray-200 p-4"');
+  });
+
+  it("below lg:, the workspace wrapper's base (non-lg:-prefixed) classes contain no grid/flex-direction-row class — mobile/tablet keeps the existing single stacked column with the navigator's own open/close toggle", () => {
+    const wrapperIdx = source.indexOf('mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start lg:gap-6"');
+    expect(wrapperIdx).toBeGreaterThan(-1);
+    const classAttr = source.slice(wrapperIdx, wrapperIdx + 80);
+    const baseClasses = classAttr.split(/\s+/).filter((c) => !c.startsWith("lg:") && c !== "" && !c.includes('"'));
+    expect(baseClasses).toEqual(["mt-6"]);
   });
 });

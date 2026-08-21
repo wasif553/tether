@@ -4550,32 +4550,32 @@ export default function TakeExamPage({
       )}
 
       {/* Tether Secure Exam Recovery and Resilient Autosave v1 — see
-          docs/tether-secure-resume-recovery-v1.md, Part 4/16. MCQ
-          interaction layout-shift fix — RecoveryStatusBanner now ALWAYS
-          renders a fixed-height box (see its own doc comment); only the
-          text inside it toggles as pendingCount/status change. This
-          wrapper's own condition (submissionStatus) is stable for the
-          whole exam, so nothing here mounts/unmounts mid-interaction —
-          do not reintroduce a pendingCount/status-based conditional
-          around RecoveryStatusBanner itself, which would silently bring
-          the same bug back. */}
+          docs/tether-secure-resume-recovery-v1.md, Part 4/16. Exam
+          workspace stability pass — RecoveryStatusBanner now renders
+          EITHER a screen-reader-only region (ordinary save activity,
+          never visible) OR a `position: fixed` overlay (exceptional
+          states only) — see its own doc comment. Neither ever occupies
+          normal document flow, so no wrapper margin/spacing is needed
+          here, and nothing about this call site can reintroduce the
+          question/MCQ-row movement bug: do not wrap this in a div that
+          participates in layout, and do not gate rendering on
+          pendingCount/connectionStatus — the component itself decides
+          silent-vs-visible now. */}
       {submissionStatus === "IN_PROGRESS" && (
-        <div className="mt-3">
-          <RecoveryStatusBanner
-            connectionStatus={resilientAutosave.status}
-            pendingCount={resilientAutosave.pendingCount}
-            offline={offlineNow}
-            recoveryMessage={recoveryStatusMessage}
-            onRetryNow={() => {
-              if (recoveryRedirectTo) {
-                router.push(recoveryRedirectTo);
-                return;
-              }
-              void resilientAutosave.flushNow();
-              void refreshRecoveryStatus();
-            }}
-          />
-        </div>
+        <RecoveryStatusBanner
+          connectionStatus={resilientAutosave.status}
+          pendingCount={resilientAutosave.pendingCount}
+          offline={offlineNow}
+          recoveryMessage={recoveryStatusMessage}
+          onRetryNow={() => {
+            if (recoveryRedirectTo) {
+              router.push(recoveryRedirectTo);
+              return;
+            }
+            void resilientAutosave.flushNow();
+            void refreshRecoveryStatus();
+          }}
+        />
       )}
 
       {cameraWarning && (
@@ -4693,7 +4693,17 @@ export default function TakeExamPage({
             // oneQuestion.payload.question (from GET/POST
             // .../question(-progress)) — data.exam.questions is empty in
             // this mode, the server never sends the full paper.
-            <div className="mt-6">
+            // Exam workspace stability pass — desktop two-column layout:
+            // navigator LEFT (stable, bounded width), active question
+            // RIGHT (flexible width). Below `lg:` this stays exactly the
+            // existing single stacked column (navigator above question,
+            // using its own open/close toggle) — grid-only classes never
+            // apply there, so mobile/tablet behaviour is unchanged.
+            // `lg:items-start` is required: without it, CSS grid stretches
+            // both columns to match the taller one's height, which would
+            // make the navigator (or the question card) grow/shrink with
+            // its sibling — exactly the instability this pass removes.
+            <div className="mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start lg:gap-6">
               {/* Question Navigator v1 — see docs/question-navigator-v1.md.
                   An aria-live region so screen-reader users hear
                   confirmation after a successful navigation or
@@ -4702,14 +4712,27 @@ export default function TakeExamPage({
                 {navigatorAnnouncement}
               </div>
               {secureSettings?.showQuestionNavigator && questionNav && (
-                <QuestionNavigatorPanel
-                  navigator={questionNav}
-                  open={navigatorPanelOpen}
-                  onToggleOpen={() => setNavigatorPanelOpen((v) => !v)}
-                  disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
-                  onSelectQuestion={navigateQuestionDirect}
-                />
+                // Sticky only at lg: and above — keeps the navigator
+                // reachable while a long essay question scrolls, without
+                // introducing a second competing scroll container
+                // (`position: sticky` scrolls with the page itself, it
+                // does not create its own scrollable region).
+                <div className="mb-4 lg:sticky lg:top-4 lg:mb-0">
+                  <QuestionNavigatorPanel
+                    navigator={questionNav}
+                    open={navigatorPanelOpen}
+                    onToggleOpen={() => setNavigatorPanelOpen((v) => !v)}
+                    disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
+                    onSelectQuestion={navigateQuestionDirect}
+                  />
+                </div>
               )}
+              {/* min-w-0 is required on a grid item that must be allowed
+                  to shrink below its content's natural width — without
+                  it, a long unbroken question/answer string can force
+                  this column (and therefore the whole grid) wider than
+                  the viewport instead of wrapping. */}
+              <div className="min-w-0">
               {oneQuestion.loading && <p className="text-gray-500">Loading question...</p>}
               {!oneQuestion.loading && oneQuestion.payload && (
                 // Exam layout stability follow-up — a floor, not a ceiling:
@@ -4837,6 +4860,7 @@ export default function TakeExamPage({
               {!oneQuestion.loading && !oneQuestion.payload && oneQuestion.error && (
                 <p className="text-red-600">{oneQuestion.error}</p>
               )}
+              </div>
             </div>
           ) : (
             <div className="mt-6 space-y-4">

@@ -3,12 +3,18 @@ import type { ReactElement, ReactNode } from "react";
 import { RecoveryStatusBanner, type RecoveryStatusBannerProps } from "./RecoveryStatusBanner";
 
 /**
- * MCQ interaction layout-shift fix — see RecoveryStatusBanner.tsx's own
- * doc comment for the root cause. No DOM/testing-library dependency in
- * this repo (see ManualReviewNotice.test.tsx for the established
- * pattern this reuses): RecoveryStatusBanner has no hooks/state of its
- * own, so it's safe to call directly as a plain function and inspect the
- * returned React element tree.
+ * Exam workspace stability pass — product decision: ordinary, successful
+ * autosave must produce NO visible banner at all (only a screen-reader-
+ * only announcement); only exceptional states (offline/FAILED/CONFLICT/
+ * resume-required) are visible, and those now render as a `position:
+ * fixed` overlay so they can never move the question/answer controls.
+ * See RecoveryStatusBanner.tsx's own doc comment for the full rationale.
+ *
+ * No DOM/testing-library dependency in this repo (see
+ * ManualReviewNotice.test.tsx for the established pattern this reuses):
+ * RecoveryStatusBanner has no hooks/state of its own, so it's safe to
+ * call directly as a plain function and inspect the returned React
+ * element tree.
  */
 function collectText(node: ReactNode): string {
   if (node == null || typeof node === "boolean") return "";
@@ -32,33 +38,64 @@ function baseProps(overrides: Partial<RecoveryStatusBannerProps> = {}): Recovery
   };
 }
 
-describe("RecoveryStatusBanner — MCQ interaction layout-shift fix (root cause: this box's own mount/unmount)", () => {
-  it("never returns null — the root node is always the same rendered div, steady-state or not", () => {
-    const steady = RecoveryStatusBanner(baseProps());
-    const pending = RecoveryStatusBanner(baseProps({ connectionStatus: "SENDING", pendingCount: 1 }));
-    expect(steady).not.toBeNull();
-    expect(pending).not.toBeNull();
-    expect((steady as ReactElement).type).toBe("div");
-    expect((pending as ReactElement).type).toBe("div");
+describe("RecoveryStatusBanner — ordinary autosave activity is silent (never visible, never reflows the page)", () => {
+  it("steady state (nothing pending, not offline, not failed/conflicted, no resume message) renders an sr-only region, not a visible box", () => {
+    const el = RecoveryStatusBanner(baseProps()) as ReactElement<{ className: string }>;
+    expect(el.type).toBe("div");
+    expect(el.props.className).toContain("sr-only");
+    expect(el.props.className).not.toContain("fixed");
   });
 
-  it("the root element's className always carries the same stable min-height token, whether or not there is anything to show", () => {
-    const steady = RecoveryStatusBanner(baseProps()) as ReactElement<{ className: string }>;
-    const pending = RecoveryStatusBanner(baseProps({ connectionStatus: "SENDING", pendingCount: 1 })) as ReactElement<{ className: string }>;
-    const failed = RecoveryStatusBanner(baseProps({ connectionStatus: "FAILED", pendingCount: 2 })) as ReactElement<{ className: string }>;
-    for (const el of [steady, pending, failed]) {
-      expect(el.props.className).toContain("min-h-[34px]");
+  it("an ordinary save in flight (pendingCount > 0, no offline/failed/conflict) is ALSO sr-only — never a visible box", () => {
+    const el = RecoveryStatusBanner(baseProps({ connectionStatus: "SENDING", pendingCount: 1 })) as ReactElement<{ className: string }>;
+    expect(el.props.className).toContain("sr-only");
+    expect(el.props.className).not.toContain("fixed");
+  });
+
+  it("SAVED (ordinary success) is ALSO sr-only — never a visible box", () => {
+    const el = RecoveryStatusBanner(baseProps({ connectionStatus: "SAVED", pendingCount: 0 })) as ReactElement<{ className: string }>;
+    expect(el.props.className).toContain("sr-only");
+    expect(el.props.className).not.toContain("fixed");
+  });
+
+  it("the sr-only region still carries role=status/aria-live so a screen reader hears 'Saving.'/'Saved.' without any visual element", () => {
+    const sending = RecoveryStatusBanner(baseProps({ connectionStatus: "SENDING", pendingCount: 1 })) as ReactElement<{
+      role: string;
+      "aria-live": string;
+    }>;
+    expect(sending.props.role).toBe("status");
+    expect(sending.props["aria-live"]).toBe("polite");
+    expect(collectText(sending)).toBe("Saving.");
+
+    const saved = RecoveryStatusBanner(baseProps({ connectionStatus: "SAVED" }));
+    expect(collectText(saved)).toBe("Saved.");
+  });
+
+  it("steady state's sr-only region has no text at all", () => {
+    expect(collectText(RecoveryStatusBanner(baseProps())).trim()).toBe("");
+  });
+});
+
+describe("RecoveryStatusBanner — exceptional states are visible AND non-reflowing (position: fixed, outside document flow)", () => {
+  it("offline, FAILED, CONFLICT, and a resume message all render a `fixed` overlay, never sr-only", () => {
+    const cases: RecoveryStatusBannerProps[] = [
+      baseProps({ offline: true }),
+      baseProps({ connectionStatus: "FAILED", pendingCount: 1 }),
+      baseProps({ connectionStatus: "CONFLICT" }),
+      baseProps({ recoveryMessage: "Resume secure examination" }),
+    ];
+    for (const props of cases) {
+      const el = RecoveryStatusBanner(props) as ReactElement<{ className: string }>;
+      expect(el.props.className).toContain("fixed");
+      expect(el.props.className).not.toContain("sr-only");
     }
   });
 
-  it("steady state (nothing pending, not offline, not failed/conflicted, no resume message) renders no visible text", () => {
-    const text = collectText(RecoveryStatusBanner(baseProps()));
-    expect(text.trim()).toBe("");
-  });
-
-  it("a save in flight shows the exact approved 'changes waiting to save' text", () => {
-    const text = collectText(RecoveryStatusBanner(baseProps({ connectionStatus: "SENDING", pendingCount: 1 })));
-    expect(text).toContain("Changes waiting to save (1).");
+  it("the fixed overlay is taken out of normal layout flow (fixed positioning) and marked pointer-events-none on the outer wrapper so it can never block clicks on content underneath when nothing is shown", () => {
+    const el = RecoveryStatusBanner(baseProps({ offline: true })) as ReactElement<{ className: string }>;
+    expect(el.props.className).toContain("pointer-events-none");
+    expect(el.props.className).toMatch(/\bfixed\b/);
+    expect(el.props.className).toContain("inset-x-0");
   });
 
   it("offline shows the connection-interrupted copy, with or without a pending count", () => {
@@ -87,12 +124,15 @@ describe("RecoveryStatusBanner — MCQ interaction layout-shift fix (root cause:
   it("a resume message takes priority and shows a Retry now button", () => {
     const onRetryNow = () => {};
     const text = collectText(RecoveryStatusBanner(baseProps({ recoveryMessage: "Resume secure examination", onRetryNow })));
-    expect(text).toBe("Resume secure examination Retry now");
+    expect(text).toContain("Resume secure examination");
+    expect(text).toContain("Retry now");
   });
 
-  it("aria-live/role are present unconditionally, not only when something is shown — a live region already in the DOM announces more reliably than one inserted fresh", () => {
-    const steady = RecoveryStatusBanner(baseProps()) as ReactElement<{ role: string; "aria-live": string }>;
-    expect(steady.props.role).toBe("status");
-    expect(steady.props["aria-live"]).toBe("polite");
+  it("role=status/aria-live are present on the visible overlay too, on the inner interactive element", () => {
+    const el = RecoveryStatusBanner(baseProps({ offline: true })) as ReactElement<{ children: ReactElement<{ role: string; "aria-live": string }> }>;
+    // Outer wrapper is a plain positioning div; the inner pill carries role/aria-live.
+    const inner = el.props.children;
+    expect(inner.props.role).toBe("status");
+    expect(inner.props["aria-live"]).toBe("polite");
   });
 });
