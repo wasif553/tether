@@ -162,6 +162,49 @@ describe("SupabaseStorageEvidenceAdapter — object key only, never bucket/key",
       adapter.put("ai-camera-evidence/sub1-evt1-abc123.jpg", Buffer.from("x"), "image/jpeg"),
     ).rejects.toThrow(/Invalid path specified in request URL/);
   });
+
+  // Evidence retention deletion safety v1 — a Supabase Storage API-level
+  // failure resolves the promise with `{ error }` rather than rejecting
+  // it (this is Supabase JS's actual response shape, reproduced here by
+  // the mock resolving normally with a non-null `error` field — never by
+  // making the mock throw/reject). Before this pass, delete() discarded
+  // that `{ error }` entirely, so a real deletion failure would look
+  // identical to success to every caller, including the retention runner
+  // that deletes the database row immediately afterward.
+  describe("delete() — Supabase response-error handling (evidence retention deletion safety v1)", () => {
+    it("A. resolves when remove() returns { error: null }", async () => {
+      const adapter = makeSupabaseAdapter();
+      mockRemove.mockResolvedValueOnce({ data: null, error: null });
+      await expect(adapter.delete("ai-camera-evidence/sub1-evt1-abc123.jpg")).resolves.toBeUndefined();
+    });
+
+    it("B. rejects when remove() resolves normally with a non-null error (an API-level failure, not a thrown exception)", async () => {
+      const adapter = makeSupabaseAdapter();
+      // D. Proves this is response-error handling: the mock RESOLVES
+      // (never throws/rejects) with an error payload, exactly matching
+      // Supabase JS's actual { data, error } response shape for a
+      // Storage API-level failure.
+      mockRemove.mockResolvedValueOnce({ data: null, error: { message: "The resource was not found" } });
+      await expect(adapter.delete("ai-camera-evidence/sub1-evt1-abc123.jpg")).rejects.toThrow(
+        /Supabase Storage evidence deletion failed/,
+      );
+    });
+
+    it("C. the thrown message contains no storageKey, bucket path, or service-role secret", async () => {
+      const adapter = makeSupabaseAdapter();
+      const key = "ai-camera-evidence/sub-abc-evt-def-suffix123.jpg";
+      mockRemove.mockResolvedValueOnce({ data: null, error: { message: "The resource was not found" } });
+      try {
+        await adapter.delete(key);
+        expect.unreachable("delete() should have thrown");
+      } catch (err) {
+        const message = (err as Error).message;
+        expect(message).not.toContain(key);
+        expect(message).not.toContain("safe-exam-evidence");
+        expect(message).not.toContain("fake-service-role-key");
+      }
+    });
+  });
 });
 
 describe("resolveEvidenceStorageAdapter — unsupported provider", () => {

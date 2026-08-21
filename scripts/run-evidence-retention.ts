@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   log(`Cutoff: ${report.cutoff.toISOString()}`);
   log(`Evaluated ${report.evaluatedCount} evidence asset(s) captured before the cutoff.`);
   for (const asset of report.eligible) {
-    log(`  eligible: ${asset.id} (${asset.kind}, captured ${asset.capturedAt.toISOString()}, submission ${asset.submissionId})`);
+    log(`  eligible: ${asset.id} (${asset.kind}, captured ${asset.capturedAt.toISOString()})`);
   }
 
   if (!execute) {

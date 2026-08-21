@@ -14,7 +14,7 @@
  * Requires the local test Postgres instance (same requirement as the
  * sibling src/lib/evidenceRetention.test.ts).
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { prisma } from "./prisma";
 import { getOrCreateTestInstitution } from "./testInstitution";
@@ -127,13 +127,136 @@ describe("findEligibleEvidenceAssetsForDeletion", () => {
   });
 });
 
+const RETENTION_CONTEXT = { retentionDays: 90, cutoff: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) };
+
 describe("deleteEvidenceAsset", () => {
   it("deletes the database row (and the — possibly nonexistent — storage object without erroring)", async () => {
     const { asset } = await createEvidenceAsset(new Date());
-    const outcome = await deleteEvidenceAsset(asset);
+    const outcome = await deleteEvidenceAsset(asset, RETENTION_CONTEXT);
     expect(outcome.ok).toBe(true);
     const found = await prisma.integrityEvidenceAsset.findUnique({ where: { id: asset.id } });
     expect(found).toBeNull();
+  });
+
+  // Evidence retention deletion safety v1.
+  describe("A. storage failure — the DB row must survive and no deletion audit log must be written", () => {
+    it("a storage delete failure leaves the IntegrityEvidenceAsset row and creates zero retention-deletion audit rows", async () => {
+      // local_dev's delete() is a plain filesystem removal — an "unsafe"
+      // key (path traversal) makes resolvePath() throw before any
+      // filesystem call, giving a real, non-mocked storage-delete
+      // failure exactly like a genuine Supabase API-level error would.
+      const exam = await prisma.exam.create({
+        data: { title: `Retention Storage Fail Exam ${Date.now()}-${Math.random()}`, durationMins: 30, published: true, createdById: lecturerA.id, institutionId: instA },
+      });
+      cleanup.exams.push(exam.id);
+      const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: studentA.id, status: "IN_PROGRESS" } });
+      const event = await prisma.integrityEvent.create({
+        data: { submissionId: submission.id, examId: exam.id, studentId: studentA.id, eventType: "SCREEN_SHARE_EVIDENCE_CAPTURED", severity: "INFO", message: "test", occurredAt: new Date() },
+      });
+      const asset = await prisma.integrityEvidenceAsset.create({
+        data: {
+          integrityEventId: event.id,
+          submissionId: submission.id,
+          examId: exam.id,
+          institutionId: instA,
+          kind: "SCREEN_SHARE_EVIDENCE_FRAME",
+          eventType: "SCREEN_SHARE_EVIDENCE_CAPTURED",
+          storageProvider: "local_dev",
+          storageKey: "../../unsafe-traversal-key.jpg",
+          contentType: "image/jpeg",
+          byteSize: 1234,
+          capturedAt: new Date(Date.now() - 200 * 24 * 60 * 60 * 1000),
+        },
+      });
+
+      const outcome = await deleteEvidenceAsset(
+        { id: asset.id, storageProvider: asset.storageProvider, storageKey: asset.storageKey, capturedAt: asset.capturedAt, submissionId: asset.submissionId, examId: asset.examId, institutionId: asset.institutionId, kind: asset.kind, byteSize: asset.byteSize },
+        RETENTION_CONTEXT,
+      );
+
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.error).toMatch(/storage delete failed/);
+
+      const found = await prisma.integrityEvidenceAsset.findUnique({ where: { id: asset.id } });
+      expect(found).not.toBeNull();
+
+      const auditRows = await prisma.platformAuditLog.findMany({ where: { action: "INTEGRITY_EVIDENCE_RETENTION_DELETED", targetId: asset.id } });
+      expect(auditRows.length).toBe(0);
+
+      // Cleanup: this row is intentionally old + eligible (that's the
+      // point of this test), so it must not leak into sibling tests in
+      // this file that assume a clean eligible-assets slate (e.g. "no
+      // eligible assets is a safe no-op"). Deleted directly — the
+      // unsafe storageKey would fail through the normal adapter path.
+      await prisma.integrityEvidenceAsset.delete({ where: { id: asset.id } });
+    });
+  });
+
+  // B. success — DB row deleted, exactly one correct, sanitized audit row.
+  describe("B. success — DB row deleted and exactly one deletion audit row is created", () => {
+    it("creates one INTEGRITY_EVIDENCE_RETENTION_DELETED audit row with correct fields and no student-linkable metadata", async () => {
+      const { asset } = await createEvidenceAsset(new Date(Date.now() - 200 * 24 * 60 * 60 * 1000));
+
+      const outcome = await deleteEvidenceAsset(asset, RETENTION_CONTEXT);
+      expect(outcome.ok).toBe(true);
+
+      const found = await prisma.integrityEvidenceAsset.findUnique({ where: { id: asset.id } });
+      expect(found).toBeNull();
+
+      const auditRows = await prisma.platformAuditLog.findMany({ where: { action: "INTEGRITY_EVIDENCE_RETENTION_DELETED", targetId: asset.id } });
+      expect(auditRows.length).toBe(1);
+      const row = auditRows[0];
+      expect(row.actorId).toBeNull();
+      expect(row.targetType).toBe("IntegrityEvidenceAsset");
+      expect(row.institutionId).toBe(instA);
+
+      const metadataStr = JSON.stringify(row.metadata);
+      expect(metadataStr).not.toContain(asset.storageKey);
+      expect(metadataStr).not.toContain(asset.submissionId);
+      expect(metadataStr).toContain(asset.kind);
+    });
+  });
+
+  // C. transaction failure after a successful storage delete — the DB row
+  // must roll back (survive), and D. a subsequent retry must then
+  // succeed, proving the storage-delete-of-already-gone-object no-op
+  // makes the retry safe.
+  describe("C/D. DB+audit transaction failure after storage delete, then a successful idempotent retry", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("rolls back the DB row on a transaction failure (no partial commit, no audit row), then a retry completes both the delete and the audit write", async () => {
+      const { asset } = await createEvidenceAsset(new Date(Date.now() - 200 * 24 * 60 * 60 * 1000));
+
+      const transactionSpy = vi.spyOn(prisma, "$transaction").mockImplementationOnce(async () => {
+        throw new Error("simulated transaction failure");
+      });
+
+      const failedOutcome = await deleteEvidenceAsset(asset, RETENTION_CONTEXT);
+      expect(failedOutcome.ok).toBe(false);
+      if (!failedOutcome.ok) expect(failedOutcome.error).toMatch(/database delete \+ audit transaction failed/);
+
+      // Row survives — the transaction never committed.
+      const stillPresent = await prisma.integrityEvidenceAsset.findUnique({ where: { id: asset.id } });
+      expect(stillPresent).not.toBeNull();
+      // No partially-committed audit row either.
+      const auditRowsAfterFailure = await prisma.platformAuditLog.findMany({ where: { action: "INTEGRITY_EVIDENCE_RETENTION_DELETED", targetId: asset.id } });
+      expect(auditRowsAfterFailure.length).toBe(0);
+
+      transactionSpy.mockRestore();
+
+      // Retry: storage delete of the already-(no-op)-deleted object
+      // succeeds again (local_dev delete() with force:true is idempotent),
+      // and the DB transaction now runs for real.
+      const retryOutcome = await deleteEvidenceAsset(asset, RETENTION_CONTEXT);
+      expect(retryOutcome.ok).toBe(true);
+
+      const afterRetry = await prisma.integrityEvidenceAsset.findUnique({ where: { id: asset.id } });
+      expect(afterRetry).toBeNull();
+      const auditRowsAfterRetry = await prisma.platformAuditLog.findMany({ where: { action: "INTEGRITY_EVIDENCE_RETENTION_DELETED", targetId: asset.id } });
+      expect(auditRowsAfterRetry.length).toBe(1);
+    });
   });
 });
 

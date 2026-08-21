@@ -171,8 +171,18 @@ class SupabaseStorageEvidenceAdapter implements EvidenceStorageAdapter {
     return Buffer.from(arrayBuffer);
   }
 
+  // Supabase's remove() resolves normally with `{ error }` on an
+  // API-level failure — it does not reject the promise. Discarding that
+  // return value (as this previously did) would let a caller believe the
+  // object was deleted when it was not, which is exactly backwards for a
+  // retention runner that deletes the database row right after this
+  // resolves. The thrown message deliberately omits the key/bucket path
+  // (unlike put()'s error above) — this method is reachable from the
+  // retention runner, and Section 3 of this pass requires no
+  // storageKey/submissionId/student-identifying detail in a delete error.
   async delete(key: string): Promise<void> {
-    await this.client.storage.from(this.bucket).remove([this.objectKey(key)]);
+    const { error } = await this.client.storage.from(this.bucket).remove([this.objectKey(key)]);
+    if (error) throw new Error(`Supabase Storage evidence deletion failed: ${error.message}`);
   }
 }
 

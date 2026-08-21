@@ -41,6 +41,9 @@
 import { prisma } from "@/lib/prisma";
 import { resolveEvidenceStorageAdapter } from "@/lib/evidenceStorage";
 
+/** The one PlatformAuditLog action name for this runner's deletions — see createPlatformAuditLog's callers elsewhere for the established SCREAMING_SNAKE_CASE, past-tense convention. */
+const RETENTION_DELETED_AUDIT_ACTION = "INTEGRITY_EVIDENCE_RETENTION_DELETED";
+
 const DEFAULT_EVIDENCE_RETENTION_DAYS = 90;
 
 /** Missing/malformed/non-positive values fall back to the safe default — mirrors the established env-var + typed-resolver convention (see systemCheckConfig.ts). */
@@ -85,12 +88,31 @@ export type DeleteEvidenceAssetOutcome = { id: string; ok: true } | { id: string
 
 /**
  * Deletes ONE evidence asset: storage object first, then the database
- * row (see this module's own doc comment for why this ordering). Never
- * throws — every failure is represented in the returned outcome, so a
- * sweep over many assets can continue past a single failure rather than
- * aborting the whole run.
+ * row + its deletion audit record together (see this module's own doc
+ * comment for why storage-then-DB is the safer ordering). Never throws —
+ * every failure is represented in the returned outcome, so a sweep over
+ * many assets can continue past a single failure rather than aborting the
+ * whole run.
+ *
+ * The DB-row delete and the PlatformAuditLog write run inside ONE Prisma
+ * transaction: a high-consequence evidence deletion must never
+ * successfully disappear from the database without its audit record, so
+ * if the audit write fails the row delete rolls back too — the row
+ * remains, and the (already storage-deleted) object stays eligible for a
+ * retry, which is safe because both storage adapters treat delete-of-
+ * missing-key as success (see the module doc comment).
+ *
+ * `actorId: null` — this CLI has no cryptographically-authenticated human
+ * operator session to attribute the action to; claiming a specific
+ * identity here would be false. Audit metadata is deliberately minimal
+ * and non-identifying: no storageKey, submissionId, studentId, or any
+ * other student-linkable field — see Section 5 of the safety-audit pass
+ * this was built in.
  */
-export async function deleteEvidenceAsset(asset: Pick<EligibleEvidenceAsset, "id" | "storageKey">): Promise<DeleteEvidenceAssetOutcome> {
+export async function deleteEvidenceAsset(
+  asset: EligibleEvidenceAsset,
+  context: { retentionDays: number; cutoff: Date },
+): Promise<DeleteEvidenceAssetOutcome> {
   try {
     const adapter = resolveEvidenceStorageAdapter();
     await adapter.delete(asset.storageKey);
@@ -98,12 +120,32 @@ export async function deleteEvidenceAsset(asset: Pick<EligibleEvidenceAsset, "id
     return { id: asset.id, ok: false, error: `storage delete failed: ${err instanceof Error ? err.message : String(err)}` };
   }
   try {
-    await prisma.integrityEvidenceAsset.delete({ where: { id: asset.id } });
+    await prisma.$transaction(async (tx) => {
+      await tx.integrityEvidenceAsset.delete({ where: { id: asset.id } });
+      await tx.platformAuditLog.create({
+        data: {
+          actorId: null,
+          action: RETENTION_DELETED_AUDIT_ACTION,
+          targetType: "IntegrityEvidenceAsset",
+          targetId: asset.id,
+          institutionId: asset.institutionId,
+          metadata: {
+            kind: asset.kind,
+            capturedAt: asset.capturedAt.toISOString(),
+            trigger: "manual_retention",
+            retentionDays: context.retentionDays,
+            cutoff: context.cutoff.toISOString(),
+          },
+        },
+      });
+    });
   } catch (err) {
-    // The underlying storage object is already gone at this point — the
-    // row is now an orphan (see doc comment above for why this is the
-    // safer failure mode than the reverse ordering).
-    return { id: asset.id, ok: false, error: `database delete failed after storage delete succeeded: ${err instanceof Error ? err.message : String(err)}` };
+    // The underlying storage object is already gone at this point, but the
+    // transaction above rolled back — the DB row (and thus its audit
+    // trail) either both exist or neither does, never a row deleted with
+    // no audit record. The row remains eligible on the next sweep;
+    // deleting an already-missing storage object is a no-op, not an error.
+    return { id: asset.id, ok: false, error: `database delete + audit transaction failed after storage delete succeeded: ${err instanceof Error ? err.message : String(err)}` };
   }
   return { id: asset.id, ok: true };
 }
@@ -130,18 +172,19 @@ export type EvidenceRetentionSweepReport = {
 export async function runEvidenceRetentionSweep(options: { retentionDays?: number; now?: Date; dryRun: boolean; institutionId?: string }): Promise<EvidenceRetentionSweepReport> {
   const retentionDays = options.retentionDays ?? resolveEvidenceRetentionDays();
   const now = options.now ?? new Date();
+  const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);
   const eligible = await findEligibleEvidenceAssetsForDeletion(retentionDays, now, options.institutionId);
 
   const outcomes: DeleteEvidenceAssetOutcome[] = [];
   if (!options.dryRun) {
     for (const asset of eligible) {
-      outcomes.push(await deleteEvidenceAsset(asset));
+      outcomes.push(await deleteEvidenceAsset(asset, { retentionDays, cutoff }));
     }
   }
 
   return {
     retentionDays,
-    cutoff: new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000),
+    cutoff,
     evaluatedCount: eligible.length,
     eligible,
     outcomes,
