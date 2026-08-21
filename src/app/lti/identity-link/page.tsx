@@ -36,6 +36,20 @@ function messageFor(reason: string): string {
   );
 }
 
+/**
+ * Pure, hook-free — extracted so it's directly testable without a React
+ * rendering harness (this repo has no DOM/testing-library dependency; see
+ * docs/security-headers-csp-v1.md, "Identity-link escape test"). Builds
+ * the exact same-page callbackUrl (guarded by
+ * isSafeLtiIdentityLinkCallbackUrl in src/lib/safeCallbackUrl.ts, never
+ * altered here) and the /login href that carries it.
+ */
+export function buildIdentityLinkSignInHref(handoff: string): { returnTo: string; loginHref: string } {
+  const returnTo = `/lti/identity-link?handoff=${encodeURIComponent(handoff)}`;
+  const loginHref = `/login?callbackUrl=${encodeURIComponent(returnTo)}`;
+  return { returnTo, loginHref };
+}
+
 function IdentityLinkContent() {
   const searchParams = useSearchParams();
   const handoff = searchParams.get("handoff");
@@ -91,8 +105,7 @@ function IdentityLinkContent() {
   }
 
   if (status !== "authenticated" || !session) {
-    const returnTo = `/lti/identity-link?handoff=${encodeURIComponent(handoff)}`;
-    const loginHref = `/login?callbackUrl=${encodeURIComponent(returnTo)}`;
+    const { loginHref } = buildIdentityLinkSignInHref(handoff);
     return (
       <div className="mx-auto mt-16 max-w-md rounded border border-gray-200 p-6 text-center">
         <h1 className="text-xl font-semibold">Existing account found</h1>
@@ -100,8 +113,23 @@ function IdentityLinkContent() {
           Tether found an existing account using the email supplied by Canvas. For security, sign
           in to confirm that this account belongs to you.
         </p>
+        {/*
+          target="_top" — /login is deliberately frame-denied (CSP
+          frame-ancestors 'none' + X-Frame-Options: DENY; see
+          docs/security-headers-csp-v1.md), so a normal same-frame
+          navigation there would be blocked when this page is reached
+          from an embedded Canvas LTI launch. This link is the one place
+          that boundary must be crossed, and it does so the safe way: an
+          explicit, user-initiated click that opens /login in the TOP-LEVEL
+          browsing context instead, escaping the Canvas iframe entirely
+          rather than weakening /login's clickjacking protection. This
+          also avoids depending on third-party/embedded-iframe cookie
+          behavior for the account-confirmation login. Never triggered
+          automatically on page load — only this explicit click.
+        */}
         <a
           href={loginHref}
+          target="_top"
           className="mt-6 inline-block rounded bg-black px-4 py-2 text-sm text-white"
         >
           Sign in to Tether

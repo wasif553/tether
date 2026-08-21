@@ -59,7 +59,14 @@ export function validateLtiFrameAncestorOrigin(candidate: string): string | null
   if (parsed.username !== "" || parsed.password !== "") return null;
   if (parsed.pathname !== "" && parsed.pathname !== "/") return null;
   if (parsed.search !== "" || parsed.hash !== "") return null;
-  if (parsed.hostname === "" || parsed.hostname === "*") return null;
+  if (parsed.hostname === "") return null;
+  // Security correction: URL() happily parses "https://*.instructure.com"
+  // as a well-formed URL with hostname "*.instructure.com" — the earlier
+  // `hostname === "*"` check only caught a bare wildcard host, not a
+  // wildcard subdomain. LTI_FRAME_ANCESTORS must contain EXACT origins
+  // only; reject any hostname containing "*" anywhere (leading, trailing,
+  // or embedded), never just a bare "*".
+  if (parsed.hostname.includes("*")) return null;
   return parsed.origin;
 }
 

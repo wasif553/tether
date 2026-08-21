@@ -64,6 +64,42 @@ describe("validateLtiFrameAncestorOrigin", () => {
   it("rejects an empty string", () => {
     expect(validateLtiFrameAncestorOrigin("   ")).toBeNull();
   });
+
+  it("accepts an exact origin with a non-default port", () => {
+    expect(validateLtiFrameAncestorOrigin("https://canvas.example.edu:8443")).toBe("https://canvas.example.edu:8443");
+  });
+
+  // Security correction — wildcard subdomain rejection. URL() happily
+  // parses "https://*.instructure.com" as well-formed with hostname
+  // "*.instructure.com"; the original `hostname === "*"` check only
+  // caught a bare wildcard host, letting a wildcard SUBDOMAIN slip
+  // through validation despite the "exact HTTPS origins only" contract.
+  describe("wildcard hostname rejection (security correction)", () => {
+    it.each([
+      "https://*.instructure.com",
+      "https://*.example.edu",
+      "https://canvas.*.example.edu",
+      "https://foo*.example.edu",
+      "https://*foo.example.edu",
+    ])("rejects %s", (candidate) => {
+      expect(validateLtiFrameAncestorOrigin(candidate)).toBeNull();
+    });
+
+    it("still accepts legitimate exact origins with no wildcard", () => {
+      expect(validateLtiFrameAncestorOrigin("https://canvas.example.edu")).toBe("https://canvas.example.edu");
+      expect(validateLtiFrameAncestorOrigin("https://canvas.example.edu:8443")).toBe("https://canvas.example.edu:8443");
+    });
+
+    it("still rejects everything the original rules covered (http, credentials, non-root path, query, fragment, javascript:, malformed)", () => {
+      expect(validateLtiFrameAncestorOrigin("http://canvas.example.edu")).toBeNull();
+      expect(validateLtiFrameAncestorOrigin("https://user:pass@canvas.example.edu")).toBeNull();
+      expect(validateLtiFrameAncestorOrigin("https://canvas.example.edu/some/path")).toBeNull();
+      expect(validateLtiFrameAncestorOrigin("https://canvas.example.edu?x=1")).toBeNull();
+      expect(validateLtiFrameAncestorOrigin("https://canvas.example.edu#frag")).toBeNull();
+      expect(validateLtiFrameAncestorOrigin("javascript:alert(1)")).toBeNull();
+      expect(validateLtiFrameAncestorOrigin("not a url at all")).toBeNull();
+    });
+  });
 });
 
 describe("parseLtiFrameAncestors", () => {
@@ -88,6 +124,19 @@ describe("parseLtiFrameAncestors", () => {
     expect(parseLtiFrameAncestors(undefined)).toEqual([]);
     expect(parseLtiFrameAncestors("")).toEqual([]);
     expect(parseLtiFrameAncestors("   ")).toEqual([]);
+  });
+
+  it("security correction: drops a wildcard subdomain origin while keeping a legitimate exact one", () => {
+    expect(parseLtiFrameAncestors("https://canvas.example.edu https://*.instructure.com")).toEqual(["https://canvas.example.edu"]);
+  });
+
+  it("security correction: the resulting frame-ancestors CSP directive never contains a wildcard", () => {
+    const origins = parseLtiFrameAncestors("https://canvas.example.edu https://*.instructure.com");
+    const csp = buildContentSecurityPolicy("LTI_EMBED_COMPATIBLE", origins);
+    const frameAncestors = csp.split(";").find((d) => d.trim().startsWith("frame-ancestors"));
+    expect(frameAncestors).toBeDefined();
+    expect(frameAncestors).not.toContain("*");
+    expect(frameAncestors?.trim()).toBe("frame-ancestors 'self' https://canvas.example.edu");
   });
 });
 
