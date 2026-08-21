@@ -2,16 +2,19 @@
 /**
  * `npm run evidence:archive -- [--execute] [--confirm-production-archive]`
  *   or
- * `npm run evidence:archive -- --restore-asset <evidenceAssetId> [--confirm-restore]`
+ * `npm run evidence:archive -- --restore-asset <evidenceAssetId> [--confirm-restore] [--confirm-production-restore]`
  *
  * Manual, operator-triggered evidence archive/restore tool. See
  * docs/tether-evidence-archive-plan.md and the doc comments on
  * src/lib/evidenceArchive.ts.
  *
- * ARCHIVE MODE (default): dry-run unless --execute is passed. When
- * ARCHIVE_SOURCE_ENVIRONMENT=production, --execute additionally requires
- * --confirm-production-archive AND a matching ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF
- * AND a genuinely separate archive Supabase project — enforced in code
+ * ARCHIVE MODE (default): dry-run unless --execute is passed. Whenever
+ * the ACTUAL configured primary Supabase project matches the configured
+ * ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF (i.e. this genuinely IS the
+ * Production primary — determined solely from real environment
+ * configuration, never from any argument this script passes), --execute
+ * additionally requires --confirm-production-archive AND a genuinely
+ * separate archive Supabase project — enforced in code
  * (assertProductionArchiveSafe), not merely by this script's own
  * argument parsing, so a caller cannot bypass it by invoking the library
  * function directly. Exactly like scripts/run-evidence-retention.ts,
@@ -23,8 +26,11 @@
  * RESTORE MODE (--restore-asset): restores exactly one evidence asset's
  * bytes from the archive back to primary storage. Never automatic, never
  * bulk, never overwrites a healthy primary object, never deletes the
- * archive copy. See restoreEvidenceAsset's own doc comment for the
- * supported scenarios.
+ * archive copy. Uses the SAME production guard as archive execute — a
+ * restore against the configured Production primary project additionally
+ * requires --confirm-production-restore, on top of the ordinary
+ * --confirm-restore already required for any restore. See
+ * restoreEvidenceAsset's own doc comment for the supported scenarios.
  */
 import { runEvidenceArchiveSweep, restoreEvidenceAsset, ProductionArchiveGuardError } from "../src/lib/evidenceArchive";
 
@@ -39,12 +45,19 @@ function parseFlagValue(args: string[], flag: string): string | undefined {
 
 async function runRestore(evidenceAssetId: string, args: string[]): Promise<void> {
   const confirmRestore = args.includes("--confirm-restore");
+  const confirmProductionRestore = args.includes("--confirm-production-restore");
   log(`Restore requested for asset ${evidenceAssetId}. Confirmation: ${confirmRestore ? "provided" : "NOT provided"}.`);
-  const outcome = await restoreEvidenceAsset(evidenceAssetId, { confirmRestore });
+  const outcome = await restoreEvidenceAsset(evidenceAssetId, { confirmRestore, confirmProductionRestore });
   log(`Result: ${outcome.status}`);
   if (outcome.error) log(`  detail: ${outcome.error}`);
   if (outcome.status === "RESTORE_CONFIRMATION_REQUIRED") {
     log("Re-run with --confirm-restore to actually write the restored bytes to primary storage.");
+  }
+  if (outcome.status === "RESTORE_PRODUCTION_GUARD_FAILED") {
+    log("This targets the configured Production primary project — re-run with --confirm-production-restore in addition to --confirm-restore.");
+  }
+  if (outcome.status === "RESTORED_VERIFIED_AUDIT_FAILED") {
+    log("Bytes were restored and verified, but the audit record could not be written — operational reconciliation is required.");
   }
   process.exitCode = outcome.status === "RESTORED_VERIFIED" ? 0 : 1;
 }
@@ -72,7 +85,8 @@ async function runArchive(args: string[]): Promise<void> {
   log(`Archive run id: ${report.archiveRunId}`);
   log(`Evaluated ${report.candidateCount} evidence asset(s).`);
   for (const outcome of report.outcomes) {
-    log(`  ${outcome.evidenceAssetId} (${outcome.kind}, captured ${outcome.capturedAt.toISOString()}, ${outcome.byteSize} bytes): ${outcome.status}`);
+    const auditSuffix = outcome.auditStatus ? `, audit: ${outcome.auditStatus}` : "";
+    log(`  ${outcome.evidenceAssetId} (${outcome.kind}, captured ${outcome.capturedAt.toISOString()}, ${outcome.byteSize} bytes): ${outcome.status}${auditSuffix}`);
   }
 
   if (!execute) {
@@ -81,8 +95,9 @@ async function runArchive(args: string[]): Promise<void> {
     return;
   }
 
+  log(`Manifest run status: ${report.runStatus ?? "unknown"}`);
   log(`Manifest verified: ${report.manifestVerified === true}`);
-  log(`Overall run status: ${report.overallOk ? "OK" : "FAILED — one or more assets did not reach a verified state"}`);
+  log(`Overall run status: ${report.overallOk ? "OK" : "FAILED — one or more assets did not reach a fully archived-and-audited state"}`);
   process.exitCode = report.overallOk ? 0 : 1;
 }
 

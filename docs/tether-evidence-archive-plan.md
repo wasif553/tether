@@ -70,19 +70,40 @@ compromise and single-project operator mistake.
     `buildManifestDocument()`/`verifyManifestDocument()` are exact
     inverses of each other, both covered by dedicated tests including a
     field-order-independence proof.
-  - `assertProductionArchiveSafe()` — the **machine-enforced**
-    project-separation guard (not merely a printed confirmation). It is
-    called from *inside* `runEvidenceArchiveSweep` itself for every
-    `dryRun: false` invocation — not only at the CLI layer — so a caller
-    cannot bypass it by invoking the library function directly. It fails
-    closed if the archive project ref would ever resolve to the *same*
-    Supabase project as the primary (checked unconditionally, regardless
-    of declared environment), and, additionally, when
-    `ARCHIVE_SOURCE_ENVIRONMENT=production`, requires a real
-    (`supabase_storage`, never `local_dev`) archive destination, a
-    primary project ref matching the operator-configured
-    `ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF`, and an explicit
-    `--confirm-production-archive` flag.
+  - `assertSupabaseArchiveOperationSafe()` — the **shared**,
+    **machine-enforced** project-separation guard used by BOTH archive
+    execute and restore (a security-corrections v1 fix: restore
+    previously resolved the archive adapter directly, with no identity
+    validation at all — the two paths can no longer drift out of sync).
+    It fails closed, unconditionally, if the archive project ref would
+    ever resolve to the *same* Supabase project as the primary. For any
+    *real* (`supabase_storage`, never `local_dev`) archive destination it
+    additionally requires: the primary project ref to be resolvable, the
+    archive project ref to be resolvable, `ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF`
+    to be configured, and the primary project ref to equal it. Crucially,
+    "is this Production" (`isProductionOperation`) is derived **solely**
+    from this actual, operator-configured environment — **never** from
+    any caller-supplied argument. `assertProductionArchiveSafe()` and
+    `assertRestoreOperationSafe()` are thin, direction-specific wrappers
+    that additionally require `--confirm-production-archive` /
+    `--confirm-production-restore` respectively whenever
+    `isProductionOperation` is true. Both are called from *inside*
+    `runEvidenceArchiveSweep`/`restoreEvidenceAsset` themselves — not
+    only at the CLI layer — so a caller cannot bypass either by invoking
+    the library function directly.
+
+    **Security correction: a caller-supplied `sourceEnvironment` can no
+    longer weaken the guard.** The prior design let
+    `runEvidenceArchiveSweep({ sourceEnvironment })` override the guard's
+    own view of "is this production," which meant a direct caller could
+    label a real-production write "test" and skip the confirmation
+    requirement entirely. `sourceEnvironment` is now recorded **only** as
+    manifest metadata (`ArchiveManifestPayload.sourceEnvironment`) and
+    has zero influence on the guard — proven by dedicated tests that set
+    the real environment to a genuinely production-matching
+    configuration, pass `sourceEnvironment: "test"` and no confirmation
+    flag, and assert the operation still fails closed for both archive
+    execute and restore.
   - `runEvidenceArchiveSweep()` — the entry point. `dryRun: true` (the
     default) only downloads and source-verifies each candidate; it never
     resolves the archive adapter, never writes a manifest, never writes
@@ -90,32 +111,77 @@ compromise and single-project operator mistake.
     archive adapter object literally isn't obtained on that path, so
     there is no code path by which a dry run could write anything. Only
     `dryRun: false` calls the production guard and actually archives.
-    Audits **only newly archived assets** (`ARCHIVED_VERIFIED`) — a
-    rerun against an already-archived, stable dataset reports
-    `ALREADY_ARCHIVED_VERIFIED` and creates **no** duplicate audit row
-    (a deliberate, documented dedup choice — see the module's own doc
-    comment).
+
+    Audit writes are **awaited** (never fire-and-forget — a security
+    correction from the prior pass, which used
+    `createPlatformAuditLog(...).catch(() => {})` and returned without
+    ever knowing whether the record actually persisted) and
+    **existence-checked before writing**: `ensureArchiveAudit()` queries
+    for an existing `INTEGRITY_EVIDENCE_ARCHIVE_VERIFIED` row for the
+    asset first. Already present → `ALREADY_AUDITED` (no duplicate).
+    Absent → attempts the write; success → `AUDITED`; failure →
+    `AUDIT_FAILED`. This runs for **both** `ARCHIVED_VERIFIED` and
+    `ALREADY_ARCHIVED_VERIFIED` outcomes (not just newly-archived ones),
+    which means a rerun **self-repairs** an asset that was successfully
+    archived on an earlier run whose audit write itself failed. A failed
+    archive audit makes `overallOk` false, but the archive object itself
+    is **never** rolled back or deleted merely because its audit failed.
+  - **Manifest coverage metadata** (a security correction — the prior
+    manifest only ever listed successfully-archived assets, with no
+    top-level signal that a run was incomplete). `ArchiveManifestPayload`
+    now carries `candidateCount`, `verifiedAssetCount`, `failureCount`,
+    and `runStatus` (`"COMPLETE"` only when every candidate reached a
+    verified archive state; `"PARTIAL_FAILURE"` otherwise) — all four
+    participate in the canonical digest, so relabeling a partial run as
+    complete (or tampering with any count) breaks `verifyManifestDocument()`.
+    A partial manifest still only ever contains entries for the assets
+    that actually verified, but its own top-level fields make that
+    incompleteness unambiguous even though the manifest document itself
+    still verifies cryptographically.
   - `restoreEvidenceAsset()` — minimum pilot restore only. Supports
     scenario **A** (primary object missing, DB row intact) and scenario
     **C** (primary object exists but fails SHA-256 verification —
     corrupt). A **healthy** primary object is always refused, regardless
-    of confirmation. Every restore requires explicit
-    `--confirm-restore`. The archive copy is **never** deleted by this
-    function under any outcome. Because the primary adapter's `put()`
-    always uses `upsert:false` (unmodified — see `evidenceStorage.ts`),
-    overwriting a corrupt primary requires first calling the *existing*
-    `delete()` on that one key — only ever reached after confirmation
-    and after the archive bytes have already been proven correct against
-    the database's own recorded digest.
+    of confirmation. Every restore requires explicit `--confirm-restore`,
+    and — per the shared guard above — a restore against the configured
+    Production primary project additionally requires
+    `--confirm-production-restore`. The archive copy is **never** deleted
+    by this function under any outcome. Because the primary adapter's
+    `put()` always uses `upsert:false` (unmodified — see
+    `evidenceStorage.ts`), overwriting a corrupt primary requires first
+    calling the *existing* `delete()` on that one key — only ever reached
+    after confirmation and after the archive bytes have already been
+    proven correct against the database's own recorded digest.
+
+    The restore audit write is likewise **awaited**, never
+    fire-and-forget. Bytes are restored and SHA-verified *before* the
+    audit write is attempted, so an audit failure is reported as a
+    distinct `RESTORED_VERIFIED_AUDIT_FAILED` outcome — the operator is
+    told bytes are safe but reconciliation is needed — rather than either
+    silently swallowing the failure or rolling back an already-healthy
+    primary object.
+
+    **Restore error sanitization** (a security correction): the primary
+    adapter's own error messages can embed the raw `storageKey` (e.g.
+    Supabase's `upload failed for "<key>": ...`, or local_dev's `Unsafe
+    evidence storage key: "<key>"`) — `evidenceStorage.ts` is
+    deliberately left unmodified, so this is fixed at the restore
+    boundary instead: a primary write/verify failure during restore
+    always returns a fixed, bounded message (`"Primary evidence restore
+    write failed."` / `"...verification failed."`), never the
+    underlying adapter's `err.message`. Proven by an adversarial test
+    that forces the primary adapter to throw a message containing the
+    real storage key, an internal URL, and a fake credential token, and
+    asserts none of it appears in the returned outcome.
 
 - **`scripts/run-evidence-archive.ts`** — `npm run evidence:archive`,
   mirroring `scripts/run-evidence-retention.ts`'s own manual-CLI,
   dry-run-by-default conventions exactly. Archive mode:
   `[--execute] [--confirm-production-archive]`. Restore mode:
-  `--restore-asset <id> [--confirm-restore]`. Routine output shows only
-  asset id, kind, capturedAt, byteSize, and status — never a
-  `submissionId`, `storageKey`, archive object key, raw URL, or
-  credential.
+  `--restore-asset <id> [--confirm-restore] [--confirm-production-restore]`.
+  Routine output shows only asset id, kind, capturedAt, byteSize, status,
+  and audit status — never a `submissionId`, `storageKey`, archive object
+  key, raw URL, or credential.
 
 ### `DB_METADATA_RECONSTRUCTION: MANUAL_RECOVERY_PROCEDURE / NOT AUTOMATED`
 
@@ -129,6 +195,38 @@ private-manifest-only fields, never printed to routine CLI output or
 written to an audit row) is meant to assist a human operator's manual
 investigation and reconciliation after such an event. Relational
 database reconstruction is explicitly out of scope for pilot v1.
+
+## Security corrections v1
+
+An independent security review of the first implementation pass found
+four issues, all fixed in this same branch before any provisioning:
+
+1. **Restore lacked the project-separation guard entirely.** Fixed by
+   introducing `assertSupabaseArchiveOperationSafe()` as a single shared
+   primitive used by both archive execute and restore, so the two paths
+   cannot drift out of sync again.
+2. **A caller-supplied `sourceEnvironment` argument could downgrade the
+   security decision** (e.g. label a real-production write "test" to
+   skip confirmation). Fixed by deriving `isProductionOperation` solely
+   from actual environment configuration; `sourceEnvironment` is now
+   manifest metadata only.
+3. **A partial archive run's manifest gave no top-level signal that it
+   was incomplete.** Fixed by adding `candidateCount` /
+   `verifiedAssetCount` / `failureCount` / `runStatus` to the manifest
+   payload, all participating in its digest.
+4. **Audit writes were fire-and-forget**, so the caller never knew
+   whether an audit record actually persisted, and a failed archive
+   audit had no effect on the reported run status. Fixed by awaiting
+   every audit write, existence-checking before writing (so a rerun
+   self-repairs a missing audit without duplicating an existing one),
+   and making a failed archive audit turn `overallOk` false. Restore
+   audit failures are reported via a distinct
+   `RESTORED_VERIFIED_AUDIT_FAILED` status rather than being silently
+   swallowed or triggering a rollback of an already-healthy primary
+   object. A related, smaller finding — restore forwarding the raw
+   primary-adapter error message (which can embed the storage key) to
+   operator output — was fixed at the same time by sanitizing at the
+   restore boundary.
 
 ## What was deliberately NOT done in this pass
 
@@ -165,21 +263,26 @@ npm run evidence:archive
 # Actually archive (non-production source, e.g. local/dev testing).
 npm run evidence:archive -- --execute
 
-# Actually archive a declared-production source (requires the full
-# machine-enforced guard: ARCHIVE_SOURCE_ENVIRONMENT=production,
-# ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF matching the real primary project,
-# a genuinely separate ARCHIVE_SUPABASE_URL, and this flag).
+# Actually archive against the configured Production primary project
+# (required whenever the ACTUAL primary Supabase project matches
+# ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF — determined from real
+# environment configuration, never from a script argument): requires a
+# genuinely separate ARCHIVE_SUPABASE_URL and this flag.
 npm run evidence:archive -- --execute --confirm-production-archive
 
 # Restore one asset (only after confirming this is genuinely needed).
 npm run evidence:archive -- --restore-asset <evidenceAssetId>
 npm run evidence:archive -- --restore-asset <evidenceAssetId> --confirm-restore
+
+# Restore against the configured Production primary project requires both flags.
+npm run evidence:archive -- --restore-asset <evidenceAssetId> --confirm-restore --confirm-production-restore
 ```
 
 ### Environment variables (names only)
 
 `ARCHIVE_STORAGE_PROVIDER`, `ARCHIVE_SUPABASE_URL`,
 `ARCHIVE_SUPABASE_SERVICE_ROLE_KEY`, `ARCHIVE_STORAGE_BUCKET`,
-`ARCHIVE_SOURCE_ENVIRONMENT`, `ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF`.
-None of these are `NEXT_PUBLIC_*`; none may reuse the primary
+`ARCHIVE_SOURCE_ENVIRONMENT` (manifest metadata only — see "Security
+corrections v1" above), `ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF`. None of
+these are `NEXT_PUBLIC_*`; none may reuse the primary
 `SUPABASE_SERVICE_ROLE_KEY`.

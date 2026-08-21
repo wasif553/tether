@@ -7,9 +7,8 @@
  * automatically: no cron, no route, no build step, no server startup
  * hook. Mirrors the established conventions of
  * src/lib/evidenceRetentionRunner.ts (dry-run by default, never throws
- * for a single-asset failure, PlatformAuditLog on success only) but is
- * otherwise fully independent of it — this module never deletes a
- * primary evidence object or database row.
+ * for a single-asset failure) but is otherwise fully independent of it —
+ * this module never deletes a primary evidence object or database row.
  *
  * Source of truth remains IntegrityEvidenceAsset metadata + the PRIMARY
  * EvidenceStorageAdapter object (src/lib/evidenceStorage.ts, unmodified
@@ -183,8 +182,10 @@ export async function archiveVerifiedEvidence(
 
 // ---------------------------------------------------------------------------
 // Manifest — see docs/tether-evidence-archive-plan.md, "Non-circular
-// manifest hash".
+// manifest hash" and "Partial-run coverage metadata".
 // ---------------------------------------------------------------------------
+
+export type ArchiveManifestRunStatus = "COMPLETE" | "PARTIAL_FAILURE";
 
 export type ArchiveManifestAssetEntry = {
   evidenceAssetId: string;
@@ -212,7 +213,22 @@ export type ArchiveManifestPayload = {
   createdAt: string;
   sourceEnvironment: string;
   sourceProvider: string;
-  assetCount: number;
+  /** Total candidates evaluated by this run — including ones that failed source verification and were never archived. */
+  candidateCount: number;
+  /** Candidates that reached ARCHIVED_VERIFIED or ALREADY_ARCHIVED_VERIFIED — equals assets.length. */
+  verifiedAssetCount: number;
+  /** candidateCount - verifiedAssetCount. */
+  failureCount: number;
+  /**
+   * "COMPLETE" only when EVERY candidate reached a verified archive
+   * state; "PARTIAL_FAILURE" otherwise. The manifest still only ever
+   * contains entries for successfully verified assets (see `assets`) —
+   * this field is what makes an incomplete run unambiguous even though
+   * the manifest document itself still verifies cryptographically. A
+   * partial manifest must never be mistaken for a complete one merely
+   * because its own SHA-256 checks out.
+   */
+  runStatus: ArchiveManifestRunStatus;
   assets: ArchiveManifestAssetEntry[];
 };
 
@@ -226,7 +242,10 @@ export type ArchiveManifestDocument = ArchiveManifestPayload & { manifestSha256:
  * hashing a document that already contains its own digest is circular
  * and would make verification meaningless. No third-party canonical-JSON
  * dependency — a small fixed-order serializer is sufficient here and is
- * directly covered by tests.
+ * directly covered by tests. EVERY payload field, including the coverage
+ * metadata (candidateCount/verifiedAssetCount/failureCount/runStatus),
+ * participates in the digest — tampering with any of them (e.g. relabeling
+ * a PARTIAL_FAILURE run as COMPLETE) breaks verification.
  */
 function canonicalManifestPayloadJson(payload: ArchiveManifestPayload): string {
   const canonical = {
@@ -235,7 +254,10 @@ function canonicalManifestPayloadJson(payload: ArchiveManifestPayload): string {
     createdAt: payload.createdAt,
     sourceEnvironment: payload.sourceEnvironment,
     sourceProvider: payload.sourceProvider,
-    assetCount: payload.assetCount,
+    candidateCount: payload.candidateCount,
+    verifiedAssetCount: payload.verifiedAssetCount,
+    failureCount: payload.failureCount,
+    runStatus: payload.runStatus,
     assets: payload.assets.map((a) => ({
       evidenceAssetId: a.evidenceAssetId,
       kind: a.kind,
@@ -279,59 +301,55 @@ export function verifyManifestDocument(doc: ArchiveManifestDocument): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Machine-enforced production/project-separation guard.
+// Machine-enforced production/project-separation guard — shared by BOTH
+// archive execute and restore, so the two can never drift out of sync.
+// See docs/tether-evidence-archive-plan.md, "Security corrections v1".
 // ---------------------------------------------------------------------------
 
-export class ProductionArchiveGuardError extends Error {
-  constructor(reason: string) {
-    super(reason);
-    this.name = "ProductionArchiveGuardError";
-  }
-}
-
-export type ProductionArchiveGuardEnv = EvidenceArchiveStorageEnv & {
-  ARCHIVE_SOURCE_ENVIRONMENT?: string;
+export type ArchiveOperationGuardEnv = EvidenceArchiveStorageEnv & {
   ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF?: string;
   SUPABASE_URL?: string;
   NEXT_PUBLIC_SUPABASE_URL?: string;
 };
 
-export type ProductionArchiveGuardResult =
-  | { ok: true; primaryProjectRef: string | null; archiveProjectRef: string | null }
+export type ArchiveOperationGuardResult =
+  | { ok: true; isProductionOperation: boolean; primaryProjectRef: string | null; archiveProjectRef: string | null }
   | { ok: false; reason: string; primaryProjectRef: string | null; archiveProjectRef: string | null };
 
 /**
- * Machine-enforced, not merely a printed confirmation prompt — this
- * function is called from inside runEvidenceArchiveSweep itself
- * (defense in depth: even a caller that bypasses the CLI cannot skip
- * it), and it fails closed unless every one of the following holds:
+ * The one place "is this a real, production-configured Supabase archive
+ * operation" is decided. Deliberately takes NO caller-supplied
+ * environment label as input — "is this Production" is derived SOLELY
+ * from actual, operator-configured environment (SUPABASE_URL vs
+ * ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF), never from a function argument
+ * like `sourceEnvironment`. A caller cannot downgrade the safety
+ * decision by passing (or omitting) a "test" label — see the security
+ * corrections in docs/tether-evidence-archive-plan.md for why this
+ * replaced the earlier, caller-influenceable design.
  *
- *   1. UNIVERSAL, regardless of declared environment: the archive
- *      project must never resolve to the same Supabase project as the
- *      primary. A same-project "backup" shares the primary's own
- *      service-role blast radius and is not a real backup at all (see
- *      docs/tether-evidence-archive-plan.md's own rejection of Option A
- *      on exactly this basis).
- *   2. Only when ARCHIVE_SOURCE_ENVIRONMENT === "production" (an
- *      operator-declared statement of intent — deliberately NOT derived
- *      from NODE_ENV/VERCEL_ENV, since this tool is meant to run from an
- *      operator workstation, not a Vercel deployment):
- *        a. the archive provider must be a real remote destination
- *           (never local_dev — a filesystem archive is not durable/
- *           shareable and defeats the purpose for a real production
- *           archive, mirroring evidenceStorage.ts's own equivalent
- *           production guard for the PRIMARY adapter);
- *        b. the primary project ref must match the operator-configured
- *           ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF (catches a stray/
- *           wrong-project primary config before it can silently archive
- *           the wrong data as if it were production);
- *        c. --confirm-production-archive must have been explicitly
- *           passed.
+ * Universal invariant (checked regardless of provider/production status):
+ * the archive project must never resolve to the same Supabase project as
+ * the primary.
+ *
+ * For any REAL (supabase_storage) archive destination, ALL of the
+ * following must additionally hold or the operation fails closed:
+ *   - the primary project ref must be resolvable
+ *   - the archive project ref must be resolvable
+ *   - ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF must be configured
+ *   - the primary project ref must equal ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF
+ * When all of the above hold, `isProductionOperation` is true — this
+ * pilot's architecture has exactly one legitimate real-Supabase
+ * deployment target, so "using real Supabase storage that matches the
+ * configured expected project" IS the definition of a production-grade
+ * operation, and every such operation requires its caller's own
+ * production-specific confirmation flag on top of this guard (see
+ * assertProductionArchiveSafe / restore's own guard usage below).
+ *
+ * `local_dev` archive operations are exempt from all of the above —
+ * dev/test only, no production concept applies, no confirmation flag
+ * required.
  */
-export function assertProductionArchiveSafe(
-  confirmProductionArchiveFlagPresent: boolean,
-  env: ProductionArchiveGuardEnv = process.env,
-): ProductionArchiveGuardResult {
+export function assertSupabaseArchiveOperationSafe(env: ArchiveOperationGuardEnv = process.env): ArchiveOperationGuardResult {
   const primaryUrl = env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL;
   const archiveUrl = env.ARCHIVE_SUPABASE_URL;
   const primaryProjectRef = extractSupabaseProjectRef(primaryUrl);
@@ -346,19 +364,27 @@ export function assertProductionArchiveSafe(
     };
   }
 
-  if (env.ARCHIVE_SOURCE_ENVIRONMENT !== "production") {
-    return { ok: true, primaryProjectRef, archiveProjectRef };
+  const isRealArchiveDestination = env.ARCHIVE_STORAGE_PROVIDER === "supabase_storage";
+  if (!isRealArchiveDestination) {
+    return { ok: true, isProductionOperation: false, primaryProjectRef, archiveProjectRef };
   }
 
-  if (!archiveProjectRef || env.ARCHIVE_STORAGE_PROVIDER !== "supabase_storage") {
+  if (!primaryProjectRef) {
+    return { ok: false, reason: "Primary Supabase project ref could not be resolved.", primaryProjectRef, archiveProjectRef };
+  }
+  if (!archiveProjectRef) {
+    return { ok: false, reason: "Archive Supabase project ref could not be resolved.", primaryProjectRef, archiveProjectRef };
+  }
+  const expectedPrimaryProjectRef = env.ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF;
+  if (!expectedPrimaryProjectRef) {
     return {
       ok: false,
-      reason: "ARCHIVE_SOURCE_ENVIRONMENT=production requires a configured, real (supabase_storage) archive destination.",
+      reason: "ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF is not configured — required for any real Supabase archive/restore operation.",
       primaryProjectRef,
       archiveProjectRef,
     };
   }
-  if (!env.ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF || primaryProjectRef !== env.ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF) {
+  if (primaryProjectRef !== expectedPrimaryProjectRef) {
     return {
       ok: false,
       reason: "Primary Supabase project ref does not match the configured ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF.",
@@ -366,15 +392,96 @@ export function assertProductionArchiveSafe(
       archiveProjectRef,
     };
   }
-  if (!confirmProductionArchiveFlagPresent) {
+
+  return { ok: true, isProductionOperation: true, primaryProjectRef, archiveProjectRef };
+}
+
+export class ProductionArchiveGuardError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "ProductionArchiveGuardError";
+  }
+}
+
+/** Archive-execute-specific wrapper around the shared guard: additionally requires --confirm-production-archive whenever isProductionOperation is true. */
+export function assertProductionArchiveSafe(
+  confirmProductionArchiveFlagPresent: boolean,
+  env: ArchiveOperationGuardEnv = process.env,
+): ArchiveOperationGuardResult {
+  const base = assertSupabaseArchiveOperationSafe(env);
+  if (!base.ok) return base;
+  if (base.isProductionOperation && !confirmProductionArchiveFlagPresent) {
     return {
       ok: false,
-      reason: "Production archive execution requires --confirm-production-archive.",
-      primaryProjectRef,
-      archiveProjectRef,
+      reason: "This operation targets the configured Production primary project — archive execution requires --confirm-production-archive.",
+      primaryProjectRef: base.primaryProjectRef,
+      archiveProjectRef: base.archiveProjectRef,
     };
   }
-  return { ok: true, primaryProjectRef, archiveProjectRef };
+  return base;
+}
+
+/** Restore-specific wrapper around the shared guard: additionally requires --confirm-production-restore whenever isProductionOperation is true (in addition to the caller's own --confirm-restore, checked separately in restoreEvidenceAsset). */
+export function assertRestoreOperationSafe(
+  confirmProductionRestoreFlagPresent: boolean,
+  env: ArchiveOperationGuardEnv = process.env,
+): ArchiveOperationGuardResult {
+  const base = assertSupabaseArchiveOperationSafe(env);
+  if (!base.ok) return base;
+  if (base.isProductionOperation && !confirmProductionRestoreFlagPresent) {
+    return {
+      ok: false,
+      reason: "This operation targets the configured Production primary project — restore requires --confirm-production-restore (in addition to --confirm-restore).",
+      primaryProjectRef: base.primaryProjectRef,
+      archiveProjectRef: base.archiveProjectRef,
+    };
+  }
+  return base;
+}
+
+// ---------------------------------------------------------------------------
+// Archive audit — awaited, existence-checked, self-repairing. See
+// docs/tether-evidence-archive-plan.md, "Audit persistence corrections".
+// ---------------------------------------------------------------------------
+
+export type ArchiveAuditStatus = "AUDITED" | "ALREADY_AUDITED" | "AUDIT_FAILED";
+
+/**
+ * AWAITED (never fire-and-forget) and existence-checked BEFORE writing —
+ * this is what makes it safe to call for both ARCHIVED_VERIFIED (a truly
+ * new archive) and ALREADY_ARCHIVED_VERIFIED (a rerun against a
+ * previously-archived asset): a rerun that finds an existing audit row
+ * reports ALREADY_AUDITED and writes nothing further, while a rerun that
+ * finds the object already archived but its audit row MISSING (e.g. the
+ * archive succeeded on an earlier run whose audit write itself failed)
+ * self-repairs by creating the missing row. Never deletes or modifies
+ * the already-archived object regardless of audit outcome.
+ */
+async function ensureArchiveAudit(
+  candidate: EvidenceArchiveCandidate,
+  archiveProvider: string,
+  archiveRunId: string,
+  verificationStatus: string,
+): Promise<ArchiveAuditStatus> {
+  const existing = await prisma.platformAuditLog.findFirst({
+    where: { action: ARCHIVE_VERIFIED_AUDIT_ACTION, targetId: candidate.id },
+    select: { id: true },
+  });
+  if (existing) return "ALREADY_AUDITED";
+
+  try {
+    await createPlatformAuditLog({
+      actorId: null,
+      action: ARCHIVE_VERIFIED_AUDIT_ACTION,
+      targetType: "IntegrityEvidenceAsset",
+      targetId: candidate.id,
+      institutionId: candidate.institutionId,
+      metadata: { kind: candidate.kind, byteSize: candidate.byteSize, archiveProvider, archiveRunId, verificationStatus },
+    });
+    return "AUDITED";
+  } catch {
+    return "AUDIT_FAILED";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +497,8 @@ export type ArchiveAssetOutcome = {
   byteSize: number;
   status: ArchiveAssetOutcomeStatus;
   error?: string;
+  /** Only set for ARCHIVED_VERIFIED/ALREADY_ARCHIVED_VERIFIED outcomes in execute mode — see ensureArchiveAudit. */
+  auditStatus?: ArchiveAuditStatus;
 };
 
 export type ArchiveSweepReport = {
@@ -399,10 +508,21 @@ export type ArchiveSweepReport = {
   dryRun: boolean;
   candidateCount: number;
   outcomes: ArchiveAssetOutcome[];
-  /** true only if EVERY candidate reached ARCHIVED_VERIFIED/ALREADY_ARCHIVED_VERIFIED (execute mode) — or every candidate passed source verification (dry-run mode, informational only). */
+  /**
+   * true only if EVERY candidate reached ARCHIVED_VERIFIED/ALREADY_ARCHIVED_VERIFIED
+   * AND its audit is AUDITED/ALREADY_AUDITED AND the manifest itself
+   * verified (execute mode) — or every candidate passed source
+   * verification (dry-run mode, informational only). A failed archive
+   * audit makes the overall run report failure even though the archive
+   * object itself was written and verified correctly — see
+   * ensureArchiveAudit's own doc comment for why the object is never
+   * rolled back merely because its audit failed.
+   */
   overallOk: boolean;
   /** null in dry-run (no manifest is ever written); true/false in execute mode. */
   manifestVerified: boolean | null;
+  /** Mirrors the manifest's own runStatus — null in dry-run. */
+  runStatus: ArchiveManifestRunStatus | null;
 };
 
 /**
@@ -413,6 +533,12 @@ export type ArchiveSweepReport = {
  * database or primary storage in any way (see the "dry-run performs no
  * writes" tests). Only `dryRun: false` calls assertProductionArchiveSafe
  * and, if it passes, actually archives anything.
+ *
+ * `sourceEnvironment` is recorded ONLY as manifest metadata — it has NO
+ * effect on the production guard (see assertSupabaseArchiveOperationSafe's
+ * own doc comment). A caller cannot weaken the guard by passing
+ * sourceEnvironment="test" (or omitting it) against a primary project
+ * that actually matches ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF.
  */
 export async function runEvidenceArchiveSweep(options: {
   dryRun: boolean;
@@ -428,10 +554,7 @@ export async function runEvidenceArchiveSweep(options: {
 
   let archiveAdapter: EvidenceArchiveStorageAdapter | null = null;
   if (!options.dryRun) {
-    const guard = assertProductionArchiveSafe(options.confirmProductionArchiveFlagPresent ?? false, {
-      ...process.env,
-      ARCHIVE_SOURCE_ENVIRONMENT: sourceEnvironment,
-    });
+    const guard = assertProductionArchiveSafe(options.confirmProductionArchiveFlagPresent ?? false);
     if (!guard.ok) throw new ProductionArchiveGuardError(guard.reason);
     archiveAdapter = resolveEvidenceArchiveStorageAdapter();
   }
@@ -455,7 +578,8 @@ export async function runEvidenceArchiveSweep(options: {
 
     const archiveKey = generateArchiveObjectKey(candidate.id, candidate.contentType);
     const writeOutcome = await archiveVerifiedEvidence(archiveAdapter!, archiveKey, verification.bytes, candidate.contentType, candidate.sha256!);
-    outcomes.push({ ...base, status: writeOutcome.status, error: writeOutcome.error });
+    const outcome: ArchiveAssetOutcome = { ...base, status: writeOutcome.status, error: writeOutcome.error };
+    outcomes.push(outcome);
 
     if (writeOutcome.status === "ARCHIVED_VERIFIED" || writeOutcome.status === "ALREADY_ARCHIVED_VERIFIED") {
       manifestAssets.push({
@@ -473,18 +597,30 @@ export async function runEvidenceArchiveSweep(options: {
         submissionId: candidate.submissionId,
         integrityEventId: candidate.integrityEventId,
       });
+      // Awaited — never fire-and-forget (see ensureArchiveAudit). Runs for
+      // BOTH new and already-archived outcomes so a prior run's failed
+      // audit write self-repairs on this rerun.
+      outcome.auditStatus = await ensureArchiveAudit(candidate, archiveAdapter!.provider, archiveRunId, writeOutcome.status);
     }
   }
 
   let manifestVerified: boolean | null = null;
+  let runStatus: ArchiveManifestRunStatus | null = null;
   if (!options.dryRun) {
+    const verifiedAssetCount = manifestAssets.length;
+    const failureCount = candidates.length - verifiedAssetCount;
+    runStatus = failureCount === 0 ? "COMPLETE" : "PARTIAL_FAILURE";
+
     const payload: ArchiveManifestPayload = {
       manifestVersion: 1,
       archiveRunId,
       createdAt: now.toISOString(),
       sourceEnvironment,
       sourceProvider: archiveAdapter!.provider,
-      assetCount: manifestAssets.length,
+      candidateCount: candidates.length,
+      verifiedAssetCount,
+      failureCount,
+      runStatus,
       assets: manifestAssets,
     };
     const manifestDocument = buildManifestDocument(payload);
@@ -496,38 +632,27 @@ export async function runEvidenceArchiveSweep(options: {
     } catch {
       manifestVerified = false;
     }
-
-    // Audit only NEWLY archived assets (ARCHIVED_VERIFIED) — never
-    // ALREADY_ARCHIVED_VERIFIED reruns, which would otherwise create an
-    // unbounded number of duplicate audit rows every time the sweep is
-    // re-run against a stable, already-archived dataset. This is a
-    // deliberate, documented choice (see docs/tether-evidence-archive-plan.md).
-    for (const outcome of outcomes) {
-      if (outcome.status !== "ARCHIVED_VERIFIED") continue;
-      const candidate = candidates.find((c) => c.id === outcome.evidenceAssetId);
-      if (!candidate) continue;
-      createPlatformAuditLog({
-        actorId: null,
-        action: ARCHIVE_VERIFIED_AUDIT_ACTION,
-        targetType: "IntegrityEvidenceAsset",
-        targetId: candidate.id,
-        institutionId: candidate.institutionId,
-        metadata: {
-          kind: candidate.kind,
-          byteSize: candidate.byteSize,
-          archiveProvider: archiveAdapter!.provider,
-          archiveRunId,
-          verificationStatus: outcome.status,
-        },
-      }).catch(() => {});
-    }
   }
 
   const overallOk = options.dryRun
     ? outcomes.every((o) => o.status === "SOURCE_VERIFIED")
-    : outcomes.every((o) => o.status === "ARCHIVED_VERIFIED" || o.status === "ALREADY_ARCHIVED_VERIFIED") && manifestVerified === true;
+    : outcomes.every(
+        (o) =>
+          (o.status === "ARCHIVED_VERIFIED" || o.status === "ALREADY_ARCHIVED_VERIFIED") &&
+          (o.auditStatus === "AUDITED" || o.auditStatus === "ALREADY_AUDITED"),
+      ) && manifestVerified === true;
 
-  return { archiveRunId, createdAt: now, sourceEnvironment, dryRun: options.dryRun, candidateCount: candidates.length, outcomes, overallOk, manifestVerified };
+  return {
+    archiveRunId,
+    createdAt: now,
+    sourceEnvironment,
+    dryRun: options.dryRun,
+    candidateCount: candidates.length,
+    outcomes,
+    overallOk,
+    manifestVerified,
+    runStatus,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +664,7 @@ export async function runEvidenceArchiveSweep(options: {
 // ---------------------------------------------------------------------------
 
 export type RestoreStatus =
+  | "RESTORE_PRODUCTION_GUARD_FAILED"
   | "RESTORE_NOT_FOUND"
   | "RESTORE_ARCHIVE_MISSING"
   | "RESTORE_DB_DIGEST_MISSING"
@@ -547,8 +673,19 @@ export type RestoreStatus =
   | "RESTORE_CONFIRMATION_REQUIRED"
   | "RESTORE_WRITE_FAILED"
   | "RESTORE_VERIFY_FAILED"
-  | "RESTORED_VERIFIED";
+  | "RESTORED_VERIFIED"
+  | "RESTORED_VERIFIED_AUDIT_FAILED";
 export type RestoreOutcome = { status: RestoreStatus; error?: string };
+
+// Fixed, bounded messages only — the underlying primary adapter's own
+// error messages (e.g. Supabase's "upload failed for \"<key>\": ...", or
+// local_dev's "Unsafe evidence storage key: \"<key>\"") can embed the raw
+// storageKey and/or a raw provider message. Restore never forwards
+// err.message from a primary-adapter call, regardless of provider —
+// sanitized here at the restore boundary rather than by touching the
+// already-frozen evidenceStorage.ts.
+const RESTORE_WRITE_FAILED_MESSAGE = "Primary evidence restore write failed.";
+const RESTORE_VERIFY_FAILED_MESSAGE = "Primary evidence restore verification failed.";
 
 /**
  * Restores ONE evidence asset's bytes from the archive back to primary
@@ -560,8 +697,21 @@ export type RestoreOutcome = { status: RestoreStatus; error?: string };
  * A healthy, verified-correct primary object is always refused (never
  * overwritten) regardless of confirmation. The archive copy is never
  * deleted by this function, under any outcome.
+ *
+ * Uses the SAME shared project-separation guard as archive execute
+ * (assertRestoreOperationSafe / assertSupabaseArchiveOperationSafe) — a
+ * restore against the configured Production primary project additionally
+ * requires `confirmProductionRestore`, on top of the ordinary
+ * `confirmRestore` flag already required for any restore (missing or
+ * corrupt primary alike).
  */
-export async function restoreEvidenceAsset(evidenceAssetId: string, options: { confirmRestore: boolean }): Promise<RestoreOutcome> {
+export async function restoreEvidenceAsset(
+  evidenceAssetId: string,
+  options: { confirmRestore: boolean; confirmProductionRestore?: boolean },
+): Promise<RestoreOutcome> {
+  const guard = assertRestoreOperationSafe(options.confirmProductionRestore ?? false);
+  if (!guard.ok) return { status: "RESTORE_PRODUCTION_GUARD_FAILED", error: guard.reason };
+
   const asset = await prisma.integrityEvidenceAsset.findUnique({
     where: { id: evidenceAssetId },
     select: { id: true, contentType: true, sha256: true, byteSize: true, storageKey: true, institutionId: true, kind: true },
@@ -605,8 +755,8 @@ export async function restoreEvidenceAsset(evidenceAssetId: string, options: { c
       await primaryAdapter.delete(asset.storageKey);
     }
     await primaryAdapter.put(asset.storageKey, archiveBytes, asset.contentType);
-  } catch (err) {
-    return { status: "RESTORE_WRITE_FAILED", error: err instanceof Error ? err.message : String(err) };
+  } catch {
+    return { status: "RESTORE_WRITE_FAILED", error: RESTORE_WRITE_FAILED_MESSAGE };
   }
 
   let rereadPrimary: Buffer | null;
@@ -615,20 +765,27 @@ export async function restoreEvidenceAsset(evidenceAssetId: string, options: { c
   } catch {
     rereadPrimary = null;
   }
-  if (!rereadPrimary) return { status: "RESTORE_VERIFY_FAILED" };
+  if (!rereadPrimary) return { status: "RESTORE_VERIFY_FAILED", error: RESTORE_VERIFY_FAILED_MESSAGE };
   const rereadSha256 = createHash("sha256").update(rereadPrimary).digest("hex");
   if (rereadSha256 !== asset.sha256 || rereadPrimary.byteLength !== asset.byteSize) {
-    return { status: "RESTORE_VERIFY_FAILED" };
+    return { status: "RESTORE_VERIFY_FAILED", error: RESTORE_VERIFY_FAILED_MESSAGE };
   }
 
-  createPlatformAuditLog({
-    actorId: null,
-    action: ARCHIVE_RESTORED_AUDIT_ACTION,
-    targetType: "IntegrityEvidenceAsset",
-    targetId: asset.id,
-    institutionId: asset.institutionId,
-    metadata: { kind: asset.kind, byteSize: asset.byteSize },
-  }).catch(() => {});
-
-  return { status: "RESTORED_VERIFIED" };
+  // AWAITED — never fire-and-forget. Bytes are already restored and
+  // verified at this point; an audit-write failure is reported distinctly
+  // (RESTORED_VERIFIED_AUDIT_FAILED) rather than silently swallowed, but
+  // never rolls back or removes the now-healthy primary object.
+  try {
+    await createPlatformAuditLog({
+      actorId: null,
+      action: ARCHIVE_RESTORED_AUDIT_ACTION,
+      targetType: "IntegrityEvidenceAsset",
+      targetId: asset.id,
+      institutionId: asset.institutionId,
+      metadata: { kind: asset.kind, byteSize: asset.byteSize },
+    });
+    return { status: "RESTORED_VERIFIED" };
+  } catch {
+    return { status: "RESTORED_VERIFIED_AUDIT_FAILED" };
+  }
 }
