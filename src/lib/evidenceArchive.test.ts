@@ -22,7 +22,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "./prisma";
 import { getOrCreateTestInstitution } from "./testInstitution";
 import { resolveEvidenceStorageAdapter, LocalDevEvidenceStorageAdapter } from "./evidenceStorage";
-import { resolveEvidenceArchiveStorageAdapter, type EvidenceArchiveStorageAdapter } from "./evidenceArchiveStorage";
+import { resolveEvidenceArchiveStorageAdapter, LocalDevEvidenceArchiveStorageAdapter, type EvidenceArchiveStorageAdapter } from "./evidenceArchiveStorage";
 import {
   findEvidenceArchiveCandidates,
   verifySourceEvidence,
@@ -41,6 +41,21 @@ import {
   type ArchiveManifestDocument,
   type EvidenceArchiveCandidate,
 } from "./evidenceArchive";
+
+// Final fix (manifest provenance) — wraps resolveEvidenceArchiveStorageAdapter
+// behind a mock that delegates to the REAL implementation by default (so
+// every other test in this file is unaffected), so that the two "genuine
+// production execute" tests below can arm it with a real, disk-backed
+// LocalDevEvidenceArchiveStorageAdapter for exactly one call — proving the
+// manifest-provenance override without ever attempting a real Supabase
+// network call from a unit test. The production GUARD itself (which reads
+// process.env directly, see withRealProductionGuardEnv) is never mocked.
+const { mockResolveArchiveAdapter } = vi.hoisted(() => ({ mockResolveArchiveAdapter: vi.fn() }));
+vi.mock("@/lib/evidenceArchiveStorage", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./evidenceArchiveStorage")>();
+  mockResolveArchiveAdapter.mockImplementation(actual.resolveEvidenceArchiveStorageAdapter);
+  return { ...actual, resolveEvidenceArchiveStorageAdapter: mockResolveArchiveAdapter };
+});
 
 const stamp = Date.now();
 const cleanup = { users: [] as string[], exams: [] as string[] };
@@ -498,6 +513,99 @@ describe("caller-supplied sourceEnvironment cannot downgrade the production guar
     await createArchiveTestAsset({ institutionId: isolatedInst.id });
     const report = await runEvidenceArchiveSweep({ dryRun: false, institutionId: isolatedInst.id, sourceEnvironment: "my-label" });
     expect(report.sourceEnvironment).toBe("my-label");
+  });
+});
+
+// ── Final fix: manifest PROVENANCE (not just the guard) is machine-derived ──
+// for genuine Production runs — a caller can no longer cause an approved
+// Production archive to be permanently mislabeled "test"/"unspecified" in
+// its own manifest. See docs/tether-evidence-archive-plan.md.
+
+describe("Production archive manifest provenance is machine-derived, not caller-controlled (manifest provenance final fix)", () => {
+  const PRODUCTION_GUARD_ENV = {
+    SUPABASE_URL: "https://primary-project.supabase.co",
+    ARCHIVE_SUPABASE_URL: "https://archive-project.supabase.co",
+    ARCHIVE_STORAGE_PROVIDER: "supabase_storage",
+    ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF: "primary-project",
+  } as const;
+
+  it("[A] genuine production execute: report.sourceEnvironment and the stored manifest both say 'production' even though the caller passed sourceEnvironment: 'test', and the manifest SHA verifies", async () => {
+    mockResolveArchiveAdapter.mockImplementationOnce(() => new LocalDevEvidenceArchiveStorageAdapter());
+    const isolatedInst = await freshInstitution("prod-provenance-a");
+    await createArchiveTestAsset({ institutionId: isolatedInst.id });
+
+    let report!: Awaited<ReturnType<typeof runEvidenceArchiveSweep>>;
+    await withRealProductionGuardEnv(PRODUCTION_GUARD_ENV, async () => {
+      report = await runEvidenceArchiveSweep({
+        dryRun: false,
+        institutionId: isolatedInst.id,
+        sourceEnvironment: "test",
+        confirmProductionArchiveFlagPresent: true,
+      });
+    });
+
+    expect(report.overallOk).toBe(true);
+    expect(report.sourceEnvironment).toBe("production");
+
+    const archiveAdapter = new LocalDevEvidenceArchiveStorageAdapter();
+    const stored = await archiveAdapter.get(`manifests/v1/${report.archiveRunId}.json`);
+    expect(stored).not.toBeNull();
+    const doc = JSON.parse(stored!.toString("utf-8"));
+    expect(doc.sourceEnvironment).toBe("production");
+    expect(verifyManifestDocument(doc)).toBe(true);
+  });
+
+  it("[B] genuine production execute with sourceEnvironment OMITTED entirely: manifest still says 'production', never 'unspecified'", async () => {
+    mockResolveArchiveAdapter.mockImplementationOnce(() => new LocalDevEvidenceArchiveStorageAdapter());
+    const isolatedInst = await freshInstitution("prod-provenance-b");
+    await createArchiveTestAsset({ institutionId: isolatedInst.id });
+
+    let report!: Awaited<ReturnType<typeof runEvidenceArchiveSweep>>;
+    await withRealProductionGuardEnv(PRODUCTION_GUARD_ENV, async () => {
+      report = await runEvidenceArchiveSweep({
+        dryRun: false,
+        institutionId: isolatedInst.id,
+        confirmProductionArchiveFlagPresent: true,
+      });
+    });
+
+    expect(report.sourceEnvironment).toBe("production");
+
+    const archiveAdapter = new LocalDevEvidenceArchiveStorageAdapter();
+    const stored = await archiveAdapter.get(`manifests/v1/${report.archiveRunId}.json`);
+    expect(stored).not.toBeNull();
+    const doc = JSON.parse(stored!.toString("utf-8"));
+    expect(doc.sourceEnvironment).toBe("production");
+  });
+
+  it("[C] non-production/local_dev execute: caller-provided sourceEnvironment is preserved unchanged as informational metadata", async () => {
+    const isolatedInst = await freshInstitution("prod-provenance-c");
+    await createArchiveTestAsset({ institutionId: isolatedInst.id });
+    const report = await runEvidenceArchiveSweep({
+      dryRun: false,
+      institutionId: isolatedInst.id,
+      sourceEnvironment: "synthetic-recovery-test",
+    });
+    expect(report.sourceEnvironment).toBe("synthetic-recovery-test");
+  });
+
+  it("[D] tampering with sourceEnvironment in a stored manifest still breaks SHA-256 verification", () => {
+    const payload: ArchiveManifestPayload = {
+      manifestVersion: 1,
+      archiveRunId: "run-provenance-d",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      sourceEnvironment: "production",
+      sourceProvider: "local_dev",
+      candidateCount: 0,
+      verifiedAssetCount: 0,
+      failureCount: 0,
+      runStatus: "COMPLETE",
+      assets: [],
+    };
+    const doc = buildManifestDocument(payload);
+    expect(verifyManifestDocument(doc)).toBe(true);
+    const tampered: ArchiveManifestDocument = { ...doc, sourceEnvironment: "test" };
+    expect(verifyManifestDocument(tampered)).toBe(false);
   });
 });
 

@@ -534,11 +534,20 @@ export type ArchiveSweepReport = {
  * writes" tests). Only `dryRun: false` calls assertProductionArchiveSafe
  * and, if it passes, actually archives anything.
  *
- * `sourceEnvironment` is recorded ONLY as manifest metadata — it has NO
- * effect on the production guard (see assertSupabaseArchiveOperationSafe's
- * own doc comment). A caller cannot weaken the guard by passing
- * sourceEnvironment="test" (or omitting it) against a primary project
- * that actually matches ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF.
+ * `sourceEnvironment` is recorded as manifest/report metadata, but it is
+ * NOT trusted as-is: it has no effect on the production guard (see
+ * assertSupabaseArchiveOperationSafe's own doc comment) — a caller
+ * cannot weaken the guard by passing sourceEnvironment="test" (or
+ * omitting it) against a primary project that actually matches
+ * ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF. And, in execute mode, the
+ * caller-supplied label cannot even be RECORDED as anything other than
+ * "production" once the guard's own machine-derived
+ * `isProductionOperation` is true — the permanent manifest's provenance
+ * must never be able to say "test"/"unspecified" for a run that the
+ * guard itself determined targets the configured Production primary
+ * project. Only when `isProductionOperation` is false (local_dev/non-
+ * production) does the caller's own label pass through unchanged, purely
+ * as informational metadata.
  */
 export async function runEvidenceArchiveSweep(options: {
   dryRun: boolean;
@@ -550,12 +559,15 @@ export async function runEvidenceArchiveSweep(options: {
 }): Promise<ArchiveSweepReport> {
   const now = options.now ?? new Date();
   const archiveRunId = options.archiveRunId ?? randomUUID();
-  const sourceEnvironment = options.sourceEnvironment ?? "unspecified";
+  let effectiveSourceEnvironment = options.sourceEnvironment ?? "unspecified";
 
   let archiveAdapter: EvidenceArchiveStorageAdapter | null = null;
   if (!options.dryRun) {
     const guard = assertProductionArchiveSafe(options.confirmProductionArchiveFlagPresent ?? false);
     if (!guard.ok) throw new ProductionArchiveGuardError(guard.reason);
+    // Machine-derived provenance overrides any caller-supplied label —
+    // see this function's own doc comment above.
+    if (guard.isProductionOperation) effectiveSourceEnvironment = "production";
     archiveAdapter = resolveEvidenceArchiveStorageAdapter();
   }
 
@@ -615,7 +627,7 @@ export async function runEvidenceArchiveSweep(options: {
       manifestVersion: 1,
       archiveRunId,
       createdAt: now.toISOString(),
-      sourceEnvironment,
+      sourceEnvironment: effectiveSourceEnvironment,
       sourceProvider: archiveAdapter!.provider,
       candidateCount: candidates.length,
       verifiedAssetCount,
@@ -645,7 +657,7 @@ export async function runEvidenceArchiveSweep(options: {
   return {
     archiveRunId,
     createdAt: now,
-    sourceEnvironment,
+    sourceEnvironment: effectiveSourceEnvironment,
     dryRun: options.dryRun,
     candidateCount: candidates.length,
     outcomes,

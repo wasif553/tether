@@ -67,7 +67,10 @@ async function runArchive(args: string[]): Promise<void> {
   const confirmProductionArchive = args.includes("--confirm-production-archive");
   const sourceEnvironment = process.env.ARCHIVE_SOURCE_ENVIRONMENT ?? "unspecified";
 
-  log(`Source environment: ${sourceEnvironment}`);
+  // This is only the caller-declared label. For a genuine Production
+  // execute run, the sweep itself overrides it — see the "Effective
+  // source environment" line printed after the run.
+  log(`Declared source label: ${sourceEnvironment}`);
   log(execute ? "Mode: EXECUTE — evidence will be archived." : "Mode: DRY RUN — nothing will be archived (pass --execute to actually archive).");
 
   let report;
@@ -83,6 +86,7 @@ async function runArchive(args: string[]): Promise<void> {
   }
 
   log(`Archive run id: ${report.archiveRunId}`);
+  log(`Effective source environment: ${report.sourceEnvironment}`);
   log(`Evaluated ${report.candidateCount} evidence asset(s).`);
   for (const outcome of report.outcomes) {
     const auditSuffix = outcome.auditStatus ? `, audit: ${outcome.auditStatus}` : "";
