@@ -31,16 +31,27 @@ export type RecoveryStatusBannerProps = {
 
 export function RecoveryStatusBanner({ connectionStatus, pendingCount, offline, recoveryMessage, onRetryNow }: RecoveryStatusBannerProps) {
   const showResume = Boolean(recoveryMessage);
-  if (!offline && !showResume && pendingCount === 0 && connectionStatus !== "FAILED" && connectionStatus !== "CONFLICT") {
-    // Nothing worth announcing — steady-state SAVED/IDLE with nothing
-    // pending renders nothing, so the banner never becomes visual noise
-    // during ordinary, uneventful exam-taking.
-    return null;
-  }
+  // MCQ interaction layout-shift fix — every answer selection routes
+  // through the resilient autosave queue (see saveAnswer in the student
+  // exam page), which flips pendingCount 0->1 the instant the debounced
+  // save fires and back to 0 once it resolves — squarely inside the
+  // window a student is still deciding between options. This component
+  // used to return null/a rendered block depending on that exact
+  // transition, so this box's own mount/unmount pushed the question card
+  // (and every MCQ row below it) up and down on essentially every answer
+  // change. It now always renders the same fixed-height box — only its
+  // INSIDE content toggles — so nothing below it ever moves. This also
+  // helps the aria-live announcement itself: a live region already
+  // present in the DOM before its content changes is more reliably
+  // announced than one inserted fresh each time.
+  const shouldShow = offline || showResume || pendingCount > 0 || connectionStatus === "FAILED" || connectionStatus === "CONFLICT";
 
   let text: string;
   let tone: "info" | "warning" | "error";
-  if (showResume) {
+  if (!shouldShow) {
+    text = "";
+    tone = "info";
+  } else if (showResume) {
     text = recoveryMessage!;
     tone = "warning";
   } else if (offline) {
@@ -52,18 +63,17 @@ export function RecoveryStatusBanner({ connectionStatus, pendingCount, offline, 
   } else if (connectionStatus === "CONFLICT") {
     text = "A newer saved version of this answer already exists. Contact your lecturer or exam support if this is unexpected.";
     tone = "error";
-  } else if (pendingCount > 0) {
+  } else {
+    // Reached whenever shouldShow is true purely because pendingCount > 0
+    // (an ordinary save in flight, not offline/failed/conflicted/resuming)
+    // — the common case while an autosave is briefly outstanding.
     text = `Changes waiting to save (${pendingCount}).`;
     tone = "info";
-  } else if (connectionStatus === "SAVED") {
-    text = "Saved.";
-    tone = "info";
-  } else {
-    return null;
   }
 
-  const toneClasses =
-    tone === "error"
+  const toneClasses = !shouldShow
+    ? "border-transparent"
+    : tone === "error"
       ? "border-red-200 bg-red-50 text-red-700"
       : tone === "warning"
         ? "border-amber-200 bg-amber-50 text-amber-800"
@@ -73,17 +83,21 @@ export function RecoveryStatusBanner({ connectionStatus, pendingCount, offline, 
     <div
       role="status"
       aria-live="polite"
-      className={`flex items-center justify-between gap-3 rounded border px-3 py-2 text-xs ${toneClasses}`}
+      className={`flex min-h-[34px] items-center justify-between gap-3 rounded border px-3 py-2 text-xs ${toneClasses}`}
     >
-      <span>{text}</span>
-      {(showResume || connectionStatus === "FAILED") && onRetryNow && (
-        <button
-          type="button"
-          onClick={onRetryNow}
-          className="shrink-0 rounded border border-current px-2 py-1 text-xs focus:outline focus:outline-2 focus:outline-offset-1"
-        >
-          Retry now
-        </button>
+      {shouldShow && (
+        <>
+          <span>{text}</span>
+          {(showResume || connectionStatus === "FAILED") && onRetryNow && (
+            <button
+              type="button"
+              onClick={onRetryNow}
+              className="shrink-0 rounded border border-current px-2 py-1 text-xs focus:outline focus:outline-2 focus:outline-offset-1"
+            >
+              Retry now
+            </button>
+          )}
+        </>
       )}
     </div>
   );

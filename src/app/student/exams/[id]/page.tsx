@@ -4550,11 +4550,15 @@ export default function TakeExamPage({
       )}
 
       {/* Tether Secure Exam Recovery and Resilient Autosave v1 — see
-          docs/tether-secure-resume-recovery-v1.md, Part 4/16. Renders
-          nothing during ordinary, uneventful exam-taking (see
-          RecoveryStatusBanner's own early-return) — only appears while
-          offline, while a save is queued/failed/conflicted, or once a
-          server-authoritative recovery message is available. */}
+          docs/tether-secure-resume-recovery-v1.md, Part 4/16. MCQ
+          interaction layout-shift fix — RecoveryStatusBanner now ALWAYS
+          renders a fixed-height box (see its own doc comment); only the
+          text inside it toggles as pendingCount/status change. This
+          wrapper's own condition (submissionStatus) is stable for the
+          whole exam, so nothing here mounts/unmounts mid-interaction —
+          do not reintroduce a pendingCount/status-based conditional
+          around RecoveryStatusBanner itself, which would silently bring
+          the same bug back. */}
       {submissionStatus === "IN_PROGRESS" && (
         <div className="mt-3">
           <RecoveryStatusBanner

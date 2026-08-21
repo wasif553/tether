@@ -687,3 +687,34 @@ describe("Exam layout stability — question card min-height floor", () => {
     expect(surrounding).not.toMatch(/animate-|transition-/);
   });
 });
+
+// MCQ interaction layout-shift fix — the proven root cause was
+// RecoveryStatusBanner's own mount/unmount as pendingCount/status flip
+// during every autosave (see RecoveryStatusBanner.tsx and
+// RecoveryStatusBanner.test.tsx for the component-level fix/tests). This
+// is the structural guard at the CALL SITE: nothing here may reintroduce
+// a pendingCount/status-conditional wrapper around it, which would
+// silently bring the same bug back at a different layer even with the
+// component itself fixed.
+describe("Exam layout stability — RecoveryStatusBanner call site never re-gates on pendingCount/status", () => {
+  it("RecoveryStatusBanner's only enclosing conditional is submissionStatus === \"IN_PROGRESS\" — stable for the whole exam, never pendingCount/connectionStatus", () => {
+    const usageIdx = source.indexOf("<RecoveryStatusBanner");
+    expect(usageIdx).toBeGreaterThan(-1);
+    const before = source.slice(Math.max(0, usageIdx - 400), usageIdx);
+    expect(before).toContain('submissionStatus === "IN_PROGRESS"');
+    // The nearest preceding conditional-opening brace is the IN_PROGRESS
+    // check — no pendingCount/status test appears between it and the
+    // component itself.
+    const conditionIdx = before.lastIndexOf('submissionStatus === "IN_PROGRESS"');
+    const between = before.slice(conditionIdx);
+    expect(between).not.toMatch(/pendingCount|connectionStatus|resilientAutosave\.status/);
+  });
+
+  it("RecoveryStatusBanner is passed resilientAutosave.status/pendingCount as PROPS (so it can render its own stable box), never used to gate whether it renders at all", () => {
+    const usageIdx = source.indexOf("<RecoveryStatusBanner");
+    const closeIdx = source.indexOf("/>", usageIdx);
+    const propsBlock = source.slice(usageIdx, closeIdx);
+    expect(propsBlock).toContain("connectionStatus={resilientAutosave.status}");
+    expect(propsBlock).toContain("pendingCount={resilientAutosave.pendingCount}");
+  });
+});
