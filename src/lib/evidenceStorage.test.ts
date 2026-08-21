@@ -190,10 +190,19 @@ describe("SupabaseStorageEvidenceAdapter — object key only, never bucket/key",
       );
     });
 
-    it("C. the thrown message contains no storageKey, bucket path, or service-role secret", async () => {
+    it("C. an adversarial/over-detailed provider error message is never forwarded — the thrown message is the fixed generic string, not error.message", async () => {
       const adapter = makeSupabaseAdapter();
       const key = "ai-camera-evidence/sub-abc-evt-def-suffix123.jpg";
-      mockRemove.mockResolvedValueOnce({ data: null, error: { message: "The resource was not found" } });
+      // A malicious or merely over-verbose provider could embed a key,
+      // bucket name, an internal URL, and something credential-shaped
+      // directly in its own error message. Tether cannot control what
+      // Supabase (or a future provider) puts in `error.message`, so the
+      // adapter must never forward that string at all — not even
+      // partially — rather than trying to redact it after the fact.
+      const adversarialMessage =
+        'failed deleting safe-exam-evidence/ai-camera-evidence/sub-abc-evt-def-suffix123.jpg from https://internal.example.supabase.co/storage/v1/object/safe-exam-evidence?token=fake-secret-abc123';
+      mockRemove.mockResolvedValueOnce({ data: null, error: { message: adversarialMessage } });
+
       try {
         await adapter.delete(key);
         expect.unreachable("delete() should have thrown");
@@ -201,7 +210,13 @@ describe("SupabaseStorageEvidenceAdapter — object key only, never bucket/key",
         const message = (err as Error).message;
         expect(message).not.toContain(key);
         expect(message).not.toContain("safe-exam-evidence");
+        expect(message).not.toContain("internal.example.supabase.co");
+        expect(message).not.toContain("token=fake-secret-abc123");
         expect(message).not.toContain("fake-service-role-key");
+        // The thrown message is the fixed, bounded string only — proves
+        // error.message is never forwarded, not merely that specific
+        // substrings happen to be filtered out of it.
+        expect(message).toBe("Supabase Storage evidence deletion failed.");
       }
     });
   });

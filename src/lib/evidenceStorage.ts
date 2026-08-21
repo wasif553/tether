@@ -176,13 +176,17 @@ class SupabaseStorageEvidenceAdapter implements EvidenceStorageAdapter {
   // return value (as this previously did) would let a caller believe the
   // object was deleted when it was not, which is exactly backwards for a
   // retention runner that deletes the database row right after this
-  // resolves. The thrown message deliberately omits the key/bucket path
-  // (unlike put()'s error above) — this method is reachable from the
-  // retention runner, and Section 3 of this pass requires no
-  // storageKey/submissionId/student-identifying detail in a delete error.
+  // resolves. Unlike put()'s error above, this deliberately throws a
+  // fixed, bounded message rather than including `error.message`: this
+  // method is reachable from the retention runner, whose outcome/error
+  // strings can end up in operator-facing CLI output, and Tether cannot
+  // guarantee a future Supabase provider message will never itself embed
+  // an object key, bucket/path detail, or other internal information —
+  // so nothing from the provider's own error is ever forwarded, not even
+  // indirectly.
   async delete(key: string): Promise<void> {
     const { error } = await this.client.storage.from(this.bucket).remove([this.objectKey(key)]);
-    if (error) throw new Error(`Supabase Storage evidence deletion failed: ${error.message}`);
+    if (error) throw new Error("Supabase Storage evidence deletion failed.");
   }
 }
 
