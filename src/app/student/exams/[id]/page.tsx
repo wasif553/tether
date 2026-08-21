@@ -4708,7 +4708,16 @@ export default function TakeExamPage({
               )}
               {oneQuestion.loading && <p className="text-gray-500">Loading question...</p>}
               {!oneQuestion.loading && oneQuestion.payload && (
-                <div className="rounded border border-gray-200 p-4">
+                // Exam layout stability follow-up — a floor, not a ceiling:
+                // short-answer/MCQ questions are otherwise much shorter than
+                // an essay question's 5-row textarea, and this card sits in
+                // a single stacked column (navigator above, Previous/Next
+                // below), so that natural per-question height difference
+                // visibly pushed everything below it up/down on every
+                // Next/Previous. min-h only raises the floor for shorter
+                // content — genuinely long question text/options still grow
+                // past it exactly as before.
+                <div className="min-h-[280px] rounded border border-gray-200 p-4">
                   <div className="flex items-center justify-between">
                     <p className="text-sm text-gray-500">
                       Question {oneQuestion.payload.currentIndex + 1} of {oneQuestion.payload.totalQuestions}{" "}

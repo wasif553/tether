@@ -647,3 +647,43 @@ describe("phone-detection calibration observability — structural checks on run
     expect(source.match(/buildPhoneCalibrationEventSummary\(/g)?.length).toBe(1);
   });
 });
+
+// Exam layout stability follow-up — the question card sits in a single
+// stacked column (navigator above, Previous/Next below), so an unstabilized
+// card visibly pushed everything below it up/down on every Next/Previous as
+// content naturally varies between question types (MCQ vs short-answer vs a
+// 5-row essay textarea). A min-height floor stops that without capping
+// genuine growth — these are source-level structural checks (this repo has
+// no DOM/testing-library harness for this file, see this file's own doc
+// comment), not a pixel-perfect rendering assertion.
+describe("Exam layout stability — question card min-height floor", () => {
+  it("the loaded-question card carries a min-height class, not just border/padding", () => {
+    // Immediately preceded by the loading-placeholder line, which uniquely
+    // anchors this to the one-question-mode card (this exact border/padding
+    // combination appears elsewhere in the file for unrelated cards).
+    const anchor = source.indexOf('{oneQuestion.loading && <p className="text-gray-500">Loading question...</p>}');
+    expect(anchor).toBeGreaterThan(-1);
+    const cardIdx = source.indexOf('rounded border border-gray-200 p-4"', anchor);
+    expect(cardIdx).toBeGreaterThan(-1);
+    const lineStart = source.lastIndexOf("\n", cardIdx);
+    const line = source.slice(lineStart, cardIdx + 40);
+    expect(line).toMatch(/min-h-\[\d+px\]/);
+  });
+
+  it("the min-height floor is on the loaded-question branch only, not the separate loading placeholder — a min-height on the placeholder would itself reserve mismatched space before content exists", () => {
+    const loadingIdx = source.indexOf('{oneQuestion.loading && <p className="text-gray-500">Loading question...</p>}');
+    expect(loadingIdx).toBeGreaterThan(-1);
+    const loadedIdx = source.indexOf('!oneQuestion.loading && oneQuestion.payload', loadingIdx);
+    expect(loadedIdx).toBeGreaterThan(loadingIdx);
+    const placeholderLine = source.slice(loadingIdx, loadingIdx + 90);
+    expect(placeholderLine).not.toMatch(/min-h-/);
+  });
+
+  it("the fix is a pure className addition — no new key prop, no conditional remount, no animation/transition class introduced on the card", () => {
+    const cardIdx = source.indexOf('min-h-[280px] rounded border border-gray-200 p-4"');
+    expect(cardIdx).toBeGreaterThan(-1);
+    const surrounding = source.slice(cardIdx - 200, cardIdx + 200);
+    expect(surrounding).not.toMatch(/\bkey=\{/);
+    expect(surrounding).not.toMatch(/animate-|transition-/);
+  });
+});
