@@ -17,6 +17,7 @@
     "release:validate": "tsx scripts/release-validate.ts",
     "backup:verify": "tsx scripts/verify-backup.ts",
     "evidence:retention": "tsx scripts/run-evidence-retention.ts",
+    "evidence:archive": "tsx scripts/run-evidence-archive.ts",
     "backfill:activated-at": "tsx scripts/backfill-submission-activated-at.ts"
   },
   "dependencies": {

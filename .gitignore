@@ -56,6 +56,10 @@ next-env.d.ts
 # a real object storage provider must be configured there.
 /.evidence-storage
 
+# Evidence Backup/Recovery v1 — local dev/test archive storage only (see
+# src/lib/evidenceArchiveStorage.ts). Never used in production.
+/.evidence-archive-storage
+
 .vercel
 .env*
 
