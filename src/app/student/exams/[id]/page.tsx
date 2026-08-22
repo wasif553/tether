@@ -4894,7 +4894,6 @@ export default function TakeExamPage({
                         Next
                       </button>
                     )}
-                    {navigatingQuestion && <span className="text-xs text-gray-500">Saving...</span>}
                   </div>
                   {oneQuestion.error && <p className="mt-2 text-sm text-red-600">{oneQuestion.error}</p>}
                 </div>

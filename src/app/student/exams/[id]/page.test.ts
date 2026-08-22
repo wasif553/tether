@@ -839,3 +839,97 @@ describe("Exam workspace — left-nav slot presence is decoupled from questionNa
     expect(guardLine).not.toContain("questionNav");
   });
 });
+
+// Remove-all-routine-save-UI pass — product decision: ordinary, successful
+// answer saving must be COMPLETELY INVISIBLE (no visible "Saving...",
+// "Saved", or pending-count text ever appears/disappears in the exam-taking
+// DOM). Backend saving itself (handleChange -> saveAnswer -> 600ms debounce
+// -> resilientAutosave.save -> IndexedDB queue -> server ack) must be
+// byte-for-byte unchanged; only the removed visible span near Previous/Next
+// is in scope. See RecoveryStatusBanner.tsx/.test.tsx for the sr-only
+// ordinary-state coverage, which this pass leaves untouched.
+describe("Remove routine save UI — no visible 'Saving...' text anywhere in the exam-taking DOM", () => {
+  it("the removed Previous/Next 'Saving...' span (navigatingQuestion && <span>Saving...</span>) is gone from the source entirely", () => {
+    expect(source).not.toContain("Saving...");
+    expect(source).not.toMatch(/>\s*Saving\s*\.\.\.\s*</);
+  });
+
+  it("no visible (non-sr-only) 'Saved' text exists in the exam-taking page — only RecoveryStatusBanner's own sr-only 'Saved.' string, which lives in a different file", () => {
+    // page.tsx never renders its own "Saved" literal at all — that copy
+    // lives exclusively inside RecoveryStatusBanner.tsx's sr-only branch.
+    expect(source).not.toMatch(/>\s*Saved\.?\s*</);
+  });
+
+  it("no visible pending-save/'changes waiting to save' phrasing appears in page.tsx's own JSX — that copy is scoped to RecoveryStatusBanner's fixed exceptional-state overlay and ManualReviewNotice's blocking recovery screen, neither of which is this file", () => {
+    expect(source).not.toContain("waiting to save");
+    expect(source).not.toContain("Changes waiting to save");
+  });
+
+  it("navigatingQuestion still exists and still disables Previous/Next/MCQ controls for race protection — only its visible text was removed, not the state itself", () => {
+    const occurrences = source.match(/navigatingQuestion/g) ?? [];
+    // setNavigatingQuestion(true/false) call sites + every disabled={...}
+    // that includes it — comfortably more than a handful if the guard is
+    // still wired everywhere it was before.
+    expect(occurrences.length).toBeGreaterThanOrEqual(6);
+    expect(source).toContain("disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}");
+  });
+
+  it("the Previous/Next button row no longer renders any trailing status span after the Next button — the row ends with the Next button's closing conditional", () => {
+    const rowIdx = source.indexOf('<div className="mt-4 flex items-center gap-2">');
+    expect(rowIdx).toBeGreaterThan(-1);
+    const rowEndIdx = source.indexOf("</div>", rowIdx);
+    const row = source.slice(rowIdx, rowEndIdx);
+    expect(row).not.toContain("<span");
+    expect(row).not.toMatch(/text-xs text-gray-500/);
+  });
+});
+
+describe("Remove routine save UI — backend autosave path is byte-for-byte unchanged", () => {
+  it("saveAnswer still debounces via setTimeout at exactly 600ms before calling resilientAutosave.save", () => {
+    const idx = source.indexOf("const saveAnswer = useCallback(");
+    expect(idx).toBeGreaterThan(-1);
+    const closeIdx = source.indexOf("[secureModeEnabled, reportIntegrityEvent, oneQuestionAtATime", idx);
+    const body = source.slice(idx, closeIdx);
+    expect(body).toContain("clearTimeout(saveTimers.current[questionId]);");
+    expect(body).toContain("saveTimers.current[questionId] = setTimeout(() => {");
+    expect(body).toContain("resilientAutosave");
+    expect(body).toContain(".save(questionId, response)");
+    expect(body).toMatch(/},\s*600\s*\);/);
+  });
+
+  it("handleChange still calls setResponses then saveAnswer synchronously — no optimistic-only shortcut, no navigation-before-save change", () => {
+    const idx = source.indexOf("function handleChange(questionId: string, value: string) {");
+    expect(idx).toBeGreaterThan(-1);
+    const closeIdx = source.indexOf("saveAnswer(questionId, value);", idx);
+    expect(closeIdx).toBeGreaterThan(idx);
+    const body = source.slice(idx, closeIdx + "saveAnswer(questionId, value);".length);
+    expect(body).toContain("setResponses((prev) => ({ ...prev, [questionId]: value }));");
+    expect(body).toContain("saveAnswer(questionId, value);");
+  });
+
+  it("navigateQuestion still awaits resilientAutosave.saveAndNavigate before navigating (durable acknowledgement preserved)", () => {
+    const idx = source.indexOf("async function navigateQuestion(requestedIndex: number) {");
+    expect(idx).toBeGreaterThan(-1);
+    const snippet = source.slice(idx, idx + 2000);
+    expect(snippet).toContain("await resilientAutosave.saveAndNavigate(questionId, response, requestedIndex);");
+  });
+
+  it("AUTOSAVE_FAILED integrity reporting on a failed/unacknowledged save is still wired (this is category B, an actual failure signal, and must survive this pass)", () => {
+    const idx = source.indexOf("const saveAnswer = useCallback(");
+    const closeIdx = source.indexOf("[secureModeEnabled, reportIntegrityEvent, oneQuestionAtATime", idx);
+    const body = source.slice(idx, closeIdx);
+    expect(body).toContain('reportIntegrityEvent("AUTOSAVE_FAILED")');
+  });
+});
+
+describe("Remove routine save UI — left-nav slot from e9727a827706576c0d3c79569ff60d2667903a46 is untouched by this pass", () => {
+  it("showQuestionNavigatorPanel is still declared and still gates both the grid wrapper and the slot, exactly as the prior fix left it", () => {
+    expect(source).toContain("const showQuestionNavigatorPanel = secureSettings?.showQuestionNavigator === true;");
+    expect(source).toContain("{showQuestionNavigatorPanel && (");
+  });
+
+  it("the two-column grid classes and the sticky navigator wrapper are still present, unmodified", () => {
+    expect(source).toContain("mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start lg:gap-6");
+    expect(source).toContain('className="mb-4 lg:sticky lg:top-4 lg:mb-0"');
+  });
+});
