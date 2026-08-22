@@ -64,3 +64,12 @@ next-env.d.ts
 .env*
 
 !.env.example
+
+# TETHER_LOAD_TEST_HARNESS_READINESS_P0_V1 — every run's manifest AND
+# credentials (plaintext synthetic passwords + session cookies) live
+# under load-tests/runs/<runId>/. credentials.local.json is secret and
+# must never be committed; manifest.json is non-secret but generated
+# per-run, so the whole directory is ignored rather than trying to
+# selectively track one file per run.
+/load-tests/runs/*
+!/load-tests/runs/.gitkeep

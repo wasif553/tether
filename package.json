@@ -18,7 +18,9 @@
     "backup:verify": "tsx scripts/verify-backup.ts",
     "evidence:retention": "tsx scripts/run-evidence-retention.ts",
     "evidence:archive": "tsx scripts/run-evidence-archive.ts",
-    "backfill:activated-at": "tsx scripts/backfill-submission-activated-at.ts"
+    "backfill:activated-at": "tsx scripts/backfill-submission-activated-at.ts",
+    "loadtest:setup": "node load-tests/setup/provisionFixture.mjs",
+    "loadtest:verify": "tsx load-tests/verify/verifyRun.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.106.0",
