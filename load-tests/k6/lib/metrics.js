@@ -47,6 +47,30 @@ export const correctnessMetrics = {
 };
 
 /**
+ * TETHER_LOCAL_POSTGRES_LOAD_SMOKE_10 (production-build recheck) — the
+ * save-and-navigate bounded-retry policy's own observability. See
+ * load-tests/shared/saveAndNavigateRetryPolicy.mjs for the policy this
+ * instruments.
+ *   - retryTotal: incremented once per RETRY attempt (i.e. every attempt
+ *     after the first for one logical action) — a healthy run should
+ *     show this near zero; a nonzero-but-small count is the harness
+ *     recovering from a transient drop exactly like the one that caused
+ *     the prior local smoke run's single navigator-convergence finding.
+ *   - journeyFailedTotal: incremented once per VU whose save-and-navigate
+ *     action was STILL unacknowledged after every retry — this is the
+ *     harness correctly refusing to silently advance past an
+ *     unacknowledged write. Any nonzero value here means that VU's
+ *     journey stopped early (no later questions answered, no submit
+ *     attempted) and should be investigated, but it is categorically
+ *     different from the OLD defect (advancing anyway) — see
+ *     studentJourney.js's own call site for the full contract.
+ */
+export const saveAndNavigateRetryMetrics = {
+  retryTotal: new Counter("save_and_navigate_retry_total"),
+  journeyFailedTotal: new Counter("save_and_navigate_journey_failed_total"),
+};
+
+/**
  * Records one HTTP response against the named operation's metric set.
  * `expected429Allowed` should be true ONLY for the rare, deliberate
  * rate-limit-testing paths this harness never actually exercises during

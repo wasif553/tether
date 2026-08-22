@@ -18,13 +18,24 @@
  * navigation always goes through the real
  * POST /question-progress / POST /save-and-navigate contracts — nothing
  * here ever writes a Submission/Answer row directly.
+ *
+ * TETHER_LOCAL_POSTGRES_LOAD_SMOKE_10 (production-build recheck) —
+ * save-and-navigate specifically now follows a bounded-retry,
+ * never-advance-without-acknowledgement contract matching the real
+ * client's own non-negotiable property (see
+ * load-tests/shared/saveAndNavigateRetryPolicy.mjs). The prior local
+ * smoke run's one finding was a harness defect, not a Tether defect: one
+ * save-and-navigate HTTP request was dropped in transit, and the old
+ * version of this loop advanced its local question index anyway. It no
+ * longer can — see the "Advance to the next question" call site below.
  */
 import http from "k6/http";
 import { sleep } from "k6";
 import exec from "k6/execution";
 import { BASE_URL, EXAM_ID, FIXTURE_QUESTIONS, studentForVu } from "./config.js";
-import { correctnessMetrics, recordResult } from "./metrics.js";
+import { correctnessMetrics, recordResult, saveAndNavigateRetryMetrics } from "./metrics.js";
 import { deterministicResponseFor } from "../../shared/deterministicAnswers.mjs";
+import { MAX_SAVE_AND_NAVIGATE_ATTEMPTS, shouldRetry, computeRetryJitterMs } from "../../shared/saveAndNavigateRetryPolicy.mjs";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
@@ -207,13 +218,55 @@ export function runStudentJourney({ targetDurationSeconds, microburst = false })
 
     // Advance to the next question — the critical, most-frequent
     // navigation path: POST /save-and-navigate (single round trip).
+    //
+    // TETHER_LOCAL_POSTGRES_LOAD_SMOKE_10 (production-build recheck) —
+    // this is the exact call site the prior local smoke run's single
+    // finding traced back to: one save-and-navigate request was dropped
+    // in transit (never reached the server at all — confirmed via the
+    // server's own access log), and the harness advanced its local
+    // question index anyway, leaving that question's "visited" marker
+    // unset even though its answer had separately been saved. Real
+    // Tether (useResilientAutosave.ts's saveAndNavigate) never applies
+    // an unacknowledged write's local effects — see
+    // load-tests/shared/saveAndNavigateRetryPolicy.mjs for the full
+    // rationale. This call site now matches that contract:
+    //   - ONE clientRequestId, generated ONCE, reused across every retry
+    //     of this SAME logical action (never a fresh id per retry) — the
+    //     server's own idempotency layer (saveAnswerWithIdempotency) is
+    //     what makes a retry of a request whose response was merely lost
+    //     safe to repeat; this harness never weakens or works around it.
+    //   - a small bounded number of attempts, short randomized jitter
+    //     between them.
+    //   - the outer `for` loop is NEVER allowed to advance to `i + 1`
+    //     unless the server genuinely acknowledged (2xx) — on
+    //     exhausting every attempt unacknowledged, this VU's journey
+    //     stops HERE: no later question is answered, submit is never
+    //     attempted, and the failure is recorded on its own dedicated
+    //     metric rather than silently folded into ordinary request
+    //     failures.
     if (!microburst) sleep(jitter(perQuestionBudgetSeconds * 0.3, 0.6));
-    const navigateRes = http.post(
-      `${BASE_URL}/api/submissions/${submissionId}/save-and-navigate`,
-      JSON.stringify({ questionId: FIXTURE_QUESTIONS[i].id, response, clientRequestId: newClientRequestId("nav"), clientRevision, currentIndex: i + 1 }),
-      { headers, tags: { operation: "save_and_navigate" } },
-    );
-    recordResult("save_and_navigate", navigateRes);
+    const navigateClientRequestId = newClientRequestId("nav");
+    let navigateAcknowledged = false;
+    for (let attempt = 1; attempt <= MAX_SAVE_AND_NAVIGATE_ATTEMPTS; attempt++) {
+      const navigateRes = http.post(
+        `${BASE_URL}/api/submissions/${submissionId}/save-and-navigate`,
+        JSON.stringify({ questionId: FIXTURE_QUESTIONS[i].id, response, clientRequestId: navigateClientRequestId, clientRevision, currentIndex: i + 1 }),
+        { headers, tags: { operation: "save_and_navigate" } },
+      );
+      const outcome = recordResult("save_and_navigate", navigateRes);
+      if (outcome.ok) {
+        navigateAcknowledged = true;
+        break;
+      }
+      if (shouldRetry(attempt)) {
+        saveAndNavigateRetryMetrics.retryTotal.add(1);
+        sleep(computeRetryJitterMs() / 1000);
+      }
+    }
+    if (!navigateAcknowledged) {
+      saveAndNavigateRetryMetrics.journeyFailedTotal.add(1);
+      return; // never advance past an unacknowledged save-and-navigate — this VU's journey stops here
+    }
   }
 
   // --- Final submission ---
