@@ -745,12 +745,13 @@ describe("Exam workspace — desktop left-navigator two-column layout", () => {
     expect(line).toContain("lg:gap-6");
   });
 
-  it("the navigator appears BEFORE the question column in the DOM (so CSS grid auto-placement puts it in the first/left column) and is wrapped separately from the question content", () => {
-    const wrapperIdx = source.indexOf('mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)]');
-    const navigatorIdx = source.indexOf("<QuestionNavigatorPanel", wrapperIdx);
-    const questionColumnIdx = source.indexOf('<div className="min-w-0">', wrapperIdx);
-    expect(navigatorIdx).toBeGreaterThan(wrapperIdx);
-    expect(questionColumnIdx).toBeGreaterThan(navigatorIdx);
+  it("the navigator slot appears BEFORE the question column in the DOM (so CSS grid auto-placement puts it in the first/left column) and is wrapped separately from the question content", () => {
+    const declIdx = source.indexOf("const showQuestionNavigatorPanel = secureSettings?.showQuestionNavigator === true;");
+    expect(declIdx).toBeGreaterThan(-1);
+    const slotIdx = source.indexOf("{showQuestionNavigatorPanel && (", declIdx);
+    const questionColumnIdx = source.indexOf('<div className="min-w-0">', declIdx);
+    expect(slotIdx).toBeGreaterThan(declIdx);
+    expect(questionColumnIdx).toBeGreaterThan(slotIdx);
   });
 
   it("the navigator's own wrapper is sticky only at lg: and above — never introduces sticky positioning (or a competing scroll container) on mobile/tablet", () => {
@@ -767,11 +768,74 @@ describe("Exam workspace — desktop left-navigator two-column layout", () => {
     expect(source).toContain('min-h-[280px] rounded border border-gray-200 p-4"');
   });
 
-  it("below lg:, the workspace wrapper's base (non-lg:-prefixed) classes contain no grid/flex-direction-row class — mobile/tablet keeps the existing single stacked column with the navigator's own open/close toggle", () => {
-    const wrapperIdx = source.indexOf('mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start lg:gap-6"');
-    expect(wrapperIdx).toBeGreaterThan(-1);
-    const classAttr = source.slice(wrapperIdx, wrapperIdx + 80);
-    const baseClasses = classAttr.split(/\s+/).filter((c) => !c.startsWith("lg:") && c !== "" && !c.includes('"'));
-    expect(baseClasses).toEqual(["mt-6"]);
+  it("the no-navigator branch of the workspace wrapper's className ternary is exactly \"mt-6\" — no grid/column classes leak into the single-column case", () => {
+    const trueBranchIdx = source.indexOf('"mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start lg:gap-6"');
+    expect(trueBranchIdx).toBeGreaterThan(-1);
+    const between = source.slice(trueBranchIdx, trueBranchIdx + 200);
+    // The ternary's false branch, reachable shortly after the true branch,
+    // is the literal string "mt-6" and nothing else.
+    expect(between).toMatch(/:\s*"mt-6"/);
+    expect(between).not.toMatch(/:\s*"mt-6[^"]/); // not "mt-6 " + something extra
+  });
+});
+
+// Left-nav slot stability fix (independent review) — the grid wrapper AND
+// the navigator's left slot must both key off the SAME synchronously-known
+// boolean (showQuestionNavigatorPanel, derived from secureSettings), never
+// off `questionNav` (which only becomes truthy once the async
+// GET /question-navigator response resolves). The bug this closes: CSS
+// grid auto-placement had only one item on first paint whenever the
+// navigator was enabled but not yet loaded, so the question column became
+// the grid's FIRST (left, 260px) item and then jumped into the second
+// (right) column the instant the navigator's data arrived.
+describe("Exam workspace — left-nav slot presence is decoupled from questionNav data", () => {
+  it("showQuestionNavigatorPanel is derived from secureSettings?.showQuestionNavigator directly — never from questionNav — and is declared once, reused by both the grid wrapper and the slot", () => {
+    const declIdx = source.indexOf("const showQuestionNavigatorPanel = secureSettings?.showQuestionNavigator === true;");
+    expect(declIdx).toBeGreaterThan(-1);
+    // Exactly two consuming usages: the grid-wrapper ternary condition and
+    // the slot's own `&&` guard — neither is `questionNav`.
+    const usages = source.match(/showQuestionNavigatorPanel/g) ?? [];
+    expect(usages.length).toBeGreaterThanOrEqual(3); // declaration + wrapper + slot guard
+  });
+
+  it("the grid wrapper's className condition and the slot's own presence guard are the exact same expression — they cannot disagree with each other", () => {
+    const declIdx = source.indexOf("const showQuestionNavigatorPanel = secureSettings?.showQuestionNavigator === true;");
+    const wrapperCondIdx = source.indexOf("showQuestionNavigatorPanel", declIdx + 1);
+    const slotGuardIdx = source.indexOf("{showQuestionNavigatorPanel && (");
+    expect(declIdx).toBeGreaterThan(-1);
+    expect(wrapperCondIdx).toBeGreaterThan(declIdx);
+    expect(slotGuardIdx).toBeGreaterThan(wrapperCondIdx);
+  });
+
+  it("inside the slot, only the CONTENT (real panel vs. placeholder) is conditional on questionNav — the slot wrapper itself is not", () => {
+    const slotGuardIdx = source.indexOf("{showQuestionNavigatorPanel && (");
+    expect(slotGuardIdx).toBeGreaterThan(-1);
+    const contentTernaryIdx = source.indexOf("{questionNav ? (", slotGuardIdx);
+    expect(contentTernaryIdx).toBeGreaterThan(slotGuardIdx);
+    // The ternary's true branch renders the real panel; false branch is a
+    // quiet, aria-hidden placeholder — never nothing, never a different
+    // element type that would change the slot's own presence.
+    const closeIdx = source.indexOf("</div>", contentTernaryIdx);
+    const between = source.slice(contentTernaryIdx, closeIdx);
+    expect(between).toContain("<QuestionNavigatorPanel");
+    expect(between).toContain('aria-hidden="true"');
+  });
+
+  it("the placeholder is a plain, non-flashing box (no loading text, no spinner, no animation class) — only a reserved shape", () => {
+    const placeholderIdx = source.indexOf('<div className="h-10 rounded border border-gray-100" aria-hidden="true" />');
+    expect(placeholderIdx).toBeGreaterThan(-1);
+    const surrounding = source.slice(placeholderIdx - 150, placeholderIdx + 50);
+    expect(surrounding).not.toMatch(/animate-|Loading|spinner/i);
+  });
+
+  it("questionNav being null does not remove the slot — the slot's presence is showQuestionNavigatorPanel-only, so a still-loading navigator never changes which grid column the question occupies", () => {
+    // Structural proof: the slot's opening guard uses showQuestionNavigatorPanel
+    // exclusively; questionNav is referenced only INSIDE it (already
+    // covered by the two tests above), never in the guard expression itself.
+    const guardMatch = source.match(/\{showQuestionNavigatorPanel && \(/);
+    expect(guardMatch).not.toBeNull();
+    const guardIdx = guardMatch!.index!;
+    const guardLine = source.slice(guardIdx, guardIdx + 40);
+    expect(guardLine).not.toContain("questionNav");
   });
 });

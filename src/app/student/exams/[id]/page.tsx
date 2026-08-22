@@ -2086,6 +2086,12 @@ export default function TakeExamPage({
 
   const secureSettings = data?.exam.secureSettings;
   const secureModeEnabled = secureSettings?.secureModeEnabled ?? false;
+  // Left-nav slot stability fix — whether the desktop two-column grid
+  // (and its reserved left navigator slot) should exist AT ALL, known
+  // synchronously from the exam's own settings. Deliberately NOT gated
+  // on questionNav (the async GET /question-navigator response) — see
+  // the JSX's own doc comment where this is consumed.
+  const showQuestionNavigatorPanel = secureSettings?.showQuestionNavigator === true;
 
   // Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
   // Called unconditionally on every render (Rules of Hooks) — this
@@ -4703,7 +4709,29 @@ export default function TakeExamPage({
             // both columns to match the taller one's height, which would
             // make the navigator (or the question card) grow/shrink with
             // its sibling — exactly the instability this pass removes.
-            <div className="mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start lg:gap-6">
+            //
+            // Left-nav slot stability fix (independent review) — the grid
+            // wrapper and the LEFT SLOT must both key off
+            // secureSettings?.showQuestionNavigator alone (known
+            // synchronously from the exam's own settings), never off
+            // `questionNav` (which only becomes truthy once the async
+            // GET /question-navigator response arrives). Gating the grid
+            // itself, or the left slot's own presence, on `questionNav`
+            // meant CSS grid auto-placement had only ONE item on first
+            // paint whenever the navigator was enabled but its data
+            // hadn't loaded yet — the question column became the FIRST
+            // (left, 260px) grid item, then jumped into the second
+            // (right) column the instant the navigator mounted. The slot
+            // itself must always exist (or never exist) independent of
+            // whether its data has arrived; only its CONTENT is
+            // conditional on questionNav.
+            <div
+              className={
+                showQuestionNavigatorPanel
+                  ? "mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start lg:gap-6"
+                  : "mt-6"
+              }
+            >
               {/* Question Navigator v1 — see docs/question-navigator-v1.md.
                   An aria-live region so screen-reader users hear
                   confirmation after a successful navigation or
@@ -4711,27 +4739,41 @@ export default function TakeExamPage({
               <div aria-live="polite" className="sr-only">
                 {navigatorAnnouncement}
               </div>
-              {secureSettings?.showQuestionNavigator && questionNav && (
+              {showQuestionNavigatorPanel && (
                 // Sticky only at lg: and above — keeps the navigator
                 // reachable while a long essay question scrolls, without
                 // introducing a second competing scroll container
                 // (`position: sticky` scrolls with the page itself, it
-                // does not create its own scrollable region).
+                // does not create its own scrollable region). This slot
+                // is present from the FIRST render whenever
+                // showQuestionNavigator is true — see the doc comment
+                // above — with its content conditional on questionNav,
+                // never the slot itself.
                 <div className="mb-4 lg:sticky lg:top-4 lg:mb-0">
-                  <QuestionNavigatorPanel
-                    navigator={questionNav}
-                    open={navigatorPanelOpen}
-                    onToggleOpen={() => setNavigatorPanelOpen((v) => !v)}
-                    disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
-                    onSelectQuestion={navigateQuestionDirect}
-                  />
+                  {questionNav ? (
+                    <QuestionNavigatorPanel
+                      navigator={questionNav}
+                      open={navigatorPanelOpen}
+                      onToggleOpen={() => setNavigatorPanelOpen((v) => !v)}
+                      disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
+                      onSelectQuestion={navigateQuestionDirect}
+                    />
+                  ) : (
+                    // Quiet placeholder — deliberately no spinner/flash;
+                    // just holds the reserved slot's approximate shape
+                    // until the real navigator data arrives. Margin is
+                    // already provided by the parent wrapper above, so
+                    // this only needs its own height.
+                    <div className="h-10 rounded border border-gray-100" aria-hidden="true" />
+                  )}
                 </div>
               )}
               {/* min-w-0 is required on a grid item that must be allowed
                   to shrink below its content's natural width — without
                   it, a long unbroken question/answer string can force
                   this column (and therefore the whole grid) wider than
-                  the viewport instead of wrapping. */}
+                  the viewport instead of wrapping. Harmless (a no-op) in
+                  the single-column, no-navigator case. */}
               <div className="min-w-0">
               {oneQuestion.loading && <p className="text-gray-500">Loading question...</p>}
               {!oneQuestion.loading && oneQuestion.payload && (
