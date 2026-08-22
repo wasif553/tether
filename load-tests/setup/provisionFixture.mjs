@@ -129,21 +129,33 @@ async function getCsrfToken(actor) {
   return body?.csrfToken;
 }
 
-async function signup(actor, name, email, password, role) {
+async function signup(actor, name, email, password, role, extra = {}) {
   return actor.request("/api/signup", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, email, password, role }),
+    body: JSON.stringify({ name, email, password, role, ...extra }),
   });
 }
 
+/**
+ * POST /api/auth/callback/credentials ALWAYS redirects with 302, on both
+ * success (to the callback URL) and failure (to
+ * /login?error=CredentialsSignin) — status alone can never distinguish
+ * the two, so `res.status < 400`-based `.ok` from `actor.request()` is
+ * not trustworthy here. A genuine success also always sets a real
+ * `authjs.session-token` cookie in the same response; a failure never
+ * does. Checking for that cookie's actual presence in the jar AFTER the
+ * request is what makes this check accurate.
+ */
 async function login(actor, email, password) {
   const csrfToken = await getCsrfToken(actor);
-  return actor.request("/api/auth/callback/credentials", {
+  const result = await actor.request("/api/auth/callback/credentials", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ csrfToken, email, password, json: "true" }).toString(),
   });
+  const hasSessionToken = [...actor.jar.keys()].some((name) => name.includes("session-token"));
+  return { ...result, ok: result.ok && hasSessionToken };
 }
 
 function generatePassword() {
@@ -180,12 +192,24 @@ async function main() {
 
   // --- lecturer ---
   const lecturer = makeActor(targetBaseUrl);
-  const lecturerEmail = `loadtest-lecturer-${runId}@example.invalid`;
+  // Lowercased explicitly — signup (src/lib/selfServiceSignup.ts's
+  // emailSchema) normalizes every stored email to lowercase, but the
+  // Credentials login lookup deliberately uses the RAW email exactly as
+  // supplied (see src/lib/security/loginAttempt.ts's own doc comment).
+  // runId embeds uppercase hex/timestamp characters, so building an email
+  // from it without lowercasing here would store one casing at signup and
+  // send a different one at login — a genuine, silent CredentialsSignin
+  // failure this exact bug produced during this task's own local smoke
+  // run before being caught and fixed.
+  const lecturerEmail = `loadtest-lecturer-${runId}@example.invalid`.toLowerCase();
   const lecturerPassword = generatePassword();
   const lecturerName = `LOADTEST_Lecturer_${runId}`;
 
   let t0 = Date.now();
-  const lecturerSignup = await signup(lecturer, lecturerName, lecturerEmail, lecturerPassword, "LECTURER");
+  // LECTURER self-service signup creates a brand-new Institution atomically
+  // (see src/lib/selfServiceSignup.ts's lecturerSignupSchema, `.strict()` —
+  // organisationName is required for this role, unlike the STUDENT branch).
+  const lecturerSignup = await signup(lecturer, lecturerName, lecturerEmail, lecturerPassword, "LECTURER", { organisationName: `LOADTEST_Org_${runId}` });
   authTimings.lecturerSignupMs = Date.now() - t0;
   if (!lecturerSignup.ok) {
     console.error("Lecturer signup failed:", lecturerSignup.status, lecturerSignup.body);
@@ -296,7 +320,8 @@ async function main() {
   // --- students ---
   const studentIndices = Array.from({ length: studentCount }, (_, i) => i);
   const students = await runWithConcurrency(studentIndices, CONCURRENCY_LIMIT, async (studentIndex) => {
-    const email = `loadtest-student-${runId}-${studentIndex}@example.invalid`;
+    // See lecturerEmail's own comment above for why this must be lowercased.
+    const email = `loadtest-student-${runId}-${studentIndex}@example.invalid`.toLowerCase();
     const password = generatePassword();
     const name = `LOADTEST_Student_${runId}_${studentIndex}`;
     const actor = makeActor(targetBaseUrl);

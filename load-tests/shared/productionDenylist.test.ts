@@ -5,6 +5,7 @@ import {
   checkLoadTestDatabaseUrl,
   assertLoadTestEnvironmentIsSafe,
   PRODUCTION_VERCEL_HOSTNAMES,
+  LOOPBACK_HOSTNAMES,
 } from "./productionDenylist.mjs";
 
 describe("checkLoadTestTargetUrl — production hostname denylist", () => {
@@ -50,7 +51,7 @@ describe("checkLoadTestTargetUrl — production hostname denylist", () => {
     expect(checkLoadTestTargetUrl("not a url").ok).toBe(false);
   });
 
-  it("rejects a non-https target", () => {
+  it("rejects a non-https, non-loopback target", () => {
     expect(checkLoadTestTargetUrl("http://tether-loadtest-dedicated.vercel.app").ok).toBe(false);
   });
 
@@ -61,6 +62,58 @@ describe("checkLoadTestTargetUrl — production hostname denylist", () => {
       expect(name.toLowerCase()).not.toContain("override");
       expect(name.toLowerCase()).not.toContain("bypass");
     }
+  });
+});
+
+describe("checkLoadTestTargetUrl — TETHER_LOCAL_POSTGRES_LOAD_SMOKE_10 loopback exception", () => {
+  it("1. accepts http://localhost:<port>", () => {
+    const result = checkLoadTestTargetUrl("http://localhost:3001");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.hostname).toBe("localhost");
+  });
+
+  it("2. accepts http://127.0.0.1:<port>", () => {
+    const result = checkLoadTestTargetUrl("http://127.0.0.1:3001");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.hostname).toBe("127.0.0.1");
+  });
+
+  it("3. accepts http://[::1]:<port>", () => {
+    const result = checkLoadTestTargetUrl("http://[::1]:3001");
+    expect(result.ok).toBe(true);
+  });
+
+  it("4. rejects an arbitrary remote http:// host — the loopback exception never widens to a general http:// allowance", () => {
+    for (const url of ["http://example.com", "http://198.51.100.7:3001", "http://staging.tether.internal"]) {
+      const result = checkLoadTestTargetUrl(url);
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it("5. still rejects tether-murex.vercel.app even when supplied over http:// — the Production hostname check runs before the loopback branch, never after it", () => {
+    const result = checkLoadTestTargetUrl("http://tether-murex.vercel.app");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("Production");
+  });
+
+  it("rejects every known Production hostname over http:// too, not only https://", () => {
+    for (const host of PRODUCTION_VERCEL_HOSTNAMES) {
+      const result = checkLoadTestTargetUrl(`http://${host}`);
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it("LOOPBACK_HOSTNAMES is exactly the three literal loopback forms — never a network range or wildcard", () => {
+    expect([...LOOPBACK_HOSTNAMES].sort()).toEqual(["127.0.0.1", "::1", "localhost"].sort());
+  });
+
+  it("https:// continues to work unchanged for a non-Production, non-loopback host", () => {
+    expect(checkLoadTestTargetUrl("https://tether-loadtest-dedicated.vercel.app").ok).toBe(true);
+  });
+
+  it("http:// on a loopback host with a different port is still accepted — the exception is host-scoped, not port-scoped", () => {
+    expect(checkLoadTestTargetUrl("http://127.0.0.1:8080").ok).toBe(true);
+    expect(checkLoadTestTargetUrl("http://localhost").ok).toBe(true);
   });
 });
 
