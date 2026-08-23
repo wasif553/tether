@@ -8,12 +8,19 @@
  *
  * SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED — these tests prove
  * what COMMAND would be constructed, never that it actually succeeds
- * against a real Supabase CLI/project.
+ * against a real Supabase CLI/project. See supabaseCliExecutor.test.ts
+ * for tests over the execution boundary (preflight, link, dump
+ * sequence, temporary-workspace cleanup) with an injected fake CLI
+ * runner.
  */
 import { describe, expect, it } from "vitest";
 import { localGenericPostgresAdapter, supabaseManagedAdapter, resolveSourceAdapter, autoDetectSourceAdapterKind, SUPABASE_VECTOR_TABLE_EXCLUSIONS } from "./sourceAdapters";
 
 describe("localGenericPostgresAdapter", () => {
+  it("uses the postgres-toolbox executor", () => {
+    expect(localGenericPostgresAdapter.executor).toBe("postgres-toolbox");
+  });
+
   it("roles dump uses raw pg_dumpall --roles-only (appropriate for a generic/local Postgres source)", () => {
     const command = localGenericPostgresAdapter.rolesDumpCommand("/tmp/roles.sql");
     expect(command.commandArgs).toEqual(["pg_dumpall", "--roles-only", "-f", "/tmp/roles.sql"]);
@@ -30,30 +37,65 @@ describe("localGenericPostgresAdapter", () => {
   });
 });
 
-describe("[TETHER_DATABASE_BACKUP_OPERATIONALISATION_FINAL_HARDENING] supabaseManagedAdapter", () => {
-  it("Supabase role backup does NOT use raw unfiltered pg_dumpall as the Production Supabase path", () => {
+describe("[TETHER_DATABASE_BACKUP_SUPABASE_MANAGED_RUNTIME_CORRECTION] supabaseManagedAdapter", () => {
+  it("uses the host-supabase-cli executor, never postgres-toolbox", () => {
+    expect(supabaseManagedAdapter.executor).toBe("host-supabase-cli");
+    expect(supabaseManagedAdapter.executor).not.toBe(localGenericPostgresAdapter.executor);
+  });
+
+  it("[7] roles command is exactly: db dump --linked -f <path> --role-only", () => {
+    const command = supabaseManagedAdapter.rolesDumpCommand("/host/bundle/roles.sql");
+    expect(command.commandArgs).toEqual(["db", "dump", "--linked", "-f", "/host/bundle/roles.sql", "--role-only"]);
+  });
+
+  it("[8] schema command is exactly: db dump --linked -f <path> (no exclusion flags)", () => {
+    const command = supabaseManagedAdapter.schemaDumpCommand("public", "/host/bundle/schema.sql");
+    expect(command.commandArgs).toEqual(["db", "dump", "--linked", "-f", "/host/bundle/schema.sql"]);
+  });
+
+  it("[9] data command includes --data-only and --use-copy", () => {
+    const command = supabaseManagedAdapter.dataDumpCommand("public", "/host/bundle/data.sql");
+    expect(command.commandArgs).toContain("--data-only");
+    expect(command.commandArgs).toContain("--use-copy");
+  });
+
+  it("[10] data command contains -x storage.buckets_vectors and -x storage.vector_indexes", () => {
+    const command = supabaseManagedAdapter.dataDumpCommand("public", "/host/bundle/data.sql");
+    expect(command.commandArgs).toEqual(["db", "dump", "--linked", "-f", "/host/bundle/data.sql", "--data-only", "--use-copy", "-x", "storage.buckets_vectors", "-x", "storage.vector_indexes"]);
+  });
+
+  it("[11] --exclude-table does NOT appear anywhere in managed command construction", () => {
+    for (const command of [supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql"), supabaseManagedAdapter.schemaDumpCommand("public", "/tmp/schema.sql"), supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql")]) {
+      expect(command.commandArgs.join(" ")).not.toContain("--exclude-table");
+    }
+  });
+
+  it("[14] never uses raw unfiltered pg_dumpall as the Production Supabase roles path", () => {
     const command = supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql");
     expect(command.commandArgs.join(" ")).not.toContain("pg_dumpall");
-    expect(command.commandArgs.join(" ")).toContain("supabase db dump");
-    expect(command.commandArgs.join(" ")).toContain("--role-only");
+    expect(command.commandArgs).toEqual(["db", "dump", "--linked", "-f", "/tmp/roles.sql", "--role-only"]);
   });
 
-  it("Supabase schema dump uses the Supabase CLI, not raw pg_dump", () => {
-    const command = supabaseManagedAdapter.schemaDumpCommand("public", "/tmp/schema.sql");
-    expect(command.commandArgs.join(" ")).not.toMatch(/\bpg_dump\b/);
-    expect(command.commandArgs.join(" ")).toContain("supabase db dump");
+  it("never uses raw pg_dump/pg_dumpall for any managed stage", () => {
+    for (const command of [supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql"), supabaseManagedAdapter.schemaDumpCommand("public", "/tmp/schema.sql"), supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql")]) {
+      expect(command.commandArgs.join(" ")).not.toMatch(/\bpg_dump\b/);
+      expect(command.commandArgs.join(" ")).not.toMatch(/\bpg_dumpall\b/);
+    }
   });
 
-  it("[data backup uses COPY semantics] --use-copy is present on the data dump command", () => {
-    const command = supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql");
-    expect(command.commandArgs.join(" ")).toContain("--data-only");
-    expect(command.commandArgs.join(" ")).toContain("--use-copy");
+  it("never uses --db-url or a credentialed connection string — --linked only", () => {
+    for (const command of [supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql"), supabaseManagedAdapter.schemaDumpCommand("public", "/tmp/schema.sql"), supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql")]) {
+      expect(command.commandArgs).toContain("--linked");
+      expect(command.commandArgs.join(" ")).not.toContain("--db-url");
+      expect(command.commandArgs.join(" ")).not.toContain("postgres://");
+      expect(command.commandArgs.join(" ")).not.toContain("postgresql://");
+    }
   });
 
-  it("applies the documented Storage vector-table exclusions to schema and data dumps", () => {
-    for (const table of SUPABASE_VECTOR_TABLE_EXCLUSIONS) {
-      expect(supabaseManagedAdapter.schemaDumpCommand("public", "/tmp/schema.sql").commandArgs.join(" ")).toContain(table);
-      expect(supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql").commandArgs.join(" ")).toContain(table);
+  it("never wraps the invocation in sh -c or references a $PG* shell variable — these are plain CLI argv now, not a shell template", () => {
+    for (const command of [supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql"), supabaseManagedAdapter.schemaDumpCommand("public", "/tmp/schema.sql"), supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql")]) {
+      expect(command.commandArgs[0]).not.toBe("sh");
+      expect(command.commandArgs.join(" ")).not.toContain("$PG");
     }
   });
 
@@ -62,36 +104,21 @@ describe("[TETHER_DATABASE_BACKUP_OPERATIONALISATION_FINAL_HARDENING] supabaseMa
     expect(SUPABASE_VECTOR_TABLE_EXCLUSIONS).toContain("storage.vector_indexes");
   });
 
-  it("never embeds a literal secret value in the constructed command — only $VAR shell references", () => {
+  it("no command ever contains an ACCESS TOKEN or DB PASSWORD env-var name embedded as a literal argv value (they travel only via subprocess environment, never argv)", () => {
     for (const command of [supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql"), supabaseManagedAdapter.schemaDumpCommand("public", "/tmp/schema.sql"), supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql")]) {
-      const joined = command.commandArgs.join(" ");
-      expect(joined).toContain("$PGUSER");
-      expect(joined).toContain("$PGPASSWORD");
-      expect(joined).toContain("$PGHOST");
-      // No literal password/hostname could appear since this module never sees one — it only ever builds a static template string.
+      expect(command.commandArgs.join(" ")).not.toContain("SUPABASE_ACCESS_TOKEN");
+      expect(command.commandArgs.join(" ")).not.toContain("SUPABASE_DB_PASSWORD");
     }
-  });
-
-  it("wraps the Supabase CLI invocation in sh -c so the shell (not this process) expands the $PG* references at execution time", () => {
-    const command = supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql");
-    expect(command.commandArgs[0]).toBe("sh");
-    expect(command.commandArgs[1]).toBe("-c");
   });
 });
 
 describe("Storage object bytes remain explicitly outside database-backup scope (documentation-level assertion)", () => {
-  it("this module's own doc comment states it does not claim Storage object bytes are backed up", () => {
-    // Asserted at the documentation layer too (safetyContract.test.ts /
-    // database-backup-operations-v1.md) and re-affirmed here
-    // structurally: neither adapter's commandArgs ever references the
-    // Storage objects table (the one that would actually hold object
-    // bytes/metadata) — the Supabase adapter's only "bucket" mention is
-    // the `--exclude-table 'storage.buckets_vectors'` flag, which
-    // EXCLUDES a Storage-related table, the opposite of backing it up.
+  it("[16] neither adapter's data-dump command ever references the Storage objects table (the one that would actually hold object bytes/metadata)", () => {
     for (const command of [localGenericPostgresAdapter.dataDumpCommand("public", "/tmp/data.sql"), supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql")]) {
       expect(command.commandArgs.join(" ")).not.toMatch(/storage\.objects/i);
     }
-    expect(supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql").commandArgs.join(" ")).toMatch(/--exclude-table 'storage\.buckets_vectors'/);
+    // The Supabase adapter's only "bucket" mention is the -x storage.buckets_vectors exclusion flag, which EXCLUDES a Storage-related table — the opposite of backing it up.
+    expect(supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql").commandArgs).toContain("storage.buckets_vectors");
   });
 });
 

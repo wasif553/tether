@@ -299,6 +299,45 @@ proceed to a restore rehearsal. **This is a tooling gap closed, not the
 PRE-PILOT BACKUP GATE itself closed** — see the status line immediately
 below.
 
+**Runtime correction (`supabase-managed` execution path made
+structurally executable):** independent review of the hardening pass
+above found that the `supabase-managed` adapter, while correctly
+constructing `supabase db dump` commands, was still routed through
+`docker exec` into the `postgres:16-alpine` toolbox container — which
+contains Postgres client binaries only, not the Supabase CLI runtime,
+so the path could not actually run even once the required credentials
+were supplied. This has been corrected: the Supabase CLI is now an
+explicit, exact-pinned `devDependency` (`"supabase"` in `package.json`,
+tracked in `package-lock.json` — never an unpinned `npx supabase`), run
+directly on the **host** (`scripts/backupCreation/supabaseCliExecutor.ts`)
+inside a fresh temporary workspace (outside this repository, removed
+unconditionally on success or failure) that is `supabase link
+--project-ref <ref>`-ed to the validated source project. `SUPABASE_ACCESS_TOKEN`
+and `SUPABASE_DB_PASSWORD` travel only through that subprocess's own
+inherited environment, never as a CLI flag or argv token. The exclusion
+flag was also corrected from the nonexistent `--exclude-table` to the
+current CLI's actual `-x`/`--exclude`, and each managed command now
+matches current official guidance exactly:
+`supabase db dump --linked -f <path> --role-only` (roles),
+`supabase db dump --linked -f <path>` (schema, no exclusions),
+`supabase db dump --linked -f <path> --data-only --use-copy -x
+"storage.buckets_vectors" -x "storage.vector_indexes"` (data). A
+fail-closed preflight (CLI binary present and versioned, project ref
+validated, both credential env vars present) runs before any temporary
+workspace is created or any Supabase project is contacted. **This
+remains `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`** — command
+construction and the execution boundary (preflight, link-then-dump
+sequence, temporary-workspace cleanup on both success and failure) are
+now unit-tested, including against an injected fake CLI runner
+(`scripts/backupCreation/supabaseCliExecutor.test.ts`), but the path has
+still never run against a real Supabase project. Unlike the prior
+version, though, it is now structurally executable once the required
+CLI/credentials are supplied, rather than routed through infrastructure
+that could never have succeeded. The `local-generic` synthetic
+end-to-end result above was re-confirmed unchanged after this
+correction — see `docs/database-backup-operations-v1.md`'s "Current
+status" table for the authoritative per-item status.
+
 **Current Supabase Free-plan boundary — state this clearly, do not
 soften it:** automatic provider-managed backup coverage is **not**
 currently relied upon, because the observed Tether Supabase organisation
@@ -1211,3 +1250,4 @@ marked complete:
 | v1.1 | 2026-08-23 | Corrected Section 5/14's Secure Browser characterisation from a single hash discrepancy to a three-source version-reconciliation gap (`compliance/backup-disaster-recovery-v1` branch, later merged). |
 | v1.2 | 2026-08-23 | Section 5 (matrix row C), Section 8, and Section 37 (gates 1–2) updated: database backup **creation** tooling (`npm run backup:create`, `npm run backup:verify-bundle`) now exists and is locally verified — see `docs/database-backup-operations-v1.md`. The PRE-PILOT BACKUP GATE and PRE-PILOT OFF-PROJECT COPY GATE remain explicitly OPEN; only the tooling portion is closed (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact or Production backup performed. |
 | v1.3 | 2026-08-23 | Section 8 updated with hardening findings: source-database password no longer appears in host subprocess argv; `--confirm-production` gate now catches every case/whitespace variant of "production"; a Supabase-managed source now uses `supabase db dump` semantics via a new source-adapter abstraction rather than raw `pg_dumpall` (Supabase runtime path explicitly marked `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`) — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact or Production backup performed. |
+| v1.4 | 2026-08-23 | Section 8 updated with a runtime correction: the `supabase-managed` adapter's dump commands were previously routed through `docker exec` into a toolbox container that does not contain the Supabase CLI runtime, so the path could not actually execute. Corrected to run the Supabase CLI (now a pinned `devDependency`) directly on the host inside a temporary `supabase link`-ed workspace, with `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` carried only via subprocess environment; exclusion flag corrected from the nonexistent `--exclude-table` to `-x`/`--exclude`, applied to the data dump only, matching current official Supabase guidance exactly — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). Remains `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED` — not yet run against a real Supabase project. No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |

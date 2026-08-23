@@ -174,7 +174,7 @@ describe("[TETHER_DATABASE_BACKUP_OPERATIONALISATION_FINAL_HARDENING] documentat
   });
 
   it("documents --use-copy for the Supabase-managed data dump", () => {
-    expect(operationsDocFlat).toMatch(/supabase db dump --data-only\s+--use-copy/);
+    expect(operationsDocFlat).toMatch(/--data-only --use-copy/);
   });
 
   it("documents the manifest metadata validation correction (allowlist, not type-level, non-secret guarantee)", () => {
@@ -194,5 +194,61 @@ describe("[TETHER_DATABASE_BACKUP_OPERATIONALISATION_FINAL_HARDENING] no hand-ro
     const sourceAdaptersSource = read("scripts/backupCreation/sourceAdapters.ts");
     expect(sourceAdaptersSource).toMatch(/This module deliberately does NOT hand-roll a/i);
     expect(sourceAdaptersSource).toMatch(/Supabase-reserved roles or internal schemas to strip/i);
+  });
+});
+
+describe("[TETHER_DATABASE_BACKUP_SUPABASE_MANAGED_RUNTIME_CORRECTION] the supabase-managed adapter is a genuinely separate, host-level execution mechanism", () => {
+  const supabaseCliExecutorSource = read("scripts/backupCreation/supabaseCliExecutor.ts");
+  const packageJsonParsed = JSON.parse(packageJson) as { devDependencies?: Record<string, string> };
+
+  it("the Supabase CLI is a pinned devDependency, never an unpinned npx download", () => {
+    expect(packageJsonParsed.devDependencies?.supabase).toBeTruthy();
+    expect(packageJsonParsed.devDependencies!.supabase).not.toMatch(/^\^|~/);
+    expect(supabaseCliExecutorSource).toMatch(/never an unpinned `npx supabase`/i);
+  });
+
+  it("[1][2] the local-generic adapter still uses the postgres toolbox, and supabase-managed does not run inside it", () => {
+    expect(createBackupSource).toMatch(/executor === "postgres-toolbox"/);
+    expect(supabaseCliExecutorSource).toMatch(/never inside the/i);
+    expect(supabaseCliExecutorSource).toMatch(/`postgres:16-alpine` toolbox container/);
+  });
+
+  it("documents the temporary, unlinked-to-the-repo Supabase CLI workspace and its unconditional cleanup", () => {
+    expect(supabaseCliExecutorSource).toMatch(/OUTSIDE this repository/);
+    expect(supabaseCliExecutorSource).toMatch(/workspace is removed/i);
+    expect(supabaseCliExecutorSource).toMatch(/unconditionally \(`finally`\)/i);
+  });
+
+  it("documents that SUPABASE_ACCESS_TOKEN/SUPABASE_DB_PASSWORD travel only via subprocess environment, never a CLI flag", () => {
+    expect(supabaseCliExecutorSource).toMatch(/never as a CLI/i);
+    expect(supabaseCliExecutorSource).toMatch(/flag \(`--password`\/`-p` would put the value directly/i);
+    expect(supabaseCliExecutorSource).toMatch(/SUPABASE_ACCESS_TOKEN/);
+    expect(supabaseCliExecutorSource).toMatch(/SUPABASE_DB_PASSWORD/);
+  });
+
+  it("the operations doc documents --linked (not --db-url) and the corrected -x exclusion flag (not --exclude-table)", () => {
+    expect(operationsDocFlat).toMatch(/supabase db dump --linked -f <path> --role-only/);
+    expect(operationsDocFlat).toMatch(/-x "storage\.buckets_vectors" -x "storage\.vector_indexes"/);
+    // --exclude-table is mentioned only as an explicit "this flag does not exist, do not use it" note — never as a flag actually applied in a command.
+    expect(operationsDocFlat).toMatch(/not the nonexistent `--exclude-table`/i);
+    expect(operationsDocFlat).not.toMatch(/--exclude-table 'storage/);
+  });
+
+  it("the operations doc documents the fail-closed preflight for the supabase-managed path", () => {
+    expect(operationsDocFlat).toMatch(/Fail-closed preflight\*\*, checked before any temporary workspace is\s+created/i);
+  });
+
+  it("the DR runbook documents the runtime correction and remains SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED", () => {
+    expect(drRunbookFlat).toMatch(/Runtime correction \(`supabase-managed` execution path made\s+structurally executable\)/i);
+    expect(drRunbookFlat).toMatch(/This\s+remains `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`/i);
+  });
+
+  it("the operations doc's Current status table uses the exact required status labels", () => {
+    expect(operationsDoc).toMatch(/\*\*DATABASE BACKUP CREATION TOOLING\*\* \| \*\*IMPLEMENTED\*\*/);
+    expect(operationsDoc).toMatch(/\*\*LOCAL\/GENERIC END-TO-END\*\* \| \*\*VERIFIED\*\*/);
+    expect(operationsDoc).toMatch(/\*\*SUPABASE MANAGED COMMAND PATH\*\* \| \*\*IMPLEMENTED \/ NOT YET RUN AGAINST PRODUCTION\*\*/);
+    expect(operationsDoc).toMatch(/\*\*PRODUCTION BACKUP\*\* \| \*\*NOT YET EXECUTED\*\*/);
+    expect(operationsDoc).toMatch(/\*\*OFF-PROJECT COPY\*\* \| \*\*OPEN\*\*/);
+    expect(operationsDoc).toMatch(/\*\*CADENCE\*\* \| \*\*OPEN\*\*/);
   });
 });

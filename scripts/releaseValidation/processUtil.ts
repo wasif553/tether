@@ -6,12 +6,13 @@ import { spawn } from "node:child_process";
 
 export type CaptureResult = { code: number | null; stdout: string; stderr: string };
 
-/** Runs a command, capturing stdout/stderr (never inherited to the terminal) — used for short, informational checks like `docker --version`. */
-export function runCapture(command: string, args: string[], options: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<CaptureResult> {
+/** Runs a command, capturing stdout/stderr (never inherited to the terminal) — used for short, informational checks like `docker --version`. `cwd` defaults to this process's own working directory (Node's normal `spawn` behaviour) — used by the Supabase-managed backup executor to run the Supabase CLI inside its own temporary, unlinked-to-the-repo workspace directory. */
+export function runCapture(command: string, args: string[], options: { timeoutMs?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {}): Promise<CaptureResult> {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       shell: process.platform === "win32",
       env: options.env ?? process.env,
+      cwd: options.cwd,
       windowsHide: true,
     });
     let stdout = "";
