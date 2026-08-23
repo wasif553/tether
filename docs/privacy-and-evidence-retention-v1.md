@@ -506,13 +506,19 @@ restored as of this pass.
 ## 23. Security incident cross-reference
 
 Suspected unauthorised access, disclosure, or loss of personal
-information must enter Tether's incident-response process. Any
-applicable Notifiable Data Breaches (NDB) scheme assessment or
-notification obligation is handled under a **separate**
-`AUSTRALIAN_INCIDENT_NDB_PROCEDURE_V1` release-readiness item, not yet
-written. This package does not itself determine whether any given
-incident is an eligible data breach, and does not overstate what
-protection currently exists.
+information must enter Tether's incident-response process, documented in
+full in [`docs/australian-incident-ndb-procedure-v1.md`](australian-incident-ndb-procedure-v1.md)
+— including the incident-severity model, the Notifiable Data Breaches
+(NDB) scheme applicability boundary, the 30-day statutory assessment
+clock, the serious-harm assessment checklist, and the institution/
+multi-entity coordination rules. That procedure has its own supporting
+templates: [`docs/data-breach-assessment-record-v1.md`](data-breach-assessment-record-v1.md),
+[`docs/data-breach-notification-template-v1.md`](data-breach-notification-template-v1.md),
+and [`docs/privacy-incident-register-template-v1.md`](privacy-incident-register-template-v1.md).
+This package does not itself determine whether any given incident is an
+eligible data breach, and does not overstate what protection currently
+exists — that determination is made under the procedure just
+referenced, on a case-by-case basis.
 
 ## 24. Cross-border/subprocessor disclosure
 
@@ -573,8 +579,14 @@ pass's data-minimisation review (Section 6):
    which deliberately keeps institution-first contact wording until a
    legal entity, privacy contact, and full platform privacy policy
    exist. **PRE-PILOT GATE.**
-7. **NDB/incident procedure not yet written** — Section 23.
-   **PRE-PILOT GATE.**
+7. **NDB/incident procedure gaps.** The procedure itself now exists
+   (Section 23, `docs/australian-incident-ndb-procedure-v1.md`), but its
+   own pre-pilot gates remain open: roles not yet assigned to named
+   individuals, internal reporting channel not finalised, institution
+   contractual notification SLA not set, no tabletop exercise run, and
+   NDB statutory applicability itself unresolved for Tether's eventual
+   entity structure — see that document's own Section 31 for the full
+   list. **PRE-PILOT GATE.**
 8. **Legal-hold enforcement is manual only** — Section 19.
    **IMPLEMENTATION GAP.**
 9. **Backup/DR runbook is a separate, not-yet-written release-readiness
@@ -586,3 +598,4 @@ pass's data-minimisation review (Section 6):
 |---|---|---|
 | v1 | 2026-08-23 | Initial package: this document, `docs/institution-privacy-responsibilities-v1.md`, `docs/evidence-retention-operations-v1.md`, and the student-facing notice update (`compliance/privacy-evidence-retention-v1` branch). No schema, migration, or evidence-collection behaviour changed. |
 | v1.1 | 2026-08-23 | Retention execution safety and privacy correction: (1) corrected Section 6/12 — exam session binding is a baseline session-integrity mechanism, not an optional/off-by-default monitoring feature; (2) raised the evidence-retention runner's fallback default from 90 to 180 days, matching Section 18's Class A pilot fallback; (3) `--execute` now requires an explicit `--institution-id` (not `all`) and `--retention-days` — no deployment-wide destructive path remains in the CLI (Section 20). No schema, migration, or evidence-collection behaviour changed; no evidence deleted. |
+| v1.2 | 2026-08-23 | Section 23 updated: the Australian Incident/NDB Procedure is no longer "not yet written" — links to `docs/australian-incident-ndb-procedure-v1.md` and its supporting templates (`compliance/australian-incident-ndb-procedure-v1` branch). No other section reopened; no schema, migration, or evidence-collection behaviour changed. |
