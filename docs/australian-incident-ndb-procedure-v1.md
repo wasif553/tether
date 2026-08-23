@@ -33,7 +33,13 @@ This is the operational sequence the numbered sections below implement.
 It is a **sequence, not a set of automatic gates** — each arrow is a
 human decision point (Sections 7/18), and an incident can exit the flow
 early at several points (e.g. "not a data breach" at Personal
-Information Involved?, or "not eligible" after Remedial Action).
+Information Involved?, or "not eligible" after Remedial Action +
+Serious-Harm Triage). Note the two distinct questions in the middle of
+this flow: whether a **data breach** (possibly) occurred is a much
+broader, earlier question than whether there are **reasonable grounds
+to suspect an eligible data breach** — the latter is the specific
+statutory trigger (Section 13), not a label every data breach
+automatically receives.
 
 ```
 DETECT
@@ -48,13 +54,18 @@ ASSESS SCOPE                        (Section 11 — initial triage)
   ↓
 PERSONAL INFORMATION INVOLVED? ──── NO ──→ close as operational-only (Section 11)
   ↓ YES
-REMEDIAL ACTION                     (Section 15 — as available, ongoing)
-  ↓
-NDB APPLICABILITY GATE              (Section 17 — YES / NO / LEGAL REVIEW)
-  ↓
-SUSPECTED ELIGIBLE BREACH? ──────── NO ──→ record conclusion, close (Section 18)
-  ↓ YES (where NDB scheme applies)
-30-DAY ASSESSMENT TRACK             (Section 16 — maximum, not a target)
+DATA BREACH / POSSIBLE DATA BREACH? (Section 12 — unauthorised access,
+  ↓ YES/POSSIBLE                     disclosure, or qualifying loss)
+REMEDIAL ACTION +                   (Sections 14–15 — always considered
+SERIOUS-HARM TRIAGE                  for any (possible) data breach, not
+  ↓                                  only once "suspected eligible")
+REASONABLE GROUNDS TO SUSPECT ────  NO ──→ record conclusion, keep
+POSSIBLE ELIGIBLE BREACH?                  monitoring if facts develop,
+  ↓ YES                                    close if not (Section 13/18)
+NDB APPLICABILITY GATE              (Section 17 — YES / NO / LEGAL REVIEW,
+  ↓                                  for the relevant entity)
+NDB STATUTORY ASSESSMENT TRACK      (Section 16 — 30-calendar-day
+WHERE APPLICABLE                     maximum, not a target)
   ↓
 ELIGIBLE BREACH? ─────────────────  NO (remedial action prevented harm,
   ↓ YES                                  or no likely serious harm) ──→ record, close (Section 18)
@@ -69,7 +80,9 @@ CORRECTIVE ACTION                   (Section 28)
 
 Institution coordination (Section 21/22) and external-provider handling
 (Section 23) run **alongside** this flow from the point scope is
-credibly established, not only at the end.
+credibly established, not only at the end — and, per Section 21,
+independently of where the flow currently sits on the statutory NDB
+track.
 
 ---
 
@@ -119,11 +132,22 @@ automation).
   require input from qualified legal counsel before a final statutory
   determination (NDB applicability, eligible-breach status, or
   notification) is made.
-- **Not every incident is a data breach.** Not every data breach is a
-  notifiable ("eligible") data breach. **Not every eligible data breach
-  automatically requires notifying OAIC** — remedial action can prevent
-  the likely risk of serious harm, in which case notification is not
-  required (Section 15).
+- **Not every privacy incident is a data breach.**
+- **Not every data breach is an eligible data breach.** Effective
+  remedial action may mean a data breach is **not** an eligible data
+  breach in the first place — see Section 15. This is a question of
+  whether the eligibility test is met at all, **not** an exception
+  applied after an eligible breach has already been established (a
+  distinct concept — statutory exceptions, Section 24, are kept
+  separate from remedial action throughout this document).
+- **Once there are reasonable grounds to believe an eligible data
+  breach has occurred, notification obligations apply where the NDB
+  scheme applies to the relevant entity, unless a separate statutory
+  exception applies.** This document does not say a confirmed eligible
+  breach can be left unnotified because remedial action happened to
+  work — if remedial action genuinely prevented the likely risk of
+  serious harm, the breach was never eligible; if it did not, and the
+  breach is eligible, notification proceeds (Sections 18–20).
 - Statutory NDB assessment/notification is performed **where the NDB
   scheme applies** to the relevant entity and incident — this document
   does not assume it always does, and does not assume it never does.
@@ -150,12 +174,13 @@ for the boundary on legal determination.
   circumstances where unauthorised access or disclosure is likely to
   occur.
 - **Suspected eligible data breach** — a state in which there are
-  reasonable grounds to *suspect* (not yet confirmed) that an eligible
-  data breach may have occurred. Where the NDB scheme applies, this
-  state starts a mandatory assessment that must be reasonable and
-  expeditious, with a **30-calendar-day maximum** to complete it
-  (Section 16) — not a 30-day waiting period before anything can happen
-  (Section 17).
+  reasonable grounds to *suspect* (not yet confirmed) that an **eligible**
+  data breach — not merely *a* data breach — may have occurred (Section
+  13 draws this exact distinction in full, since it is easy to conflate
+  the two). Where the NDB scheme applies, this state starts a mandatory
+  assessment that must be reasonable and expeditious, with a
+  **30-calendar-day maximum** to complete it (Section 16) — not a 30-day
+  waiting period before anything can happen (Section 17).
 - **Eligible data breach** — where the NDB scheme applies, a data breach
   that satisfies all three of: (a) unauthorised access/disclosure of
   personal information, or a qualifying loss of it; (b) a reasonable
@@ -350,19 +375,66 @@ Using `docs/data-breach-assessment-record-v1.md`, document factually:
   day one;
 - which institution(s)' data is involved (Section 21/22).
 
+**Output of this section: is this a (possible or confirmed) data
+breach?** — unauthorised access to, unauthorised disclosure of, or a
+qualifying loss of personal information (Section 4's definition). This
+is a **broader, earlier** question than whether the incident might be an
+*eligible* data breach — see Section 13 for that separate, narrower
+determination. A YES or POSSIBLE answer here is what triggers the next
+steps below (serious-harm consideration, remedial action, institution
+coordination, documentation) — it does **not** by itself trigger the
+statutory NDB assessment obligation.
+
 ## 13. Suspected eligible-breach assessment
 
-Once Section 12 establishes that personal information was plausibly
-subject to unauthorised access, unauthorised disclosure, or a qualifying
-loss, the incident becomes a **suspected eligible data breach**, and —
-**where the NDB scheme applies to the relevant entity** (Section 3) —
-this opens the mandatory assessment obligation and starts the clock
-(Section 16). If NDB applicability is not yet confirmed, note that
-explicitly in the assessment record rather than guessing either way, and
-escalate to legal/privacy review (Section 7) to resolve it in parallel
-with the rest of the assessment — do not let an unresolved applicability
-question stall containment, preservation, or institution coordination,
-which proceed regardless.
+This section covers two distinct things — keep them separate, because
+only the second is a statutory trigger:
+
+**A. A (possible or confirmed) data breach, established by Section 12,
+always triggers:** ongoing privacy-impact triage, serious-harm
+consideration (Section 14), remedial action where available (Section
+15), institution coordination (Section 21/22), and documentation
+(Section 26) — **regardless of whether the incident ultimately turns
+out to be an eligible data breach.** None of this waits for a
+"suspected eligible breach" determination.
+
+**B. The statutory assessment obligation** — where the NDB scheme
+applies to the relevant entity (Section 3) — is triggered specifically
+when Tether becomes aware of **reasonable grounds to suspect that the
+incident may have been an eligible data breach**: that is, reasonable
+grounds to suspect the full three-part test in Section 4 might be met,
+including a real possibility of likely serious harm that remedial action
+(Section 15) has not clearly prevented. This is what actually starts the
+30-day clock (Section 16).
+
+**Do not require certainty about serious harm before starting the
+assessment** — "reasonable grounds to suspect" is a lower bar than
+"confirmed," and the assessment process (Sections 14–17) is precisely
+how that initial suspicion gets resolved one way or the other. **But
+also do not automatically apply the "suspected eligible data breach"
+label to every ordinary data breach** — an unauthorised access with
+no plausible path to serious harm (e.g. an internal, promptly-corrected
+misdirected email with no evidence of being read) may be a data breach
+under Section 4 without there being reasonable grounds to suspect it
+meets the eligibility test.
+
+**Operationally, Tether may choose to run the full statutory-style
+assessment conservatively on any data breach whose eligibility is
+genuinely uncertain** — that is a legitimate, cautious operational
+choice, and is recommended where genuine doubt exists. **But this
+document distinguishes that voluntary, conservative choice from the
+statutory trigger itself** — record which one actually applied in a
+given incident (the assessment record's "reasonable grounds to suspect
+possible eligible breach" field), rather than treating every
+conservative assessment as proof the statutory trigger was met.
+
+If NDB applicability to the relevant entity is not yet confirmed, note
+that explicitly in the assessment record rather than guessing either
+way, and escalate to legal/privacy review (Section 7) to resolve it in
+parallel — do not let an unresolved applicability question stall
+containment, preservation, serious-harm/remedial-action consideration,
+or institution coordination, all of which proceed regardless per (A)
+above.
 
 ## 14. Serious-harm assessment
 
@@ -443,6 +515,15 @@ document why, document the reasonable steps actually taken, and
 escalate immediately for legal/privacy review** — this document does
 not normalise extensions or treat 30 days as routinely insufficient.
 
+**30 days is not something an organisation is always entitled to wait
+out.** If reasonable grounds to BELIEVE an eligible breach already
+exist — not merely reasonable grounds to *suspect* one — the procedure
+moves to notification (Sections 18–20) as soon as practicable, rather
+than continuing to run out an assessment that has already reached its
+answer. The 30-day maximum is for genuinely completing an assessment
+that started from suspicion, not a floor under a conclusion that has
+already been reached.
+
 ## 17. NDB applicability decision
 
 Recorded explicitly in the assessment record, never left implicit:
@@ -517,8 +598,12 @@ not met.
 **Target controlled-pilot rule:** potential exposure of one
 institution's student data should be escalated to that institution's
 nominated incident contact promptly after credible scope is established
-(Section 12), subject to any active security or law-enforcement
-constraint that requires a short delay (Section 24). **PRE-PILOT
+(Section 12). Section 24 explains why this is **not** automatically
+delayed by law-enforcement involvement — coordinating with law
+enforcement does not, by itself, create an entitlement to postpone
+institution notification any more than it creates one for statutory
+notification; any actual delay requires the legal basis described
+there, not merely "an investigation is underway." **PRE-PILOT
 CONTRACT GATE** — an exact notification SLA (e.g. "within N hours") is
 not invented here; it is set by the actual customer contract, not yet
 finalised. Until a contract sets one, "promptly after credible scope is
@@ -532,29 +617,60 @@ with** an institution — a breach involving that data may implicate both
 Tether's systems and the institution's own. When this happens:
 
 1. **Determine which entities hold the affected information** — Tether
-   only, the institution only, or both (e.g. data that both platforms
-   independently store, such as a student's name and email).
-2. **Immediately notify/coordinate with the affected institution**
+   only, the institution only, or both.
+2. **Determine whether the affected information is *jointly held*, not
+   merely whether both entities separately hold *some* information
+   about the same person.** These are different situations:
+   - **Jointly held** — the same affected information, held by both
+     entities together (e.g. a single shared record, or a dataset one
+     entity manages entirely on the other's behalf) — is the situation
+     item 3 below applies to.
+   - **Not jointly held** — Tether and the institution each
+     independently maintain their *own* record containing overlapping
+     personal details about the same individual (e.g. Tether's own
+     account record and the institution's own student information
+     system both happen to have that student's name and email) is the
+     more common Tether scenario, and does **not** automatically
+     qualify for the single-assessment/single-notification treatment
+     below — each entity's own holding may need its own assessment
+     unless the entities agree otherwise for a specific incident.
+   **Do not assume the jointly-held rule applies merely because two
+   entities each hold different records about the same person** — that
+   determination is made for the actual affected information in this
+   specific incident, not assumed from the general relationship between
+   Tether and its institutional customers.
+3. **Where the affected information is jointly held**, current OAIC
+   guidance allows the jointly-holding entities to coordinate so that
+   **only one entity needs to perform the NDB assessment** on behalf of
+   the group, and (separately) **only one entity needs to perform the
+   NDB notification** for that jointly-held breach — these are two
+   separate coordination decisions, not one. The entities decide between
+   themselves who is best placed for each; the entity with the most
+   direct relationship with the affected individuals may often be best
+   placed to notify, but **this must be determined for the actual
+   incident**, not assumed from a general rule. **Do not assume Tether
+   automatically owns either role. Do not assume the institution
+   automatically owns either role either.**
+4. **Immediately notify/coordinate with the affected institution**
    according to Section 21's rule and the actual contract/process, once
-   credible scope is established — this step happens regardless of who
-   turns out to own the statutory notification obligation.
-3. **Determine which entity has statutory notification responsibility**
-   for this specific incident. Current OAIC guidance notes that where a
-   breach involves multiple entities, generally only one entity needs to
-   perform the NDB notification, and the entity with the most direct
-   relationship with the affected individuals may be best placed — but
-   **this must be determined for the actual incident**, not assumed from
-   a general rule. **Do not assume Tether automatically owns the
-   notification obligation. Do not assume the institution automatically
-   owns it either.**
-4. **Avoid duplicate or inconsistent notifications** — once
+   credible scope is established — this step happens regardless of
+   whether the information turns out to be jointly held, and regardless
+   of who turns out to own the statutory assessment or notification
+   obligation.
+5. **Avoid duplicate or inconsistent notifications** — once
    responsibility is determined, coordinate so affected individuals
    receive one clear notification, not two different accounts of the
    same incident from two different senders.
-5. **Document the decision and rationale** in the assessment record —
-   which entity notifies, why, and what the other entity's role was
-   (e.g. providing facts, reviewing content, or standing down because
-   the counterpart entity is notifying).
+6. **If nobody actually performs the required assessment or
+   notification, "responsibility was shared between entities" is not a
+   defence.** Coordinating who acts does not reduce either entity's own
+   obligation if the coordination breaks down — someone must actually
+   complete the assessment and, if required, the notification.
+7. **Document the decision and rationale** in the assessment record —
+   whether the information was jointly held, the agreed assessment
+   owner, the agreed notification owner, why, and what the other
+   entity's role was (e.g. providing facts, reviewing content, or
+   standing down because the counterpart entity is acting).
 
 ## 23. External technical providers
 
@@ -598,16 +714,42 @@ For an incident that may involve criminal conduct (e.g. unauthorised
 system access, credential theft, extortion), the incident lead
 (Section 7) considers escalation to the Australian Cyber Security
 Centre (ACSC) and/or law enforcement as appropriate to the incident's
-nature and severity, alongside — not instead of — this procedure's
-privacy assessment. **PRE-PILOT GATE** — a specific escalation contact
+nature and severity, **alongside — not instead of — this procedure's
+privacy assessment.** **PRE-PILOT GATE** — a specific escalation contact
 and decision owner for this step is an operational detail not yet
 finalised; record its absence as a known gap (Section 31) rather than
-inventing one. Where law enforcement involvement genuinely requires a
-short delay to individual/OAIC notification (e.g. to avoid compromising
-an active investigation), document that constraint and the delay it
-causes explicitly in the assessment record — this is a recognised,
-narrow exception, not a default extension (Section 16 already prohibits
-normalising extensions generally).
+inventing one.
+
+**Law enforcement/ACSC involvement does not, by itself, authorise any
+delay to statutory notification:**
+
+- Coordinating with law enforcement or ACSC may happen alongside the
+  rest of this procedure's incident response.
+- While coordinating, do not disclose information in a way that would
+  unlawfully interfere with an active investigation — but this is a
+  constraint on *how* information is shared, not a general licence to
+  delay the assessment or notification timeline described in this
+  document.
+- **Statutory notification timing remains governed by the NDB scheme**
+  regardless of law-enforcement involvement — an ordinary Tether
+  operating entity must **not** self-authorise a delay to statutory
+  notification solely because law enforcement or a cyber agency is
+  involved.
+- If there is a genuine basis to believe notification should be
+  delayed, or not made, because of public-interest or enforcement
+  considerations, that requires **legal/privacy advice** to determine
+  whether an actual statutory exception applies, or whether the OAIC
+  should be asked to make a declaration under s 26WQ of the Privacy Act
+  that notification is not required, or may be delayed. The
+  Commissioner may make such a declaration, including after considering
+  relevant advice from an enforcement body or the Australian Signals
+  Directorate (ASD) — this is the Commissioner's decision, not
+  Tether's own.
+- **Absent an applicable statutory exception or an actual OAIC
+  declaration, law-enforcement involvement is never treated as an
+  automatic extension** to the 30-day assessment maximum (Section 16)
+  or to the "as soon as practicable" notification standard (Sections
+  19–20).
 
 ## 25. Communications control
 

@@ -68,6 +68,19 @@ presented as fact — see the procedure's Section 5.)*
 | Loss (with likely unauthorised access/disclosure)? | YES / NO / UNKNOWN |
 | How was it contained? | |
 
+## Data breach determination
+
+*(A broader, earlier question than eligibility — see procedure Section
+12/13. YES or POSSIBLE here is what triggers serious-harm consideration,
+remedial action, institution coordination, and documentation below —
+it does NOT by itself mean the statutory "suspected eligible breach"
+trigger has been met; that is assessed separately, below.)*
+
+| Field | Value |
+|---|---|
+| Data breach / possible data breach? | YES / POSSIBLE / NO |
+| Reasoning | |
+
 ## Remedial action
 
 | Question | Answer |
@@ -101,10 +114,22 @@ actually weighed and the reasoning, not only a conclusion.)*
 
 ## Suspected eligible breach?
 
+*(This is the statutory trigger, distinct from "data breach /
+possible data breach?" above — see procedure Section 13. It asks
+whether there are reasonable grounds to suspect the incident MAY BE an
+*eligible* data breach specifically — including a real possibility of
+likely serious harm not clearly prevented by remedial action — not
+merely whether a data breach of some kind occurred. Do not answer YES
+here automatically just because "data breach / possible data breach?"
+above was YES.)*
+
 | Field | Value |
 |---|---|
-| Suspected eligible breach? | YES / NO |
-| If YES — assessment-clock start date (day after awareness) | |
+| Reasonable grounds to suspect a *possible eligible* data breach? | YES / NO |
+| Reasoning (why this does, or doesn't, meet the "reasonable grounds to suspect" threshold — certainty about serious harm is NOT required, but a plausible basis for suspecting it is) | |
+| Is this a conservative/voluntary assessment despite the statutory trigger not clearly being met? (a legitimate, recommended choice under genuine doubt — see procedure Section 13) | YES / NO / N/A |
+| If YES to either — statutory assessment trigger date/time (awareness of the grounds causing the suspicion) | |
+| If YES — assessment-clock start date (day after the trigger date/time above) | |
 | If YES — 30-calendar-day statutory maximum date | |
 | Assessment status (updated as it proceeds) | |
 | Blockers | |
@@ -119,12 +144,27 @@ actually weighed and the reasoning, not only a conclusion.)*
 - [ ] Eligible data breach
 - [ ] Legal determination required
 
+## Multi-entity coordination (if applicable)
+
+*(See procedure Section 22. Do not assume the jointly-held rule applies
+merely because Tether and an institution each separately hold some
+overlapping information about the same person — it applies to the same
+affected information genuinely held jointly, e.g. a shared record or a
+dataset one entity manages on the other's behalf.)*
+
+| Field | Value |
+|---|---|
+| Jointly held affected information? | YES / NO / UNCERTAIN |
+| Assessment entity/owner | *(who is performing the NDB assessment — Tether, the institution, or agreed jointly; do not invent an entity name — name the actual party)* |
+| Notification entity/owner | *(who will notify, if required — a separate coordination decision from the above; see procedure Section 22 item 3)* |
+| Rationale | |
+
 ## Notification
 
 | Field | Value |
 |---|---|
 | Notification required? | YES / NO / PENDING |
-| Which entity will notify? | *(Tether / institution / jointly — see procedure Section 22 for multi-entity incidents; do not assume by default)* |
+| Which entity will notify? | *(Tether / institution / jointly — matches "Notification entity/owner" above; see procedure Section 22 for multi-entity incidents; do not assume by default)* |
 | OAIC notified date/time | |
 | Individuals notified date/time | |
 | Institution notified date/time (contractual — separate from the above; see procedure Section 21) | |

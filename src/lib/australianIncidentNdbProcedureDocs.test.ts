@@ -27,8 +27,9 @@ const registerTemplate = read("docs/privacy-incident-register-template-v1.md");
 const privacyPackage = read("docs/privacy-and-evidence-retention-v1.md");
 
 describe("not every data breach is NDB-notifiable / applicability is conditional", () => {
-  it("states not every breach requires OAIC notification", () => {
-    expect(procedureFlat).toMatch(/not every data breach is a notifiable/i);
+  it("states not every privacy incident is a data breach, and not every data breach is an eligible data breach", () => {
+    expect(procedureFlat).toMatch(/Not every privacy incident is a data breach/i);
+    expect(procedureFlat).toMatch(/Not every data breach is an eligible data breach/i);
   });
 
   it("never claims Tether must notify OAIC for every breach", () => {
@@ -111,12 +112,12 @@ describe("multi-entity responsibility is determined per incident, not assumed", 
     expect(procedure).toMatch(/## 22\. Multi-entity incidents/);
   });
 
-  it("states Tether does not automatically own the notification obligation", () => {
-    expect(procedureFlat).toMatch(/Do not assume Tether automatically owns the\s+notification obligation/i);
+  it("states Tether does not automatically own either the assessment or notification role", () => {
+    expect(procedureFlat).toMatch(/Do not assume Tether\s+automatically owns either role/i);
   });
 
-  it("states the institution does not automatically own it either", () => {
-    expect(procedureFlat).toMatch(/Do not assume the institution automatically\s+owns it either/i);
+  it("states the institution does not automatically own either role either", () => {
+    expect(procedureFlat).toMatch(/Do not assume the institution\s+automatically owns either role either/i);
   });
 
   it("requires documenting the decision and rationale for which entity notifies", () => {
@@ -211,5 +212,103 @@ describe("the four statutory notification content fields are represented", () =>
 describe("severity is explicitly an operations classification, not a legal determination", () => {
   it("states severity does not by itself determine eligible breach, serious harm, or OAIC notification", () => {
     expect(procedureFlat).toMatch(/It does not, by itself, determine\s+whether an incident is an eligible data breach, whether serious harm\s+exists, or whether OAIC notification is required/i);
+  });
+});
+
+describe("[TETHER_AUSTRALIAN_NDB_LEGAL_PROCESS_CORRECTION_V1] remedial action vs. eligible-breach exception", () => {
+  it("[1] effective remedial action can make a data breach non-eligible (not an exception applied afterward)", () => {
+    expect(procedureFlat).toMatch(/If remedial\s+action genuinely prevents the likely risk of serious harm, the incident\s+is a data breach but not an eligible data breach/i);
+    expect(procedureFlat).toMatch(/Effective\s+remedial action may mean a data breach is \*\*not\*\* an eligible data\s+breach in the first place/i);
+  });
+
+  it("[2] never says an already-eligible breach becomes non-notifiable merely because remedial action succeeded", () => {
+    expect(procedure).not.toMatch(/Not every eligible data breach\s*\n?\s*automatically requires notifying OAIC/i);
+    expect(procedureFlat).toMatch(/This document does not say a confirmed eligible\s+breach can be left unnotified because remedial action happened to\s+work/i);
+  });
+
+  it("keeps statutory exceptions conceptually separate from remedial action", () => {
+    expect(procedureFlat).toMatch(/a distinct concept —\s+statutory exceptions, Section 24, are kept\s+separate from remedial action throughout this document/i);
+  });
+});
+
+describe("[TETHER_AUSTRALIAN_NDB_LEGAL_PROCESS_CORRECTION_V1] suspected-eligible-breach trigger is not automatic", () => {
+  it("[3] ordinary unauthorised access/disclosure alone does not automatically create the 'suspected eligible breach' label", () => {
+    expect(procedureFlat).toMatch(/do not automatically apply the "suspected eligible data breach"\s+label to every ordinary data breach/i);
+  });
+
+  it("[4] the statutory assessment trigger is worded as reasonable grounds to suspect an eligible breach may have occurred", () => {
+    expect(procedureFlat).toMatch(/triggered specifically\s+when Tether becomes aware of \*\*reasonable grounds to suspect that the\s+incident may have been an eligible data breach\*\*/i);
+  });
+
+  it("distinguishes a (possible) data breach — which always triggers triage/remedial action/coordination — from the narrower statutory trigger", () => {
+    expect(procedureFlat).toMatch(/A \(possible or confirmed\) data breach, established by Section 12,\s+always triggers:\*\* ongoing privacy-impact triage, serious-harm\s+consideration/i);
+    expect(procedureFlat).toMatch(/regardless of whether the incident ultimately turns\s+out to be an eligible data breach/i);
+  });
+
+  it("distinguishes voluntary/conservative assessment from the statutory trigger itself", () => {
+    expect(procedureFlat).toMatch(/this document distinguishes that voluntary,\s+conservative choice from the\s+statutory trigger itself/i);
+  });
+
+  it("does not require certainty about serious harm before starting the assessment", () => {
+    expect(procedureFlat).toMatch(/Do not require certainty about serious harm before starting the\s+assessment/i);
+  });
+});
+
+describe("[TETHER_AUSTRALIAN_NDB_LEGAL_PROCESS_CORRECTION_V1] 30-day assessment remains a maximum, and notification remains as-soon-as-practicable", () => {
+  it("[5] the assessment obligation remains 'reasonable and expeditious' with a 30-calendar-day maximum", () => {
+    expect(procedureFlat).toMatch(/The assessment must be \*\*reasonable and expeditious\*\*\. \*\*30 calendar/i);
+  });
+
+  it("[6] if reasonable grounds to believe an eligible breach already exist, notification proceeds as soon as practicable rather than waiting out 30 days", () => {
+    expect(procedureFlat).toMatch(/If reasonable grounds to BELIEVE an eligible breach already\s+exist/i);
+    expect(procedureFlat).toMatch(/the procedure\s+moves to notification \(Sections 18–20\) as soon as practicable, rather\s+than continuing to run out an assessment/i);
+  });
+});
+
+describe("[TETHER_AUSTRALIAN_NDB_LEGAL_PROCESS_CORRECTION_V1] law-enforcement involvement does not authorise delay on its own", () => {
+  it("[7] states law-enforcement/ACSC involvement does not, by itself, authorise any delay to statutory notification", () => {
+    expect(procedureFlat).toMatch(/\*\*Law enforcement\/ACSC involvement does not, by itself, authorise any\s+delay to statutory notification/i);
+  });
+
+  it("explicitly forbids self-authorised delay solely because law enforcement is involved", () => {
+    expect(procedureFlat).toMatch(/an ordinary Tether\s+operating entity must \*\*not\*\* self-authorise a delay to statutory\s+notification solely because law enforcement or a cyber agency is\s+involved/i);
+  });
+
+  it("[8] represents the s 26WQ / OAIC declaration boundary accurately — the Commissioner decides, not Tether", () => {
+    expect(procedureFlat).toMatch(/whether the OAIC\s+should be asked to make a declaration under s 26WQ of the Privacy Act/i);
+    expect(procedureFlat).toMatch(/The\s+Commissioner may make such a declaration, including after considering\s+relevant advice from an enforcement body or the Australian Signals\s+Directorate \(ASD\)/i);
+    expect(procedureFlat).toMatch(/this is the Commissioner's decision, not\s+Tether's own/i);
+  });
+
+  it("no longer describes a law-enforcement delay as a 'recognised, narrow exception' granted by this document itself", () => {
+    expect(procedure).not.toMatch(/this is a recognised,\s*\n?\s*narrow exception, not a default extension/i);
+  });
+
+  it("Section 21's institution-notification rule no longer implies an automatic entitlement to delay for law enforcement", () => {
+    expect(procedureFlat).toMatch(/does\s+not, by itself, create\s+an entitlement to postpone\s+institution notification/i);
+  });
+});
+
+describe("[TETHER_AUSTRALIAN_NDB_LEGAL_PROCESS_CORRECTION_V1] jointly-held multi-entity assessment and notification", () => {
+  it("[9] jointly held information permits a coordinated single assessment", () => {
+    expect(procedureFlat).toMatch(/only one entity needs to perform the NDB assessment\*\* on behalf of\s+the group/i);
+  });
+
+  it("[10] jointly held information permits a coordinated single notification, as a separate decision", () => {
+    expect(procedureFlat).toMatch(/\(separately\) \*\*only one entity needs to perform the\s+NDB notification\*\* for that jointly-held breach/i);
+  });
+
+  it("does not apply the jointly-held shortcut merely because two entities each separately hold different records about the same person", () => {
+    expect(procedureFlat).toMatch(/Do not assume the\s+jointly-held rule applies merely because two entities each hold\s+different records about the same person/i);
+  });
+
+  it("[11] no entity automatically escapes responsibility because another entity might act", () => {
+    expect(procedureFlat).toMatch(/If nobody actually performs the required assessment or\s+notification, "responsibility was shared between entities" is not a\s+defence/i);
+  });
+
+  it("the assessment record template captures jointly-held status and both the assessment and notification owners", () => {
+    expect(assessmentRecord).toMatch(/Jointly held affected information\?/i);
+    expect(assessmentRecord).toMatch(/Assessment entity\/owner/i);
+    expect(assessmentRecord).toMatch(/Notification entity\/owner/i);
   });
 });
