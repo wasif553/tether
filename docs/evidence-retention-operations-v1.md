@@ -9,6 +9,14 @@ awareness of legal holds, active appeals, or Production-target
 confirmation**. This runbook is what supplies that missing judgement
 until (and unless) it is built into the tooling itself.
 
+`--execute` requires an explicit `--institution-id <id>` (never `all`)
+and an explicit `--retention-days <n>` — there is no deployment-wide
+destructive command in this CLI (see `scripts/evidenceRetention/cliArgs.ts`).
+That requirement reduces the **blast radius** of a single run; it is
+**not** a substitute for the hold check in step 3 below, and does not by
+itself confirm which environment/database the command is pointed at
+(step 5).
+
 **This runbook does not grant a generic operator permission to delete
 production evidence.** Destruction requires the explicit,
 authorised administrative process below — never an ad hoc decision by
@@ -34,8 +42,8 @@ asset:
 | Field | Description |
 |---|---|
 | Sweep date | When the sweep was run |
-| Institution(s) in scope | Which institution's data was evaluated (or "all," at current pilot scale) |
-| Retention window used | `EVIDENCE_RETENTION_DAYS` value for this sweep |
+| Institution(s) in scope | The specific institution id evaluated. A dry run may preview deployment-wide (no `--institution-id`); `--execute` always names one specific institution — `all` is never accepted (Section 20 of the privacy package). |
+| Retention window used | The `--retention-days` value used for this sweep (required for `--execute`; falls back to `EVIDENCE_RETENTION_DAYS`/180 days for a dry run only if omitted) |
 | Cutoff date | The computed cutoff (`report.cutoff` from the runner's own output) |
 | Eligible count | `report.evaluatedCount` from the dry run |
 | Hold-check performed by | Named administrator who confirmed no eligible asset is under an active hold |
@@ -58,9 +66,18 @@ grows.
 
 ### 1. Dry run
 
+Preview a single institution — the normal case for an operational sweep
+— using its approved retention window:
+
 ```bash
-npm run evidence:retention
+npm run evidence:retention -- --institution-id <institution-id> --retention-days <approved-days>
 ```
+
+`--retention-days` may be omitted on a dry run to preview against the
+configured fallback (`EVIDENCE_RETENTION_DAYS`, default 180 days — see
+Section 18 of the privacy package); `--institution-id` may also be
+omitted to preview deployment-wide. Neither omission is permitted once
+you reach `--execute` in step 6.
 
 This reports what **would** be deleted — nothing is deleted. Record the
 eligible count and cutoff in the retention register.
@@ -69,8 +86,9 @@ eligible count and cutoff in the retention register.
 
 Review the dry-run's list of eligible assets (id, kind, `capturedAt`).
 Confirm the retention window used matches the institution's agreed
-policy (Section 18 of the privacy package) — override with
-`--retention-days N` only for a deliberate, documented reason.
+policy (Section 18 of the privacy package) before proceeding to step 6 —
+`--retention-days` is a required, explicit argument for `--execute`, not
+an optional override.
 
 ### 3. Active-case / appeal / hold check
 
@@ -112,8 +130,16 @@ personally verified.
 ### 6. Destruction execution
 
 ```bash
-npm run evidence:retention -- --execute
+npm run evidence:retention -- --execute --institution-id <institution-id> --retention-days <approved-days>
 ```
+
+Both `--institution-id` (a specific id — `all` is refused) and
+`--retention-days` are **required** for `--execute`. If either is
+omitted, the command performs no deletion, exits non-zero, and prints
+which explicit argument is missing — it never falls back to a default
+retention period or a deployment-wide scope for a destructive run. **Do
+not** run `npm run evidence:retention -- --execute` with no further
+arguments; it will refuse to do anything, by design.
 
 This deletes the storage object for each eligible asset first, then its
 database row, and writes a `PlatformAuditLog` entry
@@ -124,10 +150,32 @@ deletion. Record the reported deleted/failed counts in the register.
 
 Confirm the reported outcome: for a healthy run, `deleted count` should
 equal the eligible count from step 1 (accounting for anything
-deliberately excluded in step 3). Investigate and record any failure —
-the runner reports each failed asset individually and leaves it eligible
-for the next sweep (see `docs/tether-evidence-retention-plan.md` for why
-a failure never leaves a "half-deleted" state).
+deliberately excluded in step 3). Investigate and record any failure.
+
+**Precise failure-mode wording** (do not describe this as "never leaves
+a half-deleted state" — that overstates it): the runner deletes the
+storage object **first**, then the database row and audit record
+together in one transaction.
+
+- If the **storage delete fails**, nothing else runs — the database row
+  survives untouched and the asset remains eligible for the next sweep.
+  No partial state here.
+- If the **storage delete succeeds but the DB/audit transaction fails**,
+  the storage object is already gone while the database row (and its
+  future audit trail) still exists — this **is** a partial physical
+  deletion: the evidence image no longer exists, but the row that used
+  to point at it has not yet been removed. This state is **safely
+  retryable**, not indefinitely broken: a retry's storage-delete call is
+  a no-op against the already-missing key (both storage adapters treat
+  delete-of-missing-key as success), so the retry can complete the DB
+  row deletion and audit write cleanly. The DB row and its audit record
+  are never split from each other — that pair either both exist or
+  neither does, because they share one transaction — but the row and its
+  storage object can transiently disagree until the next successful
+  retry.
+
+Record any reported failure and note whether it needs a retry (routine
+— see step 12) or investigation (repeated failure on the same asset).
 
 ### 8. Evidence-storage object consideration
 
@@ -173,19 +221,29 @@ duplicates.
   repeatedly in the same session hoping for a different result without
   investigating the failure reason first.
 - **The retention window itself is disputed** (e.g. an institution
-  believes 90 days is too short/long for a specific exam) — resolve the
-  policy question first (Section 18 of the privacy package); do not run
-  `--execute` with an ad hoc `--retention-days` value to work around a
-  disagreement.
+  believes the 180-day pilot fallback is too short/long for a specific
+  exam) — resolve the policy question first (Section 18 of the privacy
+  package); do not run `--execute` with an ad hoc `--retention-days`
+  value to work around a disagreement.
+- **`--execute` was run without `--institution-id` and/or
+  `--retention-days`** — the command performs no deletion and exits
+  non-zero; this is expected, fail-closed behaviour, not a bug. Re-run
+  with both arguments explicitly set once steps 1–5 are complete.
 
 ## Destructive execution step — current status
 
 **NOT YET AUTOMATED / REQUIRES APPROVED ADMINISTRATIVE PROCEDURE.**
 
 The technical capability to delete an evidence asset exists and is
-tested (`npm run evidence:retention -- --execute`). What does **not**
-exist is a self-service, hold-aware, Production-safety-railed workflow —
-every real execution today depends on a human following steps 1–7 above
-in full. This is the accurate, honest state of the tooling as of this
-pass, and is preferable to describing a safer workflow than actually
-exists.
+tested (`npm run evidence:retention -- --execute --institution-id <id>
+--retention-days <n>`). The CLI itself refuses to run `--execute`
+without both explicit arguments (fail-closed — see step 6), which closes
+the specific gap where an unscoped `--execute` could delete
+deployment-wide using a default retention period. What does **not**
+exist is a self-service, **hold-aware**, Production-safety-railed
+workflow — every real execution today still depends on a human following
+steps 1–7 above in full, including the manual hold check (step 3) and
+Production-target confirmation (step 5), neither of which the argument
+requirement replaces. This is the accurate, honest state of the tooling
+as of this pass, and is preferable to describing a safer workflow than
+actually exists.

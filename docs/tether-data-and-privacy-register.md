@@ -40,9 +40,11 @@ corresponding operational-language rules.
   on `IntegrityEvidenceAsset` (only `capturedAt`/`createdAt`). No
   scheduled deletion runs automatically. A manual, operator-triggered
   retention runner (`npm run evidence:retention`, age-based on
-  `capturedAt`, default 90-day window) now exists — see
+  `capturedAt`, default 180-day window) now exists — see
   `docs/tether-evidence-retention-plan.md` — but must be deliberately
-  invoked; nothing deletes this data on its own.
+  invoked, and `--execute` requires an explicit `--institution-id` and
+  `--retention-days` (no deployment-wide destructive path); nothing
+  deletes this data on its own.
 - **Sensitivity:** High — may capture anything visible on the student's
   screen, potentially including unrelated personal content if the student
   had other windows/content open.

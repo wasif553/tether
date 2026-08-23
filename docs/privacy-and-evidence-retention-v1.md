@@ -151,15 +151,25 @@ and should be read alongside this table.
 
 ## 6. Collection minimisation
 
-Every optional monitoring feature (camera monitoring, AI camera checks,
-camera/screen evidence stills, screen-share requirement, session
-binding's coarse fingerprinting, answer-development provenance, AI
-brainstorming) is **off by default** and must be explicitly enabled per
-exam by the institution/lecturer. Enabling a feature never retroactively
-applies to an exam already in progress or already taken. `POST
+Every **optional monitoring feature** (camera monitoring, AI camera
+checks, camera/screen evidence stills, screen-share requirement,
+answer-development provenance, AI brainstorming) is **off by default**
+and must be explicitly enabled per exam by the institution/lecturer.
+Enabling a feature never retroactively applies to an exam already in
+progress or already taken. `POST
 /api/submissions/[id]/integrity-events` structurally rejects any request
 whose metadata contains an image/frame/screenshot/base64/blob-shaped key
 or value — this is enforced in code, not only by convention.
+
+**Exam session binding is not in this optional list.** It is a
+**baseline session-integrity/security mechanism** — not a lecturer-
+enabled monitoring feature — that creates/resumes an `ExamAttemptSession`
+from the student's first exam heartbeat and continues heartbeat-based
+continuity checks for the duration of every exam attempt, regardless of
+which optional monitoring features are enabled. See Section 12 for its
+privacy-minimised design (hashed tokens only, coarse fingerprinting, no
+raw IP) and the data inventory (Section 4), which correctly lists it as
+"Always," not optional.
 
 **Free-text and metadata fields.** A small number of fields accept
 free-text input capable of containing personal information beyond what
@@ -237,13 +247,25 @@ evidence, which never stores a raw IP. See
 
 ## 12. Secure Browser/session evidence
 
+**Exam session binding is a baseline session-integrity/security
+mechanism, not an optional monitoring feature.** It creates/resumes an
+`ExamAttemptSession` from the student's first exam heartbeat and
+continues heartbeat-based continuity checks throughout every attempt —
+it is not lecturer-enabled and is not listed among the off-by-default
+features in Section 6.
+
 Exam-attempt session binding uses two server-issued, HMAC-hashed,
 first-party cookies (a short-lived browser-session token and a
 longer-lived device token) plus a coarse device-profile fingerprint
 (browser/OS family, device category, bucketed screen size, language,
 timezone — never canvas/WebGL/audio fingerprinting, never exact screen
 dimensions). **No raw IP is ever stored by this feature** — only an
-HMAC-hashed network prefix (`/24` IPv4, `/48` IPv6). Tether Secure
+HMAC-hashed network prefix (`/24` IPv4, `/48` IPv6); a separate system,
+Section 11's `NetworkEvidence`, may store a raw IP. Session-binding
+signals are, like every other integrity signal in this package, a
+review aid for a human reviewer — Tether does not make an automatic
+misconduct determination from a session-continuity signal any more than
+from any other signal (Section 15). Tether Secure
 Browser session lifecycle (installation attestation, launch manifests,
 heartbeats) is covered under "secure-client/session operational
 evidence" in the data inventory. See `docs/exam-session-binding-v1.md`.
@@ -393,18 +415,37 @@ either overstated or ignored:
 - A tested, manually-invoked retention runner
   (`npm run evidence:retention`) exists for **`IntegrityEvidenceAsset`
   rows only** — the camera and screen-share evidence stills (Sections 9
-  and 10). It is age-based on `capturedAt`, defaults to a 90-day window
-  (`EVIDENCE_RETENTION_DAYS`), is **dry-run by default**, requires an
-  explicit `--execute` flag to delete anything, deletes the storage
-  object before the database row, and writes a `PlatformAuditLog` row
+  and 10). It is age-based on `capturedAt`, defaults to a **180-day**
+  window (`EVIDENCE_RETENTION_DAYS`) — matching this section's Class A
+  pilot fallback (Section 18) rather than an arbitrary shorter value —
+  is **dry-run by default**, deletes the storage object before the
+  database row, and writes a `PlatformAuditLog` row
   (`INTEGRITY_EVIDENCE_RETENTION_DELETED`) atomically with each
   deletion. See `docs/tether-evidence-retention-plan.md` and
   `src/lib/evidenceRetentionRunner.ts`.
+- **`--execute` requires explicit institution scope and an explicit
+  retention period.** A dry run (`npm run evidence:retention`) may
+  target a single institution with `--institution-id <id>`, or preview
+  deployment-wide without it, and may omit `--retention-days` to use the
+  configured fallback above. `--execute` refuses to run unless **both**
+  `--institution-id <id>` (a specific id — `all` is rejected) and
+  `--retention-days <n>` are supplied explicitly; omitting either
+  performs no deletion and exits non-zero with an explanation of what is
+  missing. **There is no deployment-wide destructive path in this v1
+  CLI** — see `scripts/evidenceRetention/cliArgs.ts` and
+  `docs/evidence-retention-operations-v1.md` for the exact command form.
+  This closes the previous gap where `--execute` alone would silently
+  delete deployment-wide using the default retention window — but it is
+  a **blast-radius reduction, not a hold check**: the manual
+  active-appeal/hold verification below is still required for every run.
 - This runner has **no awareness of legal/academic holds or active
   appeals** — eligibility is purely age-based. An operator must manually
   confirm (via the retention register process in
   `docs/evidence-retention-operations-v1.md`) that no eligible asset is
-  under an active hold before ever running `--execute`.
+  under an active hold before ever running `--execute`. The
+  institution-scope requirement above narrows *which* institution's data
+  a single run can affect; it does not itself know about holds or
+  appeals.
   **IMPLEMENTATION GAP — hold-aware, self-service retention enforcement
   is not yet implemented; every `--execute` run today depends on a
   human operator's manual check.**
@@ -421,9 +462,12 @@ either overstated or ignored:
   `npm run release:validate`'s disposable-database guard, it will run
   against whatever `DATABASE_URL` is configured, and relies entirely on
   the operator having deliberately pointed their environment correctly.
-  **PRE-PILOT GATE — a Production-target confirmation step should be
-  added before this tool is used operationally against a real
-  institution's data.**
+  The institution-scope/retention-period requirement above limits the
+  *blast radius* of a mistaken run against the wrong environment; it
+  does **not** detect or block a Production `DATABASE_URL` the way
+  `release:validate` does. **PRE-PILOT GATE — a Production-target
+  confirmation step should be added before this tool is used
+  operationally against a real institution's data.**
 
 Do not read the existence of this tool as a claim that retention is
 enforced today — it is a real, tested capability that requires a human
@@ -541,3 +585,4 @@ pass's data-minimisation review (Section 6):
 | Version | Date | Change |
 |---|---|---|
 | v1 | 2026-08-23 | Initial package: this document, `docs/institution-privacy-responsibilities-v1.md`, `docs/evidence-retention-operations-v1.md`, and the student-facing notice update (`compliance/privacy-evidence-retention-v1` branch). No schema, migration, or evidence-collection behaviour changed. |
+| v1.1 | 2026-08-23 | Retention execution safety and privacy correction: (1) corrected Section 6/12 — exam session binding is a baseline session-integrity mechanism, not an optional/off-by-default monitoring feature; (2) raised the evidence-retention runner's fallback default from 90 to 180 days, matching Section 18's Class A pilot fallback; (3) `--execute` now requires an explicit `--institution-id` (not `all`) and `--retention-days` — no deployment-wide destructive path remains in the CLI (Section 20). No schema, migration, or evidence-collection behaviour changed; no evidence deleted. |

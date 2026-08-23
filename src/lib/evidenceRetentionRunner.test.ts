@@ -75,24 +75,31 @@ async function createEvidenceAsset(capturedAt: Date) {
 }
 
 describe("resolveEvidenceRetentionDays", () => {
-  it("defaults to 90 days when unset", () => {
+  // [1] Conservative pilot fallback — see
+  // docs/privacy-and-evidence-retention-v1.md, Section 18 (Class A
+  // target: review/appeal period + 30 days; 180-day fallback where no
+  // institution-specific period is agreed). Raised from 90 to 180 to
+  // match the approved pilot policy — an implicit destructive default
+  // must never be stricter/shorter than the governance document it's
+  // supposed to implement.
+  it("[1] defaults to 180 days when unset", () => {
     const original = process.env.EVIDENCE_RETENTION_DAYS;
     delete process.env.EVIDENCE_RETENTION_DAYS;
-    expect(resolveEvidenceRetentionDays()).toBe(90);
+    expect(resolveEvidenceRetentionDays()).toBe(180);
     if (original !== undefined) process.env.EVIDENCE_RETENTION_DAYS = original;
   });
 
-  it("falls back to the default for a non-positive or malformed value", () => {
+  it("[3] falls back to the 180-day default for a non-positive or malformed value", () => {
     const original = process.env.EVIDENCE_RETENTION_DAYS;
     process.env.EVIDENCE_RETENTION_DAYS = "-5";
-    expect(resolveEvidenceRetentionDays()).toBe(90);
+    expect(resolveEvidenceRetentionDays()).toBe(180);
     process.env.EVIDENCE_RETENTION_DAYS = "not-a-number";
-    expect(resolveEvidenceRetentionDays()).toBe(90);
+    expect(resolveEvidenceRetentionDays()).toBe(180);
     if (original !== undefined) process.env.EVIDENCE_RETENTION_DAYS = original;
     else delete process.env.EVIDENCE_RETENTION_DAYS;
   });
 
-  it("honours a valid configured value", () => {
+  it("[2] honours a valid configured value, overriding the 180-day fallback", () => {
     const original = process.env.EVIDENCE_RETENTION_DAYS;
     process.env.EVIDENCE_RETENTION_DAYS = "30";
     expect(resolveEvidenceRetentionDays()).toBe(30);
