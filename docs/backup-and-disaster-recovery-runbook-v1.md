@@ -160,7 +160,7 @@ that does not exist yet.
 |---|---|---|---|---|---|---|
 | A. Application source | GitHub (`wasif553/tether`) | Git history itself is the recovery mechanism — every commit is a full, independently-checkable snapshot | Yes (inherent to Git) | N/A | Repository availability itself depends on GitHub | None beyond normal GitHub account hygiene |
 | B. Vercel deployment/runtime | Vercel (Hobby plan) | Redeploy from a known-good Git commit | Not independently verified on the current plan | No | Hobby-plan rollback/promotion capability not confirmed | Verify actual Hobby-plan redeploy path before pilot (Section 12) |
-| C. Supabase Postgres database | Supabase (Free plan, `AP-Northeast`) | None provider-managed on Free plan; manual `pg_dump`/Supabase CLI `db dump` possible but not currently scheduled | No — no backup has ever been produced and verified against this Production project as of this pass | No | **No scheduled Production backup cadence exists** | **PRE-PILOT BACKUP GATE** (Section 37) |
+| C. Supabase Postgres database | Supabase (Free plan, `AP-Northeast`) | None provider-managed on Free plan; `npm run backup:create` tooling now exists (`docs/database-backup-operations-v1.md`) but has never been run against this Production project | No — no backup has ever been produced and verified against this Production project as of this pass | No | **No scheduled Production backup cadence exists — tooling gap closed, operational gap (real backup + off-project copy + cadence) remains open** | **PRE-PILOT BACKUP GATE** (Section 37) |
 | D. Supabase Storage primary evidence objects | Supabase Storage (same project as C) | None dedicated — not covered by database backups at all | No | No | Same failure domain as C; no independent copy | **PRE-PILOT EVIDENCE ARCHIVE GATE** (Section 37) |
 | E. `IntegrityEvidenceAsset` relational metadata | Postgres row (same database as C) | Covered by whatever database backup exists (i.e. currently none scheduled) | No | No | Same as C; also: metadata alone is useless without the bytes it references (Section 10) | Same as C |
 | F. Separate evidence archive | Not provisioned | `npm run evidence:archive` architecture exists in code but has no real target project | No | No | **Architecturally implemented, cloud recovery path not yet activated or tested** | **PRE-PILOT EVIDENCE ARCHIVE GATE** (Section 37) |
@@ -238,13 +238,58 @@ That tool:
 scheduling/creation system**, and this runbook does not describe it as
 one.
 
+**Backup CREATION tooling now exists**, closing the tooling portion of
+this section's own gate: `npm run backup:create` (see
+[`docs/database-backup-operations-v1.md`](database-backup-operations-v1.md)
+for the full operator runbook) produces a logical backup **bundle**
+(`roles.sql`, `schema.sql`, `data.sql`, `manifest.json`) via
+`pg_dump`/`pg_dumpall` run inside a throwaway toolbox Docker container,
+and integrates directly with a bundle-aware counterpart to the existing
+verifier, `npm run backup:verify-bundle`. Defaults to a dry run;
+`--execute` requires an explicit `--environment` and `--output-dir`, and
+`--environment production` additionally requires a separate, explicit
+`--confirm-production` flag — never inferred from the connection
+string. **DATABASE BACKUP CREATION TOOLING: IMPLEMENTED AND LOCALLY
+VERIFIED.** Local-test result (disposable, synthetic data only — no
+Production contact): a disposable local Postgres container was seeded
+with 2 synthetic tables and 4 rows; `npm run backup:create -- --execute
+--environment local-test ...` produced a `COMPLETE` bundle (`roles.sql`
+671 bytes, `schema.sql` 4063 bytes, `data.sql` 1512 bytes, each hashed);
+`npm run backup:verify-bundle -- <bundle> --restore` recomputed and
+matched every file's SHA-256, then rehearsed a full restore (roles →
+schema → data) into a **second**, independent disposable container,
+finding the same 2 tables and 4 rows — `overallPassed: true`. A genuine
+bug was found and fixed during this exercise: `pg_dump --schema-only`'s
+default `CREATE SCHEMA public;` statement collided with the "public"
+schema every fresh Postgres database already has; fixed by adding
+`--clean --if-exists` to the schema dump so the restore is idempotent
+against a fresh target (see `scripts/create-database-backup.ts`'s own
+comment on that line). The tool's fail-closed paths were also exercised
+for real: an unreachable source correctly produced a `FAILED` bundle
+(diagnostic preserved, redacted, no partial `COMPLETE` bundle), and
+`--environment production` without `--confirm-production` was refused
+before any Docker/network action. **This is a tooling gap closed, not
+the PRE-PILOT BACKUP GATE itself closed** — see the status line
+immediately below.
+
 **Current Supabase Free-plan boundary — state this clearly, do not
 soften it:** automatic provider-managed backup coverage is **not**
 currently relied upon, because the observed Tether Supabase organisation
 is on the Free plan, which current official Supabase documentation
 states does not include automatic database backups. **Therefore Tether
 currently has no documented, verified, scheduled Production
-database-backup cadence.** **PRE-PILOT BACKUP GATE.**
+database-backup cadence.**
+
+- **PRODUCTION BACKUP: NOT YET EXECUTED / VERIFIED** — `npm run
+  backup:create` has never been run with `--environment production
+  --confirm-production` against a real Production database.
+- **OFF-PROJECT COPY: NOT YET SELECTED / VERIFIED** — see
+  `docs/database-backup-operations-v1.md`'s own PRE-PILOT OFF-PROJECT
+  COPY GATE.
+- **PRODUCTION BACKUP GATE: OPEN.** Writing and locally verifying this
+  tooling does not, by itself, close this gate — it closes only once a
+  real, authorised Production backup has been created, copied
+  off-project, verified, and restore-tested.
 
 Before a real institutional pilot, choose and implement a Production
 database backup strategy. Possible future strategies (not decided or
@@ -252,9 +297,13 @@ purchased by this task):
 
 - **A.** A paid Supabase plan with provider-managed backups, plus an
   independent, off-project verification/safeguard step.
-- **B.** Operator-controlled scheduled logical backups using the current
-  Supabase CLI/`pg_dump` capability, stored securely outside the primary
-  Supabase project.
+- **B.** Operator-controlled scheduled logical backups using the
+  now-implemented `npm run backup:create` tooling (or the Supabase
+  CLI/`pg_dump` directly), stored securely outside the primary Supabase
+  project — the creation and verification tooling for this strategy now
+  exists; the operational decision to actually run it against
+  Production, on what cadence, and where the off-project copy goes, does
+  not yet exist.
 - **C.** Another reviewed combination of A and B.
 
 This runbook does not decide between them.
@@ -1095,11 +1144,15 @@ Writing this documentation does **not** close any of these gates —
 each requires an actual action, verified and recorded, before it can be
 marked complete:
 
-1. **PRE-PILOT BACKUP GATE** — choose and implement an actual
-   Production database backup cadence (Section 8).
+1. **PRE-PILOT BACKUP GATE** — the backup-creation *tooling* now exists
+   and is locally verified (`npm run backup:create`,
+   `docs/database-backup-operations-v1.md`), but the gate itself
+   requires an actual, authorised Production backup to be created,
+   copied off-project, verified, and restore-tested (Section 8).
 2. **PRE-PILOT OFF-PROJECT COPY GATE** — ensure the critical database
    backup does not depend solely on the same primary-project failure
-   domain it is meant to protect against.
+   domain it is meant to protect against; no destination has been
+   selected or tested (`docs/database-backup-operations-v1.md`).
 3. **PRE-PILOT EVIDENCE ARCHIVE GATE** — provision the approved separate
    evidence-archive location; archive representative evidence; test one
    verified restore (Section 9/25).
@@ -1128,3 +1181,5 @@ marked complete:
 | Version | Date | Change |
 |---|---|---|
 | v1 | 2026-08-23 | Initial package: this document, `docs/restore-test-record-v1.md`, `docs/dr-exercise-checklist-v1.md`, and small cross-linking updates to `docs/production-backup-restore-runbook.md`, `docs/privacy-and-evidence-retention-v1.md`, and `docs/australian-incident-ndb-procedure-v1.md` (`compliance/backup-disaster-recovery-v1` branch). No schema, migration, or application-behaviour change. No Production contact, restore, or evidence deletion performed. No cloud resource created. |
+| v1.1 | 2026-08-23 | Corrected Section 5/14's Secure Browser characterisation from a single hash discrepancy to a three-source version-reconciliation gap (`compliance/backup-disaster-recovery-v1` branch, later merged). |
+| v1.2 | 2026-08-23 | Section 5 (matrix row C), Section 8, and Section 37 (gates 1–2) updated: database backup **creation** tooling (`npm run backup:create`, `npm run backup:verify-bundle`) now exists and is locally verified — see `docs/database-backup-operations-v1.md`. The PRE-PILOT BACKUP GATE and PRE-PILOT OFF-PROJECT COPY GATE remain explicitly OPEN; only the tooling portion is closed (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact or Production backup performed. |

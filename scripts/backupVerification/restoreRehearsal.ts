@@ -53,7 +53,8 @@ async function restoreIntoContainer(containerName: string, dumpFormat: DumpForma
  * lockstep). Confirms the restore produced an actual populated schema, not
  * an empty database that merely didn't error.
  */
-async function runSanityChecks(disposableDatabaseUrl: string): Promise<SanityCheckResult[]> {
+/** Exported so scripts/backupCreation/bundleRestoreRehearsal.ts can reuse it verbatim rather than duplicating these checks for a multi-file bundle restore. */
+export async function runSanityChecks(disposableDatabaseUrl: string): Promise<SanityCheckResult[]> {
   const { Client } = await import("pg");
   const client = new Client({ connectionString: disposableDatabaseUrl, connectionTimeoutMillis: 5000 });
   const results: SanityCheckResult[] = [];

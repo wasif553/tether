@@ -60,6 +60,13 @@ next-env.d.ts
 # src/lib/evidenceArchiveStorage.ts). Never used in production.
 /.evidence-archive-storage
 
+# Production Database Backup Creation v1 — the one dedicated local
+# destination `npm run backup:create` will write into (see
+# docs/database-backup-operations-v1.md). Never commit a database
+# backup — this directory exists specifically so an accidental
+# `git add .` cannot pick one up.
+/.local-backups
+
 .vercel
 .env*
 
