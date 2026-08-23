@@ -164,9 +164,9 @@ describe("[TETHER_DATABASE_BACKUP_OPERATIONALISATION_FINAL_HARDENING] documentat
     expect(operationsDocFlat).toMatch(/"Production", "PRODUCTION", " production ",\s+"production " all normalise \(trim \+\s+lowercase\) to the one canonical label "production"/i);
   });
 
-  it("documents the local-generic vs supabase-managed source-adapter split and the deferred Supabase runtime-test status", () => {
+  it("documents the local-generic vs supabase-managed source-adapter split and the deferred Supabase Production runtime-test status", () => {
     expect(operationsDoc).toMatch(/## Source adapters — local\/generic vs\. Supabase-managed/);
-    expect(operationsDocFlat).toMatch(/\*\*`SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`\*\*/);
+    expect(operationsDocFlat).toMatch(/\*\*`SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED`\*\*/);
   });
 
   it("documents that raw pg_dumpall is not used for the Supabase-managed path", () => {
@@ -218,37 +218,89 @@ describe("[TETHER_DATABASE_BACKUP_SUPABASE_MANAGED_RUNTIME_CORRECTION] the supab
     expect(supabaseCliExecutorSource).toMatch(/workspace is removed/i);
     expect(supabaseCliExecutorSource).toMatch(/unconditionally \(`finally`\)/i);
   });
+});
 
-  it("documents that SUPABASE_ACCESS_TOKEN/SUPABASE_DB_PASSWORD travel only via subprocess environment, never a CLI flag", () => {
-    expect(supabaseCliExecutorSource).toMatch(/never as a CLI/i);
-    expect(supabaseCliExecutorSource).toMatch(/flag \(`--password`\/`-p` would put the value directly/i);
-    expect(supabaseCliExecutorSource).toMatch(/SUPABASE_ACCESS_TOKEN/);
-    expect(supabaseCliExecutorSource).toMatch(/SUPABASE_DB_PASSWORD/);
+describe("[TETHER_DATABASE_BACKUP_READ_ONLY_SUPABASE_CORRECTION] supabase link removed — read-only, passwordless --db-url + PGPASSWORD design", () => {
+  const supabaseCliExecutorSource = read("scripts/backupCreation/supabaseCliExecutor.ts");
+  const sourceAdaptersSource = read("scripts/backupCreation/sourceAdapters.ts");
+  const supabaseDatabaseUrlSource = read("scripts/backupCreation/supabaseDatabaseUrl.ts");
+
+  it("[1][2] no source file constructs a literal '--linked' or 'link' argv array element — the precise 'no link subcommand ever reaches the runner' guarantee is proven at runtime by supabaseCliExecutor.test.ts and sourceAdapters.test.ts's array-level checks; this only guards against a re-introduced literal argv token", () => {
+    for (const [name, content] of [
+      ["scripts/create-database-backup.ts", createBackupSource],
+      ["scripts/backupCreation/sourceAdapters.ts", sourceAdaptersSource],
+      ["scripts/backupCreation/supabaseCliExecutor.ts", supabaseCliExecutorSource],
+    ] as const) {
+      expect(content, `${name} must not construct a "--linked" argv array element`).not.toMatch(/"--linked"/);
+      expect(content, `${name} must not construct a "link" argv array element`).not.toMatch(/"link"/);
+    }
   });
 
-  it("the operations doc documents --linked (not --db-url) and the corrected -x exclusion flag (not --exclude-table)", () => {
-    expect(operationsDocFlat).toMatch(/supabase db dump --linked -f <path> --role-only/);
+  it("documents 'No supabase link. No --linked.' as an explicit design statement", () => {
+    expect(supabaseCliExecutorSource).toMatch(/READ-ONLY BY CONSTRUCTION — NO `supabase link`/);
+    expect(operationsDocFlat).toMatch(/\*\*No\s+`supabase link`\. No `--linked`\. No `SUPABASE_ACCESS_TOKEN`\.\*\*/);
+  });
+
+  it("documents why supabase link was removed (not guaranteed read-only)", () => {
+    expect(supabaseCliExecutorSource).toMatch(/not a guaranteed\s+read-only operation/i);
+    expect(supabaseCliExecutorSource).toMatch(/CREATE SCHEMA IF NOT EXISTS supabase_migrations/);
+  });
+
+  it("[3] no SUPABASE_ACCESS_TOKEN or separate SUPABASE_DB_PASSWORD is read from the environment any more (the code no longer checks either)", () => {
+    expect(supabaseCliExecutorSource).not.toMatch(/process\.env\.SUPABASE_ACCESS_TOKEN/);
+    expect(supabaseCliExecutorSource).not.toMatch(/process\.env\.SUPABASE_DB_PASSWORD/);
+    expect(operationsDocFlat).toMatch(/No\s+`SUPABASE_ACCESS_TOKEN` and no separate\s+`SUPABASE_DB_PASSWORD`/i);
+  });
+
+  it("[5][6] documents that the real password reaches the CLI only via PGPASSWORD, never --db-url or a CLI flag", () => {
+    expect(supabaseCliExecutorSource).toMatch(/PGPASSWORD/);
+    expect(supabaseCliExecutorSource).toMatch(/never as a CLI flag \(`--password`\/`-p` would put the value/i);
+  });
+
+  it("[7][8] the passwordless-URL builder module documents its allowlist design", () => {
+    expect(supabaseDatabaseUrlSource).toMatch(/Allowlist, not denylist/i);
+    expect(supabaseDatabaseUrlSource).toMatch(/passfile[\s\S]*servicefile/);
+  });
+
+  it("the operations doc documents --db-url and the corrected -x exclusion flag (not --exclude-table as a used flag)", () => {
+    expect(operationsDocFlat).toMatch(/supabase db dump --db-url <passwordless-url> --workdir <tmp> -f <path> --role-only/);
     expect(operationsDocFlat).toMatch(/-x "storage\.buckets_vectors" -x "storage\.vector_indexes"/);
-    // --exclude-table is mentioned only as an explicit "this flag does not exist, do not use it" note — never as a flag actually applied in a command.
-    expect(operationsDocFlat).toMatch(/not the nonexistent `--exclude-table`/i);
-    expect(operationsDocFlat).not.toMatch(/--exclude-table 'storage/);
+    expect(operationsDoc).not.toMatch(/--exclude-table 'storage/);
   });
 
-  it("the operations doc documents the fail-closed preflight for the supabase-managed path", () => {
-    expect(operationsDocFlat).toMatch(/Fail-closed preflight\*\*, checked before any temporary workspace is\s+created/i);
+  it("[9][10] the operations doc documents Docker checked before any remote operation", () => {
+    expect(operationsDocFlat).toMatch(/Docker is installed and \(2\)\s+its daemon is running/i);
+    expect(operationsDocFlat).toMatch(/must fail BEFORE any remote/i);
   });
 
-  it("the DR runbook documents the runtime correction and remains SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED", () => {
-    expect(drRunbookFlat).toMatch(/Runtime correction \(`supabase-managed` execution path made\s+structurally executable\)/i);
-    expect(drRunbookFlat).toMatch(/This\s+remains `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`/i);
+  it("[11] the operations doc documents supabase init runs before any dump", () => {
+    expect(operationsDocFlat).toMatch(/supabase init --force --yes --workdir <dir>/);
+  });
+
+  it("[19] the execution boundary module documents the exact allowed subcommand set (init, db dump) and no others", () => {
+    expect(supabaseCliExecutorSource).toMatch(/It never invokes `link`, `db push`, `db/);
+    expect(supabaseCliExecutorSource).toMatch(/pull`, `db reset`, `migration repair`, `migration up`, `config push`,/);
+    expect(supabaseCliExecutorSource).toMatch(/`projects create`\/`delete`, or any Storage-mutating command/);
+  });
+
+  it("the DR runbook documents the read-only correction and remains SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED", () => {
+    expect(drRunbookFlat).toMatch(/Read-only correction \(`supabase link` removed\)/i);
+    expect(drRunbookFlat).toMatch(/This\s+remains `SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED`/i);
   });
 
   it("the operations doc's Current status table uses the exact required status labels", () => {
     expect(operationsDoc).toMatch(/\*\*DATABASE BACKUP CREATION TOOLING\*\* \| \*\*IMPLEMENTED\*\*/);
-    expect(operationsDoc).toMatch(/\*\*LOCAL\/GENERIC END-TO-END\*\* \| \*\*VERIFIED\*\*/);
-    expect(operationsDoc).toMatch(/\*\*SUPABASE MANAGED COMMAND PATH\*\* \| \*\*IMPLEMENTED \/ NOT YET RUN AGAINST PRODUCTION\*\*/);
+    expect(operationsDoc).toMatch(/\*\*LOCAL-GENERIC END-TO-END\*\* \| \*\*VERIFIED\*\*/);
+    expect(operationsDoc).toMatch(/\*\*PINNED SUPABASE CLI DIRECT DUMP PATH\*\* \| \*\*VERIFIED AGAINST DISPOSABLE LOCAL POSTGRES\*\*/);
+    expect(operationsDoc).toMatch(/\*\*SUPABASE MANAGED PRODUCTION RUNTIME\*\* \| \*\*NOT YET EXECUTED\*\*/);
     expect(operationsDoc).toMatch(/\*\*PRODUCTION BACKUP\*\* \| \*\*NOT YET EXECUTED\*\*/);
     expect(operationsDoc).toMatch(/\*\*OFF-PROJECT COPY\*\* \| \*\*OPEN\*\*/);
-    expect(operationsDoc).toMatch(/\*\*CADENCE\*\* \| \*\*OPEN\*\*/);
+    expect(operationsDoc).toMatch(/\*\*BACKUP CADENCE\*\* \| \*\*OPEN\*\*/);
+    expect(operationsDoc).toMatch(/\*\*RPO\/RTO\*\* \| \*\*UNCOMMITTED\*\*/);
+  });
+
+  it("SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS is stated, distinct from the still-deferred Production runtime test", () => {
+    expect(operationsDocFlat).toMatch(/SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS/);
+    expect(operationsDocFlat).toMatch(/SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED/);
   });
 });

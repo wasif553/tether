@@ -6,12 +6,17 @@
  * only — no Docker, no subprocess, no Supabase CLI, no Production
  * contact. See sourceAdapters.ts's own doc comment:
  *
- * SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED — these tests prove
- * what COMMAND would be constructed, never that it actually succeeds
- * against a real Supabase CLI/project. See supabaseCliExecutor.test.ts
- * for tests over the execution boundary (preflight, link, dump
- * sequence, temporary-workspace cleanup) with an injected fake CLI
- * runner.
+ * These tests prove what BASE command (no `--db-url`, no `--workdir`)
+ * would be constructed, never that it actually succeeds against a real
+ * Supabase CLI/project — see supabaseCliExecutor.test.ts for tests over
+ * the execution boundary (preflight, `init`, the FINAL assembled argv
+ * including `--db-url`/`--workdir`, dump sequence, temporary-workspace
+ * cleanup) with an injected fake CLI runner, and
+ * docs/database-backup-operations-v1.md's "Current status" section for
+ * the real disposable-Postgres runtime exercise
+ * (`SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS`).
+ * SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED — none of this
+ * proves Production compatibility.
  */
 import { describe, expect, it } from "vitest";
 import { localGenericPostgresAdapter, supabaseManagedAdapter, resolveSourceAdapter, autoDetectSourceAdapterKind, SUPABASE_VECTOR_TABLE_EXCLUSIONS } from "./sourceAdapters";
@@ -43,37 +48,37 @@ describe("[TETHER_DATABASE_BACKUP_SUPABASE_MANAGED_RUNTIME_CORRECTION] supabaseM
     expect(supabaseManagedAdapter.executor).not.toBe(localGenericPostgresAdapter.executor);
   });
 
-  it("[7] roles command is exactly: db dump --linked -f <path> --role-only", () => {
+  it("[14] roles base command is exactly: db dump -f <path> --role-only (no --linked)", () => {
     const command = supabaseManagedAdapter.rolesDumpCommand("/host/bundle/roles.sql");
-    expect(command.commandArgs).toEqual(["db", "dump", "--linked", "-f", "/host/bundle/roles.sql", "--role-only"]);
+    expect(command.commandArgs).toEqual(["db", "dump", "-f", "/host/bundle/roles.sql", "--role-only"]);
   });
 
-  it("[8] schema command is exactly: db dump --linked -f <path> (no exclusion flags)", () => {
+  it("[15] schema base command is exactly: db dump -f <path> (no exclusion flags, no --linked)", () => {
     const command = supabaseManagedAdapter.schemaDumpCommand("public", "/host/bundle/schema.sql");
-    expect(command.commandArgs).toEqual(["db", "dump", "--linked", "-f", "/host/bundle/schema.sql"]);
+    expect(command.commandArgs).toEqual(["db", "dump", "-f", "/host/bundle/schema.sql"]);
   });
 
-  it("[9] data command includes --data-only and --use-copy", () => {
+  it("[16] data base command includes --data-only and --use-copy", () => {
     const command = supabaseManagedAdapter.dataDumpCommand("public", "/host/bundle/data.sql");
     expect(command.commandArgs).toContain("--data-only");
     expect(command.commandArgs).toContain("--use-copy");
   });
 
-  it("[10] data command contains -x storage.buckets_vectors and -x storage.vector_indexes", () => {
+  it("[17] data base command contains -x storage.buckets_vectors and -x storage.vector_indexes", () => {
     const command = supabaseManagedAdapter.dataDumpCommand("public", "/host/bundle/data.sql");
-    expect(command.commandArgs).toEqual(["db", "dump", "--linked", "-f", "/host/bundle/data.sql", "--data-only", "--use-copy", "-x", "storage.buckets_vectors", "-x", "storage.vector_indexes"]);
+    expect(command.commandArgs).toEqual(["db", "dump", "-f", "/host/bundle/data.sql", "--data-only", "--use-copy", "-x", "storage.buckets_vectors", "-x", "storage.vector_indexes"]);
   });
 
-  it("[11] --exclude-table does NOT appear anywhere in managed command construction", () => {
+  it("[18] --exclude-table does NOT appear anywhere in managed command construction", () => {
     for (const command of [supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql"), supabaseManagedAdapter.schemaDumpCommand("public", "/tmp/schema.sql"), supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql")]) {
       expect(command.commandArgs.join(" ")).not.toContain("--exclude-table");
     }
   });
 
-  it("[14] never uses raw unfiltered pg_dumpall as the Production Supabase roles path", () => {
+  it("never uses raw unfiltered pg_dumpall as the Production Supabase roles path", () => {
     const command = supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql");
     expect(command.commandArgs.join(" ")).not.toContain("pg_dumpall");
-    expect(command.commandArgs).toEqual(["db", "dump", "--linked", "-f", "/tmp/roles.sql", "--role-only"]);
+    expect(command.commandArgs).toEqual(["db", "dump", "-f", "/tmp/roles.sql", "--role-only"]);
   });
 
   it("never uses raw pg_dump/pg_dumpall for any managed stage", () => {
@@ -83,16 +88,17 @@ describe("[TETHER_DATABASE_BACKUP_SUPABASE_MANAGED_RUNTIME_CORRECTION] supabaseM
     }
   });
 
-  it("never uses --db-url or a credentialed connection string — --linked only", () => {
+  it("[1][2] never uses --linked and never invokes supabase link — this adapter's own base commands never embed --db-url either (the executor appends it — see supabaseCliExecutor.test.ts for the FINAL assembled argv)", () => {
     for (const command of [supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql"), supabaseManagedAdapter.schemaDumpCommand("public", "/tmp/schema.sql"), supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql")]) {
-      expect(command.commandArgs).toContain("--linked");
+      expect(command.commandArgs).not.toContain("--linked");
+      expect(command.commandArgs).not.toContain("link");
       expect(command.commandArgs.join(" ")).not.toContain("--db-url");
       expect(command.commandArgs.join(" ")).not.toContain("postgres://");
       expect(command.commandArgs.join(" ")).not.toContain("postgresql://");
     }
   });
 
-  it("never wraps the invocation in sh -c or references a $PG* shell variable — these are plain CLI argv now, not a shell template", () => {
+  it("never wraps the invocation in sh -c or references a $PG* shell variable — plain CLI argv, not a shell template", () => {
     for (const command of [supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql"), supabaseManagedAdapter.schemaDumpCommand("public", "/tmp/schema.sql"), supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql")]) {
       expect(command.commandArgs[0]).not.toBe("sh");
       expect(command.commandArgs.join(" ")).not.toContain("$PG");
@@ -104,7 +110,7 @@ describe("[TETHER_DATABASE_BACKUP_SUPABASE_MANAGED_RUNTIME_CORRECTION] supabaseM
     expect(SUPABASE_VECTOR_TABLE_EXCLUSIONS).toContain("storage.vector_indexes");
   });
 
-  it("no command ever contains an ACCESS TOKEN or DB PASSWORD env-var name embedded as a literal argv value (they travel only via subprocess environment, never argv)", () => {
+  it("[3] no command ever contains an ACCESS TOKEN or DB PASSWORD env-var name embedded as a literal argv value (they travel only via subprocess environment, never argv, and are no longer required at all)", () => {
     for (const command of [supabaseManagedAdapter.rolesDumpCommand("/tmp/roles.sql"), supabaseManagedAdapter.schemaDumpCommand("public", "/tmp/schema.sql"), supabaseManagedAdapter.dataDumpCommand("public", "/tmp/data.sql")]) {
       expect(command.commandArgs.join(" ")).not.toContain("SUPABASE_ACCESS_TOKEN");
       expect(command.commandArgs.join(" ")).not.toContain("SUPABASE_DB_PASSWORD");

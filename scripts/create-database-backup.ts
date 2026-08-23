@@ -221,16 +221,18 @@ async function runLocalGenericBackup(params: { source: ParsedBackupSourceConnect
 }
 
 /**
- * The `supabase-managed` execution path: fail-closed preflight (CLI
- * binary/version, project ref, both env vars) BEFORE any workspace or
+ * The `supabase-managed` execution path: fail-closed preflight (Docker
+ * installed/running, CLI binary/version, source password present, a
+ * safe passwordless `--db-url` buildable) BEFORE any workspace or
  * remote contact; then `runSupabaseManagedDumpSequence` runs `supabase
- * link` and each dump stage inside one temporary workspace (removed
- * unconditionally by that function itself), writing each file directly
- * to its final path in `tmpDirPath` — no toolbox container, no
+ * init` (purely local) and each dump stage — authenticated via
+ * `PGPASSWORD`, never `supabase link` — inside one temporary workspace
+ * (removed unconditionally by that function itself), writing each file
+ * directly to its final path in `tmpDirPath` — no toolbox container, no
  * intermediate copy step.
  */
-async function runSupabaseManagedBackup(params: { repoRoot: string; sourceProjectRef: string | null; adapter: SourceAdapter; pgSchema: string; tmpDirPath: string; onFileHashed: (key: "roles" | "schema" | "data", entry: BackupBundleFileEntry) => Promise<void> }): Promise<StageResult> {
-  const preflight = await preflightSupabaseManagedExecution(params.repoRoot, params.sourceProjectRef);
+async function runSupabaseManagedBackup(params: { repoRoot: string; rawSourceUrl: string; source: ParsedBackupSourceConnection; adapter: SourceAdapter; pgSchema: string; tmpDirPath: string; onFileHashed: (key: "roles" | "schema" | "data", entry: BackupBundleFileEntry) => Promise<void> }): Promise<StageResult> {
+  const preflight = await preflightSupabaseManagedExecution(params.repoRoot, params.rawSourceUrl, params.source.password);
   if (!preflight.ok) {
     return { ok: false, reason: `Supabase CLI preflight failed: ${preflight.reason}` };
   }
@@ -244,7 +246,8 @@ async function runSupabaseManagedBackup(params: { repoRoot: string; sourceProjec
 
   const sequenceResult = await runSupabaseManagedDumpSequence(
     preflight.binaryPath,
-    params.sourceProjectRef!,
+    preflight.passwordlessUrl,
+    preflight.password,
     stages.map((s) => ({ key: s.key, command: s.command })),
   );
   if (!sequenceResult.ok) {
@@ -347,7 +350,7 @@ async function main(): Promise<void> {
     const stageResult =
       sourceAdapter.executor === "postgres-toolbox"
         ? await runLocalGenericBackup({ source, adapter: sourceAdapter, pgSchema: args.pgSchema, tmpDirPath, onFileHashed })
-        : await runSupabaseManagedBackup({ repoRoot, sourceProjectRef, adapter: sourceAdapter, pgSchema: args.pgSchema, tmpDirPath, onFileHashed });
+        : await runSupabaseManagedBackup({ repoRoot, rawSourceUrl, source, adapter: sourceAdapter, pgSchema: args.pgSchema, tmpDirPath, onFileHashed });
 
     if (!stageResult.ok) {
       await fail(stageResult.reason);

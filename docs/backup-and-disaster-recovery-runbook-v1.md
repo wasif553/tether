@@ -306,37 +306,101 @@ constructing `supabase db dump` commands, was still routed through
 `docker exec` into the `postgres:16-alpine` toolbox container — which
 contains Postgres client binaries only, not the Supabase CLI runtime,
 so the path could not actually run even once the required credentials
-were supplied. This has been corrected: the Supabase CLI is now an
-explicit, exact-pinned `devDependency` (`"supabase"` in `package.json`,
-tracked in `package-lock.json` — never an unpinned `npx supabase`), run
-directly on the **host** (`scripts/backupCreation/supabaseCliExecutor.ts`)
-inside a fresh temporary workspace (outside this repository, removed
-unconditionally on success or failure) that is `supabase link
---project-ref <ref>`-ed to the validated source project. `SUPABASE_ACCESS_TOKEN`
-and `SUPABASE_DB_PASSWORD` travel only through that subprocess's own
-inherited environment, never as a CLI flag or argv token. The exclusion
-flag was also corrected from the nonexistent `--exclude-table` to the
-current CLI's actual `-x`/`--exclude`, and each managed command now
+were supplied. This was corrected by running the Supabase CLI (now a
+pinned `devDependency`) directly on the host inside a temporary
+workspace.
+
+**Read-only correction (`supabase link` removed):** a second review
+found that the fix above still ran `supabase link --project-ref <ref>`
+before dumping, and `link` is **not** a guaranteed read-only operation —
+observed Supabase CLI behaviour includes issuing statements such as
+`CREATE SCHEMA IF NOT EXISTS supabase_migrations` and `CREATE TABLE IF
+NOT EXISTS supabase_migrations.schema_migrations ...` as a side effect
+of linking. **A Production database BACKUP tool must not modify
+Production migration metadata as a side effect of preparing to read
+it.** `supabase link` has been removed from the backup path entirely.
+The corrected mechanism: a fresh temporary workspace (outside this
+repository, removed unconditionally on success or failure) runs
+`supabase init --force --yes` (purely local scaffolding — contacts no
+project, links to nothing), then each dump stage authenticates via a
+PASSWORDLESS `--db-url` (built by
+`scripts/backupCreation/supabaseDatabaseUrl.ts`, which strips the
+password and allowlists only the `sslmode` query parameter, refusing
+outright on anything else — including credential/file-redirection
+parameters like `passfile`/`servicefile`) plus `PGPASSWORD` carried only
+via the CLI subprocess's own environment. This relies on the pinned
+CLI's `db dump --db-url` honouring `PGPASSWORD` via its
+libpq-compatible connection-string parser whenever the URL itself
+supplies no password — **verified directly against this repository's
+own pinned CLI (2.115.0) against a disposable local Postgres container,
+not merely assumed from documentation**:
+`SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS` (see
+`docs/database-backup-operations-v1.md`'s "Current status" table for
+the exact result). No `SUPABASE_ACCESS_TOKEN` and no separate
+`SUPABASE_DB_PASSWORD` environment variable is required any more — the
+one authoritative source credential remains
+`BACKUP_SOURCE_DATABASE_URL`/`DATABASE_URL`. Each managed command now
 matches current official guidance exactly:
-`supabase db dump --linked -f <path> --role-only` (roles),
-`supabase db dump --linked -f <path>` (schema, no exclusions),
-`supabase db dump --linked -f <path> --data-only --use-copy -x
-"storage.buckets_vectors" -x "storage.vector_indexes"` (data). A
-fail-closed preflight (CLI binary present and versioned, project ref
-validated, both credential env vars present) runs before any temporary
-workspace is created or any Supabase project is contacted. **This
-remains `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`** — command
-construction and the execution boundary (preflight, link-then-dump
-sequence, temporary-workspace cleanup on both success and failure) are
-now unit-tested, including against an injected fake CLI runner
-(`scripts/backupCreation/supabaseCliExecutor.test.ts`), but the path has
-still never run against a real Supabase project. Unlike the prior
-version, though, it is now structurally executable once the required
-CLI/credentials are supplied, rather than routed through infrastructure
-that could never have succeeded. The `local-generic` synthetic
-end-to-end result above was re-confirmed unchanged after this
-correction — see `docs/database-backup-operations-v1.md`'s "Current
-status" table for the authoritative per-item status.
+`supabase db dump --db-url <passwordless-url> -f <path> --role-only`
+(roles), `supabase db dump --db-url <passwordless-url> -f <path>`
+(schema, no exclusions), `supabase db dump --db-url <passwordless-url>
+-f <path> --data-only --use-copy -x "storage.buckets_vectors" -x
+"storage.vector_indexes"` (data). A fail-closed preflight (Docker
+installed and running — the Supabase CLI's own `db dump` uses Docker
+internally, so its absence must fail before any remote connection
+attempt; CLI binary present and versioned; source password present; a
+safe passwordless URL buildable) runs before any temporary workspace is
+created or any Supabase project is contacted. The backup path now
+invokes exactly two Supabase CLI subcommands anywhere: `init` and `db
+dump` — never `link`, `db push`, `db pull`, `db reset`, `migration
+repair`, `migration up`, `config push`, `projects create`/`delete`, or
+any Storage-mutating command, locked with a regression-guard test.
+**This remains `SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED`** —
+never run against a real Supabase **Production** project, since no
+Production contact is permitted and this repository does not use a
+sandbox Supabase project. The `local-generic` synthetic end-to-end
+result above was re-confirmed unchanged after this correction — see
+`docs/database-backup-operations-v1.md`'s "Current status" table for
+the authoritative per-item status.
+
+**`SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS`** — the corrected mechanism
+was exercised against a disposable local Postgres 16 container (never
+Production) using the real pinned Supabase CLI (2.115.0), via
+`npm run backup:create -- --execute --environment local-test
+--output-dir <dir> --source-type supabase-managed`, with neither
+`SUPABASE_ACCESS_TOKEN` nor `SUPABASE_DB_PASSWORD` set in the
+environment (proving neither is required any more): the disposable
+container was seeded with one table (`t1`, 2 rows); the tool's
+fail-closed preflight passed (Docker installed/running, pinned CLI
+2.115.0 resolved, source password present, safe passwordless URL
+built); `supabase init` ran purely locally; all three dump stages
+succeeded — `roles.sql` (246 bytes) captured the source role,
+`schema.sql` (1088 bytes) captured the `t1` table definition, `data.sql`
+(1008 bytes) used a real `COPY "public"."t1" ("id", "v") FROM stdin;`
+statement (proving `--use-copy`) containing exactly the 2 seeded rows.
+`npm run backup:verify-bundle` recomputed and matched all three files'
+SHA-256/byte-size against the manifest — bundle mechanics fully
+verified. The run was repeated once more (reproducibility check) with
+the same result. A live process-listing scan for the real source
+password across both runs found no match, corroborating the unit-level
+argv proof. **One known cross-version limitation was found and is
+reported honestly, not hidden**: the disposable-restore rehearsal
+(`npm run backup:verify-bundle -- --restore`) failed on this bundle —
+`data.sql` was produced by the Supabase CLI's own internal `pg_dump`
+(version 17.6, from its bundled `supabase/postgres` Docker image) and
+contains `SET transaction_timeout = 0;`, a Postgres-17-only setting that
+this tool's disposable *restore* toolbox (pinned to `postgres:16-alpine`,
+reused from `npm run release:validate`) does not recognise. This is a
+limitation of the LOCAL verification toolbox's own Postgres version, not
+a defect in the `supabase-managed` adapter's dump correctness — Supabase
+itself runs Postgres 15–17 depending on project, so a bundle this
+adapter produces from a real Supabase project is expected to restore
+correctly into a matching-or-newer Postgres target, just not into this
+tool's fixed Postgres-16 disposable rehearsal container. Not fixed in
+this pass (out of scope — would mean changing the shared toolbox
+Postgres version used by `release:validate` and the existing single-file
+`backup:verify --restore` tool as well, a broader change than this
+correction's mandate).
 
 **Current Supabase Free-plan boundary — state this clearly, do not
 soften it:** automatic provider-managed backup coverage is **not**
@@ -1251,3 +1315,4 @@ marked complete:
 | v1.2 | 2026-08-23 | Section 5 (matrix row C), Section 8, and Section 37 (gates 1–2) updated: database backup **creation** tooling (`npm run backup:create`, `npm run backup:verify-bundle`) now exists and is locally verified — see `docs/database-backup-operations-v1.md`. The PRE-PILOT BACKUP GATE and PRE-PILOT OFF-PROJECT COPY GATE remain explicitly OPEN; only the tooling portion is closed (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact or Production backup performed. |
 | v1.3 | 2026-08-23 | Section 8 updated with hardening findings: source-database password no longer appears in host subprocess argv; `--confirm-production` gate now catches every case/whitespace variant of "production"; a Supabase-managed source now uses `supabase db dump` semantics via a new source-adapter abstraction rather than raw `pg_dumpall` (Supabase runtime path explicitly marked `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`) — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact or Production backup performed. |
 | v1.4 | 2026-08-23 | Section 8 updated with a runtime correction: the `supabase-managed` adapter's dump commands were previously routed through `docker exec` into a toolbox container that does not contain the Supabase CLI runtime, so the path could not actually execute. Corrected to run the Supabase CLI (now a pinned `devDependency`) directly on the host inside a temporary `supabase link`-ed workspace, with `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` carried only via subprocess environment; exclusion flag corrected from the nonexistent `--exclude-table` to `-x`/`--exclude`, applied to the data dump only, matching current official Supabase guidance exactly — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). Remains `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED` — not yet run against a real Supabase project. No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
+| v1.5 | 2026-08-23 | Section 8 updated with a read-only correction: `supabase link` (not a guaranteed read-only operation — observed to issue `CREATE SCHEMA`/`CREATE TABLE` statements against `supabase_migrations` as a side effect) removed entirely from the backup path. Replaced with `supabase init` (purely local) plus a passwordless `--db-url` + `PGPASSWORD`-subprocess-environment mechanism, verified directly against the pinned CLI (2.115.0) against a disposable local Postgres container (`SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS`). `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` are no longer required. Backup path now invokes only `init`/`db dump` — never `link`/`push`/`pull`/`reset`/`migration repair`/`config push`/`projects create`-`delete`/Storage mutation, locked with a regression-guard test — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). Remains `SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED` — not yet run against a real Supabase Production project. No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |

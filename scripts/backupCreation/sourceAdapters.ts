@@ -12,15 +12,27 @@
  *   end to end against synthetic local data, and remains appropriate for
  *   local/generic Postgres testing.
  * - **`supabase-managed`** (`executor: "host-supabase-cli"`): the
- *   project-pinned Supabase CLI's own `supabase db dump --linked`,
- *   invoked directly on the HOST (never inside the Postgres toolbox
- *   container, which does not contain the Supabase CLI runtime — see
- *   scripts/backupCreation/supabaseCliExecutor.ts). `--linked` means the
- *   command never takes a credentialed `--db-url`/connection string as
- *   an argument at all — the CLI resolves the connection itself from a
- *   temporary, previously-`supabase link`-ed local workspace, and
- *   `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` travel only through
- *   that subprocess's own environment (see supabaseCliExecutor.ts).
+ *   project-pinned Supabase CLI's own `supabase db dump --db-url
+ *   <passwordless-url>`, invoked directly on the HOST (never inside the
+ *   Postgres toolbox container, which does not contain the Supabase CLI
+ *   runtime — see scripts/backupCreation/supabaseCliExecutor.ts). **No
+ *   `supabase link`, no `--linked`, no `SUPABASE_ACCESS_TOKEN`** — an
+ *   earlier version of this adapter used `supabase link
+ *   --project-ref <ref>` before dumping, which is not a guaranteed
+ *   read-only operation (observed Supabase CLI behaviour includes
+ *   issuing `CREATE SCHEMA IF NOT EXISTS supabase_migrations` /
+ *   `CREATE TABLE IF NOT EXISTS supabase_migrations.schema_migrations`
+ *   statements as a side effect of linking) and was withdrawn — a
+ *   Production database BACKUP tool must not modify Production
+ *   migration metadata as a side effect of preparing to read it. The
+ *   base commands this module builds below never embed `--db-url` or a
+ *   secret themselves (see `DumpStageCommand`'s own doc comment) —
+ *   `scripts/backupCreation/supabaseCliExecutor.ts` appends the
+ *   PASSWORDLESS `--db-url` (built by
+ *   `scripts/backupCreation/supabaseDatabaseUrl.ts`) and a `--workdir`
+ *   pointing at a temporary, unlinked-to-the-repo workspace, while the
+ *   real source password travels only through that subprocess's own
+ *   `PGPASSWORD` environment variable.
  *   This module deliberately does NOT hand-roll a list of
  *   Supabase-reserved roles or internal schemas to strip — that list
  *   belongs to Supabase to define and maintain, and the Supabase CLI is
@@ -29,20 +41,26 @@
  *   is NOT equivalent to `supabase db dump --role-only` and must never
  *   be used as the Production Supabase path.
  *
- * **`SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`** — the
+ * **`SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED`** — the
  * `supabase-managed` adapter's command construction is unit-tested in
- * `sourceAdapters.test.ts`, and its execution boundary (preflight, link,
+ * `sourceAdapters.test.ts`, and its execution boundary (preflight, init,
  * dump-sequence orchestration, temporary-workspace cleanup) is unit-
  * tested against an injected fake CLI runner in
- * `supabaseCliExecutor.test.ts` — but this pass has never run it against
- * a real Supabase project (no Production contact is permitted, and no
- * disposable/sandbox Supabase project is available in this development
- * environment). Do not treat this pass's successful `local-generic`
- * synthetic exercise as proof that the `supabase-managed` adapter works
- * against a real managed project — it proves bundle mechanics (manifest,
- * hashing, restore rehearsal, atomicity), not Supabase-specific dump
- * semantics or the real Supabase CLI's actual `--linked` connection
- * behaviour.
+ * `supabaseCliExecutor.test.ts`. The full mechanism (temporary
+ * workspace → `supabase init` → passwordless `--db-url` + `PGPASSWORD`
+ * → `db dump`) has additionally been exercised end to end against a
+ * **disposable local Postgres container** using this repository's own
+ * pinned CLI — see `docs/database-backup-operations-v1.md`'s "Current
+ * status" section for `SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS`. What
+ * remains untested is a real **Production Supabase project** — no
+ * Production contact is permitted, and this repository does not create
+ * or use a sandbox Supabase project. Do not treat either the
+ * `local-generic` synthetic exercise or the disposable-Postgres
+ * `supabase-managed` runtime test as proof that this adapter works
+ * against a real managed Production project's own hosted infrastructure
+ * (connection pooling quirks, IPv6-only networking, Supabase-specific
+ * schema/role shape, etc.) — both prove the mechanism, neither proves
+ * Production compatibility.
  */
 
 export type SourceAdapterKind = "local-generic" | "supabase-managed";
@@ -65,12 +83,13 @@ export type DumpStageCommand = {
    * `pg_dumpall` argv, executed via `docker exec` (see
    * dockerExecInvocation.ts for how the PG* connection values reach the
    * subprocess without ever appearing here). For `supabase-managed` this
-   * is the Supabase CLI's own argv (e.g. `["db", "dump", "--linked",
-   * "-f", <path>, "--role-only"]`) — no `--db-url`, no embedded
-   * credential, nothing for a shell to expand; the CLI resolves the
-   * connection from the temporary workspace's own `supabase link` state,
-   * and reads `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` from its
-   * own process environment (see supabaseCliExecutor.ts).
+   * is the BASE Supabase CLI argv only (e.g. `["db", "dump", "-f",
+   * <path>, "--role-only"]`) — no `--db-url`, no `--workdir`, no
+   * embedded credential; `scripts/backupCreation/supabaseCliExecutor.ts`'s
+   * `buildManagedDumpInvocationArgs` appends the PASSWORDLESS `--db-url`
+   * and `--workdir` around this base command, and the real password
+   * reaches the subprocess only via that subprocess's own `PGPASSWORD`
+   * environment variable (see supabaseCliExecutor.ts).
    */
   commandArgs: string[];
 };
@@ -124,16 +143,19 @@ export const localGenericPostgresAdapter: SourceAdapter = {
 };
 
 /**
- * `--linked` dumps from whatever project the CLI's current working
- * directory (a temporary workspace — see supabaseCliExecutor.ts) was
- * most recently `supabase link`-ed to — never a `--db-url`/connection
- * string argument. `outputPath` here is the FINAL host bundle path
- * (e.g. `<bundleDir>/roles.sql`); the CLI writes directly there.
+ * `outputPath` here is the FINAL host bundle path (e.g.
+ * `<bundleDir>/roles.sql`); the CLI writes directly there. These are
+ * BASE commands only — no `--db-url`, no `--workdir`, no `--linked`
+ * (never used anywhere in this adapter): `supabaseCliExecutor.ts`'s
+ * `buildManagedDumpInvocationArgs` appends the passwordless `--db-url`
+ * and `--workdir` around whatever this module returns.
  *
- * Flag set mirrors current official Supabase guidance exactly:
- *   roles.sql:  supabase db dump --linked -f <path> --role-only
- *   schema.sql: supabase db dump --linked -f <path>
- *   data.sql:   supabase db dump --linked -f <path> --data-only --use-copy
+ * Flag set mirrors current official Supabase guidance exactly (with
+ * `--db-url <passwordless-url> --workdir <temp-workspace>` appended by
+ * the executor):
+ *   roles.sql:  supabase db dump -f <path> --role-only
+ *   schema.sql: supabase db dump -f <path>
+ *   data.sql:   supabase db dump -f <path> --data-only --use-copy
  *               -x "storage.buckets_vectors" -x "storage.vector_indexes"
  * Note the vector-table exclusions apply to the DATA dump only — the
  * schema dump intentionally carries no `-x` flags, matching current
@@ -143,20 +165,20 @@ export const supabaseManagedAdapter: SourceAdapter = {
   kind: "supabase-managed",
   executor: "host-supabase-cli",
   rolesDumpCommand(hostOutputPath) {
-    return { commandArgs: ["db", "dump", "--linked", "-f", hostOutputPath, "--role-only"] };
+    return { commandArgs: ["db", "dump", "-f", hostOutputPath, "--role-only"] };
   },
   schemaDumpCommand(_pgSchema, hostOutputPath) {
     // No --schema flag and no -x exclusions: which schemas/tables are
     // included by default for a managed project, and the managed-schema
     // exclusions applied to them, are the Supabase CLI's own decision —
     // not this repository's to second-guess.
-    return { commandArgs: ["db", "dump", "--linked", "-f", hostOutputPath] };
+    return { commandArgs: ["db", "dump", "-f", hostOutputPath] };
   },
   dataDumpCommand(_pgSchema, hostOutputPath) {
     // --use-copy: current Supabase guidance's recommended data-dump
     // mode (COPY statements rather than individual INSERTs) — faster
     // and more portable for a managed project's own tooling to restore.
-    return { commandArgs: ["db", "dump", "--linked", "-f", hostOutputPath, "--data-only", "--use-copy", ...supabaseExcludeFlags()] };
+    return { commandArgs: ["db", "dump", "-f", hostOutputPath, "--data-only", "--use-copy", ...supabaseExcludeFlags()] };
   },
 };
 
