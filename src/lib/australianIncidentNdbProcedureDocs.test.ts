@@ -22,6 +22,7 @@ function read(relativePath: string): string {
 const procedure = read("docs/australian-incident-ndb-procedure-v1.md");
 const procedureFlat = procedure.replace(/\s+/g, " ");
 const assessmentRecord = read("docs/data-breach-assessment-record-v1.md");
+const assessmentRecordFlat = assessmentRecord.replace(/\s+/g, " ");
 const notificationTemplate = read("docs/data-breach-notification-template-v1.md");
 const registerTemplate = read("docs/privacy-incident-register-template-v1.md");
 const privacyPackage = read("docs/privacy-and-evidence-retention-v1.md");
@@ -310,5 +311,87 @@ describe("[TETHER_AUSTRALIAN_NDB_LEGAL_PROCESS_CORRECTION_V1] jointly-held multi
     expect(assessmentRecord).toMatch(/Jointly held affected information\?/i);
     expect(assessmentRecord).toMatch(/Assessment entity\/owner/i);
     expect(assessmentRecord).toMatch(/Notification entity\/owner/i);
+  });
+});
+
+describe("[TETHER_NDB_ASSESSMENT_CLOCK_TEMPLATE_FINAL_FIX] voluntary assessment does not create or reset the statutory clock", () => {
+  it("[1] the template explicitly states a conservative/voluntary assessment does not itself create or reset the statutory clock", () => {
+    expect(assessmentRecordFlat).toMatch(/\*\*A conservative\/voluntary assessment \(below\) does NOT itself create or\s+reset a statutory s 26WH assessment clock\.\*\*/i);
+  });
+
+  it("the voluntary-assessment fields are a distinct subsection from the statutory-trigger fields, not the same field", () => {
+    expect(assessmentRecord).toMatch(/### Statutory trigger/);
+    expect(assessmentRecord).toMatch(/### Conservative\/voluntary assessment \(separate from the statutory trigger\)/);
+  });
+
+  it("a YES on the voluntary-assessment field is explicitly stated to change nothing about the statutory-trigger fields", () => {
+    expect(assessmentRecordFlat).toMatch(/A YES here, on its own, changes nothing about the statutory trigger\s+fields above/i);
+  });
+
+  it("the main procedure states a voluntary assessment does not itself create or reset a statutory clock", () => {
+    expect(procedureFlat).toMatch(/a voluntary assessment does not itself\s+create or reset a statutory clock/i);
+  });
+});
+
+describe("[TETHER_NDB_ASSESSMENT_CLOCK_TEMPLATE_FINAL_FIX] statutory clock starts from actual awareness of reasonable grounds to suspect an eligible breach", () => {
+  it("[2] the template's statutory-trigger field asks about reasonable grounds to suspect an eligible breach, not a voluntary choice", () => {
+    expect(assessmentRecord).toMatch(/Reasonable grounds to suspect there may have been an eligible data breach\?/i);
+    expect(assessmentRecord).toMatch(/Statutory assessment trigger confirmed\?/i);
+  });
+
+  it("the trigger awareness date/time field is the actual date grounds existed, not the date this was recognised", () => {
+    expect(assessmentRecordFlat).toMatch(/trigger awareness date\/time \(the actual date the grounds for\s+suspicion existed — not the date this was recognised, if\s+different/i);
+  });
+
+  it("the main procedure's 30-day clock section starts the clock from actual awareness of the grounds causing suspicion", () => {
+    expect(procedureFlat).toMatch(/the assessment clock starts \*\*the day after the\s+entity became aware of the grounds\/information that caused the\s+suspicion\*\*/i);
+  });
+});
+
+describe("[TETHER_NDB_ASSESSMENT_CLOCK_TEMPLATE_FINAL_FIX] later reclassification cannot reset the statutory clock", () => {
+  it("[3] the template states the statutory clock is never reset by a later reclassification", () => {
+    expect(assessmentRecordFlat).toMatch(/never from the date someone later labelled an assessment "statutory,"\s+and never reset\s+by a later reclassification/i);
+  });
+
+  it("the template instructs correcting the trigger-awareness field to the actual date, not restarting the clock on the correction date", () => {
+    expect(assessmentRecordFlat).toMatch(/the trigger-awareness field below is corrected to the\s+actual date, it is never treated as newly starting on the correction\s+date/i);
+  });
+
+  it("the main procedure's 30-day clock section states this date cannot be reset by a later reclassification", () => {
+    expect(procedureFlat).toMatch(/\*\*This date cannot be\s+reset by a later reclassification\.\*\*/i);
+  });
+
+  it("the main procedure states the clock is calculated from the actual date statutory grounds existed, not a later recognition/relabelling date", () => {
+    expect(procedureFlat).toMatch(/the clock is calculated from\s+the \*actual\* date the statutory grounds existed — not from the later\s+date someone recognised or labelled it as statutory/i);
+  });
+});
+
+describe("[TETHER_NDB_ASSESSMENT_CLOCK_TEMPLATE_FINAL_FIX] template has separate voluntary-assessment and statutory-trigger dates", () => {
+  it("[4] the template has a distinct 'Voluntary assessment start date/time' field, separate from the statutory trigger awareness date", () => {
+    expect(assessmentRecord).toMatch(/Voluntary assessment start date\/time/i);
+    expect(assessmentRecord).toMatch(/trigger awareness date\/time/i);
+  });
+
+  it("the two date fields live in different subsections of the template", () => {
+    const statutorySection = assessmentRecord.match(/### Statutory trigger[\s\S]*?(?=\n### Conservative)/);
+    const voluntarySection = assessmentRecord.match(/### Conservative\/voluntary assessment[\s\S]*$/);
+    expect(statutorySection).not.toBeNull();
+    expect(voluntarySection).not.toBeNull();
+    expect(statutorySection![0]).toMatch(/trigger awareness date\/time/i);
+    expect(statutorySection![0]).not.toMatch(/Voluntary assessment start date\/time/i);
+    expect(voluntarySection![0]).toMatch(/Voluntary assessment start date\/time/i);
+    expect(voluntarySection![0]).not.toMatch(/trigger awareness date\/time/i);
+  });
+});
+
+describe("[TETHER_NDB_ASSESSMENT_CLOCK_TEMPLATE_FINAL_FIX] 30-day maximum and as-soon-as-practicable notification remain intact", () => {
+  it("[5] the 30-calendar-day maximum statement remains present and unweakened", () => {
+    expect(procedureFlat).toMatch(/\*\*30 calendar\s+days is a maximum, not a target and not an entitlement to wait that\s+long\*\*/i);
+    expect(assessmentRecord).toMatch(/30-calendar-day statutory maximum date/i);
+  });
+
+  it("[6] as-soon-as-practicable notification wording remains present for both OAIC and individual notification", () => {
+    expect(procedureFlat).toMatch(/a statement is provided to the OAIC \*\*as soon as practicable\*\*/i);
+    expect(procedureFlat).toMatch(/individuals at risk of serious harm are notified \*\*as soon as\s+practicable\*\*/i);
   });
 });

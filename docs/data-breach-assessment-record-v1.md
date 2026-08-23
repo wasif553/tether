@@ -123,16 +123,46 @@ merely whether a data breach of some kind occurred. Do not answer YES
 here automatically just because "data breach / possible data breach?"
 above was YES.)*
 
+**A conservative/voluntary assessment (below) does NOT itself create or
+reset a statutory s 26WH assessment clock.** The statutory clock, where
+it applies, only ever starts from actual awareness of the grounds that
+caused a reasonable suspicion of an eligible breach — never from the
+date someone later labelled an assessment "statutory," and never reset
+by a later reclassification. If facts later establish that the
+statutory trigger was actually met earlier than first recorded, the
+statutory clock must be recalculated from that earlier awareness
+date/time — the trigger-awareness field below is corrected to the
+actual date, it is never treated as newly starting on the correction
+date.
+
+### Statutory trigger
+
 | Field | Value |
 |---|---|
-| Reasonable grounds to suspect a *possible eligible* data breach? | YES / NO |
+| Reasonable grounds to suspect there may have been an eligible data breach? | YES / NO / UNCERTAIN |
 | Reasoning (why this does, or doesn't, meet the "reasonable grounds to suspect" threshold — certainty about serious harm is NOT required, but a plausible basis for suspecting it is) | |
-| Is this a conservative/voluntary assessment despite the statutory trigger not clearly being met? (a legitimate, recommended choice under genuine doubt — see procedure Section 13) | YES / NO / N/A |
-| If YES to either — statutory assessment trigger date/time (awareness of the grounds causing the suspicion) | |
-| If YES — assessment-clock start date (day after the trigger date/time above) | |
+| Statutory assessment trigger confirmed? | YES / NO / LEGAL REVIEW REQUIRED |
+| If YES — trigger awareness date/time (the actual date the grounds for suspicion existed — not the date this was recognised, if different; see the clock-reset note above) | |
+| If YES — assessment-clock start date (day after the trigger awareness date/time above) | |
 | If YES — 30-calendar-day statutory maximum date | |
 | Assessment status (updated as it proceeds) | |
 | Blockers | |
+
+### Conservative/voluntary assessment (separate from the statutory trigger)
+
+| Field | Value |
+|---|---|
+| Conservative/voluntary assessment being conducted even though the statutory trigger is not established? | YES / NO |
+| Reason for conducting it anyway (e.g. genuine doubt, awaiting legal review) | |
+| Voluntary assessment start date/time | |
+
+*(A YES here, on its own, changes nothing about the statutory trigger
+fields above — it neither satisfies nor substitutes for "reasonable
+grounds to suspect there may have been an eligible data breach." If the
+statutory trigger is later confirmed while a voluntary assessment is
+already underway, complete the "Statutory trigger" fields above using
+the actual trigger-awareness date, which may predate the voluntary
+assessment's own start date.)*
 
 ## Assessment outcome
 

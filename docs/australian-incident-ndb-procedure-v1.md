@@ -423,10 +423,17 @@ assessment conservatively on any data breach whose eligibility is
 genuinely uncertain** — that is a legitimate, cautious operational
 choice, and is recommended where genuine doubt exists. **But this
 document distinguishes that voluntary, conservative choice from the
-statutory trigger itself** — record which one actually applied in a
-given incident (the assessment record's "reasonable grounds to suspect
-possible eligible breach" field), rather than treating every
-conservative assessment as proof the statutory trigger was met.
+statutory trigger itself, and a voluntary assessment does not itself
+create or reset a statutory clock** — the assessment record
+(`docs/data-breach-assessment-record-v1.md`) keeps these as two
+separate tracks with their own fields and dates: the statutory trigger
+(reasonable grounds to suspect an *eligible* breach, with its own
+awareness date and 30-day maximum) and the conservative/voluntary
+assessment (its own, separate start date). Record which one actually
+applied — and if both did, record both, with the statutory clock always
+calculated from the actual date the statutory grounds existed, never
+from the date the voluntary assessment happened to start or the date
+someone later relabelled it as statutory.
 
 If NDB applicability to the relevant entity is not yet confirmed, note
 that explicitly in the assessment record rather than guessing either
@@ -495,7 +502,14 @@ inconvenience).
 exists (Section 13), the assessment clock starts **the day after the
 entity became aware of the grounds/information that caused the
 suspicion** — not the date of the incident itself if awareness came
-later, and not the date containment finished.
+later, and not the date containment finished. **This date cannot be
+reset by a later reclassification.** If a voluntary/conservative
+assessment (Section 13) was already under way and facts later confirm
+the statutory trigger was actually met, the clock is calculated from
+the *actual* date the statutory grounds existed — not from the later
+date someone recognised or labelled it as statutory, and not from the
+voluntary assessment's own (possibly later, possibly earlier) start
+date.
 
 The assessment must be **reasonable and expeditious**. **30 calendar
 days is a maximum, not a target and not an entitlement to wait that
