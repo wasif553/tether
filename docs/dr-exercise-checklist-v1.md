@@ -132,6 +132,27 @@ failure domain where this exercise requires them to be separate.**
       described; real event: executed only through the normal
       controlled Git/Vercel path).
 
+## I2. Secure Browser release-artifact recovery exercise
+
+*(Tabletop/checklist item only — this exercise does not modify
+`apps/lockdown`, copy an installer, or update release-metadata
+constants. See the runbook's Section 14 for the current
+release-metadata reconciliation gap this item exists to surface.)*
+
+- [ ] Authoritative Secure Browser release version/hash record
+      reconciled? *(As of this pass: NO — the native source
+      (`apps/lockdown/src/shared.ts`), distribution metadata
+      (`src/lib/tetherReleaseMetadata.ts`), and release-management
+      documentation (`docs/tether-release-management.md`) identify
+      three different versions. This item is expected to fail until the
+      PRE-PILOT SECURE-BROWSER RELEASE-METADATA RECONCILIATION GATE is
+      closed — record that honestly rather than picking one source.)*
+- [ ] Installer artifact retrievable, for whichever version is
+      currently treated as authoritative?
+- [ ] Retrieved installer's SHA-256 matches the authoritative release
+      record? *(Not just "matches one of the three sources" — matches
+      the single record established by the reconciliation gate above.)*
+
 ## J. Configuration recovery review
 
 - [ ] Configuration Recovery Register (runbook Section 13) consulted for

@@ -165,7 +165,7 @@ that does not exist yet.
 | E. `IntegrityEvidenceAsset` relational metadata | Postgres row (same database as C) | Covered by whatever database backup exists (i.e. currently none scheduled) | No | No | Same as C; also: metadata alone is useless without the bytes it references (Section 10) | Same as C |
 | F. Separate evidence archive | Not provisioned | `npm run evidence:archive` architecture exists in code but has no real target project | No | No | **Architecturally implemented, cloud recovery path not yet activated or tested** | **PRE-PILOT EVIDENCE ARCHIVE GATE** (Section 37) |
 | G. Environment configuration/secrets | Vercel project environment variables | No documented authoritative recovery source beyond "however they were originally set" | No | No | **No documented secret-recovery source of truth** | **PRE-PILOT CONFIGURATION RECOVERY GATE** (Section 37) |
-| H. Secure Browser installers/release hashes | Installer file hosted wherever `TETHER_INSTALLER_DOWNLOAD_URL` points; hash tracked in `src/lib/tetherReleaseMetadata.ts` and `docs/tether-release-management.md` | Whatever redundancy the operator hosting the file happens to have | No | No | Only an operator/local copy is documented to definitely exist; no independent backup store confirmed. As of this pass the release-management doc's own hash table and the code constant `CURRENT_INSTALLER_SHA256` **do not match each other** for the same nominal version — a data-integrity finding, not resolved by this runbook | **PRE-PILOT RELEASE-ARTIFACT BACKUP GATE** (Section 37) |
+| H. Secure Browser installers/release hashes | Installer file hosted wherever `TETHER_INSTALLER_DOWNLOAD_URL` points; version/hash metadata split across three sources that currently disagree — `apps/lockdown/src/shared.ts` (`LOCKDOWN_VERSION = "1.7.6"`), `src/lib/tetherReleaseMetadata.ts` (release-candidate/distribution metadata still at `1.7.4`), and `docs/tether-release-management.md` (release record still at `1.7.2`) | Whatever redundancy the operator hosting the file happens to have | No | No | Only an operator/local copy is documented to definitely exist for any of these versions; no independent backup store confirmed. **The three sources describe three different versions, not conflicting hashes for one version** — the authoritative release-artifact record has not been reconciled after the subsequent native-client releases | **PRE-PILOT SECURE-BROWSER RELEASE-METADATA RECONCILIATION GATE** and **PRE-PILOT RELEASE-ARTIFACT BACKUP GATE** (Section 37) |
 | I. Domain/DNS configuration | Vercel-managed (assumed; not independently verified in this pass) | Vercel project settings | Not verified in this pass | N/A | Not audited in this pass | Confirm DNS/domain configuration recovery source before pilot |
 | J. Optional Anthropic/AI integration | Anthropic API (external dependency, not Tether-controlled) | N/A — this is dependency continuity, not a Tether backup domain | N/A | N/A | Provider outage handling only (Section 15) | Not a backup gate — see note below |
 | K. Transactional email provider (Resend) | Resend API (external dependency, not Tether-controlled) | N/A — dependency continuity, not a backup domain | N/A | N/A | Provider outage handling only (Section 15) | Not a backup gate — see note below |
@@ -386,44 +386,78 @@ RECOVERY GATE** (Section 37).
 Tether is not only a web application — the Tether Secure Browser
 installer is a separate recoverable artifact.
 
-**Audited current state:** the installer file itself (e.g.
-`Tether-Secure-Browser-1.7.2-win-x64.exe`, the latest version actually
-documented in this repository as of this pass) is hosted wherever the
+**Audited current state — three sources, three different versions, not
+reconciled:**
+
+1. The native client source itself currently identifies as **v1.7.6**
+   (`LOCKDOWN_VERSION = "1.7.6"` in `apps/lockdown/src/shared.ts`),
+   which also contains the actual v1.7.5 and v1.7.6 change history.
+2. `src/lib/tetherReleaseMetadata.ts` — the release-candidate/
+   distribution metadata actually served to clients — still identifies
+   the current release candidate as **v1.7.4**
+   (`CURRENT_RELEASE_CANDIDATE_VERSION`, `CURRENT_INSTALLER_FILENAME =
+   "Tether-Secure-Browser-1.7.4-win-x64.exe"`, and its own v1.7.4
+   SHA-256).
+3. `docs/tether-release-management.md` — the release-management
+   document's own release table — still identifies **v1.7.2** as the
+   release candidate, with the v1.7.2 installer filename and SHA-256.
+
+**This is not merely a hash mismatch for one installer.** An earlier
+pass of this runbook mischaracterised it that way — it is corrected
+here: these are three different version numbers from three different
+sources, meaning **the authoritative release-artifact record has not
+yet been reconciled after the subsequent native-client releases** (the
+native source moved from 1.7.2 → 1.7.4 → 1.7.6 without the
+distribution-metadata and release-management sources being updated to
+match). This runbook does not silently pick one of the three versions
+as "correct," does not copy or touch the installer, and does not modify
+`apps/lockdown` or update any release-metadata constant — resolving
+which version is actually the accepted one is a release-management
+decision outside this runbook's scope.
+
+The installer file itself, for whichever version is eventually
+established as authoritative, is hosted wherever the
 `TETHER_INSTALLER_DOWNLOAD_URL` environment variable points — the
 release-management process (`docs/tether-release-management.md`)
 requires this to exist before a version is published, but does not
 document any specific redundant or backed-up hosting location beyond
 "the actual `.exe`, hosted somewhere `TETHER_INSTALLER_DOWNLOAD_URL` can
 point to." **This runbook does not invent a redundant artifact store
-that does not exist.** If only a local/operator copy of a given
-installer build is confirmed to exist, mark it explicitly:
+that does not exist.**
 
-**PRE-PILOT RELEASE-ARTIFACT BACKUP GATE.**
+**Before pilot, Tether must establish ONE authoritative release record**
+for the accepted Secure Browser version, containing:
 
-**Data-integrity finding, noted here for accuracy, not resolved by this
-runbook:** as of this pass, the SHA-256 recorded for the current
-installer differs between `docs/tether-release-management.md`'s release
-table and the `CURRENT_INSTALLER_SHA256` constant in
-`src/lib/tetherReleaseMetadata.ts`. Any recovery action that depends on
-"the correct installer hash" must resolve this discrepancy first — do
-not silently pick one value.
-
-This runbook requires that a recoverable release record include, for
-every published version:
-
-- **Version** (matching the Git tag, e.g. `tether-v1.7.2`);
-- **Installer hash** (SHA-256, matching the live code constant
-  `CURRENT_INSTALLER_SHA256`, once the discrepancy above is resolved);
-- **Signing status** (signed/unsigned, and if unsigned, that this is a
-  deliberate pilot-stage decision per
+- **exact version**;
+- **installer filename**;
+- **SHA-256**;
+- **source/build provenance** (the exact commit the installer was built
+  from);
+- **physical acceptance status** (per `docs/tether-release-management.md`'s
+  own PHYSICAL ACCEPTANCE stage — never inferred from automated tests or
+  code review alone);
+- **code-signing status** (signed/unsigned, and if unsigned, that this
+  is a deliberate pilot-stage decision per
   `docs/tether-windows-code-signing-plan.md`, not an oversight);
-- **Release notes** (what changed since the previous published
+- **release notes** (what changed since the previous published
   version);
-- **Source commit/build provenance**, where available (the exact commit
-  the installer was built from).
+- **recoverable artifact location** (where the actual `.exe` can be
+  retrieved from, distinct from where it is currently distributed).
+
+Two related but distinct gates follow from this — do not conflate them:
+
+- **PRE-PILOT SECURE-BROWSER RELEASE-METADATA RECONCILIATION GATE** —
+  *which* version/hash/artifact is actually authoritative? (This is the
+  gap described above.)
+- **PRE-PILOT RELEASE-ARTIFACT BACKUP GATE** — once that is answered,
+  *can* the authoritative installer actually be recovered if its current
+  hosting/local copy is lost? (Unresolved either way — only an
+  operator/local copy is documented to definitely exist for any of the
+  three versions above; no independent backup store is confirmed.)
 
 This runbook does not rebuild, resign, or modify the Secure Browser
-installer.
+installer, and does not update any release-metadata constant — that
+remains the release-management process's own responsibility.
 
 ## 15. External provider outage handling
 
@@ -974,11 +1008,15 @@ a database rollback**
 - *Restore path:* re-host from the operator copy if one exists;
   otherwise, this is currently the PRE-PILOT RELEASE-ARTIFACT BACKUP GATE
   materialising in practice.
-- *Validation:* re-hosted installer's SHA-256 matches the resolved
-  correct value (Section 14's own discrepancy must be resolved first).
+- *Validation:* re-hosted installer's SHA-256 matches the authoritative
+  release record for whichever version is actually accepted (Section
+  14's release-metadata reconciliation gate must be resolved first —
+  there is currently no single authoritative version/hash to validate
+  against).
 - *Escalation:* recovery lead; product/release owner.
 - *Known limitation:* no independently verified redundant hosting
-  location is currently documented.
+  location is currently documented, and the authoritative
+  version/hash itself is not yet reconciled across sources.
 
 **15. Simultaneous database + evidence-storage recovery**
 - *Trigger:* both domains are affected at once (e.g. the complete
@@ -1043,9 +1081,10 @@ deleted under retention policy**
 - No documented authoritative configuration/secret recovery source
   exists (Section 13).
 - No independently verified redundant Secure Browser installer hosting
-  location exists, and a data-integrity discrepancy (two different
-  SHA-256 values for the same nominal version) exists between
-  documentation and code as of this pass (Section 14).
+  location exists, and the authoritative release version/hash itself is
+  not reconciled — the native source (v1.7.6), distribution metadata
+  (v1.7.4), and release-management documentation (v1.7.2) currently
+  identify three different versions as current (Section 14).
 - No RPO/RTO numbers are committed (Section 32).
 - No DR exercise has been run against this runbook as of this pass
   (Section 33/37).
@@ -1072,11 +1111,16 @@ marked complete:
    after a measured recovery test provides evidence (Section 32).
 6. **PRE-PILOT CONFIGURATION RECOVERY GATE** — establish the
    authoritative secret/config recovery source of truth (Section 13).
-7. **PRE-PILOT RELEASE ARTIFACT GATE** — ensure the Secure Browser
-   installer, its correct hash, and release metadata have a genuinely
-   recoverable source, and resolve the current hash discrepancy (Section
-   14).
-8. **PRE-PILOT DR TABLETOP GATE** — run at least one full DR tabletop
+7. **PRE-PILOT SECURE-BROWSER RELEASE-METADATA RECONCILIATION GATE** —
+   establish one authoritative version/hash/artifact record for the
+   accepted Secure Browser release, reconciling the native source
+   (currently v1.7.6), distribution metadata (currently v1.7.4), and
+   release-management documentation (currently v1.7.2), which today
+   identify three different versions (Section 14).
+8. **PRE-PILOT RELEASE ARTIFACT GATE** — once the version above is
+   reconciled, ensure the accepted installer, its correct hash, and
+   release metadata have a genuinely recoverable source (Section 14).
+9. **PRE-PILOT DR TABLETOP GATE** — run at least one full DR tabletop
    exercise using [`docs/dr-exercise-checklist-v1.md`](dr-exercise-checklist-v1.md).
 
 ## 38. Version control

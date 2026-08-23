@@ -274,15 +274,68 @@ describe("[19] Storage/evidence sample verification is represented", () => {
 describe("[20] Secure Browser installer/release artifact recovery is represented", () => {
   it("has a dedicated Section 14 covering installer/hash/signing/release-notes recovery", () => {
     expect(runbook).toMatch(/## 14\. Secure Browser release artifact recovery/);
-    expect(runbookFlat).toMatch(/\*\*PRE-PILOT RELEASE-ARTIFACT BACKUP GATE\.\*\*/);
-  });
-
-  it("flags the installer-hash discrepancy honestly rather than picking one silently", () => {
-    expect(runbookFlat).toMatch(/the SHA-256 recorded for the current\s+installer differs between/i);
+    expect(runbook).toMatch(/\*\*PRE-PILOT RELEASE-ARTIFACT BACKUP GATE\*\*/);
   });
 
   it("does not claim the browser is rebuilt or modified by this runbook", () => {
     expect(runbookFlat).toMatch(/This runbook does not rebuild, resign, or modify the Secure Browser\s+installer/i);
+  });
+});
+
+describe("[TETHER_DR_SECURE_BROWSER_RELEASE_METADATA_CORRECTION] Secure Browser release-metadata boundary", () => {
+  it("[1] recognises the apps/lockdown native source version is v1.7.6", () => {
+    expect(runbookFlat).toMatch(/The native client source itself currently identifies as\s+\*\*v1\.7\.6\*\* \(`LOCKDOWN_VERSION = "1\.7\.6"` in\s+`apps\/lockdown\/src\/shared\.ts`\)/i);
+  });
+
+  it("[2] recognises distribution/release-candidate metadata is stale at v1.7.4", () => {
+    expect(runbookFlat).toMatch(/`src\/lib\/tetherReleaseMetadata\.ts` — the release-candidate\/\s+distribution metadata actually served to clients — still identifies\s+the current release candidate as \*\*v1\.7\.4\*\*/i);
+  });
+
+  it("[3] recognises docs/tether-release-management.md is stale at v1.7.2", () => {
+    expect(runbookFlat).toMatch(/`docs\/tether-release-management\.md` — the release-management\s+document's own release table — still identifies \*\*v1\.7\.2\*\*/i);
+  });
+
+  it("[4] calls this a release-metadata reconciliation gap, not merely a hash issue", () => {
+    expect(runbookFlat).toMatch(/the authoritative release-artifact record has not\s+yet been reconciled after the subsequent native-client releases/i);
+    expect(runbook).toMatch(/\*\*PRE-PILOT SECURE-BROWSER RELEASE-METADATA RECONCILIATION\s+GATE\*\*/);
+  });
+
+  it("[5] does not claim these are conflicting hashes for the same installer version", () => {
+    expect(runbookFlat).toMatch(/\*\*This is not merely a hash mismatch for one installer\.\*\*/i);
+    expect(runbookFlat).toMatch(/these are three different version numbers from three different\s+sources/i);
+    expect(runbook).not.toMatch(/differ between `docs\/tether-release-management\.md`'s release\s*\ntable and the `CURRENT_INSTALLER_SHA256`/i);
+  });
+
+  it("[6] requires the authoritative release record to include version, filename, SHA-256, provenance, acceptance, signing, notes, and artifact location", () => {
+    const requiredFields = [
+      "\\*\\*exact version\\*\\*",
+      "\\*\\*installer filename\\*\\*",
+      "\\*\\*SHA-256\\*\\*",
+      "\\*\\*source/build provenance\\*\\*",
+      "\\*\\*physical acceptance status\\*\\*",
+      "\\*\\*code-signing status\\*\\*",
+      "\\*\\*release notes\\*\\*",
+      "\\*\\*recoverable artifact location\\*\\*",
+    ];
+    for (const field of requiredFields) {
+      expect(runbookFlat).toMatch(new RegExp(field, "i"));
+    }
+  });
+
+  it("[7] treats release-metadata reconciliation and artifact backup as two separate pre-pilot gates", () => {
+    expect(runbookFlat).toMatch(/Two related but distinct gates follow from this — do not conflate\s+them/i);
+    expect(runbook).toMatch(/\*\*PRE-PILOT SECURE-BROWSER RELEASE-METADATA RECONCILIATION\s+GATE\*\*/);
+    expect(runbook).toMatch(/\*\*PRE-PILOT RELEASE-ARTIFACT BACKUP GATE\*\*/);
+  });
+
+  it("[8] the DR checklist verifies a retrieved installer against the authoritative SHA-256 before considering artifact recovery successful", () => {
+    expect(drChecklistFlat).toMatch(/Retrieved installer's SHA-256 matches the authoritative release\s+record\?/i);
+    expect(drChecklistFlat).toMatch(/matches\s+the single record established by the reconciliation gate above/i);
+  });
+
+  it("does not modify apps/lockdown, copy an installer, or update release-metadata constants", () => {
+    expect(drChecklistFlat).toMatch(/this exercise does not modify\s+`apps\/lockdown`, copy an installer, or update release-metadata\s+constants/i);
+    expect(runbookFlat).toMatch(/does not update any release-metadata constant/i);
   });
 });
 
