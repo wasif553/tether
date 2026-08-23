@@ -476,11 +476,15 @@ to run it deliberately, following the register process in
 
 ## 21. Backup/deletion boundary
 
-Deletion/destruction treatment for **backups** must be aligned with the
-Backup/DR Runbook, which is a **separate release-readiness item** not
-covered by this package. This document does not claim that deleting a
-row/object via the retention runner immediately removes it from any
-backup or archive copy.
+Deletion/destruction treatment for **backups** must be aligned with
+[`docs/backup-and-disaster-recovery-runbook-v1.md`](backup-and-disaster-recovery-runbook-v1.md)
+— a **separate governance document** not covered by this package. That
+runbook's own Section 29 ("Privacy/retention reconciliation after
+restore") cross-references back to this document and to
+`docs/evidence-retention-operations-v1.md` for exactly how a restore
+must be reconciled against retention and hold obligations — this
+document does not claim that deleting a row/object via the retention
+runner immediately removes it from any backup or archive copy.
 
 A separate, tested, manually-invoked **evidence archive** tool exists
 (`npm run evidence:archive`) that copies verified evidence objects to a
@@ -589,8 +593,12 @@ pass's data-minimisation review (Section 6):
    list. **PRE-PILOT GATE.**
 8. **Legal-hold enforcement is manual only** — Section 19.
    **IMPLEMENTATION GAP.**
-9. **Backup/DR runbook is a separate, not-yet-written release-readiness
-   item** — Section 21. **PRE-PILOT GATE.**
+9. **Backup/DR runbook now exists** (Section 21,
+   `docs/backup-and-disaster-recovery-runbook-v1.md`), but its own
+   pre-pilot recovery gates remain open — no scheduled Production
+   database backup, no provisioned evidence archive, no measured
+   RPO/RTO, no DR tabletop exercise run yet — see that document's own
+   Section 37 for the full list. **PRE-PILOT GATE.**
 
 ## 28. Version/change control
 
@@ -599,3 +607,4 @@ pass's data-minimisation review (Section 6):
 | v1 | 2026-08-23 | Initial package: this document, `docs/institution-privacy-responsibilities-v1.md`, `docs/evidence-retention-operations-v1.md`, and the student-facing notice update (`compliance/privacy-evidence-retention-v1` branch). No schema, migration, or evidence-collection behaviour changed. |
 | v1.1 | 2026-08-23 | Retention execution safety and privacy correction: (1) corrected Section 6/12 — exam session binding is a baseline session-integrity mechanism, not an optional/off-by-default monitoring feature; (2) raised the evidence-retention runner's fallback default from 90 to 180 days, matching Section 18's Class A pilot fallback; (3) `--execute` now requires an explicit `--institution-id` (not `all`) and `--retention-days` — no deployment-wide destructive path remains in the CLI (Section 20). No schema, migration, or evidence-collection behaviour changed; no evidence deleted. |
 | v1.2 | 2026-08-23 | Section 23 updated: the Australian Incident/NDB Procedure is no longer "not yet written" — links to `docs/australian-incident-ndb-procedure-v1.md` and its supporting templates (`compliance/australian-incident-ndb-procedure-v1` branch). No other section reopened; no schema, migration, or evidence-collection behaviour changed. |
+| v1.3 | 2026-08-23 | Section 21 and Section 27 item 9 updated: the Backup & Disaster Recovery Runbook is no longer "not yet written" — links to `docs/backup-and-disaster-recovery-runbook-v1.md` (`compliance/backup-disaster-recovery-v1` branch). No other section reopened; no schema, migration, or evidence-collection behaviour changed. |

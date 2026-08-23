@@ -198,10 +198,11 @@ image itself).
 a database backup or in the separate evidence-archive tool
 (`npm run evidence:archive` — see `docs/tether-evidence-archive-plan.md`,
 which has no delete capability at all by design).** Backup/archive
-destruction timing must be aligned with the Backup/DR Runbook, a
-**separate release-readiness item** — do not assume a deleted evidence
-asset is unrecoverable from every location until that runbook is in
-place and followed.
+destruction timing must be aligned with
+[`docs/backup-and-disaster-recovery-runbook-v1.md`](backup-and-disaster-recovery-runbook-v1.md)
+— do not assume a deleted evidence asset is unrecoverable from every
+location until that runbook's own pre-pilot recovery gates (its Section
+37) are closed and followed.
 
 ### 11. Audit record of destruction
 
