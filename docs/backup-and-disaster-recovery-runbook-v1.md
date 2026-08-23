@@ -383,24 +383,36 @@ SHA-256/byte-size against the manifest — bundle mechanics fully
 verified. The run was repeated once more (reproducibility check) with
 the same result. A live process-listing scan for the real source
 password across both runs found no match, corroborating the unit-level
-argv proof. **One known cross-version limitation was found and is
-reported honestly, not hidden**: the disposable-restore rehearsal
-(`npm run backup:verify-bundle -- --restore`) failed on this bundle —
+argv proof. A cross-version restore limitation was found in that pass —
 `data.sql` was produced by the Supabase CLI's own internal `pg_dump`
 (version 17.6, from its bundled `supabase/postgres` Docker image) and
-contains `SET transaction_timeout = 0;`, a Postgres-17-only setting that
-this tool's disposable *restore* toolbox (pinned to `postgres:16-alpine`,
-reused from `npm run release:validate`) does not recognise. This is a
-limitation of the LOCAL verification toolbox's own Postgres version, not
-a defect in the `supabase-managed` adapter's dump correctness — Supabase
-itself runs Postgres 15–17 depending on project, so a bundle this
-adapter produces from a real Supabase project is expected to restore
-correctly into a matching-or-newer Postgres target, just not into this
-tool's fixed Postgres-16 disposable rehearsal container. Not fixed in
-this pass (out of scope — would mean changing the shared toolbox
-Postgres version used by `release:validate` and the existing single-file
-`backup:verify --restore` tool as well, a broader change than this
-correction's mandate).
+contains `SET transaction_timeout = 0;`, a Postgres-17-only setting the
+disposable *restore* toolbox (then pinned to `postgres:16-alpine`) did
+not recognise — the backup itself was always valid; only the rehearsal
+target was too old. **This is now resolved** (see the "Bundle restore
+rehearsal target: Postgres 17" note in
+`docs/database-backup-operations-v1.md`'s "Verifying a bundle" section):
+`scripts/backupCreation/bundleRestoreRehearsal.ts` now explicitly
+requests `postgres:17-alpine` as its own disposable restore target via a
+new, narrow `image` option on the shared disposable-container helper
+(`scripts/releaseValidation/docker.ts`) — every OTHER caller
+(`release:validate`, the existing single-file
+`backup:verify --restore`) keeps the helper's unchanged default
+`postgres:16-alpine`. Re-verified end to end: a fresh `supabase-managed`
+bundle (disposable Postgres 16 source, 1 table/2 rows, `data.sql`
+confirmed to still contain the exact `SET transaction_timeout = 0;`
+statement) restored successfully into the corrected Postgres-17 target —
+`overallPassed: true`, 1 table/2 rows restored. The `local-generic`
+synthetic bundle (2 tables/4 rows, from a plain `pg_dump`/`pg_dumpall`
+source) also restored successfully into the same Postgres-17 target —
+`overallPassed: true`, 2 tables/4 rows restored, confirming the target
+change did not regress the already-working `local-generic` path. Tamper
+detection was re-confirmed on a **copy** of the `supabase-managed`
+bundle (the original bundle was never touched, and its `data.sql`
+SHA-256 was reconfirmed unchanged after the tamper test): a modified
+byte in the copy's `data.sql` was correctly caught by
+`backup:verify-bundle`'s SHA-256/size comparison, which refused to
+proceed to a restore rehearsal for that copy.
 
 **Current Supabase Free-plan boundary — state this clearly, do not
 soften it:** automatic provider-managed backup coverage is **not**
@@ -1316,3 +1328,4 @@ marked complete:
 | v1.3 | 2026-08-23 | Section 8 updated with hardening findings: source-database password no longer appears in host subprocess argv; `--confirm-production` gate now catches every case/whitespace variant of "production"; a Supabase-managed source now uses `supabase db dump` semantics via a new source-adapter abstraction rather than raw `pg_dumpall` (Supabase runtime path explicitly marked `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`) — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact or Production backup performed. |
 | v1.4 | 2026-08-23 | Section 8 updated with a runtime correction: the `supabase-managed` adapter's dump commands were previously routed through `docker exec` into a toolbox container that does not contain the Supabase CLI runtime, so the path could not actually execute. Corrected to run the Supabase CLI (now a pinned `devDependency`) directly on the host inside a temporary `supabase link`-ed workspace, with `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` carried only via subprocess environment; exclusion flag corrected from the nonexistent `--exclude-table` to `-x`/`--exclude`, applied to the data dump only, matching current official Supabase guidance exactly — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). Remains `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED` — not yet run against a real Supabase project. No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
 | v1.5 | 2026-08-23 | Section 8 updated with a read-only correction: `supabase link` (not a guaranteed read-only operation — observed to issue `CREATE SCHEMA`/`CREATE TABLE` statements against `supabase_migrations` as a side effect) removed entirely from the backup path. Replaced with `supabase init` (purely local) plus a passwordless `--db-url` + `PGPASSWORD`-subprocess-environment mechanism, verified directly against the pinned CLI (2.115.0) against a disposable local Postgres container (`SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS`). `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` are no longer required. Backup path now invokes only `init`/`db dump` — never `link`/`push`/`pull`/`reset`/`migration repair`/`config push`/`projects create`-`delete`/Storage mutation, locked with a regression-guard test — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). Remains `SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED` — not yet run against a real Supabase Production project. No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
+| v1.6 | 2026-08-24 | Section 8 updated: the bundle-restore-rehearsal target was corrected from Postgres 16 to Postgres 17, resolving the `SET transaction_timeout = 0;` restore failure previously observed on `supabase-managed`-produced bundles (Supabase CLI's own internal `pg_dump` is version 17.x). `scripts/releaseValidation/docker.ts`'s shared disposable-container helper gained a narrow, optional `image` parameter (default unchanged: `postgres:16-alpine`, used by `release:validate` and the existing single-file `backup:verify --restore`); `scripts/backupCreation/bundleRestoreRehearsal.ts` is the one caller that requests `postgres:17-alpine`. Re-verified end to end: both a `local-generic` bundle (2 tables/4 rows) and a `supabase-managed` bundle (1 table/2 rows, `data.sql` confirmed still containing `SET transaction_timeout = 0;`) restored successfully into the corrected target — `overallPassed: true` for both. Tamper detection re-confirmed on a copy of the bundle; the original bundle's SHA-256 was reconfirmed unchanged. No dump content was rewritten, sanitised, or stripped to achieve compatibility — verification still runs against the original hashed bytes — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |

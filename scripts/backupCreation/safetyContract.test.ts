@@ -290,9 +290,9 @@ describe("[TETHER_DATABASE_BACKUP_READ_ONLY_SUPABASE_CORRECTION] supabase link r
 
   it("the operations doc's Current status table uses the exact required status labels", () => {
     expect(operationsDoc).toMatch(/\*\*DATABASE BACKUP CREATION TOOLING\*\* \| \*\*IMPLEMENTED\*\*/);
-    expect(operationsDoc).toMatch(/\*\*LOCAL-GENERIC END-TO-END\*\* \| \*\*VERIFIED\*\*/);
-    expect(operationsDoc).toMatch(/\*\*PINNED SUPABASE CLI DIRECT DUMP PATH\*\* \| \*\*VERIFIED AGAINST DISPOSABLE LOCAL POSTGRES\*\*/);
-    expect(operationsDoc).toMatch(/\*\*SUPABASE MANAGED PRODUCTION RUNTIME\*\* \| \*\*NOT YET EXECUTED\*\*/);
+    expect(operationsDoc).toMatch(/\*\*LOCAL-GENERIC BACKUP \+ RESTORE\*\* \| \*\*VERIFIED\*\*/);
+    expect(operationsDoc).toMatch(/\*\*PINNED SUPABASE CLI DIRECT BACKUP \+ DISPOSABLE RESTORE\*\* \| \*\*VERIFIED\*\*/);
+    expect(operationsDoc).toMatch(/\*\*SUPABASE MANAGED PRODUCTION RUNTIME\*\* \| \*\*DEFERRED\*\*/);
     expect(operationsDoc).toMatch(/\*\*PRODUCTION BACKUP\*\* \| \*\*NOT YET EXECUTED\*\*/);
     expect(operationsDoc).toMatch(/\*\*OFF-PROJECT COPY\*\* \| \*\*OPEN\*\*/);
     expect(operationsDoc).toMatch(/\*\*BACKUP CADENCE\*\* \| \*\*OPEN\*\*/);
@@ -302,5 +302,39 @@ describe("[TETHER_DATABASE_BACKUP_READ_ONLY_SUPABASE_CORRECTION] supabase link r
   it("SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS is stated, distinct from the still-deferred Production runtime test", () => {
     expect(operationsDocFlat).toMatch(/SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS/);
     expect(operationsDocFlat).toMatch(/SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED/);
+  });
+});
+
+describe("[TETHER_DATABASE_BACKUP_BUNDLE_RESTORE_POSTGRES17_COMPATIBILITY] bundle-restore-rehearsal target corrected to Postgres 17", () => {
+  const dockerSource = read("scripts/releaseValidation/docker.ts");
+  const bundleRestoreRehearsalSource = read("scripts/backupCreation/bundleRestoreRehearsal.ts");
+
+  it("[1] the shared disposable Postgres helper's DEFAULT_DISPOSABLE_POSTGRES_IMAGE constant is postgres:16-alpine", () => {
+    expect(dockerSource).toMatch(/DEFAULT_DISPOSABLE_POSTGRES_IMAGE = "postgres:16-alpine"/);
+  });
+
+  it("[2] bundleRestoreRehearsal.ts's own image constant is postgres:17-alpine and is documented as deliberately newer than the shared default", () => {
+    expect(bundleRestoreRehearsalSource).toMatch(/BUNDLE_RESTORE_REHEARSAL_POSTGRES_IMAGE = "postgres:17-alpine"/);
+    expect(bundleRestoreRehearsalSource).toMatch(/Postgres 17 restore target, not the shared default/i);
+  });
+
+  it("documents that the fix targets the restore rehearsal only — no dump content is rewritten/sanitised", () => {
+    expect(bundleRestoreRehearsalSource).toMatch(/not to alter the shared helper's default/i);
+    expect(bundleRestoreRehearsalSource).toMatch(/certainly not to rewrite\/strip the hashed dump content/i);
+  });
+
+  it("the operations doc documents the Postgres-17 restore-target fix and that release:validate's default is unchanged", () => {
+    expect(operationsDocFlat).toMatch(/Bundle restore rehearsal target: Postgres 17, not the shared\s+default/i);
+    expect(operationsDocFlat).toMatch(/`npm run release:validate` and the\s+existing single-file `npm run backup:verify --restore` both keep that\s+default, unchanged/i);
+    expect(operationsDocFlat).toMatch(/The backup itself was never\s+invalid — only the rehearsal target was too old/i);
+  });
+
+  it("the operations doc states verification always runs against the original, hashed bytes — never a sanitised copy", () => {
+    expect(operationsDocFlat).toMatch(/verification always runs against the original, hashed\s+bytes/i);
+  });
+
+  it("the DR runbook documents the fix as resolved, with the corrected end-to-end result", () => {
+    expect(drRunbookFlat).toMatch(/This is now resolved/);
+    expect(drRunbookFlat).toMatch(/restored successfully into the corrected Postgres-17 target/);
   });
 });

@@ -326,6 +326,24 @@ Production** — see `scripts/backupCreation/bundleRestoreRehearsal.ts`'s
 own doc comment for the same structural guarantee (`requireDisposableDatabaseUrl`)
 the existing single-file tool already relies on.
 
+**Bundle restore rehearsal target: Postgres 17, not the shared
+default.** The shared disposable-container helper
+(`scripts/releaseValidation/docker.ts`) defaults to `postgres:16-alpine`
+for every caller — `npm run release:validate` and the existing
+single-file `npm run backup:verify --restore` both keep that default,
+unchanged. `scripts/backupCreation/bundleRestoreRehearsal.ts` is the one
+caller that explicitly requests `postgres:17-alpine`
+(`BUNDLE_RESTORE_REHEARSAL_POSTGRES_IMAGE`), because a bundle produced by
+the `supabase-managed` adapter is dumped by the Supabase CLI's own
+internal `pg_dump` (currently 17.x), whose output can legitimately
+contain Postgres-17-only syntax (e.g. `SET transaction_timeout = 0;`)
+that a Postgres-16 target cannot restore. **The backup itself was never
+invalid — only the rehearsal target was too old.** This tool never
+rewrites, sanitises, or strips statements from a dump to make it
+restorable — verification always runs against the original, hashed
+bytes; see "Manifest contents" above for the SHA-256 guarantee this
+would otherwise undermine.
+
 ## Output location safety
 
 Backups are refused from writing into any ordinary tracked repository
@@ -414,11 +432,11 @@ approves a cadence.
 | Item | Status |
 |---|---|
 | **DATABASE BACKUP CREATION TOOLING** | **IMPLEMENTED** |
-| **LOCAL-GENERIC END-TO-END** | **VERIFIED** — `local-generic` adapter exercised end to end against a disposable, synthetic local Postgres database, including the hardened source-password handling and Production-confirmation casing gate (see `docs/backup-and-disaster-recovery-runbook-v1.md`'s Section 8 for the exact local test result) |
-| **PINNED SUPABASE CLI DIRECT DUMP PATH** | **VERIFIED AGAINST DISPOSABLE LOCAL POSTGRES** — `SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS`. The real pinned Supabase CLI (2.115.0), run via the exact temporary-workspace → `supabase init` → passwordless `--db-url` + `PGPASSWORD` → `db dump` mechanism this tool uses, was exercised twice (reproducibility check) against a disposable local Postgres 16 container seeded with 1 table/2 rows via `npm run backup:create -- --source-type supabase-managed`, with neither `SUPABASE_ACCESS_TOKEN` nor `SUPABASE_DB_PASSWORD` set — see `docs/backup-and-disaster-recovery-runbook-v1.md`'s Section 8 for the exact result and the one known cross-version restore limitation found (Supabase's own internal dump uses Postgres 17's `pg_dump`, whose output is not restorable by this tool's Postgres-16 disposable restore toolbox) |
-| **SUPABASE MANAGED PRODUCTION RUNTIME** | **NOT YET EXECUTED** — `SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED`. Never executed against a real Supabase Production project — no Production contact is permitted, and no sandbox Supabase project is used by this repository |
+| **LOCAL-GENERIC BACKUP + RESTORE** | **VERIFIED** — `local-generic` adapter exercised end to end (backup, hash verification, disposable restore, tamper detection, Production-confirmation casing gate) against a disposable, synthetic local Postgres database — see `docs/backup-and-disaster-recovery-runbook-v1.md`'s Section 8 for the exact result |
+| **PINNED SUPABASE CLI DIRECT BACKUP + DISPOSABLE RESTORE** | **VERIFIED** — `SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS`. The real pinned Supabase CLI (2.115.0), via the exact temporary-workspace → `supabase init` → passwordless `--db-url` + `PGPASSWORD` → `db dump` mechanism, was exercised against a disposable local Postgres source, and the resulting bundle was hash-verified AND successfully restored into the corrected Postgres-17 bundle-restore-rehearsal target (`postgres:17-alpine`) — the previously-observed `SET transaction_timeout = 0;` incompatibility is resolved. See `docs/backup-and-disaster-recovery-runbook-v1.md`'s Section 8 for the exact result |
+| **SUPABASE MANAGED PRODUCTION RUNTIME** | **DEFERRED** — `SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED`. Never executed against a real Supabase Production project — no Production contact is permitted, and no sandbox Supabase project is used by this repository |
 | **PRODUCTION BACKUP** | **NOT YET EXECUTED** — this tool has never been run with `--environment production --confirm-production` against a real Production database |
 | **OFF-PROJECT COPY** | **OPEN** — PRE-PILOT OFF-PROJECT COPY GATE: OPEN, no destination selected or tested |
 | **BACKUP CADENCE** | **OPEN** — PRE-PILOT BACKUP CADENCE DECISION: OPEN, no cadence approved |
 | **RPO/RTO** | **UNCOMMITTED** — no contractual RPO or RTO is committed by this document |
-| PRE-PILOT BACKUP GATE (overall) | **OPEN** — the tooling gap is closed for the `local-generic` path and, separately, the `supabase-managed` mechanism itself is now runtime-verified against a disposable Postgres source; the operational gap (a real, verified, off-project, restore-tested **Production** backup) is not closed either way |
+| PRE-PILOT BACKUP GATE (overall) | **OPEN** — the tooling gap is closed for both the `local-generic` and `supabase-managed` mechanisms, each now backup-AND-restore verified against a disposable Postgres source; the operational gap (a real, verified, off-project, restore-tested **Production** backup) is not closed either way — do not read this row as Production recovery being tested |

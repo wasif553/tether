@@ -13,6 +13,26 @@
  * the target is always a fresh disposable container this module
  * creates itself, run through the same `requireDisposableDatabaseUrl`
  * structural guarantee.
+ *
+ * **Postgres 17 restore target, not the shared default.** A bundle
+ * produced by the `supabase-managed` source adapter is dumped by the
+ * Supabase CLI's own internal `pg_dump` (currently version 17.x, from
+ * its bundled `supabase/postgres` Docker image) — its output can
+ * legitimately contain Postgres-17-only syntax (e.g. `SET
+ * transaction_timeout = 0;`), which the shared disposable-container
+ * helper's own DEFAULT `postgres:16-alpine` target cannot restore. This
+ * is a restore-REHEARSAL-target compatibility gap, not a defect in the
+ * backup itself — the fix is to rehearse into a Postgres 17 target here,
+ * not to alter the shared helper's default (which every OTHER caller —
+ * `npm run release:validate`, the existing single-file
+ * `npm run backup:verify --restore` — keeps getting unchanged) and
+ * certainly not to rewrite/strip the hashed dump content to make it
+ * Postgres-16-compatible (that would mean verifying a SANITIZED copy,
+ * not the original bytes the manifest's own SHA-256 covers). This
+ * module is therefore the one caller that passes `image:
+ * BUNDLE_RESTORE_REHEARSAL_POSTGRES_IMAGE` to
+ * `startDisposablePostgresContainer` — see that function's own `image`
+ * option doc comment in `../releaseValidation/docker.ts`.
  */
 import crypto from "node:crypto";
 import path from "node:path";
@@ -29,6 +49,9 @@ export type BundleRestoreRehearsalResult = {
   sanityChecks: SanityCheckResult[];
   passed: boolean;
 };
+
+/** Matches the Postgres major version the pinned Supabase CLI's own `db dump` uses internally (see this module's own doc comment) — deliberately NEWER than the shared disposable-container helper's `postgres:16-alpine` default, which every other caller keeps unchanged. */
+export const BUNDLE_RESTORE_REHEARSAL_POSTGRES_IMAGE = "postgres:17-alpine";
 
 const CONTAINER_BUNDLE_DIR = "/tmp/bundle-restore-rehearsal";
 
@@ -73,7 +96,7 @@ export async function runBundleRestoreRehearsal(bundleDir: string): Promise<Bund
 
   try {
     const hostPort = await findFreeLocalPort();
-    await startDisposablePostgresContainer({ containerName, runId, databaseName, username, password, hostPort });
+    await startDisposablePostgresContainer({ containerName, runId, databaseName, username, password, hostPort, image: BUNDLE_RESTORE_REHEARSAL_POSTGRES_IMAGE });
 
     const disposableDatabaseUrl = `postgresql://${username}:${password}@localhost:${hostPort}/${databaseName}`;
     requireDisposableDatabaseUrl(disposableDatabaseUrl, hostPort);
