@@ -31,13 +31,20 @@ export default function StudentExamNoticePage() {
             When you open an exam and when you submit it, SES records:
           </p>
           <ul className="mt-1 list-disc space-y-1 pl-5">
-            <li>Your IP address at exam open</li>
-            <li>Approximate country, region, and city inferred from that IP address</li>
-            <li>Your IP address at final submission</li>
-            <li>Approximate country, region, and city inferred from that IP address</li>
+            <li>Your IP address at exam open, and a hashed (scrambled) version of it used for comparison</li>
+            <li>Approximate country, region, and city inferred from that IP address, when available</li>
+            <li>Your IP address at final submission, and a hashed version of it</li>
+            <li>Approximate country, region, and city inferred from that IP address, when available</li>
             <li>Browser and operating system information (user-agent string)</li>
             <li>Whether the network address changed between exam open and submission</li>
           </ul>
+          <p className="mt-1">
+            Separately, while you are taking the exam, this platform may also record a{" "}
+            <strong>hashed (scrambled) representation</strong> of your device and network for
+            session-continuity checks — for example, detecting whether your exam is unexpectedly
+            open in two places at once. This separate check never stores your raw IP address —
+            only a hashed, coarse network range.
+          </p>
           <p className="mt-2">
             <strong>
               Location is inferred from IP address and is approximate. VPNs, mobile networks,
@@ -83,12 +90,17 @@ export default function StudentExamNoticePage() {
           </ul>
           <p className="mt-2">Camera Monitoring v1 does <strong>not</strong>:</p>
           <ul className="mt-1 list-disc space-y-1 pl-5">
-            <li>store video recordings</li>
-            <li>store images</li>
+            <li>continuously record or store video</li>
             <li>use facial recognition</li>
             <li>automatically determine misconduct</li>
             <li>share your camera feed with other students</li>
           </ul>
+          <p className="mt-2">
+            Camera Monitoring v1 on its own never stores an image either — but if your lecturer has
+            <strong> separately</strong> enabled camera evidence frames (see below), a single still
+            image may be saved for specific signals only. This is always a distinct, separately
+            enabled setting, never something Camera Monitoring v1 does by itself.
+          </p>
           <p className="mt-2">
             Camera integrity events are reviewed by authorised teaching staff. Final academic
             decisions remain with your institution and lecturer.
@@ -124,8 +136,11 @@ export default function StudentExamNoticePage() {
             real time.
           </p>
           <p className="mt-2">
-            <strong>By default, no image, frame, or screenshot is ever stored</strong> — only the
-            numeric signal itself (e.g. &quot;possible phone visible&quot;) is recorded.
+            <strong>By default, no image, frame, or screenshot is ever stored by this AI camera
+            check itself</strong> — only the numeric signal (e.g. &quot;possible phone
+            visible&quot;) is recorded. The one exception is the separate, further opt-in setting
+            described immediately below — if your lecturer has enabled it, you will see it named
+            explicitly in the checklist before you start.
           </p>
         </section>
 
@@ -211,7 +226,7 @@ export default function StudentExamNoticePage() {
 
         <section>
           <h2 className="font-medium text-gray-900">Browser secure mode</h2>
-          <p className="mt-1">When Secure Exam Mode is active, SES may:</p>
+          <p className="mt-1">When Secure Exam Mode is active in an ordinary browser, SES may:</p>
           <ul className="mt-1 list-disc space-y-1 pl-5">
             <li>block copy, cut, and paste inside the exam page</li>
             <li>block right-click/context menu inside the exam page</li>
@@ -220,9 +235,26 @@ export default function StudentExamNoticePage() {
             <li>record attempts to leave the exam window</li>
           </ul>
           <p className="mt-2">
-            SES cannot close other browser tabs or control other applications on your device.
-            Higher-security lockdown mode requires a dedicated lockdown browser and is planned as
-            a future option.
+            An ordinary browser cannot close other browser tabs or control other applications on
+            your device.
+          </p>
+        </section>
+
+        <section>
+          <h2 className="font-medium text-gray-900">Tether Secure Browser, if required for your exam</h2>
+          <p className="mt-1">
+            Some exams require <strong>Tether Secure Browser</strong>, a dedicated exam
+            application that applies additional device and exam-session controls beyond what an
+            ordinary browser tab can enforce. If your exam requires it, you will be guided through
+            installing and starting it before your attempt begins, and the specific requirements
+            for your exam are shown to you at that point.
+          </p>
+          <p className="mt-1">
+            Tether Secure Browser establishes a verified session for your attempt and sends
+            periodic status/heartbeat signals confirming that session is still active — this
+            operational session evidence is reviewable by your lecturer alongside other integrity
+            signals, in the same way as everything else on this page. As with every other feature
+            here, this does not by itself make any misconduct determination.
           </p>
         </section>
 
@@ -257,8 +289,9 @@ export default function StudentExamNoticePage() {
           <p className="mt-1">
             Some lecturers require you to share your entire screen for the duration of the exam.
             You will be shown what this involves and asked to start sharing yourself — the exam
-            cannot begin until you do. Only your video is shared: your microphone and system audio
-            are never captured, and your screen is never continuously recorded or streamed. Tether
+            cannot begin until you do. Only the video of your screen is shared: your microphone
+            and system audio are never captured, and your screen is never continuously recorded,
+            saved as a video, or streamed anywhere. Tether
             records when sharing starts, stops, or is restored as review signals, and, if your
             lecturer has enabled it, may save a limited number of still frames of your screen for
             review. These signals and frames are stored privately and are for your lecturer&apos;s
@@ -282,9 +315,27 @@ export default function StudentExamNoticePage() {
         <section>
           <h2 className="font-medium text-gray-900">Who makes assessment decisions</h2>
           <p className="mt-1">
-            This platform does not make grading or academic integrity decisions on its own. Your
-            institution and your lecturer remain responsible for any assessment outcome.
+            <strong>
+              Tether does not automatically determine academic misconduct.
+            </strong>{" "}
+            Every integrity signal, evidence frame, and review status described on this page
+            exists to support review by authorised institutional staff — never to make a decision
+            on its own. This platform does not make grading or academic integrity decisions by
+            itself. Your institution and your lecturer remain responsible for any assessment
+            outcome, including any integrity finding.
           </p>
+        </section>
+
+        <section>
+          <h2 className="font-medium text-gray-900">How long is exam integrity evidence kept?</h2>
+          <p className="mt-1">
+            Retention is set by your institution and applicable requirements. Tether&apos;s
+            recommended evidence-retention approach is to keep integrity evidence through the
+            applicable review/appeal period and a short administrative buffer, then securely
+            remove it when it is no longer required, subject to any active investigation, appeal,
+            or legal retention requirement.
+          </p>
+          <p className="mt-1">Your institution can provide the retention period that applies to your exam.</p>
         </section>
 
         <section>
