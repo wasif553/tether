@@ -1,5 +1,15 @@
 # Production Backup & Restore Verification Runbook (v1)
 
+**This is the detailed, technical database-backup-verification
+sub-runbook.** Broader Production recovery decisions — evidence-storage
+recovery, application/Vercel recovery, configuration recovery, Secure
+Browser release-artifact recovery, RPO/RTO, and the overall recovery
+process and approval boundary — belong to the umbrella
+[`docs/backup-and-disaster-recovery-runbook-v1.md`](backup-and-disaster-recovery-runbook-v1.md),
+which cross-links back to this document for the exact `backup:verify`
+tool behaviour rather than restating it. This document's own scope and
+guarantees below are unchanged by that umbrella document.
+
 ## Why this exists
 
 A previous production "backup" was later found to be only 41 bytes —

@@ -845,6 +845,15 @@ from ordinary operation:
   (`docs/privacy-and-evidence-retention-v1.md` Section 18) — this
   document does not create a separate, incident-specific retention
   category.
+- **If the incident itself involved a backup restore** — for example,
+  Production data was recovered after a disaster — the restore's own
+  privacy/retention reconciliation is governed by
+  [`docs/backup-and-disaster-recovery-runbook-v1.md`](backup-and-disaster-recovery-runbook-v1.md),
+  Section 29, which runs **alongside**, not instead of, this section: a
+  restore can resurrect data that should already have been deleted, or
+  intersect with a hold exactly as described above, and that runbook's
+  own reconciliation sequence is the detailed process for that specific
+  situation.
 
 ## 30. Testing/exercises
 
@@ -882,6 +891,7 @@ Consolidated from the sections above:
 | Version | Date | Change |
 |---|---|---|
 | v1 | 2026-08-23 | Initial procedure: this document, `docs/data-breach-assessment-record-v1.md`, `docs/data-breach-notification-template-v1.md`, `docs/privacy-incident-register-template-v1.md`, and the Section 23 update to `docs/privacy-and-evidence-retention-v1.md` (`compliance/australian-incident-ndb-procedure-v1` branch). No schema, migration, or evidence-collection behaviour changed. No live notification automation added. |
+| v1.1 | 2026-08-23 | Section 29 updated with a cross-reference to `docs/backup-and-disaster-recovery-runbook-v1.md` for incidents that involve a backup restore (`compliance/backup-disaster-recovery-v1` branch). No other section reopened. |
 
 ---
 
