@@ -21,7 +21,7 @@ describe("student exam notice page", () => {
 
     expect(text).toContain("Camera monitoring");
     expect(text).toContain("checks that your camera is available when the exam starts");
-    expect(text).toContain("store video recordings");
+    expect(text).toContain("continuously record or store video");
     expect(text).toContain("Browser secure mode");
     expect(text).toContain("block copy, cut, and paste inside the exam page");
     expect(text).toContain("cannot close other browser tabs");

@@ -40,17 +40,30 @@
  */
 import { prisma } from "@/lib/prisma";
 import { resolveEvidenceStorageAdapter } from "@/lib/evidenceStorage";
+import { isPositiveIntegerDays } from "../../scripts/evidenceRetention/cliArgs";
+
+export { isPositiveIntegerDays };
 
 /** The one PlatformAuditLog action name for this runner's deletions — see createPlatformAuditLog's callers elsewhere for the established SCREAMING_SNAKE_CASE, past-tense convention. */
 const RETENTION_DELETED_AUDIT_ACTION = "INTEGRITY_EVIDENCE_RETENTION_DELETED";
 
-const DEFAULT_EVIDENCE_RETENTION_DAYS = 90;
+/**
+ * Conservative pilot-fallback default — see
+ * docs/privacy-and-evidence-retention-v1.md, Section 18 (Class A target:
+ * institution review/appeal period + 30 days; 180 days after final
+ * submission is the proposed operational fallback where no
+ * institution-specific period has been agreed). This is only the
+ * fallback used when EVIDENCE_RETENTION_DAYS is unset/invalid — an
+ * institution-specific period should be supplied explicitly wherever one
+ * has been agreed, not left to this default.
+ */
+const DEFAULT_EVIDENCE_RETENTION_DAYS = 180;
 
-/** Missing/malformed/non-positive values fall back to the safe default — mirrors the established env-var + typed-resolver convention (see systemCheckConfig.ts). */
+/** Missing/malformed/non-positive/non-integer values fall back to the safe default — mirrors the established env-var + typed-resolver convention (see systemCheckConfig.ts). `isPositiveIntegerDays` (imported above from scripts/evidenceRetention/cliArgs.ts) is the single source of truth for what counts as a valid retention window, shared with the CLI's `--retention-days` parsing. */
 export function resolveEvidenceRetentionDays(): number {
   const raw = process.env.EVIDENCE_RETENTION_DAYS;
   const parsed = raw != null ? Number(raw) : NaN;
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_EVIDENCE_RETENTION_DAYS;
+  if (!isPositiveIntegerDays(parsed)) return DEFAULT_EVIDENCE_RETENTION_DAYS;
   return parsed;
 }
 
@@ -70,10 +83,13 @@ export type EligibleEvidenceAsset = {
  * Pure read — never deletes anything itself. `now` is always passed
  * explicitly (never `new Date()` read internally) so this is
  * deterministically testable. `institutionId`, when provided, scopes the
- * query to that institution only — added for the admin preview surface
- * (Part E, production administration hardening v1); the CLI script
- * (scripts/run-evidence-retention.ts) still defaults to no scope
- * (deployment-wide) unless a future caller passes one.
+ * query to that institution only. The CLI script
+ * (scripts/run-evidence-retention.ts) supports it for dry runs and
+ * *requires* it for `--execute` (see scripts/evidenceRetention/cliArgs.ts)
+ * — this function itself still accepts an unscoped (deployment-wide)
+ * query for dry-run/preview use and for any future non-CLI caller; the
+ * CLI-level requirement is a caller-side safety rail, not a change to
+ * this function's own contract.
  */
 export async function findEligibleEvidenceAssetsForDeletion(retentionDays: number, now: Date, institutionId?: string): Promise<EligibleEvidenceAsset[]> {
   const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);

@@ -32,8 +32,11 @@ the audit outcome was the former.
 
 - **`src/lib/evidenceRetentionRunner.ts`** — the reusable runner:
   - `resolveEvidenceRetentionDays()` — env-var + typed-resolver
-    (`EVIDENCE_RETENTION_DAYS`, default 90 days), following this repo's
-    established convention (see `systemCheckConfig.ts`).
+    (`EVIDENCE_RETENTION_DAYS`, default **180 days** — raised from an
+    earlier 90-day default to match the approved pilot Class A fallback
+    in `docs/privacy-and-evidence-retention-v1.md`, Section 18),
+    following this repo's established convention (see
+    `systemCheckConfig.ts`).
   - `findEligibleEvidenceAssetsForDeletion(retentionDays, now)` — pure
     read, age-based on `capturedAt`.
   - `deleteEvidenceAsset(asset)` — deletes the storage object first, then
@@ -49,12 +52,23 @@ the audit outcome was the former.
     not to dry-run).
 - **`scripts/run-evidence-retention.ts`** — `npm run evidence:retention`,
   a manual CLI tool. Dry-run by default; requires an explicit `--execute`
-  flag to actually delete anything.
+  flag to actually delete anything. **`--execute` additionally requires**
+  an explicit `--institution-id <id>` (a specific id — `all` is refused)
+  **and** an explicit `--retention-days <n>` — there is no
+  deployment-wide destructive path in this CLI. Argument parsing and this
+  fail-closed gate live in `scripts/evidenceRetention/cliArgs.ts`, kept
+  as a pure, dependency-free module specifically so it can be
+  unit-tested without a database.
 - **`src/lib/evidenceRetentionRunner.test.ts`** — DB-backed tests
-  covering: default/malformed/valid retention-days resolution,
+  covering: default(180)/malformed/valid retention-days resolution,
   eligibility for old/recent/exactly-at-boundary assets, single-asset
   deletion, full dry-run vs. execute sweep behavior, and the no-eligible-
   assets no-op case.
+- **`scripts/evidenceRetention/cliArgs.test.ts`** — unit tests (no
+  database) covering argument parsing and the `--execute` fail-closed
+  gate: missing `--institution-id`, missing `--retention-days`, both
+  missing, `--institution-id all` rejected, and the happy path where
+  both are supplied.
 
 ## What was deliberately NOT done in this pass
 
@@ -76,11 +90,16 @@ the audit outcome was the former.
   differ from image-evidence policy. Left as a follow-up scoping decision,
   not implemented speculatively.
 - **No default retention period is activated.** `EVIDENCE_RETENTION_DAYS`
-  defaults to 90 purely as a safe fallback if the script is ever run
-  without configuring it explicitly — this is not a claim that 90 days is
-  the institutionally correct policy. The institution should set this
-  deliberately (or confirm 90 is acceptable) before ever running the
-  script with `--execute`.
+  defaults to 180 purely as a safe pilot fallback if the script is ever
+  run without configuring it explicitly — this is not a claim that 180
+  days is every institution's correct policy, only that it matches the
+  conservative Class A pilot fallback documented in
+  `docs/privacy-and-evidence-retention-v1.md`, Section 18. The
+  institution should set this deliberately via `--retention-days` before
+  ever running the script with `--execute` — indeed, `--execute` will
+  refuse to run at all unless `--retention-days` (and `--institution-id`)
+  are supplied explicitly; there is no "confirm the default is
+  acceptable and just run `--execute`" path any more.
 
 ## How to use this
 
@@ -89,12 +108,20 @@ and the doc comments in `src/lib/evidenceRetentionRunner.ts` /
 `scripts/run-evidence-retention.ts` for usage. In short:
 
 ```bash
-# Report what would be deleted — deletes nothing.
+# Report what would be deleted, deployment-wide, using the configured/default
+# retention window — deletes nothing.
 npm run evidence:retention
 
-# Actually delete evidence assets older than the configured/default retention window.
-npm run evidence:retention -- --execute
+# Preview a single institution's eligible assets at its approved retention window.
+npm run evidence:retention -- --institution-id <institution-id> --retention-days 180
 
-# Override the retention window for one run.
-npm run evidence:retention -- --execute --retention-days 60
+# Actually delete evidence assets for one institution, at its approved retention
+# window. Both flags are REQUIRED for --execute — omitting either aborts with no
+# deletion (see docs/evidence-retention-operations-v1.md for the full authorised
+# process this must follow: hold check, authorisation, target confirmation).
+npm run evidence:retention -- --execute --institution-id <institution-id> --retention-days 180
 ```
+
+There is no unscoped/deployment-wide `--execute` command — `npm run
+evidence:retention -- --execute` with no further arguments exits
+non-zero and deletes nothing, by design.

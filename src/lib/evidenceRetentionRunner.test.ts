@@ -75,27 +75,62 @@ async function createEvidenceAsset(capturedAt: Date) {
 }
 
 describe("resolveEvidenceRetentionDays", () => {
-  it("defaults to 90 days when unset", () => {
+  // [1] Conservative pilot fallback — see
+  // docs/privacy-and-evidence-retention-v1.md, Section 18 (Class A
+  // target: review/appeal period + 30 days; 180-day fallback where no
+  // institution-specific period is agreed). Raised from 90 to 180 to
+  // match the approved pilot policy — an implicit destructive default
+  // must never be stricter/shorter than the governance document it's
+  // supposed to implement.
+  it("[1] defaults to 180 days when unset", () => {
     const original = process.env.EVIDENCE_RETENTION_DAYS;
     delete process.env.EVIDENCE_RETENTION_DAYS;
-    expect(resolveEvidenceRetentionDays()).toBe(90);
+    expect(resolveEvidenceRetentionDays()).toBe(180);
     if (original !== undefined) process.env.EVIDENCE_RETENTION_DAYS = original;
   });
 
-  it("falls back to the default for a non-positive or malformed value", () => {
+  it("[3] falls back to the 180-day default for a non-positive or malformed value", () => {
     const original = process.env.EVIDENCE_RETENTION_DAYS;
     process.env.EVIDENCE_RETENTION_DAYS = "-5";
-    expect(resolveEvidenceRetentionDays()).toBe(90);
+    expect(resolveEvidenceRetentionDays()).toBe(180);
     process.env.EVIDENCE_RETENTION_DAYS = "not-a-number";
-    expect(resolveEvidenceRetentionDays()).toBe(90);
+    expect(resolveEvidenceRetentionDays()).toBe(180);
     if (original !== undefined) process.env.EVIDENCE_RETENTION_DAYS = original;
     else delete process.env.EVIDENCE_RETENTION_DAYS;
   });
 
-  it("honours a valid configured value", () => {
+  it("[2][TETHER_RETENTION_INTEGER_GUARD_FINAL_FIX 8] honours a valid, whole-positive-integer configured value, overriding the 180-day fallback", () => {
     const original = process.env.EVIDENCE_RETENTION_DAYS;
     process.env.EVIDENCE_RETENTION_DAYS = "30";
     expect(resolveEvidenceRetentionDays()).toBe(30);
+    if (original !== undefined) process.env.EVIDENCE_RETENTION_DAYS = original;
+    else delete process.env.EVIDENCE_RETENTION_DAYS;
+  });
+
+  // TETHER_RETENTION_INTEGER_GUARD_FINAL_FIX — EVIDENCE_RETENTION_DAYS
+  // follows the same whole-positive-day contract as the CLI's own
+  // --retention-days (isPositiveIntegerDays, shared from
+  // scripts/evidenceRetention/cliArgs.ts): a decimal, zero, negative,
+  // malformed, or infinite value is never silently truncated/rounded —
+  // it falls back to the 180-day default exactly like a missing value.
+  it("[9] falls back to 180 for a decimal env value", () => {
+    const original = process.env.EVIDENCE_RETENTION_DAYS;
+    process.env.EVIDENCE_RETENTION_DAYS = "1.5";
+    expect(resolveEvidenceRetentionDays()).toBe(180);
+    process.env.EVIDENCE_RETENTION_DAYS = "180.25";
+    expect(resolveEvidenceRetentionDays()).toBe(180);
+    process.env.EVIDENCE_RETENTION_DAYS = "0.1";
+    expect(resolveEvidenceRetentionDays()).toBe(180);
+    if (original !== undefined) process.env.EVIDENCE_RETENTION_DAYS = original;
+    else delete process.env.EVIDENCE_RETENTION_DAYS;
+  });
+
+  it("[10] falls back to 180 for zero, negative, malformed, and infinite env values", () => {
+    const original = process.env.EVIDENCE_RETENTION_DAYS;
+    for (const invalid of ["0", "-5", "not-a-number", "Infinity", "-Infinity", "NaN", ""]) {
+      process.env.EVIDENCE_RETENTION_DAYS = invalid;
+      expect(resolveEvidenceRetentionDays()).toBe(180);
+    }
     if (original !== undefined) process.env.EVIDENCE_RETENTION_DAYS = original;
     else delete process.env.EVIDENCE_RETENTION_DAYS;
   });
