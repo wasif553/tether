@@ -160,7 +160,7 @@ that does not exist yet.
 |---|---|---|---|---|---|---|
 | A. Application source | GitHub (`wasif553/tether`) | Git history itself is the recovery mechanism — every commit is a full, independently-checkable snapshot | Yes (inherent to Git) | N/A | Repository availability itself depends on GitHub | None beyond normal GitHub account hygiene |
 | B. Vercel deployment/runtime | Vercel (Hobby plan) | Redeploy from a known-good Git commit | Not independently verified on the current plan | No | Hobby-plan rollback/promotion capability not confirmed | Verify actual Hobby-plan redeploy path before pilot (Section 12) |
-| C. Supabase Postgres database | Supabase (Free plan, `AP-Northeast`) | None provider-managed on Free plan; manual `pg_dump`/Supabase CLI `db dump` possible but not currently scheduled | No — no backup has ever been produced and verified against this Production project as of this pass | No | **No scheduled Production backup cadence exists** | **PRE-PILOT BACKUP GATE** (Section 37) |
+| C. Supabase Postgres database | Supabase (Free plan, `AP-Northeast`) | None provider-managed on Free plan; `npm run backup:create` tooling now exists (`docs/database-backup-operations-v1.md`) but has never been run against this Production project | No — no backup has ever been produced and verified against this Production project as of this pass | No | **No scheduled Production backup cadence exists — tooling gap closed, operational gap (real backup + off-project copy + cadence) remains open** | **PRE-PILOT BACKUP GATE** (Section 37) |
 | D. Supabase Storage primary evidence objects | Supabase Storage (same project as C) | None dedicated — not covered by database backups at all | No | No | Same failure domain as C; no independent copy | **PRE-PILOT EVIDENCE ARCHIVE GATE** (Section 37) |
 | E. `IntegrityEvidenceAsset` relational metadata | Postgres row (same database as C) | Covered by whatever database backup exists (i.e. currently none scheduled) | No | No | Same as C; also: metadata alone is useless without the bytes it references (Section 10) | Same as C |
 | F. Separate evidence archive | Not provisioned | `npm run evidence:archive` architecture exists in code but has no real target project | No | No | **Architecturally implemented, cloud recovery path not yet activated or tested** | **PRE-PILOT EVIDENCE ARCHIVE GATE** (Section 37) |
@@ -238,13 +238,200 @@ That tool:
 scheduling/creation system**, and this runbook does not describe it as
 one.
 
+**Backup CREATION tooling now exists**, closing the tooling portion of
+this section's own gate: `npm run backup:create` (see
+[`docs/database-backup-operations-v1.md`](database-backup-operations-v1.md)
+for the full operator runbook) produces a logical backup **bundle**
+(`roles.sql`, `schema.sql`, `data.sql`, `manifest.json`) via
+`pg_dump`/`pg_dumpall` run inside a throwaway toolbox Docker container,
+and integrates directly with a bundle-aware counterpart to the existing
+verifier, `npm run backup:verify-bundle`. Defaults to a dry run;
+`--execute` requires an explicit `--environment` and `--output-dir`, and
+`--environment production` additionally requires a separate, explicit
+`--confirm-production` flag — never inferred from the connection
+string. **DATABASE BACKUP CREATION TOOLING: IMPLEMENTED AND LOCALLY
+VERIFIED.** Local-test result (disposable, synthetic data only — no
+Production contact): a disposable local Postgres container was seeded
+with 2 synthetic tables and 4 rows; `npm run backup:create -- --execute
+--environment local-test ...` produced a `COMPLETE` bundle (`roles.sql`
+671 bytes, `schema.sql` 4063 bytes, `data.sql` 1512 bytes, each hashed);
+`npm run backup:verify-bundle -- <bundle> --restore` recomputed and
+matched every file's SHA-256, then rehearsed a full restore (roles →
+schema → data) into a **second**, independent disposable container,
+finding the same 2 tables and 4 rows — `overallPassed: true`. A genuine
+bug was found and fixed during this exercise: `pg_dump --schema-only`'s
+default `CREATE SCHEMA public;` statement collided with the "public"
+schema every fresh Postgres database already has; fixed by adding
+`--clean --if-exists` to the schema dump so the restore is idempotent
+against a fresh target (see `scripts/create-database-backup.ts`'s own
+comment on that line). The tool's fail-closed paths were also exercised
+for real: an unreachable source correctly produced a `FAILED` bundle
+(diagnostic preserved, redacted, no partial `COMPLETE` bundle), and
+`--environment production` without `--confirm-production` was refused
+before any Docker/network action.
+
+**Hardening re-run (source-credential handling, casing gate, Supabase
+adapter):** repeated end to end against a second, freshly seeded
+disposable source — same result, `overallPassed: true`, same table/row
+counts — after fixing three findings from independent review: (1) the
+source database PASSWORD no longer appears in the host `docker exec`
+process's own argument vector at all (`-e PGPASSWORD` bare-name
+forwarding + child-process environment, not `-e PGPASSWORD=<value>` —
+see `scripts/backupCreation/dockerExecInvocation.ts`); (2)
+`--environment "Production"`/`"PRODUCTION"`/`" production "`/
+`"production "` are all now correctly caught by the
+`--confirm-production` gate (previously only the exact lowercase
+string `"production"` was, real casing/whitespace bypasses were
+confirmed closed for all five tested variants); (3) a real Supabase
+Production source now uses the Supabase CLI's own `supabase db dump`
+semantics (`--role-only` / default schema dump / `--data-only
+--use-copy`, plus explicit `--exclude-table` for the two current
+Storage vector tables), never raw `pg_dumpall --roles-only`, via a new
+source-adapter abstraction auto-selected from whether a Supabase
+project reference is known — **this Supabase-specific path is
+`SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`, unit-tested for
+command construction only, never executed against a real Supabase
+CLI/project**, since none is available in this environment and no
+Production contact is permitted. Tamper detection was also confirmed
+for real: a modified `schema.sql` byte was correctly caught by
+`backup:verify-bundle`'s SHA-256/size comparison, which refused to
+proceed to a restore rehearsal. **This is a tooling gap closed, not the
+PRE-PILOT BACKUP GATE itself closed** — see the status line immediately
+below.
+
+**Runtime correction (`supabase-managed` execution path made
+structurally executable):** independent review of the hardening pass
+above found that the `supabase-managed` adapter, while correctly
+constructing `supabase db dump` commands, was still routed through
+`docker exec` into the `postgres:16-alpine` toolbox container — which
+contains Postgres client binaries only, not the Supabase CLI runtime,
+so the path could not actually run even once the required credentials
+were supplied. This was corrected by running the Supabase CLI (now a
+pinned `devDependency`) directly on the host inside a temporary
+workspace.
+
+**Read-only correction (`supabase link` removed):** a second review
+found that the fix above still ran `supabase link --project-ref <ref>`
+before dumping, and `link` is **not** a guaranteed read-only operation —
+observed Supabase CLI behaviour includes issuing statements such as
+`CREATE SCHEMA IF NOT EXISTS supabase_migrations` and `CREATE TABLE IF
+NOT EXISTS supabase_migrations.schema_migrations ...` as a side effect
+of linking. **A Production database BACKUP tool must not modify
+Production migration metadata as a side effect of preparing to read
+it.** `supabase link` has been removed from the backup path entirely.
+The corrected mechanism: a fresh temporary workspace (outside this
+repository, removed unconditionally on success or failure) runs
+`supabase init --force --yes` (purely local scaffolding — contacts no
+project, links to nothing), then each dump stage authenticates via a
+PASSWORDLESS `--db-url` (built by
+`scripts/backupCreation/supabaseDatabaseUrl.ts`, which strips the
+password and allowlists only the `sslmode` query parameter, refusing
+outright on anything else — including credential/file-redirection
+parameters like `passfile`/`servicefile`) plus `PGPASSWORD` carried only
+via the CLI subprocess's own environment. This relies on the pinned
+CLI's `db dump --db-url` honouring `PGPASSWORD` via its
+libpq-compatible connection-string parser whenever the URL itself
+supplies no password — **verified directly against this repository's
+own pinned CLI (2.115.0) against a disposable local Postgres container,
+not merely assumed from documentation**:
+`SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS` (see
+`docs/database-backup-operations-v1.md`'s "Current status" table for
+the exact result). No `SUPABASE_ACCESS_TOKEN` and no separate
+`SUPABASE_DB_PASSWORD` environment variable is required any more — the
+one authoritative source credential remains
+`BACKUP_SOURCE_DATABASE_URL`/`DATABASE_URL`. Each managed command now
+matches current official guidance exactly:
+`supabase db dump --db-url <passwordless-url> -f <path> --role-only`
+(roles), `supabase db dump --db-url <passwordless-url> -f <path>`
+(schema, no exclusions), `supabase db dump --db-url <passwordless-url>
+-f <path> --data-only --use-copy -x "storage.buckets_vectors" -x
+"storage.vector_indexes"` (data). A fail-closed preflight (Docker
+installed and running — the Supabase CLI's own `db dump` uses Docker
+internally, so its absence must fail before any remote connection
+attempt; CLI binary present and versioned; source password present; a
+safe passwordless URL buildable) runs before any temporary workspace is
+created or any Supabase project is contacted. The backup path now
+invokes exactly two Supabase CLI subcommands anywhere: `init` and `db
+dump` — never `link`, `db push`, `db pull`, `db reset`, `migration
+repair`, `migration up`, `config push`, `projects create`/`delete`, or
+any Storage-mutating command, locked with a regression-guard test.
+**This remains `SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED`** —
+never run against a real Supabase **Production** project, since no
+Production contact is permitted and this repository does not use a
+sandbox Supabase project. The `local-generic` synthetic end-to-end
+result above was re-confirmed unchanged after this correction — see
+`docs/database-backup-operations-v1.md`'s "Current status" table for
+the authoritative per-item status.
+
+**`SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS`** — the corrected mechanism
+was exercised against a disposable local Postgres 16 container (never
+Production) using the real pinned Supabase CLI (2.115.0), via
+`npm run backup:create -- --execute --environment local-test
+--output-dir <dir> --source-type supabase-managed`, with neither
+`SUPABASE_ACCESS_TOKEN` nor `SUPABASE_DB_PASSWORD` set in the
+environment (proving neither is required any more): the disposable
+container was seeded with one table (`t1`, 2 rows); the tool's
+fail-closed preflight passed (Docker installed/running, pinned CLI
+2.115.0 resolved, source password present, safe passwordless URL
+built); `supabase init` ran purely locally; all three dump stages
+succeeded — `roles.sql` (246 bytes) captured the source role,
+`schema.sql` (1088 bytes) captured the `t1` table definition, `data.sql`
+(1008 bytes) used a real `COPY "public"."t1" ("id", "v") FROM stdin;`
+statement (proving `--use-copy`) containing exactly the 2 seeded rows.
+`npm run backup:verify-bundle` recomputed and matched all three files'
+SHA-256/byte-size against the manifest — bundle mechanics fully
+verified. The run was repeated once more (reproducibility check) with
+the same result. A live process-listing scan for the real source
+password across both runs found no match, corroborating the unit-level
+argv proof. A cross-version restore limitation was found in that pass —
+`data.sql` was produced by the Supabase CLI's own internal `pg_dump`
+(version 17.6, from its bundled `supabase/postgres` Docker image) and
+contains `SET transaction_timeout = 0;`, a Postgres-17-only setting the
+disposable *restore* toolbox (then pinned to `postgres:16-alpine`) did
+not recognise — the backup itself was always valid; only the rehearsal
+target was too old. **This is now resolved** (see the "Bundle restore
+rehearsal target: Postgres 17" note in
+`docs/database-backup-operations-v1.md`'s "Verifying a bundle" section):
+`scripts/backupCreation/bundleRestoreRehearsal.ts` now explicitly
+requests `postgres:17-alpine` as its own disposable restore target via a
+new, narrow `image` option on the shared disposable-container helper
+(`scripts/releaseValidation/docker.ts`) — every OTHER caller
+(`release:validate`, the existing single-file
+`backup:verify --restore`) keeps the helper's unchanged default
+`postgres:16-alpine`. Re-verified end to end: a fresh `supabase-managed`
+bundle (disposable Postgres 16 source, 1 table/2 rows, `data.sql`
+confirmed to still contain the exact `SET transaction_timeout = 0;`
+statement) restored successfully into the corrected Postgres-17 target —
+`overallPassed: true`, 1 table/2 rows restored. The `local-generic`
+synthetic bundle (2 tables/4 rows, from a plain `pg_dump`/`pg_dumpall`
+source) also restored successfully into the same Postgres-17 target —
+`overallPassed: true`, 2 tables/4 rows restored, confirming the target
+change did not regress the already-working `local-generic` path. Tamper
+detection was re-confirmed on a **copy** of the `supabase-managed`
+bundle (the original bundle was never touched, and its `data.sql`
+SHA-256 was reconfirmed unchanged after the tamper test): a modified
+byte in the copy's `data.sql` was correctly caught by
+`backup:verify-bundle`'s SHA-256/size comparison, which refused to
+proceed to a restore rehearsal for that copy.
+
 **Current Supabase Free-plan boundary — state this clearly, do not
 soften it:** automatic provider-managed backup coverage is **not**
 currently relied upon, because the observed Tether Supabase organisation
 is on the Free plan, which current official Supabase documentation
 states does not include automatic database backups. **Therefore Tether
 currently has no documented, verified, scheduled Production
-database-backup cadence.** **PRE-PILOT BACKUP GATE.**
+database-backup cadence.**
+
+- **PRODUCTION BACKUP: NOT YET EXECUTED / VERIFIED** — `npm run
+  backup:create` has never been run with `--environment production
+  --confirm-production` against a real Production database.
+- **OFF-PROJECT COPY: NOT YET SELECTED / VERIFIED** — see
+  `docs/database-backup-operations-v1.md`'s own PRE-PILOT OFF-PROJECT
+  COPY GATE.
+- **PRODUCTION BACKUP GATE: OPEN.** Writing and locally verifying this
+  tooling does not, by itself, close this gate — it closes only once a
+  real, authorised Production backup has been created, copied
+  off-project, verified, and restore-tested.
 
 Before a real institutional pilot, choose and implement a Production
 database backup strategy. Possible future strategies (not decided or
@@ -252,9 +439,13 @@ purchased by this task):
 
 - **A.** A paid Supabase plan with provider-managed backups, plus an
   independent, off-project verification/safeguard step.
-- **B.** Operator-controlled scheduled logical backups using the current
-  Supabase CLI/`pg_dump` capability, stored securely outside the primary
-  Supabase project.
+- **B.** Operator-controlled scheduled logical backups using the
+  now-implemented `npm run backup:create` tooling (or the Supabase
+  CLI/`pg_dump` directly), stored securely outside the primary Supabase
+  project — the creation and verification tooling for this strategy now
+  exists; the operational decision to actually run it against
+  Production, on what cadence, and where the off-project copy goes, does
+  not yet exist.
 - **C.** Another reviewed combination of A and B.
 
 This runbook does not decide between them.
@@ -1095,11 +1286,15 @@ Writing this documentation does **not** close any of these gates —
 each requires an actual action, verified and recorded, before it can be
 marked complete:
 
-1. **PRE-PILOT BACKUP GATE** — choose and implement an actual
-   Production database backup cadence (Section 8).
+1. **PRE-PILOT BACKUP GATE** — the backup-creation *tooling* now exists
+   and is locally verified (`npm run backup:create`,
+   `docs/database-backup-operations-v1.md`), but the gate itself
+   requires an actual, authorised Production backup to be created,
+   copied off-project, verified, and restore-tested (Section 8).
 2. **PRE-PILOT OFF-PROJECT COPY GATE** — ensure the critical database
    backup does not depend solely on the same primary-project failure
-   domain it is meant to protect against.
+   domain it is meant to protect against; no destination has been
+   selected or tested (`docs/database-backup-operations-v1.md`).
 3. **PRE-PILOT EVIDENCE ARCHIVE GATE** — provision the approved separate
    evidence-archive location; archive representative evidence; test one
    verified restore (Section 9/25).
@@ -1128,3 +1323,9 @@ marked complete:
 | Version | Date | Change |
 |---|---|---|
 | v1 | 2026-08-23 | Initial package: this document, `docs/restore-test-record-v1.md`, `docs/dr-exercise-checklist-v1.md`, and small cross-linking updates to `docs/production-backup-restore-runbook.md`, `docs/privacy-and-evidence-retention-v1.md`, and `docs/australian-incident-ndb-procedure-v1.md` (`compliance/backup-disaster-recovery-v1` branch). No schema, migration, or application-behaviour change. No Production contact, restore, or evidence deletion performed. No cloud resource created. |
+| v1.1 | 2026-08-23 | Corrected Section 5/14's Secure Browser characterisation from a single hash discrepancy to a three-source version-reconciliation gap (`compliance/backup-disaster-recovery-v1` branch, later merged). |
+| v1.2 | 2026-08-23 | Section 5 (matrix row C), Section 8, and Section 37 (gates 1–2) updated: database backup **creation** tooling (`npm run backup:create`, `npm run backup:verify-bundle`) now exists and is locally verified — see `docs/database-backup-operations-v1.md`. The PRE-PILOT BACKUP GATE and PRE-PILOT OFF-PROJECT COPY GATE remain explicitly OPEN; only the tooling portion is closed (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact or Production backup performed. |
+| v1.3 | 2026-08-23 | Section 8 updated with hardening findings: source-database password no longer appears in host subprocess argv; `--confirm-production` gate now catches every case/whitespace variant of "production"; a Supabase-managed source now uses `supabase db dump` semantics via a new source-adapter abstraction rather than raw `pg_dumpall` (Supabase runtime path explicitly marked `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`) — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact or Production backup performed. |
+| v1.4 | 2026-08-23 | Section 8 updated with a runtime correction: the `supabase-managed` adapter's dump commands were previously routed through `docker exec` into a toolbox container that does not contain the Supabase CLI runtime, so the path could not actually execute. Corrected to run the Supabase CLI (now a pinned `devDependency`) directly on the host inside a temporary `supabase link`-ed workspace, with `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` carried only via subprocess environment; exclusion flag corrected from the nonexistent `--exclude-table` to `-x`/`--exclude`, applied to the data dump only, matching current official Supabase guidance exactly — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). Remains `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED` — not yet run against a real Supabase project. No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
+| v1.5 | 2026-08-23 | Section 8 updated with a read-only correction: `supabase link` (not a guaranteed read-only operation — observed to issue `CREATE SCHEMA`/`CREATE TABLE` statements against `supabase_migrations` as a side effect) removed entirely from the backup path. Replaced with `supabase init` (purely local) plus a passwordless `--db-url` + `PGPASSWORD`-subprocess-environment mechanism, verified directly against the pinned CLI (2.115.0) against a disposable local Postgres container (`SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS`). `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` are no longer required. Backup path now invokes only `init`/`db dump` — never `link`/`push`/`pull`/`reset`/`migration repair`/`config push`/`projects create`-`delete`/Storage mutation, locked with a regression-guard test — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). Remains `SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED` — not yet run against a real Supabase Production project. No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
+| v1.6 | 2026-08-24 | Section 8 updated: the bundle-restore-rehearsal target was corrected from Postgres 16 to Postgres 17, resolving the `SET transaction_timeout = 0;` restore failure previously observed on `supabase-managed`-produced bundles (Supabase CLI's own internal `pg_dump` is version 17.x). `scripts/releaseValidation/docker.ts`'s shared disposable-container helper gained a narrow, optional `image` parameter (default unchanged: `postgres:16-alpine`, used by `release:validate` and the existing single-file `backup:verify --restore`); `scripts/backupCreation/bundleRestoreRehearsal.ts` is the one caller that requests `postgres:17-alpine`. Re-verified end to end: both a `local-generic` bundle (2 tables/4 rows) and a `supabase-managed` bundle (1 table/2 rows, `data.sql` confirmed still containing `SET transaction_timeout = 0;`) restored successfully into the corrected target — `overallPassed: true` for both. Tamper detection re-confirmed on a copy of the bundle; the original bundle's SHA-256 was reconfirmed unchanged. No dump content was rewritten, sanitised, or stripped to achieve compatibility — verification still runs against the original hashed bytes — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |

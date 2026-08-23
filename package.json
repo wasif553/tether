@@ -16,6 +16,8 @@
     "validate:build": "npm run build",
     "release:validate": "tsx scripts/release-validate.ts",
     "backup:verify": "tsx scripts/verify-backup.ts",
+    "backup:create": "tsx scripts/create-database-backup.ts",
+    "backup:verify-bundle": "tsx scripts/verify-backup-bundle.ts",
     "evidence:retention": "tsx scripts/run-evidence-retention.ts",
     "evidence:archive": "tsx scripts/run-evidence-archive.ts",
     "backfill:activated-at": "tsx scripts/backfill-submission-activated-at.ts"
@@ -51,6 +53,7 @@
     "dotenv": "^17.4.2",
     "eslint": "^9",
     "eslint-config-next": "16.2.11",
+    "supabase": "2.115.0",
     "tailwindcss": "^4",
     "tsx": "^4.22.4",
     "typescript": "^5",

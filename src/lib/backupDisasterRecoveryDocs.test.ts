@@ -38,8 +38,9 @@ describe("[1] Supabase Free-plan baseline does not claim automatic backups", () 
     expect(runbookFlat).toMatch(/Tether currently has no documented, verified, scheduled Production\s+database-backup cadence/i);
   });
 
-  it("marks this as a PRE-PILOT BACKUP GATE", () => {
-    expect(runbook).toMatch(/\*\*PRE-PILOT BACKUP GATE\.\*\*/);
+  it("marks this as a PRE-PILOT BACKUP GATE / PRODUCTION BACKUP GATE: OPEN", () => {
+    expect(runbook).toMatch(/\*\*PRE-PILOT BACKUP GATE\*\*/);
+    expect(runbook).toMatch(/\*\*PRODUCTION BACKUP GATE: OPEN\.\*\*/);
   });
 });
 

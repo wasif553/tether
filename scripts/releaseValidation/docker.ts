@@ -9,7 +9,8 @@ import { Client } from "pg";
 import { runCapture } from "./processUtil";
 
 export const RELEASE_VALIDATE_LABEL_KEY = "tether-release-validate-run";
-const POSTGRES_IMAGE = "postgres:16-alpine";
+/** The default disposable-container Postgres image — unchanged by the `image` option below. Every existing caller (release-validate.ts, backupVerification/restoreRehearsal.ts, create-database-backup.ts's own toolbox container) keeps getting exactly this image unless it explicitly opts into a different one. */
+export const DEFAULT_DISPOSABLE_POSTGRES_IMAGE = "postgres:16-alpine";
 
 export async function isDockerInstalled(): Promise<boolean> {
   const result = await runCapture("docker", ["--version"], { timeoutMs: 10_000 });
@@ -47,11 +48,13 @@ export type DisposableContainerParams = {
   username: string;
   password: string;
   hostPort: number;
+  /** Optional — defaults to `DEFAULT_DISPOSABLE_POSTGRES_IMAGE` (`postgres:16-alpine`), unchanged for every existing caller. Pass a different tag (e.g. `postgres:17-alpine`) only when a caller has a specific, reviewed reason to need a different Postgres major version as its disposable target — see `scripts/backupCreation/bundleRestoreRehearsal.ts` for the one caller that does. */
+  image?: string;
 };
 
-/** Starts the disposable Postgres container. Never logs the password — only the container name and port. */
-export async function startDisposablePostgresContainer(params: DisposableContainerParams): Promise<void> {
-  const args = [
+/** Pure argv builder for `startDisposablePostgresContainer` — no subprocess execution, so the default-image/override-image behaviour is directly unit-testable without Docker. `params.image` defaults to `DEFAULT_DISPOSABLE_POSTGRES_IMAGE`. */
+export function buildStartDisposablePostgresContainerArgs(params: DisposableContainerParams): string[] {
+  return [
     "run",
     "-d",
     "--name",
@@ -66,8 +69,13 @@ export async function startDisposablePostgresContainer(params: DisposableContain
     `POSTGRES_USER=${params.username}`,
     "-p",
     `127.0.0.1:${params.hostPort}:5432`,
-    POSTGRES_IMAGE,
+    params.image ?? DEFAULT_DISPOSABLE_POSTGRES_IMAGE,
   ];
+}
+
+/** Starts the disposable Postgres container. Never logs the password — only the container name and port. */
+export async function startDisposablePostgresContainer(params: DisposableContainerParams): Promise<void> {
+  const args = buildStartDisposablePostgresContainerArgs(params);
   const result = await runCapture("docker", args, { timeoutMs: 60_000 });
   if (result.code !== 0) {
     throw new Error(`Failed to start disposable PostgreSQL container "${params.containerName}" (exit ${result.code}). ${result.stderr.trim().slice(0, 500)}`);
