@@ -125,15 +125,29 @@ above was YES.)*
 
 **A conservative/voluntary assessment (below) does NOT itself create or
 reset a statutory s 26WH assessment clock.** The statutory clock, where
-it applies, only ever starts from actual awareness of the grounds that
-caused a reasonable suspicion of an eligible breach — never from the
+it applies, only ever starts the day after the entity **became aware**
+of grounds or information sufficient to create reasonable grounds to
+suspect there may have been an eligible data breach — never from the
 date someone later labelled an assessment "statutory," and never reset
-by a later reclassification. If facts later establish that the
-statutory trigger was actually met earlier than first recorded, the
-statutory clock must be recalculated from that earlier awareness
-date/time — the trigger-awareness field below is corrected to the
-actual date, it is never treated as newly starting on the correction
-date.
+by a later reclassification.
+
+**"Became aware" is about the entity's actual knowledge, not the
+underlying facts' objective existence.** It is not the date the
+incident occurred, or the date relevant logs/evidence objectively came
+into being, if nobody at the entity was aware of them yet. It is also
+not the date a formal classification, escalation, or board/CEO briefing
+happened, if appropriate personnel already had the relevant grounds or
+information earlier than that.
+
+If later review establishes that the entity was actually aware of the
+relevant grounds/information earlier than first recorded, **correct the
+trigger-awareness date to that earlier actual-awareness date** — do
+not backdate it merely to when the incident or evidence objectively
+existed without entity awareness, and do not leave it at a later
+formal-classification date once an earlier actual-awareness date is
+established. The trigger-awareness field below is corrected to the
+actual awareness date; it is never treated as newly starting on the
+date of the correction itself.
 
 ### Statutory trigger
 
@@ -142,7 +156,7 @@ date.
 | Reasonable grounds to suspect there may have been an eligible data breach? | YES / NO / UNCERTAIN |
 | Reasoning (why this does, or doesn't, meet the "reasonable grounds to suspect" threshold — certainty about serious harm is NOT required, but a plausible basis for suspecting it is) | |
 | Statutory assessment trigger confirmed? | YES / NO / LEGAL REVIEW REQUIRED |
-| If YES — trigger awareness date/time (the actual date the grounds for suspicion existed — not the date this was recognised, if different; see the clock-reset note above) | |
+| If YES — trigger awareness date/time: the earliest date/time the relevant entity became aware of grounds or information sufficient to create reasonable grounds to suspect there may have been an eligible data breach. Do not use the incident date merely because the underlying facts existed then if the entity was not yet aware of them; equally, do not move the date later merely because the incident was formally classified or escalated later. (See the clock-reset note above.) | |
 | If YES — assessment-clock start date (day after the trigger awareness date/time above) | |
 | If YES — 30-calendar-day statutory maximum date | |
 | Assessment status (updated as it proceeds) | |

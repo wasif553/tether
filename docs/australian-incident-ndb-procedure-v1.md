@@ -431,8 +431,10 @@ separate tracks with their own fields and dates: the statutory trigger
 awareness date and 30-day maximum) and the conservative/voluntary
 assessment (its own, separate start date). Record which one actually
 applied — and if both did, record both, with the statutory clock always
-calculated from the actual date the statutory grounds existed, never
-from the date the voluntary assessment happened to start or the date
+calculated from the actual date the entity **became aware** of the
+statutory grounds — never from the mere objective existence of those
+grounds before anyone at the entity knew of them, never from the date
+the voluntary assessment happened to start, and never from the date
 someone later relabelled it as statutory.
 
 If NDB applicability to the relevant entity is not yet confirmed, note
@@ -506,10 +508,11 @@ later, and not the date containment finished. **This date cannot be
 reset by a later reclassification.** If a voluntary/conservative
 assessment (Section 13) was already under way and facts later confirm
 the statutory trigger was actually met, the clock is calculated from
-the *actual* date the statutory grounds existed — not from the later
-date someone recognised or labelled it as statutory, and not from the
-voluntary assessment's own (possibly later, possibly earlier) start
-date.
+the *actual date the entity became aware* of the statutory grounds —
+never from the mere objective existence of those grounds/facts before
+anyone at the entity knew of them, never from the later date someone
+recognised or labelled it as statutory, and not from the voluntary
+assessment's own (possibly later, possibly earlier) start date.
 
 The assessment must be **reasonable and expeditious**. **30 calendar
 days is a maximum, not a target and not an entitlement to wait that

@@ -339,8 +339,16 @@ describe("[TETHER_NDB_ASSESSMENT_CLOCK_TEMPLATE_FINAL_FIX] statutory clock start
     expect(assessmentRecord).toMatch(/Statutory assessment trigger confirmed\?/i);
   });
 
-  it("the trigger awareness date/time field is the actual date grounds existed, not the date this was recognised", () => {
-    expect(assessmentRecordFlat).toMatch(/trigger awareness date\/time \(the actual date the grounds for\s+suspicion existed — not the date this was recognised, if\s+different/i);
+  it("[TETHER_NDB_AWARENESS_DATE_FINAL_CORRECTION 1] the trigger awareness date/time field uses entity awareness of grounds/information, not mere existence of the grounds", () => {
+    expect(assessmentRecordFlat).toMatch(/the earliest date\/time the relevant entity became aware of grounds or\s+information sufficient to create reasonable grounds to suspect there\s+may have been an eligible data breach/i);
+  });
+
+  it("[TETHER_NDB_AWARENESS_DATE_FINAL_CORRECTION 2] the trigger is not automatically the incident-occurrence date", () => {
+    expect(assessmentRecordFlat).toMatch(/Do not use the incident date merely because the underlying\s+facts existed then if the entity was not yet aware of them/i);
+  });
+
+  it("[TETHER_NDB_AWARENESS_DATE_FINAL_CORRECTION 4] later formal classification/escalation cannot move an earlier actual-awareness date forward", () => {
+    expect(assessmentRecordFlat).toMatch(/do not\s+move the date later merely because the incident was formally\s+classified or escalated later/i);
   });
 
   it("the main procedure's 30-day clock section starts the clock from actual awareness of the grounds causing suspicion", () => {
@@ -353,16 +361,46 @@ describe("[TETHER_NDB_ASSESSMENT_CLOCK_TEMPLATE_FINAL_FIX] later reclassificatio
     expect(assessmentRecordFlat).toMatch(/never from the date someone later labelled an assessment "statutory,"\s+and never reset\s+by a later reclassification/i);
   });
 
-  it("the template instructs correcting the trigger-awareness field to the actual date, not restarting the clock on the correction date", () => {
-    expect(assessmentRecordFlat).toMatch(/the trigger-awareness field below is corrected to the\s+actual date, it is never treated as newly starting on the correction\s+date/i);
+  it("[TETHER_NDB_AWARENESS_DATE_FINAL_CORRECTION 5] later discovery of earlier actual awareness requires correcting the date backward to that actual-awareness date", () => {
+    expect(assessmentRecordFlat).toMatch(/correct the\s+trigger-awareness date to that earlier actual-awareness date/i);
+  });
+
+  it("[TETHER_NDB_AWARENESS_DATE_FINAL_CORRECTION 3] objective existence of logs/evidence without awareness does not by itself set the recorded awareness date", () => {
+    expect(assessmentRecordFlat).toMatch(/do not backdate it merely to when the incident or evidence objectively\s+existed without entity awareness/i);
+  });
+
+  it("does not leave the date at a later formal-classification date once an earlier actual-awareness date is established", () => {
+    expect(assessmentRecordFlat).toMatch(/do not leave it at a later\s+formal-classification date once an earlier actual-awareness date is\s+established/i);
   });
 
   it("the main procedure's 30-day clock section states this date cannot be reset by a later reclassification", () => {
     expect(procedureFlat).toMatch(/\*\*This date cannot be\s+reset by a later reclassification\.\*\*/i);
   });
 
-  it("the main procedure states the clock is calculated from the actual date statutory grounds existed, not a later recognition/relabelling date", () => {
-    expect(procedureFlat).toMatch(/the clock is calculated from\s+the \*actual\* date the statutory grounds existed — not from the later\s+date someone recognised or labelled it as statutory/i);
+  it("the main procedure states the clock is calculated from the actual date the entity became aware of the statutory grounds, not their mere objective existence", () => {
+    expect(procedureFlat).toMatch(/the clock is calculated from\s+the \*actual date the entity became aware\* of the statutory grounds —/i);
+    expect(procedureFlat).toMatch(/never from the mere objective\s+existence of those grounds\/facts before\s*\n?anyone at the entity knew of them/i);
+  });
+});
+
+describe("[TETHER_NDB_AWARENESS_DATE_FINAL_CORRECTION] entity-awareness framing preserved end to end", () => {
+  it("[6] the voluntary assessment remains a distinct, separate track after this wording correction", () => {
+    expect(assessmentRecord).toMatch(/### Statutory trigger/);
+    expect(assessmentRecord).toMatch(/### Conservative\/voluntary assessment \(separate from the statutory trigger\)/);
+    expect(assessmentRecordFlat).toMatch(/does NOT itself create or\s+reset a statutory s 26WH assessment clock/i);
+  });
+
+  it("the statutory clock still starts the day after entity awareness (Section 16 preserved)", () => {
+    expect(procedureFlat).toMatch(/the assessment clock starts \*\*the day after the\s+entity became aware of the grounds\/information that caused the\s+suspicion\*\*/i);
+  });
+
+  it("30-day maximum and as-soon-as-practicable notification remain intact after this correction", () => {
+    expect(procedureFlat).toMatch(/\*\*30 calendar\s+days is a maximum, not a target and not an entitlement to wait that\s+long\*\*/i);
+    expect(procedureFlat).toMatch(/a statement is provided to the OAIC \*\*as soon as practicable\*\*/i);
+  });
+
+  it("later administrative reclassification still cannot reset the clock (Section 16 preserved)", () => {
+    expect(procedureFlat).toMatch(/\*\*This date cannot be\s+reset by a later reclassification\.\*\*/i);
   });
 });
 
