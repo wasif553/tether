@@ -268,9 +268,36 @@ comment on that line). The tool's fail-closed paths were also exercised
 for real: an unreachable source correctly produced a `FAILED` bundle
 (diagnostic preserved, redacted, no partial `COMPLETE` bundle), and
 `--environment production` without `--confirm-production` was refused
-before any Docker/network action. **This is a tooling gap closed, not
-the PRE-PILOT BACKUP GATE itself closed** — see the status line
-immediately below.
+before any Docker/network action.
+
+**Hardening re-run (source-credential handling, casing gate, Supabase
+adapter):** repeated end to end against a second, freshly seeded
+disposable source — same result, `overallPassed: true`, same table/row
+counts — after fixing three findings from independent review: (1) the
+source database PASSWORD no longer appears in the host `docker exec`
+process's own argument vector at all (`-e PGPASSWORD` bare-name
+forwarding + child-process environment, not `-e PGPASSWORD=<value>` —
+see `scripts/backupCreation/dockerExecInvocation.ts`); (2)
+`--environment "Production"`/`"PRODUCTION"`/`" production "`/
+`"production "` are all now correctly caught by the
+`--confirm-production` gate (previously only the exact lowercase
+string `"production"` was, real casing/whitespace bypasses were
+confirmed closed for all five tested variants); (3) a real Supabase
+Production source now uses the Supabase CLI's own `supabase db dump`
+semantics (`--role-only` / default schema dump / `--data-only
+--use-copy`, plus explicit `--exclude-table` for the two current
+Storage vector tables), never raw `pg_dumpall --roles-only`, via a new
+source-adapter abstraction auto-selected from whether a Supabase
+project reference is known — **this Supabase-specific path is
+`SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`, unit-tested for
+command construction only, never executed against a real Supabase
+CLI/project**, since none is available in this environment and no
+Production contact is permitted. Tamper detection was also confirmed
+for real: a modified `schema.sql` byte was correctly caught by
+`backup:verify-bundle`'s SHA-256/size comparison, which refused to
+proceed to a restore rehearsal. **This is a tooling gap closed, not the
+PRE-PILOT BACKUP GATE itself closed** — see the status line immediately
+below.
 
 **Current Supabase Free-plan boundary — state this clearly, do not
 soften it:** automatic provider-managed backup coverage is **not**
@@ -1183,3 +1210,4 @@ marked complete:
 | v1 | 2026-08-23 | Initial package: this document, `docs/restore-test-record-v1.md`, `docs/dr-exercise-checklist-v1.md`, and small cross-linking updates to `docs/production-backup-restore-runbook.md`, `docs/privacy-and-evidence-retention-v1.md`, and `docs/australian-incident-ndb-procedure-v1.md` (`compliance/backup-disaster-recovery-v1` branch). No schema, migration, or application-behaviour change. No Production contact, restore, or evidence deletion performed. No cloud resource created. |
 | v1.1 | 2026-08-23 | Corrected Section 5/14's Secure Browser characterisation from a single hash discrepancy to a three-source version-reconciliation gap (`compliance/backup-disaster-recovery-v1` branch, later merged). |
 | v1.2 | 2026-08-23 | Section 5 (matrix row C), Section 8, and Section 37 (gates 1–2) updated: database backup **creation** tooling (`npm run backup:create`, `npm run backup:verify-bundle`) now exists and is locally verified — see `docs/database-backup-operations-v1.md`. The PRE-PILOT BACKUP GATE and PRE-PILOT OFF-PROJECT COPY GATE remain explicitly OPEN; only the tooling portion is closed (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact or Production backup performed. |
+| v1.3 | 2026-08-23 | Section 8 updated with hardening findings: source-database password no longer appears in host subprocess argv; `--confirm-production` gate now catches every case/whitespace variant of "production"; a Supabase-managed source now uses `supabase db dump` semantics via a new source-adapter abstraction rather than raw `pg_dumpall` (Supabase runtime path explicitly marked `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`) — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact or Production backup performed. |

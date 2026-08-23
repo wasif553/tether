@@ -8,9 +8,21 @@
  * (the writer) and `scripts/verify-backup-bundle.ts` (the reader) can
  * never silently drift apart on the schema.
  *
- * Every field here is non-secret operational metadata by construction —
- * there is no field this type could hold a password, connection string,
- * or service-role key in, by design, not by convention alone.
+ * **This module's own types do NOT, by themselves, prevent a secret
+ * from ending up in this manifest** — `sourceEnvironmentLabel` and
+ * `sourceProjectRef` are plain `string` fields, and TypeScript's type
+ * system has no way to express "not a connection string." What
+ * actually makes every field here non-secret operational metadata is
+ * `scripts/backupCreation/manifestMetadataValidation.ts`: every value
+ * that reaches this manifest is validated against a strict ALLOWLIST
+ * pattern (`checkBackupCreateExecuteSafety` in `cliArgs.ts` runs this
+ * validation, and refuses `--execute` outright on a malformed value —
+ * see that module) BEFORE it is ever passed to `newInProgressManifest`
+ * below. `failureDetail` is the one exception: it is redacted
+ * operational diagnostic text produced by the tool itself (via
+ * `redactConnectionStrings`), not operator-supplied metadata, and
+ * carries the same "never a raw, unredacted subprocess error" guarantee
+ * documented on that field.
  */
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -30,9 +42,9 @@ export type BackupBundleManifest = {
   manifestSchemaVersion: typeof BACKUP_BUNDLE_MANIFEST_SCHEMA_VERSION;
   backupId: string;
   createdAt: string;
-  /** Operator-supplied, e.g. "production", "local-test" — never inferred from the connection string. */
+  /** Operator-supplied, e.g. "production", "local-test" — validated and normalised (trimmed, lowercased) by `validateEnvironmentLabel` before it ever reaches this field; never inferred from the connection string. */
   sourceEnvironmentLabel: string;
-  /** Explicitly supplied by the operator, or safely derived from a Supabase hostname/pooler-username pattern — never a connection string. Null if neither is available. */
+  /** Explicitly supplied by the operator and validated by `validateSourceProjectRef`, or safely derived from a Supabase hostname/pooler-username pattern — never a connection string. Null if neither is available. */
   sourceProjectRef: string | null;
   toolVersion: string | null;
   repositoryCommit: string | null;

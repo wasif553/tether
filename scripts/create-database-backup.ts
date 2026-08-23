@@ -1,7 +1,8 @@
 #!/usr/bin/env -S npx tsx
 /**
  * `npm run backup:create -- [--execute --environment <label> --output-dir <path>
- * [--confirm-production] [--source-project-ref <ref>] [--pg-schema <name>]]`
+ * [--confirm-production] [--source-project-ref <ref>] [--source-type <local-generic|supabase-managed>]
+ * [--pg-schema <name>]]`
  *
  * See docs/database-backup-operations-v1.md for the full operator
  * runbook this tool supports. This tool CREATES a logical database
@@ -13,14 +14,18 @@
  *
  * DEFAULT (no `--execute`) is DRY RUN / INFORMATION ONLY: prints what
  * would happen, contacts no database, starts no Docker container.
- * `--execute` additionally requires `--environment <label>` and
+ * `--execute` additionally requires a VALID `--environment <label>` and
  * `--output-dir <path>` explicitly — there is no default environment or
- * default output location. `--environment production` additionally
- * requires `--confirm-production` — this is never inferred from the
- * connection string; a non-"production" label is trusted as the
- * operator's own deliberate statement, exactly as instructed by this
- * tool's own task specification ("do not infer Production merely
- * because DATABASE_URL exists").
+ * default output location. `--environment` (in ANY case/whitespace
+ * variant of "production" — "Production", "PRODUCTION", " production ",
+ * "production " all normalise to the one canonical label "production"
+ * before this decision is made, see cliArgs.ts/manifestMetadataValidation.ts)
+ * additionally requires `--confirm-production` — this is never inferred
+ * from the connection string; a non-"production" label is trusted as
+ * the operator's own deliberate statement. `--source-project-ref`, if
+ * supplied, is validated against a strict alphanumeric-token pattern —
+ * a malformed value (e.g. a connection string pasted into the wrong
+ * flag) is refused before any backup starts, never silently accepted.
  *
  * Connects to `BACKUP_SOURCE_DATABASE_URL` (preferred — a dedicated,
  * clearly-named variable distinct from the application's own runtime
@@ -30,16 +35,30 @@
  * in this tool's own console output — only a redacted `host:port/database`
  * description is ever printed. Subprocess stderr is redacted before
  * being logged or stored, in case a subprocess ever echoed the
- * connection string back (e.g. in a "connection refused" message).
+ * connection string back (e.g. in a "connection refused" message). The
+ * source PASSWORD never appears in this process's own subprocess argv
+ * either — see scripts/backupCreation/dockerExecInvocation.ts's own doc
+ * comment for the bare-name `-e PGPASSWORD` / child-process-environment
+ * mechanism this uses instead of `-e PGPASSWORD=<value>`.
  *
- * MECHANISM: `pg_dump`/`pg_dumpall` are run inside a throwaway,
- * unconfigured "toolbox" Docker container (the same `postgres:16-alpine`
- * image `npm run release:validate`/`npm run backup:verify --restore`
- * already use) purely for its bundled client binaries — the container
- * itself is never used as a database target. This means the operator
- * does not need `pg_dump`/`pg_dumpall` installed on their own machine,
- * only Docker (which every other tool in this repo's release/backup
- * tooling already requires).
+ * MECHANISM: dump commands run inside a throwaway, unconfigured
+ * "toolbox" Docker container (the same `postgres:16-alpine` image
+ * `npm run release:validate`/`npm run backup:verify --restore` already
+ * use) purely for its bundled client binaries — the container itself is
+ * never used as a database target. This means the operator does not
+ * need `pg_dump`/`pg_dumpall`/the Supabase CLI installed on their own
+ * machine, only Docker.
+ *
+ * SOURCE ADAPTER: which dump commands actually run is decided by
+ * scripts/backupCreation/sourceAdapters.ts — `local-generic` (raw
+ * `pg_dump`/`pg_dumpall`, the path exercised end to end against
+ * synthetic local data in this pass) or `supabase-managed` (the
+ * Supabase CLI's own `supabase db dump`, which applies Supabase's own
+ * managed-schema/reserved-role/Storage-vector-table filtering — **not
+ * runtime-tested in this pass, see that module's own
+ * SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED note**). Auto-detected
+ * from whether a Supabase project reference is known (explicit or
+ * derived); overridable with `--source-type`.
  *
  * OUTPUT: a bundle DIRECTORY, never one ambiguous unnamed file —
  * `roles.sql`, `schema.sql`, `data.sql`, `manifest.json`. Written first
@@ -58,6 +77,8 @@ import { assertSafeBackupOutputPath, DEDICATED_LOCAL_BACKUP_DIR } from "./backup
 import { computeFileSha256 } from "./backupVerification/backupFileChecks";
 import { newInProgressManifest, writeBundleManifest, type BackupBundleManifest, type BackupBundleFileEntry } from "./backupCreation/backupBundleManifest";
 import { parseBackupCreateArgs, checkBackupCreateExecuteSafety, type ParsedBackupCreateArgs } from "./backupCreation/cliArgs";
+import { buildContainerExecInvocation } from "./backupCreation/dockerExecInvocation";
+import { resolveSourceAdapter, autoDetectSourceAdapterKind, type SourceAdapterKind } from "./backupCreation/sourceAdapters";
 
 function log(message: string): void {
   console.log(`[backup:create] ${redactConnectionStrings(message)}`);
@@ -67,10 +88,11 @@ function printDryRunInfo(args: ParsedBackupCreateArgs): void {
   log("Mode: DRY RUN / INFORMATION ONLY — no database will be contacted, no Docker container will be started.");
   log("This command creates a logical database backup BUNDLE (roles.sql, schema.sql, data.sql, manifest.json) from BACKUP_SOURCE_DATABASE_URL (preferred) or DATABASE_URL (fallback) — it never restores anything.");
   log("To actually create a backup, pass: --execute --environment <label> --output-dir <path>");
-  log('If --environment production, an additional --confirm-production flag is required — this is never inferred from the connection string.');
+  log('If --environment is "production" (any case/whitespace variant), an additional --confirm-production flag is required — this is never inferred from the connection string.');
   log(`Environment label supplied: ${args.environment ?? "(none)"}`);
   log(`Output directory supplied: ${args.outputDir ?? "(none)"}`);
   log(`Output directory must be an explicit external path, or the dedicated "${DEDICATED_LOCAL_BACKUP_DIR}/" directory inside this repository (gitignored) — no other repository-tracked path is permitted.`);
+  log(`Source adapter: auto-detected from a Supabase project reference (explicit --source-project-ref or derived from the connection string) unless --source-type overrides it. See scripts/backupCreation/sourceAdapters.ts — the "supabase-managed" adapter is NOT runtime-tested in this pass.`);
   log(`This does NOT create a backup of Supabase Storage object bytes — database backups and evidence-storage recovery are separate domains (see docs/backup-and-disaster-recovery-runbook-v1.md, Sections 9-10).`);
 }
 
@@ -97,10 +119,23 @@ async function hashFile(filePath: string): Promise<BackupBundleFileEntry> {
   return { filename: path.basename(filePath), byteSize: stats.size, sha256 };
 }
 
-/** Runs a pg_dump/pg_dumpall command inside the toolbox container, connecting OUT to the real backup source via PG* environment variables (never a connection string on the command line, never logged). */
-async function execInToolbox(toolboxContainerName: string, source: ParsedBackupSourceConnection, commandArgs: string[]): Promise<{ ok: boolean; detail: string }> {
-  const args = ["exec", "-e", `PGHOST=${source.hostname}`, "-e", `PGPORT=${source.port}`, "-e", `PGUSER=${source.username}`, "-e", `PGPASSWORD=${source.password}`, "-e", `PGDATABASE=${source.database}`, toolboxContainerName, ...commandArgs];
-  const result = await runCapture("docker", args, { timeoutMs: 300_000 });
+/**
+ * Runs a dump-stage command inside the toolbox container, connecting
+ * OUT to the real backup source. The visible `docker exec` argument
+ * list contains only PG* environment-variable NAMES, never the actual
+ * values — see dockerExecInvocation.ts's own doc comment for the
+ * bare-name-forwarding mechanism this relies on.
+ */
+async function execInToolbox(toolboxContainerName: string, source: ParsedBackupSourceConnection, commandArgs: readonly string[]): Promise<{ ok: boolean; detail: string }> {
+  const invocation = buildContainerExecInvocation(toolboxContainerName, source, commandArgs);
+  // Cast: ExecEnv is intentionally the wider Record<string, string | undefined>
+  // (see dockerExecInvocation.ts's own doc comment) so that module stays
+  // easy to unit-test with a minimal base env; NodeJS.ProcessEnv's extra
+  // required fields (e.g. NODE_ENV, from Next.js's own global
+  // augmentation) are a TypeScript-only formality here — at runtime this
+  // is always built from `...process.env` plus the PG* overrides, which
+  // already has NODE_ENV set.
+  const result = await runCapture("docker", invocation.args, { timeoutMs: 300_000, env: invocation.env as NodeJS.ProcessEnv });
   return { ok: result.code === 0, detail: redactConnectionStrings(result.stderr.trim().slice(0, 2000)) };
 }
 
@@ -119,6 +154,9 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  // From here on, use the VALIDATED, canonical values — never the raw
+  // operator-typed args.environment/args.sourceProjectRef.
+  const environment = safety.environment!;
 
   const repoRoot = path.resolve(__dirname, "..");
   const pathSafety = assertSafeBackupOutputPath(args.outputDir!, repoRoot);
@@ -141,10 +179,15 @@ async function main(): Promise<void> {
     return;
   }
   log(`Backup source (redacted): ${describeConnectionTargetSafely(source)}`);
-  log(`Environment label: ${args.environment} | pg schema: ${args.pgSchema}`);
+  log(`Environment label: ${environment} | pg schema: ${args.pgSchema}`);
+
+  const sourceProjectRef = safety.sourceProjectRef ?? deriveSupabaseProjectRefSafely(source);
+  const sourceAdapterKind: SourceAdapterKind = (args.sourceType as SourceAdapterKind | null) ?? autoDetectSourceAdapterKind(sourceProjectRef);
+  const sourceAdapter = resolveSourceAdapter(sourceAdapterKind);
+  log(`Source adapter: ${sourceAdapter.kind}${sourceAdapter.kind === "supabase-managed" ? " (NOT runtime-tested against a real Supabase CLI/project in this pass — see docs/database-backup-operations-v1.md)" : ""}`);
 
   if (!(await isDockerInstalled())) {
-    log("Docker is not installed — required to run pg_dump/pg_dumpall inside a throwaway toolbox container.");
+    log("Docker is not installed — required to run dump commands inside a throwaway toolbox container.");
     process.exitCode = 1;
     return;
   }
@@ -162,14 +205,13 @@ async function main(): Promise<void> {
   const tmpDirPath = path.join(outputRoot, tmpDirName);
   await fs.mkdir(tmpDirPath, { recursive: true });
 
-  const sourceProjectRef = args.sourceProjectRef ?? deriveSupabaseProjectRefSafely(source);
   const toolVersion = await readToolVersion(repoRoot);
   const repositoryCommit = await readRepositoryCommit();
 
   let manifest: BackupBundleManifest = newInProgressManifest({
     backupId,
     createdAt: now,
-    sourceEnvironmentLabel: args.environment!,
+    sourceEnvironmentLabel: environment,
     sourceProjectRef,
     toolVersion,
     repositoryCommit,
@@ -179,10 +221,10 @@ async function main(): Promise<void> {
   const runId = crypto.randomBytes(6).toString("hex");
   const toolboxContainerName = `tether-backup-create-toolbox-${runId}`;
   // The toolbox container's own database/credentials are never used —
-  // only its bundled pg_dump/pg_dumpall binaries, invoked via `docker
-  // exec` connecting OUT to the real backup source. A throwaway
-  // password is still required by the postgres:16-alpine image's own
-  // startup, so a random one is generated and immediately irrelevant.
+  // only its bundled client binaries, invoked via `docker exec`
+  // connecting OUT to the real backup source. A throwaway password is
+  // still required by the postgres:16-alpine image's own startup, so a
+  // random one is generated and immediately irrelevant.
   const toolboxDbName = `unused_toolbox_${runId}`;
   const toolboxUser = `toolbox_user_${runId}`;
   const toolboxPassword = crypto.randomBytes(24).toString("base64url");
@@ -200,31 +242,26 @@ async function main(): Promise<void> {
     const toolboxPort = await findFreeLocalPort();
     await startDisposablePostgresContainer({ containerName: toolboxContainerName, runId, databaseName: toolboxDbName, username: toolboxUser, password: toolboxPassword, hostPort: toolboxPort });
 
-    const rolesResult = await execInToolbox(toolboxContainerName, source, ["pg_dumpall", "--roles-only", "-f", "/tmp/roles.sql"]);
+    const rolesCommand = sourceAdapter.rolesDumpCommand("/tmp/roles.sql");
+    const rolesResult = await execInToolbox(toolboxContainerName, source, rolesCommand.commandArgs);
     if (!rolesResult.ok) {
-      await fail(`pg_dumpall --roles-only failed: ${rolesResult.detail}`);
+      await fail(`Roles dump (${sourceAdapter.kind}) failed: ${rolesResult.detail}`);
       process.exitCode = 1;
       return;
     }
-    // --clean --if-exists: pg_dump's schema-only output for a named schema
-    // (e.g. "public") includes a CREATE SCHEMA statement — every fresh
-    // Postgres database already has its own "public" schema, so restoring
-    // this dump into a fresh/disposable target would otherwise fail with
-    // "schema already exists" on that one line. --clean/--if-exists makes
-    // the dump idempotent (DROP IF EXISTS ... CASCADE before each CREATE)
-    // against both a fresh target and one that already has prior content
-    // from an earlier restore attempt — the correct behaviour for a
-    // disaster-recovery restore, which is expected to replace whatever is
-    // at the target, not merge with it.
-    const schemaResult = await execInToolbox(toolboxContainerName, source, ["pg_dump", "--schema-only", "--schema", args.pgSchema, "--clean", "--if-exists", "-f", "/tmp/schema.sql"]);
+
+    const schemaCommand = sourceAdapter.schemaDumpCommand(args.pgSchema, "/tmp/schema.sql");
+    const schemaResult = await execInToolbox(toolboxContainerName, source, schemaCommand.commandArgs);
     if (!schemaResult.ok) {
-      await fail(`pg_dump --schema-only failed: ${schemaResult.detail}`);
+      await fail(`Schema dump (${sourceAdapter.kind}) failed: ${schemaResult.detail}`);
       process.exitCode = 1;
       return;
     }
-    const dataResult = await execInToolbox(toolboxContainerName, source, ["pg_dump", "--data-only", "--schema", args.pgSchema, "-f", "/tmp/data.sql"]);
+
+    const dataCommand = sourceAdapter.dataDumpCommand(args.pgSchema, "/tmp/data.sql");
+    const dataResult = await execInToolbox(toolboxContainerName, source, dataCommand.commandArgs);
     if (!dataResult.ok) {
-      await fail(`pg_dump --data-only failed: ${dataResult.detail}`);
+      await fail(`Data dump (${sourceAdapter.kind}) failed: ${dataResult.detail}`);
       process.exitCode = 1;
       return;
     }

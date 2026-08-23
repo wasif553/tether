@@ -153,3 +153,46 @@ describe("no secret-looking values appear in the new backup-creation source or d
     });
   }
 });
+
+describe("[TETHER_DATABASE_BACKUP_OPERATIONALISATION_FINAL_HARDENING] documentation reflects the actual hardened mechanism", () => {
+  it("documents that the source password is never in the host subprocess argv, and describes the bare-name -e forwarding mechanism", () => {
+    expect(operationsDocFlat).toMatch(/Source password is never in this process's own subprocess argument\s+list/i);
+    expect(operationsDocFlat).toMatch(/docker exec -e PGPASSWORD \.\.\.` \(the bare variable\s+NAME, no `=value`\)/i);
+  });
+
+  it("documents Production-confirmation casing/whitespace normalisation", () => {
+    expect(operationsDocFlat).toMatch(/"Production", "PRODUCTION", " production ",\s+"production " all normalise \(trim \+\s+lowercase\) to the one canonical label "production"/i);
+  });
+
+  it("documents the local-generic vs supabase-managed source-adapter split and the deferred Supabase runtime-test status", () => {
+    expect(operationsDoc).toMatch(/## Source adapters — local\/generic vs\. Supabase-managed/);
+    expect(operationsDocFlat).toMatch(/\*\*`SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`\*\*/);
+  });
+
+  it("documents that raw pg_dumpall is not used for the Supabase-managed path", () => {
+    expect(operationsDocFlat).toMatch(/a raw, unfiltered `pg_dumpall --roles-only` against a real\s+Supabase project is not equivalent to `supabase db dump --role-only`\s+and must never be used as the Production Supabase path/i);
+  });
+
+  it("documents --use-copy for the Supabase-managed data dump", () => {
+    expect(operationsDocFlat).toMatch(/supabase db dump --data-only\s+--use-copy/);
+  });
+
+  it("documents the manifest metadata validation correction (allowlist, not type-level, non-secret guarantee)", () => {
+    expect(operationsDocFlat).toMatch(/This\s+is enforced by validation, not merely by the field types being\s+`string`/i);
+  });
+
+  it("the manifest module's own doc comment reflects the same correction", () => {
+    const manifestSource = read("scripts/backupCreation/backupBundleManifest.ts");
+    expect(manifestSource).toMatch(/This module's own types do NOT, by themselves, prevent a secret/i);
+    expect(manifestSource).toMatch(/from ending up in this manifest/i);
+    expect(manifestSource).toMatch(/validated against a strict ALLOWLIST/i);
+  });
+});
+
+describe("[TETHER_DATABASE_BACKUP_OPERATIONALISATION_FINAL_HARDENING] no hand-rolled Supabase reserved-role list", () => {
+  it("the source adapter module explicitly states it does not hand-roll reserved-role/schema exclusions", () => {
+    const sourceAdaptersSource = read("scripts/backupCreation/sourceAdapters.ts");
+    expect(sourceAdaptersSource).toMatch(/This module deliberately does NOT hand-roll a/i);
+    expect(sourceAdaptersSource).toMatch(/Supabase-reserved roles or internal schemas to strip/i);
+  });
+});

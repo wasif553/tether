@@ -53,9 +53,14 @@ never Production.
 Running `npm run backup:create` with **no** `--execute` flag is always a
 **DRY RUN / INFORMATION ONLY** — it prints what would happen, contacts
 no database, and starts no Docker container. `--execute` additionally
-requires `--environment <label>` and `--output-dir <path>` explicitly —
-there is no default environment and no default output location.
-**`--environment production` additionally requires a separate, explicit
+requires a VALID `--environment <label>` and `--output-dir <path>`
+explicitly — there is no default environment and no default output
+location, and an empty/whitespace-only/malformed label is rejected
+before proceeding, not silently treated as absent. **`--environment`
+"production", in ANY case or whitespace variant — "Production",
+"PRODUCTION", " production ", "production " all normalise (trim +
+lowercase) to the one canonical label "production" before this
+decision is made — additionally requires a separate, explicit
 `--confirm-production` flag** — this is never inferred from the
 connection string; a `local-test`/`staging`/other non-"production"
 label is trusted as the operator's own deliberate statement.
@@ -73,19 +78,100 @@ error text is redacted before being logged or stored (see
 
 ## Mechanism
 
-`pg_dump`/`pg_dumpall` run inside a throwaway, unconfigured "toolbox"
-Docker container (the same `postgres:16-alpine` image
-`npm run release:validate` and `npm run backup:verify --restore` already
-use) purely for its bundled client binaries — the toolbox container
-itself is never used as a database target, and is unconditionally
-removed when the run finishes, succeeds or fails. This means the
-operator does not need `pg_dump`/`pg_dumpall` installed locally, only
-Docker.
+Dump commands run inside a throwaway, unconfigured "toolbox" Docker
+container purely for its bundled client binaries — the toolbox
+container itself is never used as a database target, and is
+unconditionally removed when the run finishes, succeeds or fails. This
+means the operator does not need any Postgres/Supabase client tooling
+installed locally, only Docker.
+
+**Source password is never in this process's own subprocess argument
+list.** `docker exec -e PGPASSWORD=<value> ...` would put the real
+source password directly into the host `docker` process's own
+argument vector — visible to any other process on the same machine via
+an ordinary process listing, without needing elevated privileges. This
+tool instead uses `docker exec -e PGPASSWORD ...` (the bare variable
+NAME, no `=value`) — real, documented Docker CLI behaviour that
+forwards the CURRENT VALUE of `PGPASSWORD` from the `docker` client
+process's OWN environment into the container. The actual value is
+handed to the spawned `docker` process only via its environment
+(`child_process.spawn`'s own `env` option), never as an argv token —
+see `scripts/backupCreation/dockerExecInvocation.ts`.
+
+## Source adapters — local/generic vs. Supabase-managed
+
+Which dump commands actually run is decided by
+`scripts/backupCreation/sourceAdapters.ts`, auto-selected from whether
+a Supabase project reference is known (explicit `--source-project-ref`
+or safely derived from the connection string), overridable with
+`--source-type local-generic|supabase-managed`:
+
+- **`local-generic`** — raw `pg_dumpall --roles-only` /
+  `pg_dump --schema-only --schema <name> --clean --if-exists` /
+  `pg_dump --data-only --schema <name>`. Appropriate for a generic or
+  local Postgres source. **This is the path exercised end to end
+  against synthetic local data in this pass** (see "Current status"
+  below).
+- **`supabase-managed`** — the Supabase CLI's own `supabase db dump
+  --role-only` / `supabase db dump` / `supabase db dump --data-only
+  --use-copy`, which applies Supabase's own managed-schema exclusions
+  and reserved-role filtering internally. **This tool deliberately does
+  not hand-roll a list of Supabase-reserved roles or internal schemas
+  to strip** — that list belongs to Supabase to define and maintain,
+  and a raw, unfiltered `pg_dumpall --roles-only` against a real
+  Supabase project is not equivalent to `supabase db dump --role-only`
+  and must never be used as the Production Supabase path. This adapter
+  additionally passes `--exclude-table 'storage.buckets_vectors'
+  --exclude-table 'storage.vector_indexes'` per current Supabase
+  guidance for Storage vector tables — **not verified against a real
+  Supabase CLI in this pass**, listed as a single, easy-to-adjust
+  constant (`SUPABASE_VECTOR_TABLE_EXCLUSIONS`) specifically so it can
+  be corrected quickly once verified. Excluding these tables does not
+  change the separate, unchanged fact that Storage object *bytes* are
+  never covered by any database backup — see "What this tooling does
+  NOT do" below.
+
+  The Supabase CLI's `--db-url` flag requires the connection string as
+  a literal argument — there is no environment-variable-based
+  alternative the way `pg_dump`/`psql` have. To avoid that URL (with
+  its embedded password) appearing as its own discrete token in the
+  HOST's own `docker exec` argv, the command run inside the toolbox
+  container is a fixed, static shell string (`sh -c '...'`, itself
+  containing no secret — only `$PGUSER`/`$PGPASSWORD`/etc. variable
+  *references*), with those references expanded by the shell running
+  *inside* the container from its own environment at execution time.
+  This moves the exposure from the host's own process list into a
+  short-lived, single-purpose container's internal process list — not
+  a zero-risk design, but the best available given the Supabase CLI's
+  own requirement.
+
+  **`SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED`** — this adapter's
+  command construction is unit-tested
+  (`scripts/backupCreation/sourceAdapters.test.ts`), but has never been
+  executed against a real Supabase CLI or a real Supabase project in
+  this pass. No Supabase CLI is available in this development
+  environment, and no Production contact is permitted. Do not treat
+  this pass's successful `local-generic` synthetic exercise as proof
+  that the `supabase-managed` adapter works against a real managed
+  project — it proves bundle mechanics (manifest, hashing, restore
+  rehearsal, atomicity), not Supabase-specific dump semantics.
 
 ## Manifest contents
 
-`manifest.json` contains only non-secret operational metadata — there
-is no field in its type that could hold a credential, by construction:
+`manifest.json` contains only non-secret operational metadata. **This
+is enforced by validation, not merely by the field types being
+`string`** — `--environment` and `--source-project-ref` are each
+validated against a strict allowlist pattern
+(`scripts/backupCreation/manifestMetadataValidation.ts`) before
+`--execute` is permitted to proceed at all; a malformed value (a
+connection string pasted into either flag, embedded whitespace,
+control characters, an oversized value) is rejected outright and never
+reaches manifest creation. `--environment production`, in any case or
+whitespace variant ("Production", "PRODUCTION", " production ",
+"production "), normalises to the one canonical stored label
+`"production"` — this is also the exact form the
+`--confirm-production` gate checks against, so the two can never
+silently disagree:
 
 - manifest schema version
 - backup ID (matches the bundle's own timestamp-based directory name)
@@ -227,8 +313,9 @@ approves a cadence.
 
 | Item | Status |
 |---|---|
-| Database backup **creation** tooling | **IMPLEMENTED AND LOCALLY VERIFIED** — exercised end to end against a disposable, synthetic local Postgres database only (see `docs/backup-and-disaster-recovery-runbook-v1.md`'s updated Section 8 for the exact local test result) |
+| Database backup **creation** tooling (`local-generic` adapter) | **IMPLEMENTED AND LOCALLY VERIFIED** — exercised end to end against a disposable, synthetic local Postgres database, including the hardened source-password handling and Production-confirmation casing gate (see `docs/backup-and-disaster-recovery-runbook-v1.md`'s updated Section 8 for the exact local test result) |
+| `supabase-managed` adapter | **SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED** — command construction is unit-tested; never executed against a real Supabase CLI/project |
 | A real **Production** backup | **NOT YET EXECUTED / VERIFIED** — this tool has never been run with `--environment production --confirm-production` against a real Production database |
 | Off-project copy destination | **NOT YET SELECTED / VERIFIED** — PRE-PILOT OFF-PROJECT COPY GATE: OPEN |
 | Backup cadence | **NOT YET APPROVED** — PRE-PILOT BACKUP CADENCE DECISION: OPEN |
-| PRE-PILOT BACKUP GATE (overall) | **OPEN** — the tooling gap is closed; the operational gap (a real, verified, off-project, restore-tested Production backup) is not |
+| PRE-PILOT BACKUP GATE (overall) | **OPEN** — the tooling gap is closed for the `local-generic` path; the `supabase-managed` path is untested at runtime; the operational gap (a real, verified, off-project, restore-tested Production backup) is not closed either way |

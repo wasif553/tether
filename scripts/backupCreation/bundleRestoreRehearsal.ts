@@ -21,6 +21,7 @@ import { requireDisposableDatabaseUrl } from "../releaseValidation/dbSafetyGuard
 import { runCapture } from "../releaseValidation/processUtil";
 import { runSanityChecks, type SanityCheckResult } from "../backupVerification/restoreRehearsal";
 import { redactConnectionStrings } from "./connectionRedaction";
+import { buildDisposablePasswordExecInvocation } from "./dockerExecInvocation";
 
 export type BundleRestoreRehearsalResult = {
   restoreSucceeded: boolean;
@@ -32,8 +33,14 @@ export type BundleRestoreRehearsalResult = {
 const CONTAINER_BUNDLE_DIR = "/tmp/bundle-restore-rehearsal";
 
 async function restoreSqlFile(containerName: string, username: string, password: string, databaseName: string, containerFilePath: string, options: { stopOnError: boolean }): Promise<{ ok: boolean; detail: string }> {
-  const args = ["exec", "-e", `PGPASSWORD=${password}`, containerName, "psql", "-U", username, "-d", databaseName, "-f", containerFilePath, "-v", `ON_ERROR_STOP=${options.stopOnError ? "1" : "0"}`];
-  const result = await runCapture("docker", args, { timeoutMs: 120_000 });
+  // Username/database are plain (non-secret) psql arguments; only the
+  // password avoids the host process's own argv — see
+  // dockerExecInvocation.ts's own doc comment for why.
+  const invocation = buildDisposablePasswordExecInvocation(containerName, password, ["psql", "-U", username, "-d", databaseName, "-f", containerFilePath, "-v", `ON_ERROR_STOP=${options.stopOnError ? "1" : "0"}`]);
+  // Cast: see create-database-backup.ts's equivalent comment —
+  // ExecEnv's wider type is a TypeScript-only formality here, not a
+  // runtime concern (this is always ...process.env plus one override).
+  const result = await runCapture("docker", invocation.args, { timeoutMs: 120_000, env: invocation.env as NodeJS.ProcessEnv });
   return { ok: result.code === 0, detail: redactConnectionStrings(result.stderr.trim().slice(0, 2000)) };
 }
 
