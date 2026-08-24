@@ -31,20 +31,47 @@ export type AuditResult = {
     byCategory: Record<string, number>;
     activeSecretsWithoutRecoveryClass: number;
     /**
-     * These two numbers can legitimately differ: a handful of register
-     * entries group multiple INDEPENDENTLY-toggleable env var names under
-     * one entry via `aliasNames` for register brevity (e.g.
+     * CURRENT-STATE TOTALS ONLY — how many register entries currently
+     * expect `.env.example` presence, and how many distinct env var NAMES
+     * that represents right now. These are NOT a historical "added" or
+     * "drift" count: they describe today's register regardless of
+     * whether `.env.example` actually satisfies it (see
+     * `templateMissingEntryCount`/`templateMissingNameCount` below for
+     * that). This audit has no access to Git history and cannot recompute
+     * what changed on any particular branch — a historical reconciliation
+     * figure (e.g. "13 entries / 16 names added on this branch") belongs
+     * in a changelog entry, derived once from that branch's own
+     * baseline-vs-feature diff, never re-derived here after the fact.
+     *
+     * The two numbers can legitimately differ from each other: a handful
+     * of register entries group multiple INDEPENDENTLY-toggleable env var
+     * names under one entry via `aliasNames` for register brevity (e.g.
      * `TETHER_BLOCK_DEBUG_TOOLS` groups 4 separate lockdown-toggle names
-     * — see that entry's own `notes` field) — this is a different case
-     * from a true multi-representation fallback group (e.g. the LTI
+     * — see that entry's own `notes` field) — a different case from a
+     * true multi-representation fallback group (e.g. the LTI
      * `*_B64`/`*_PATH`/raw key forms, where only ONE of the three is ever
-     * actually set). Report BOTH numbers rather than picking one, so a
-     * "how many names does .env.example actually need" question is
-     * always answered precisely instead of by a hand-counted prose
-     * number that can silently drift from the real register.
+     * actually set).
      */
     templatePresenceExpectedEntryCount: number;
     templatePresenceExpectedNameCount: number;
+    /**
+     * CURRENT-STATE DRIFT — how many `templatePresenceExpected` entries
+     * (and, per-entry, how many of their represented names) are NOT
+     * currently satisfied by `.env.example`, right now, on this exact
+     * register/template pair. Unlike the totals above, these numbers are
+     * expected to reach `0`/`0` once `.env.example` is fully reconciled,
+     * and are exactly what should be re-checked on every future run of
+     * `npm run config:recovery-audit` — this is the genuinely ongoing
+     * drift metric, computed fresh from current state every time, never
+     * from Git history. `templateMissingNameCount` sums, over only the
+     * entries that are CURRENTLY missing (i.e. none of their name/alias
+     * forms are present), how many total name-slots (`1 +
+     * aliasNames.length`) each represents — it does not independently
+     * re-evaluate an alias whose SIBLING name already satisfies that same
+     * entry's own any-of-these-names presence check.
+     */
+    templateMissingEntryCount: number;
+    templateMissingNameCount: number;
   };
 };
 
@@ -97,6 +124,8 @@ export function auditConfigurationRecovery(params: { register: readonly ConfigRe
 
   const byCategory: Record<string, number> = {};
   let activeSecretsWithoutRecoveryClass = 0;
+  let templateMissingEntryCount = 0;
+  let templateMissingNameCount = 0;
 
   for (const entry of params.register) {
     byCategory[entry.category] = (byCategory[entry.category] ?? 0) + 1;
@@ -106,6 +135,8 @@ export function auditConfigurationRecovery(params: { register: readonly ConfigRe
     const anyPresentInTemplate = allNamesForEntry.some((n) => envExampleNames.has(n));
     if (entry.templatePresenceExpected && !anyPresentInTemplate) {
       findings.push({ code: "MISSING_FROM_ENV_EXAMPLE", severity: "ERROR", entryName: entry.name, message: `"${entry.name}" (or one of its documented alias forms) is expected in .env.example but was not found.` });
+      templateMissingEntryCount += 1;
+      templateMissingNameCount += allNamesForEntry.length;
     }
     if (!entry.templatePresenceExpected && entry.category === "FUTURE_NOT_PROVISIONED" && anyPresentInTemplate) {
       findings.push({ code: "FUTURE_ITEM_PRESENT_IN_TEMPLATE", severity: "ERROR", entryName: entry.name, message: `"${entry.name}" is FUTURE_NOT_PROVISIONED but appears in .env.example — a not-yet-provisioned item must not be added to the template merely because its architecture exists.` });
@@ -156,6 +187,6 @@ export function auditConfigurationRecovery(params: { register: readonly ConfigRe
   return {
     findings,
     passed,
-    summary: { totalEntries: params.register.length, byCategory, activeSecretsWithoutRecoveryClass, templatePresenceExpectedEntryCount, templatePresenceExpectedNameCount },
+    summary: { totalEntries: params.register.length, byCategory, activeSecretsWithoutRecoveryClass, templatePresenceExpectedEntryCount, templatePresenceExpectedNameCount, templateMissingEntryCount, templateMissingNameCount },
   };
 }

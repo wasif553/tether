@@ -78,15 +78,24 @@ describe("[1] register entries are structurally valid against the real register"
   });
 });
 
-describe("[ISSUE 3] template drift counts are computed, never hand-maintained", () => {
-  it("summary distinguishes entry count from distinct-name count when an entry groups multiple independently-toggleable names via aliasNames", () => {
+describe("[1][2] current-state TOTAL metrics — templatePresenceExpectedEntryCount/NameCount describe TODAY's register, regardless of .env.example's actual state", () => {
+  it("[1] templatePresenceExpectedEntryCount counts every templatePresenceExpected entry, even against an EMPTY template", () => {
+    const register = [baseEntry({ name: "SOLO_TOGGLE", templatePresenceExpected: true }), baseEntry({ name: "NOT_EXPECTED", templatePresenceExpected: false })];
+    const result = auditConfigurationRecovery({ register, envExampleContent: "" });
+    expect(result.summary.templatePresenceExpectedEntryCount).toBe(1);
+  });
+
+  it("[2] templatePresenceExpectedNameCount counts every represented name (entry + aliases) for templatePresenceExpected entries, even against an EMPTY template", () => {
     const register = [baseEntry({ name: "GROUPED_TOGGLE_A", aliasNames: ["GROUPED_TOGGLE_B", "GROUPED_TOGGLE_C"], templatePresenceExpected: true }), baseEntry({ name: "SOLO_TOGGLE", templatePresenceExpected: true })];
-    const result = auditConfigurationRecovery({ register, envExampleContent: "GROUPED_TOGGLE_A=\nGROUPED_TOGGLE_B=\nGROUPED_TOGGLE_C=\nSOLO_TOGGLE=\n" });
+    const result = auditConfigurationRecovery({ register, envExampleContent: "" });
+    // Both totals are unchanged by an empty template — they describe the
+    // register's own current expectations, not .env.example's current
+    // satisfaction of them (that is templateMissing*Count, tested below).
     expect(result.summary.templatePresenceExpectedEntryCount).toBe(2);
     expect(result.summary.templatePresenceExpectedNameCount).toBe(4);
   });
 
-  it("the real register's own computed counts: entry count and name count differ by exactly the number of extra grouped-alias names among templatePresenceExpected entries", () => {
+  it("the real register's own current totals: entry count and name count differ by exactly the number of extra grouped-alias names among templatePresenceExpected entries", () => {
     const expectedEntries = CONFIGURATION_RECOVERY_REGISTER.filter((e) => e.templatePresenceExpected);
     const expectedNameCount = expectedEntries.reduce((sum, e) => sum + 1 + e.aliasNames.length, 0);
     const result = auditConfigurationRecovery({ register: CONFIGURATION_RECOVERY_REGISTER, envExampleContent: "" });
@@ -97,6 +106,47 @@ describe("[ISSUE 3] template drift counts are computed, never hand-maintained", 
     // alone contributes 3 extra names (4 total) beyond its own 1 entry.
     const blockToggles = expectedEntries.find((e) => e.name === "TETHER_BLOCK_DEBUG_TOOLS");
     expect(blockToggles?.aliasNames.length).toBe(3);
+  });
+
+  it("[6] audit output never describes these totals as historical 'added' or 'drift' counts", async () => {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const auditSource = await fs.readFile(path.join(__dirname, "audit.ts"), "utf8");
+    const cliSource = await fs.readFile(path.join(__dirname, "..", "audit-configuration-recovery.ts"), "utf8");
+    // The CLI's own log lines for the TOTAL metrics must say "current
+    // total", never "added"/"missing"/"drift" (those words belong only
+    // to the separate templateMissing*Count lines, checked elsewhere).
+    expect(cliSource).toMatch(/Expected template entries \(current total\)/);
+    expect(cliSource).toMatch(/Expected template names \(current total\)/);
+    expect(auditSource).toMatch(/CURRENT-STATE TOTALS ONLY/);
+    expect(auditSource).toMatch(/NOT a historical "added" or/);
+  });
+});
+
+describe("[3][4][5] current-state DRIFT metrics — templateMissingEntryCount/NameCount, computed fresh from current state, never Git history", () => {
+  it("[3][4] both reach 0 against the real, fully-reconciled .env.example", async () => {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const repoRoot = path.resolve(__dirname, "..", "..");
+    const envExampleContent = await fs.readFile(path.join(repoRoot, ".env.example"), "utf8");
+    const result = auditConfigurationRecovery({ register: CONFIGURATION_RECOVERY_REGISTER, envExampleContent });
+    expect(result.summary.templateMissingEntryCount).toBe(0);
+    expect(result.summary.templateMissingNameCount).toBe(0);
+  });
+
+  it("[5] a synthetic missing entry increments both current missing counts", () => {
+    const register = [baseEntry({ name: "PRESENT_ONE", templatePresenceExpected: true }), baseEntry({ name: "MISSING_ONE", aliasNames: ["MISSING_ONE_ALT"], templatePresenceExpected: true })];
+    const result = auditConfigurationRecovery({ register, envExampleContent: "PRESENT_ONE=\n" });
+    expect(result.summary.templateMissingEntryCount).toBe(1);
+    // MISSING_ONE represents 2 names (itself + its one alias) — both count as missing since neither is present.
+    expect(result.summary.templateMissingNameCount).toBe(2);
+  });
+
+  it("a fully-satisfied template (including via an alias, not just the canonical name) reports zero missing", () => {
+    const register = [baseEntry({ name: "PRESENT_VIA_ALIAS", aliasNames: ["PRESENT_VIA_ALIAS_ALT"], templatePresenceExpected: true })];
+    const result = auditConfigurationRecovery({ register, envExampleContent: "PRESENT_VIA_ALIAS_ALT=\n" });
+    expect(result.summary.templateMissingEntryCount).toBe(0);
+    expect(result.summary.templateMissingNameCount).toBe(0);
   });
 });
 

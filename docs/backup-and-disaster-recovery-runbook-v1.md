@@ -580,10 +580,16 @@ values), and the accompanying documentation package
 `docs/configuration-reconstruction-checklist-v1.md`,
 `docs/configuration-recovery-test-record-v1.md`,
 `docs/configuration-loss-dr-exercise-checklist-v1.md`) all now exist.
-`.env.example` was reconciled against the register — **13 register
-entries, representing 16 distinct environment-variable NAMES**, that
-were genuinely active/currently-read but missing from the template were
-added (`EVIDENCE_RETENTION_DAYS`, `TETHER_CLIENT_OPTIONAL_ENABLED`,
+`.env.example` was reconciled against the register. **Recorded result of
+this implementation pass** (a one-time baseline-vs-feature comparison at
+the time this branch was built — not a figure `npm run
+config:recovery-audit` recomputes on demand; see that tool's own
+`templateMissingEntryCount`/`templateMissingNameCount` fields below for
+the genuinely ongoing, current-state equivalent, which read `0`/`0` once
+reconciled): **13 register entries, representing 16 distinct
+environment-variable NAMES**, that were genuinely active/currently-read
+but missing from the template at that time were added
+(`EVIDENCE_RETENTION_DAYS`, `TETHER_CLIENT_OPTIONAL_ENABLED`,
 `TETHER_MOCK_SECURE_CLIENT_ENABLED` and its institution allowlist,
 `TETHER_DIAGNOSTIC_LOGGING_ENABLED`,
 `TETHER_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS`, the four
@@ -598,6 +604,17 @@ values only, verified by `register.test.ts`'s own secret-leak tests. The
 `FUTURE_NOT_PROVISIONED` (Section 9 above) —
 `npm run config:recovery-audit` actively fails if that ever happens by
 mistake.
+
+**Ongoing, current-state coverage** (as opposed to the one-time
+historical figure above) is what `npm run config:recovery-audit` itself
+reports on every run, computed fresh from the register and
+`.env.example` as they exist right now — never from Git history:
+register entries expecting template presence (current total), the
+distinct names that represents (current total), and how many of each are
+currently missing. As of this pass: 62 entries / 71 names expected,
+**0 entries / 0 names missing** — the reconciliation above is fully
+satisfied, and this is the number future changes should keep at zero,
+not the historical 13/16 above.
 
 **`CONFIGURATION RECOVERY SYNTHETIC EXERCISE: PASS`.** The authoritative
 exercise ran entirely with synthetic values generated fresh for the
@@ -1415,3 +1432,4 @@ marked complete:
 | v1.6 | 2026-08-24 | Section 8 updated: the bundle-restore-rehearsal target was corrected from Postgres 16 to Postgres 17, resolving the `SET transaction_timeout = 0;` restore failure previously observed on `supabase-managed`-produced bundles (Supabase CLI's own internal `pg_dump` is version 17.x). `scripts/releaseValidation/docker.ts`'s shared disposable-container helper gained a narrow, optional `image` parameter (default unchanged: `postgres:16-alpine`, used by `release:validate` and the existing single-file `backup:verify --restore`); `scripts/backupCreation/bundleRestoreRehearsal.ts` is the one caller that requests `postgres:17-alpine`. Re-verified end to end: both a `local-generic` bundle (2 tables/4 rows) and a `supabase-managed` bundle (1 table/2 rows, `data.sql` confirmed still containing `SET transaction_timeout = 0;`) restored successfully into the corrected target — `overallPassed: true` for both. Tamper detection re-confirmed on a copy of the bundle; the original bundle's SHA-256 was reconfirmed unchanged. No dump content was rewritten, sanitised, or stripped to achieve compatibility — verification still runs against the original hashed bytes — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
 | v1.7 | 2026-08-24 | Section 13 rewritten: replaced the small hand-maintained Configuration Recovery Register table with a full Configuration & Secrets Recovery v1 package — a machine-readable, value-free canonical register (`scripts/configurationRecovery/register.ts`, 75 entries, built from actual `process.env` read sites), a repository/static-analysis-only audit tool (`npm run config:recovery-audit`), and four new documents (`docs/configuration-and-secrets-recovery-v1.md`, `docs/configuration-reconstruction-checklist-v1.md`, `docs/configuration-recovery-test-record-v1.md`, `docs/configuration-loss-dr-exercise-checklist-v1.md`). `.env.example` reconciled — 13 genuinely active, currently-read variables that were missing were added (names/safe values only); the `ARCHIVE_*` group deliberately left out (`FUTURE_NOT_PROVISIONED`). `CONFIGURATION_RECOVERY_SYNTHETIC_EXERCISE: PASS` — a real disposable-Postgres `prisma db push` plus an isolated in-process validation against this repository's own real readiness/HMAC code, using only synthetic values (one earlier `next dev`-based attempt auto-loaded the repository's real, pre-existing `.env.local` for unset variable names before that behaviour was noticed and the attempt was immediately aborted — no value from it was inspected, printed, copied, committed, or recorded anywhere; the isolated-process design that produced the actual `PASS` result never loads any file-based configuration at all). Remains `AUTHORITATIVE SECRET RECOVERY SOURCE: NOT YET SELECTED` and `PRE-PILOT CONFIGURATION RECOVERY GATE: OPEN` — see `docs/configuration-and-secrets-recovery-v1.md` (`operations/configuration-secrets-recovery-v1` branch). No Production secret values read, no Production contact, no credentials rotated/revoked, no cloud resources/spend, no schema/migration, no branding/native/release-metadata change. |
 | v1.8 | 2026-08-24 | Section 13 corrected on three points, none changing what was actually built: (1) `.env.example`'s own comments for `EXAM_BINDING_HMAC_SECRET`/`NETWORK_EVIDENCE_SALT` previously described a stale "random per-process fallback" behaviour current code does not have (both now FAIL CLOSED — `register.test.ts` locks this permanently); (2) the v1.7 row's "never any real `.env`/`.env.local` content" phrasing overstated the synthetic exercise — the aborted `next dev` attempt DID auto-load the repository's real `.env.local` for unset names before that was noticed and the attempt was killed, with no value from it ever inspected/printed/copied/committed/recorded; the wording here and in Section 13's own prose now states this precisely instead of overstating or concealing it; (3) the "13 variables missing from `.env.example`" figure is now stated as what it actually is — 13 register ENTRIES representing 16 distinct env var NAMES (one entry, `TETHER_BLOCK_DEBUG_TOOLS`, groups 4 independently-toggleable names) — and the audit tool (`scripts/configurationRecovery/audit.ts`) now exposes both counts (`templatePresenceExpectedEntryCount`/`templatePresenceExpectedNameCount`) permanently rather than requiring a hand-recount. No runtime code changed. See `docs/configuration-and-secrets-recovery-v1.md` (`operations/configuration-secrets-recovery-v1` branch). No Production contact, no credential rotation, no cloud resources/spend, no schema/migration, no branding/native/release-metadata change. |
+| v1.9 | 2026-08-24 | Corrects v1.8's own overstatement: `templatePresenceExpectedEntryCount`/`templatePresenceExpectedNameCount` (`scripts/configurationRecovery/audit.ts`) count TODAY's register expectations regardless of `.env.example`'s actual state — they were NOT, and are not now, a recomputation of the historical 13-entry/16-name branch reconciliation (this audit has no access to Git history and cannot recompute what changed on a merged branch). That 13/16 figure remains documented in Section 13 above labelled explicitly as a one-time recorded result of this implementation pass, not an ongoing audit output. Two genuinely new, genuinely ongoing current-state metrics were added instead — `templateMissingEntryCount`/`templateMissingNameCount`, computed fresh from the current register vs. current `.env.example` on every run, both `0` once reconciled (confirmed: `0`/`0` against this branch's own `.env.example`) — these are what should be watched for regression going forward, not the historical figure. CLI output relabelled accordingly ("current total" / "current" missing counts). No runtime code changed, no register entry reclassified. See `docs/configuration-and-secrets-recovery-v1.md` (`operations/configuration-secrets-recovery-v1` branch). No Production contact, no env-file read, no credential action, no schema/migration, no branding/native/release-metadata change. |

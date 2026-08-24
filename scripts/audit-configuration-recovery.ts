@@ -37,7 +37,10 @@ async function main(): Promise<void> {
   });
 
   log(`Register entries: ${result.summary.totalEntries}`);
-  log(`Entries expecting .env.example presence: ${result.summary.templatePresenceExpectedEntryCount} (representing ${result.summary.templatePresenceExpectedNameCount} distinct env var NAMES, since a few entries group multiple independently-toggleable names via aliasNames — see AuditResult's own doc comment)`);
+  log(`Expected template entries (current total): ${result.summary.templatePresenceExpectedEntryCount}`);
+  log(`Expected template names (current total): ${result.summary.templatePresenceExpectedNameCount} (a few entries represent more than one independently-toggleable name via aliasNames — see AuditResult's own doc comment)`);
+  log(`Missing expected template entries (current): ${result.summary.templateMissingEntryCount}`);
+  log(`Missing expected template names (current): ${result.summary.templateMissingNameCount}`);
   log("By category:");
   for (const [category, count] of Object.entries(result.summary.byCategory).sort()) {
     log(`  ${category}: ${count}`);
