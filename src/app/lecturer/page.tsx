@@ -5,7 +5,6 @@ import Link from "next/link";
 import {
   lecturerAvailabilityStatus,
   lecturerDashboardGroup,
-  type LecturerAvailabilityStatus,
 } from "@/lib/lecturerDashboardGrouping";
 import { LecturerPageHeader, PrimaryButton, SecondaryLinkButton } from "@/components/lecturer/LecturerPageHeader";
 import { MetricCard } from "@/components/lecturer/MetricCard";
@@ -177,7 +176,7 @@ export default function LecturerDashboard() {
   }, [exams]);
 
   return (
-    <div className="mx-auto max-w-7xl">
+    <div className="mx-auto max-w-none">
       <LecturerPageHeader
         title="Lecturer Dashboard"
         description="Manage assessments, monitor integrity signals and review student activity."
@@ -206,19 +205,19 @@ export default function LecturerDashboard() {
 
       {!loading && !loadError && exams.length > 0 && (
         <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <MetricCard label="Active exams" value={summary.active} accent="success" icon={<ExamsIcon className="h-3.5 w-3.5" />} />
-          <MetricCard label="Upcoming" value={summary.upcoming} accent="info" icon={<ReportsIcon className="h-3.5 w-3.5" />} />
+          <MetricCard label="Active exams" value={summary.active} accent="success" icon={<ExamsIcon className="h-[18px] w-[18px]" />} />
+          <MetricCard label="Upcoming" value={summary.upcoming} accent="info" icon={<ReportsIcon className="h-[18px] w-[18px]" />} />
           <MetricCard
             label="Needs review"
             value={summary.needsReview}
             accent={summary.needsReview > 0 ? "warning" : "neutral"}
-            icon={<IntegrityIcon className="h-3.5 w-3.5" />}
+            icon={<IntegrityIcon className="h-[18px] w-[18px]" />}
           />
-          <MetricCard label="Drafts" value={summary.drafts} accent="neutral" icon={<ExamsIcon className="h-3.5 w-3.5" />} />
+          <MetricCard label="Drafts" value={summary.drafts} accent="neutral" icon={<ExamsIcon className="h-[18px] w-[18px]" />} />
         </div>
       )}
 
-      <div className="mt-6 space-y-8">
+      <div className="mt-7 space-y-7">
         {loading && <LoadingState label="Loading exams…" />}
 
         {!loading && loadError && <ErrorState message={loadError} onRetry={() => loadExams(showAllClosed)} />}
@@ -264,7 +263,7 @@ export default function LecturerDashboard() {
             <SectionHeading title="Drafts" muted />
             <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
               {draft.map((exam) => (
-                <ExamCard key={exam.id} exam={exam} variant="muted" action="Continue editing →" />
+                <ExamCard key={exam.id} exam={exam} action="Continue editing →" />
               ))}
             </div>
           </section>
@@ -275,7 +274,7 @@ export default function LecturerDashboard() {
             <SectionHeading title="Recently closed" muted />
             <div className="mt-3 space-y-2">
               {recentlyClosed.map((exam) => (
-                <ExamCard key={exam.id} exam={exam} variant="muted" />
+                <ExamCard key={exam.id} exam={exam} variant="archived" />
               ))}
             </div>
           </section>
@@ -298,7 +297,7 @@ export default function LecturerDashboard() {
                   <SectionHeading title="Older examinations" muted />
                   <div className="mt-3 space-y-2">
                     {olderClosed.map((exam) => (
-                      <ExamCard key={exam.id} exam={exam} variant="muted" />
+                      <ExamCard key={exam.id} exam={exam} variant="archived" />
                     ))}
                   </div>
                 </section>
@@ -379,7 +378,7 @@ function CreateExamPanel({
   );
 }
 
-const REVIEW_COLUMNS = "md:grid md:grid-cols-[1fr_110px_130px_130px_90px] md:items-center md:gap-4";
+const REVIEW_COLUMNS = "md:grid md:grid-cols-[minmax(220px,1fr)_110px_120px_130px_220px] md:items-center md:gap-4";
 
 // Highest-priority content on the dashboard (Task: "Needs your
 // attention"). Renders from the SAME needsAttention array the parent
@@ -397,11 +396,11 @@ function ReviewQueue({ exams }: { exams: ExamSummary[] }) {
       <SectionHeading title="Needs your attention" badge={countLabel(exams.length, "exam")} subtitle="Integrity signals awaiting lecturer review." />
 
       <SectionCard accent="warning" padded={false} className="mt-3">
-        <div className={`hidden border-b border-lecturer-border bg-lecturer-border-subtle/60 px-4 py-2 text-xs font-medium tracking-wide text-lecturer-text-secondary uppercase ${REVIEW_COLUMNS}`}>
+        <div className={`hidden border-b border-lecturer-border bg-lecturer-border-subtle/60 px-4 py-1.5 text-xs font-medium tracking-wide text-lecturer-text-secondary uppercase ${REVIEW_COLUMNS}`}>
           <span>Exam / course</span>
           <span>Status</span>
           <span>Submissions</span>
-          <span>Integrity signals</span>
+          <span>Signals</span>
           <span className="text-right">Action</span>
         </div>
         <ul className="divide-y divide-lecturer-border">
@@ -412,7 +411,7 @@ function ReviewQueue({ exams }: { exams: ExamSummary[] }) {
       </SectionCard>
 
       {hasMore && (
-        <div className="mt-3">
+        <div className="mt-2">
           <button
             type="button"
             onClick={() => setShowAll((v) => !v)}
@@ -438,8 +437,8 @@ function ReviewQueue({ exams }: { exams: ExamSummary[] }) {
 function ReviewRow({ exam }: { exam: ExamSummary }) {
   const status = lecturerAvailabilityStatus(exam);
   return (
-    <li className={`px-4 py-3 ${REVIEW_COLUMNS}`}>
-      <div className="min-w-0">
+    <li className={`px-4 py-2 ${REVIEW_COLUMNS}`}>
+      <div className="min-w-0 leading-tight">
         <Link
           href={`/lecturer/exams/${exam.id}`}
           className="truncate rounded text-sm font-semibold text-lecturer-text-primary hover:text-lecturer-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
@@ -452,25 +451,29 @@ function ReviewRow({ exam }: { exam: ExamSummary }) {
           </p>
         )}
       </div>
-      <div className="mt-2 md:mt-0">
+      <div className="mt-1.5 md:mt-0">
         <StatusBadge tone={availabilityToneFor(status)}>{status}</StatusBadge>
       </div>
-      <div className="mt-2 text-sm text-lecturer-text-secondary md:mt-0">{countLabel(exam._count.submissions, "submission")}</div>
-      <div className="mt-2 md:mt-0">
-        <StatusBadge tone="warning">{countLabel(exam.needsReviewCount, "signal")}</StatusBadge>
+      <div className="mt-1.5 text-sm text-lecturer-text-secondary md:mt-0">{countLabel(exam._count.submissions, "submission")}</div>
+      <div className="mt-1.5 md:mt-0">
+        {/* Signal volume ≠ misconduct: a raw count is toned down to a
+            neutral badge — the amber "needs review" semantic is already
+            carried by this section's own accent bar and title, not by
+            colouring every row's number. */}
+        <StatusBadge tone="neutral">{countLabel(exam.needsReviewCount, "signal")}</StatusBadge>
       </div>
-      <div className="mt-2 flex flex-col items-start gap-1 md:mt-0 md:items-end">
-        <Link
-          href={`/lecturer/exams/${exam.id}`}
-          className="rounded text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
-        >
-          Open exam →
-        </Link>
+      <div className="mt-2 flex items-center gap-3 md:mt-0 md:justify-end">
         <Link
           href={`/lecturer/exams/${exam.id}/integrity`}
-          className="rounded text-sm font-medium text-lecturer-text-secondary hover:text-lecturer-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+          className="rounded text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
         >
-          Review signals
+          Review signals →
+        </Link>
+        <Link
+          href={`/lecturer/exams/${exam.id}`}
+          className="rounded text-xs font-medium text-lecturer-text-secondary hover:text-lecturer-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+        >
+          Open exam
         </Link>
       </div>
     </li>
@@ -479,21 +482,29 @@ function ReviewRow({ exam }: { exam: ExamSummary }) {
 
 // Essential fields only (title, course, submission/review counts already
 // cheaply available from the single aggregate query, one status pill) —
-// no per-exam extra DB round trip. `variant="muted"` visually
-// de-emphasizes drafts/closed exams.
+// no per-exam extra DB round trip. `variant="archived"` is reserved for
+// genuinely lower-priority historical rows (Recently closed/Older
+// examinations) — a subtly quieter surface is appropriate there. Drafts
+// deliberately use the SAME "default" white-card treatment as Active
+// (polish pass v2: the old shared "muted" variant made Draft cards blend
+// into the page background and read as unfinished — differentiation
+// between Draft/Active now comes only from the restrained neutral
+// "Draft" status badge, not from a different card surface).
 // `action`, when given, renders a subtle right-aligned affordance (e.g.
 // "Open →", "Continue editing →") so it's clear the whole card is
 // clickable — never a second link/destination, purely a visual hint on
 // the SAME existing /lecturer/exams/${exam.id} link.
-function ExamCard({ exam, variant = "default", action }: { exam: ExamSummary; variant?: "default" | "muted"; action?: string }) {
+function ExamCard({ exam, variant = "default", action }: { exam: ExamSummary; variant?: "default" | "archived"; action?: string }) {
   const status = lecturerAvailabilityStatus(exam);
-  const muted = variant === "muted";
+  const archived = variant === "archived";
 
   return (
     <Link
       href={`/lecturer/exams/${exam.id}`}
-      className={`block rounded-xl border p-4 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent ${
-        muted ? "border-lecturer-border bg-staff-canvas hover:border-lecturer-text-muted" : "border-lecturer-border bg-lecturer-surface hover:border-lecturer-text-muted"
+      className={`block rounded-xl border p-4 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent ${
+        archived
+          ? "border-lecturer-border bg-staff-canvas hover:border-lecturer-text-muted"
+          : "border-lecturer-border bg-lecturer-surface hover:border-lecturer-accent/50 hover:shadow-sm"
       }`}
     >
       <div className="flex items-start justify-between gap-3">

@@ -48,7 +48,7 @@ describe("Lecturer Dashboard — Needs your attention: ReviewRow navigation", ()
     // className="block ...` wrapping literally everything in the row.
     expect(block).not.toMatch(/<Link\s+href=\{`\/lecturer\/exams\/\$\{exam\.id\}\/integrity`\}\s*\n\s*className="block/);
     // The outer element is a plain <li>, not a <Link>/<a> itself.
-    expect(block).toMatch(/<li className=\{`px-4 py-3 \$\{REVIEW_COLUMNS\}`\}>/);
+    expect(block).toMatch(/<li className=\{`px-4 py-2 \$\{REVIEW_COLUMNS\}`\}>/);
   });
 
   it("4. exam title itself also links to the Exam Workspace, for a natural click target in addition to the explicit action", () => {

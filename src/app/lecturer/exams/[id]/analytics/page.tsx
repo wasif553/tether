@@ -306,7 +306,7 @@ export default function ExamAnalyticsPage({
   const isSmallSample = summary.totalGraded > 0 && summary.totalGraded < SMALL_SAMPLE_THRESHOLD;
 
   return (
-    <div className="mx-auto max-w-7xl">
+    <div className="mx-auto max-w-none">
       <LecturerPageHeader
         breadcrumbs={[{ label: "Dashboard", href: "/lecturer" }, { label: examTitle ?? "Exam", href: `/lecturer/exams/${id}` }, { label: "Analytics" }]}
         title={

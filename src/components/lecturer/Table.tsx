@@ -34,5 +34,5 @@ export function Tr({ children, className = "" }: { children: React.ReactNode; cl
 }
 
 export function Td({ children, className = "" }: { children?: React.ReactNode; className?: string }) {
-  return <td className={`px-4 py-3 align-middle text-lecturer-text-primary ${className}`}>{children}</td>;
+  return <td className={`px-4 py-2.5 align-middle text-lecturer-text-primary ${className}`}>{children}</td>;
 }

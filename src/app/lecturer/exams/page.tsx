@@ -115,7 +115,7 @@ export default function LecturerExamsIndexPage() {
                       </Td>
                       <Td>{exam._count.questions}</Td>
                       <Td>{exam._count.submissions}</Td>
-                      <Td>{exam.needsReviewCount > 0 ? <StatusBadge tone="warning">{exam.needsReviewCount}</StatusBadge> : <span className="text-lecturer-text-muted">—</span>}</Td>
+                      <Td>{exam.needsReviewCount > 0 ? <StatusBadge tone="neutral">{exam.needsReviewCount}</StatusBadge> : <span className="text-lecturer-text-muted">—</span>}</Td>
                       <Td className="text-right">
                         <Link href={`/lecturer/exams/${exam.id}`} className="text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover">
                           Open →

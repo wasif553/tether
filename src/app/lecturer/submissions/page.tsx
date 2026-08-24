@@ -47,9 +47,9 @@ export default function LecturerSubmissionsIndexPage() {
 
       {exams && exams.length > 0 && (
         <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3">
-          <MetricCard label="Exams with submissions" value={exams.length} icon={<SubmissionsIcon className="h-3.5 w-3.5" />} />
-          <MetricCard label="Total submissions" value={totalSubmissions} accent="info" icon={<SubmissionsIcon className="h-3.5 w-3.5" />} />
-          <MetricCard label="Needs review" value={totalNeedsReview} accent={totalNeedsReview > 0 ? "warning" : "neutral"} icon={<IntegrityIcon className="h-3.5 w-3.5" />} />
+          <MetricCard label="Exams with submissions" value={exams.length} icon={<SubmissionsIcon className="h-[18px] w-[18px]" />} />
+          <MetricCard label="Total submissions" value={totalSubmissions} accent="info" icon={<SubmissionsIcon className="h-[18px] w-[18px]" />} />
+          <MetricCard label="Needs review" value={totalNeedsReview} accent={totalNeedsReview > 0 ? "warning" : "neutral"} icon={<IntegrityIcon className="h-[18px] w-[18px]" />} />
         </div>
       )}
 
@@ -82,7 +82,7 @@ export default function LecturerSubmissionsIndexPage() {
                         <StatusBadge tone={availabilityToneFor(status)}>{status}</StatusBadge>
                       </Td>
                       <Td>{exam._count.submissions}</Td>
-                      <Td>{exam.needsReviewCount > 0 ? <StatusBadge tone="warning">{exam.needsReviewCount}</StatusBadge> : <span className="text-lecturer-text-muted">—</span>}</Td>
+                      <Td>{exam.needsReviewCount > 0 ? <StatusBadge tone="neutral">{exam.needsReviewCount}</StatusBadge> : <span className="text-lecturer-text-muted">—</span>}</Td>
                       <Td className="text-right">
                         <Link href={`/lecturer/exams/${exam.id}/submissions`} className="text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover">
                           Review submissions →

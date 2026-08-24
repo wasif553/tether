@@ -46,7 +46,7 @@ const SECONDARY_NAV: NavItem[] = [
 
 const MORE_NAV: NavItem[] = [
   { label: "Pilot Readiness", href: "/lecturer/pilot-readiness", icon: ShieldLockIcon },
-  { label: "Unmatched Canvas launches", href: "/lecturer/lti/unmatched-launches", icon: MoreIcon },
+  { label: "Unmatched launches", href: "/lecturer/lti/unmatched-launches", icon: MoreIcon },
 ];
 
 const ALL_NAV = [...PRIMARY_NAV, ...SECONDARY_NAV, ...MORE_NAV];
@@ -68,8 +68,10 @@ function NavLink({ item, activeHref, onNavigate }: { item: NavItem; activeHref: 
       href={item.href}
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
-      className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent ${
-        active ? "bg-lecturer-sidebar-active text-white" : "text-lecturer-sidebar-text hover:bg-lecturer-sidebar-elevated hover:text-white"
+      className={`flex items-center gap-2.5 rounded-lg border-l-2 py-2 pr-3 pl-[10px] text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent ${
+        active
+          ? "border-lecturer-accent bg-lecturer-accent/[0.16] text-white"
+          : "border-transparent text-lecturer-sidebar-text hover:bg-lecturer-sidebar-elevated hover:text-white"
       }`}
     >
       <Icon className="h-[18px] w-[18px] shrink-0" />
@@ -126,8 +128,8 @@ export function LecturerSidebar({ mobileOpen, onClose }: { mobileOpen: boolean; 
             </ul>
           </div>
 
-          <div className="mt-5 border-t border-lecturer-sidebar-border pt-4">
-            <p className="px-3 pb-1.5 text-[11px] font-semibold tracking-wide text-lecturer-sidebar-text-muted uppercase">More</p>
+          <div className="mt-6 border-t border-lecturer-sidebar-border pt-5">
+            <p className="px-3 pb-2 text-xs font-semibold tracking-widest text-lecturer-sidebar-text/80 uppercase">Advanced</p>
             <ul className="space-y-0.5">
               {MORE_NAV.map((item) => (
                 <li key={item.href}>

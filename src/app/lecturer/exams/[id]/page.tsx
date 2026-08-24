@@ -46,6 +46,8 @@ import {
   resolveEffectiveExamDurationMins,
   type ExamTimeAccommodationMode,
 } from "@/lib/examTimeAccommodation";
+import { MetricCard } from "@/components/lecturer/MetricCard";
+import { QuestionBankIcon, SubmissionsIcon, IntegrityIcon, ReportsIcon } from "@/components/lecturer/icons";
 
 type Question = {
   id: string;
@@ -280,27 +282,6 @@ const AVAILABILITY_PILL_STYLES: Record<LecturerAvailabilityStatus, string> = {
   Draft: "bg-[#F2F4F7] text-lecturer-text-secondary",
   Closed: "bg-[#F2F4F7] text-lecturer-text-secondary",
 };
-
-function ExamMetric({
-  label,
-  value,
-  accent = "neutral",
-}: {
-  label: string;
-  value: string | number;
-  accent?: "neutral" | "warning";
-}) {
-  return (
-    <div
-      className={`rounded-xl border p-4 ${
-        accent === "warning" ? "border-[#FEDF89] bg-[#FFFAEB]" : "border-lecturer-border bg-lecturer-surface"
-      }`}
-    >
-      <p className="text-xs font-medium text-lecturer-text-secondary">{label}</p>
-      <p className="mt-1 text-2xl font-bold text-lecturer-text-primary">{value}</p>
-    </div>
-  );
-}
 
 export default function LecturerExamPage({
   params,
@@ -1319,7 +1300,7 @@ export default function LecturerExamPage({
   })();
 
   return (
-    <div className="mx-auto max-w-7xl">
+    <div className="mx-auto max-w-none">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <h1 className="truncate text-2xl font-semibold text-lecturer-text-primary sm:text-3xl">{exam.title}</h1>
@@ -1361,14 +1342,15 @@ export default function LecturerExamPage({
       {markEssaysMessage && <p className="mt-2 text-sm text-lecturer-text-secondary">{markEssaysMessage}</p>}
 
       <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <ExamMetric label="Questions" value={exam.questions.length} />
-        <ExamMetric label="Submissions" value={submissionCounts ? submissionCounts.total : "—"} />
-        <ExamMetric
+        <MetricCard label="Questions" value={exam.questions.length} icon={<QuestionBankIcon className="h-[18px] w-[18px]" />} />
+        <MetricCard label="Submissions" value={submissionCounts ? submissionCounts.total : "—"} accent="info" icon={<SubmissionsIcon className="h-[18px] w-[18px]" />} />
+        <MetricCard
           label="Needs review"
           value={unresolvedHighRisk != null ? unresolvedHighRisk : "—"}
           accent={unresolvedHighRisk ? "warning" : "neutral"}
+          icon={<IntegrityIcon className="h-[18px] w-[18px]" />}
         />
-        <ExamMetric label="Duration" value={`${exam.durationMins} min`} />
+        <MetricCard label="Duration" value={`${exam.durationMins} min`} icon={<ReportsIcon className="h-[18px] w-[18px]" />} />
       </div>
 
       <div

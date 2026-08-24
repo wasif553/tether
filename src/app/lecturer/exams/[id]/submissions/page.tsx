@@ -345,7 +345,7 @@ export default function SubmissionsListPage({
   if (error) return <ErrorState message={error} onRetry={load} />;
 
   return (
-    <div className="mx-auto max-w-7xl">
+    <div className="mx-auto max-w-none">
       <LecturerPageHeader
         breadcrumbs={[{ label: "Dashboard", href: "/lecturer" }, { label: examTitle ?? "Exam", href: `/lecturer/exams/${id}` }, { label: "Submissions" }]}
         title={examTitle ?? "Exam"}
@@ -354,10 +354,10 @@ export default function SubmissionsListPage({
 
       {submissions.length > 0 && (
         <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <MetricCard label="Submitted" value={submittedCount} accent="info" icon={<SubmissionsIcon className="h-3.5 w-3.5" />} />
-          <MetricCard label="Awaiting marking" value={awaitingMarkingCount} accent="neutral" icon={<SubmissionsIcon className="h-3.5 w-3.5" />} />
-          <MetricCard label="Needs review" value={needsReviewCount} accent={needsReviewCount > 0 ? "warning" : "neutral"} icon={<IntegrityIcon className="h-3.5 w-3.5" />} />
-          <MetricCard label="Marked" value={markedCount} accent="success" icon={<SubmissionsIcon className="h-3.5 w-3.5" />} />
+          <MetricCard label="Submitted" value={submittedCount} accent="info" icon={<SubmissionsIcon className="h-[18px] w-[18px]" />} />
+          <MetricCard label="Awaiting marking" value={awaitingMarkingCount} accent="neutral" icon={<SubmissionsIcon className="h-[18px] w-[18px]" />} />
+          <MetricCard label="Needs review" value={needsReviewCount} accent={needsReviewCount > 0 ? "warning" : "neutral"} icon={<IntegrityIcon className="h-[18px] w-[18px]" />} />
+          <MetricCard label="Marked" value={markedCount} accent="success" icon={<SubmissionsIcon className="h-[18px] w-[18px]" />} />
         </div>
       )}
 

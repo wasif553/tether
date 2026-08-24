@@ -331,7 +331,7 @@ export default function CourseDetailPage({
                 >
                   <span className="min-w-0 truncate font-medium text-lecturer-text-primary">{exam.title}</span>
                   <span className="flex shrink-0 items-center gap-2">
-                    {exam.needsReviewCount > 0 && <StatusBadge tone="warning">{exam.needsReviewCount} signals</StatusBadge>}
+                    {exam.needsReviewCount > 0 && <StatusBadge tone="neutral">{exam.needsReviewCount} signals</StatusBadge>}
                     <StatusBadge tone={availabilityToneFor(status)}>{status}</StatusBadge>
                   </span>
                 </Link>

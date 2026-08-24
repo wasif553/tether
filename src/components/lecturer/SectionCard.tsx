@@ -7,8 +7,8 @@ import type { ReactNode } from "react";
 
 const ACCENT_STYLES = {
   none: "border-lecturer-border",
-  warning: "border-lecturer-border border-l-4 border-l-[#D97706]",
-  critical: "border-lecturer-border border-l-4 border-l-[#B42318]",
+  warning: "border-lecturer-border border-l-[3px] border-l-[#D97706]",
+  critical: "border-lecturer-border border-l-[3px] border-l-[#B42318]",
 } as const;
 
 export function SectionCard({
@@ -62,9 +62,11 @@ export function SectionHeading({
   return (
     <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
       <div>
-        <div className="flex items-baseline gap-2">
+        <div className="flex items-center gap-2">
           <h2 className={muted ? "text-sm font-semibold text-lecturer-text-secondary" : "text-lg font-semibold text-lecturer-text-primary"}>{title}</h2>
-          {badge && <span className="text-sm font-medium text-lecturer-text-secondary">{badge}</span>}
+          {badge && (
+            <span className="rounded-full bg-lecturer-border-subtle px-2 py-0.5 text-xs font-medium text-lecturer-text-secondary">{badge}</span>
+          )}
         </div>
         {subtitle && <p className="mt-0.5 text-sm text-lecturer-text-secondary">{subtitle}</p>}
       </div>

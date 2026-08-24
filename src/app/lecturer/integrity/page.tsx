@@ -56,9 +56,9 @@ export default function LecturerIntegritySignalsIndexPage() {
 
       {exams && exams.length > 0 && (
         <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3">
-          <MetricCard label="Exams monitored" value={monitored} icon={<IntegrityIcon className="h-3.5 w-3.5" />} />
-          <MetricCard label="Exams with signals" value={withSignals.length} accent={withSignals.length > 0 ? "warning" : "neutral"} icon={<IntegrityIcon className="h-3.5 w-3.5" />} />
-          <MetricCard label="Signals awaiting review" value={totalSignals} accent={totalSignals > 0 ? "warning" : "neutral"} icon={<IntegrityIcon className="h-3.5 w-3.5" />} />
+          <MetricCard label="Exams monitored" value={monitored} icon={<IntegrityIcon className="h-[18px] w-[18px]" />} />
+          <MetricCard label="Exams with signals" value={withSignals.length} accent={withSignals.length > 0 ? "warning" : "neutral"} icon={<IntegrityIcon className="h-[18px] w-[18px]" />} />
+          <MetricCard label="Signals awaiting review" value={totalSignals} accent={totalSignals > 0 ? "warning" : "neutral"} icon={<IntegrityIcon className="h-[18px] w-[18px]" />} />
         </div>
       )}
 
@@ -79,7 +79,7 @@ export default function LecturerIntegritySignalsIndexPage() {
                     </div>
                     <div className="flex shrink-0 items-center gap-3">
                       <StatusBadge tone={availabilityToneFor(status)}>{status}</StatusBadge>
-                      <StatusBadge tone="warning">{exam.needsReviewCount} signal{exam.needsReviewCount === 1 ? "" : "s"}</StatusBadge>
+                      <StatusBadge tone="neutral">{exam.needsReviewCount} signal{exam.needsReviewCount === 1 ? "" : "s"}</StatusBadge>
                       <Link href={`/lecturer/exams/${exam.id}/integrity`} className="text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover">
                         Review →
                       </Link>

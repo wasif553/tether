@@ -240,7 +240,7 @@ export default function ExamIntegrityPage({
   const hasMoreStudents = data.studentGroups.length > STUDENT_REVIEW_QUEUE_INITIAL_LIMIT;
 
   return (
-    <div className="mx-auto max-w-7xl">
+    <div className="mx-auto max-w-none">
       <LecturerPageHeader
         breadcrumbs={[{ label: "Dashboard", href: "/lecturer" }, { label: examTitle ?? "Exam", href: `/lecturer/exams/${id}` }, { label: "Integrity" }]}
         title={examTitle ?? "Exam"}
@@ -265,11 +265,11 @@ export default function ExamIntegrityPage({
           value={totalEvents}
           label={pluralWord(totalEvents, "Integrity event", "Integrity events")}
           accent="neutral"
-          icon={<IntegrityIcon className="h-3.5 w-3.5" />}
+          icon={<IntegrityIcon className="h-[18px] w-[18px]" />}
         />
-        <MetricCard value={studentsWithEvents} label={pluralWord(studentsWithEvents, "Student affected", "Students affected")} accent="info" icon={<IntegrityIcon className="h-3.5 w-3.5" />} />
-        <MetricCard value={unresolvedEvents} label="Awaiting review" accent={unresolvedEvents > 0 ? "warning" : "neutral"} icon={<IntegrityIcon className="h-3.5 w-3.5" />} />
-        <MetricCard value={highSeverityEvents} label="High severity" accent={highSeverityEvents > 0 ? "critical" : "neutral"} icon={<IntegrityIcon className="h-3.5 w-3.5" />} />
+        <MetricCard value={studentsWithEvents} label={pluralWord(studentsWithEvents, "Student affected", "Students affected")} accent="info" icon={<IntegrityIcon className="h-[18px] w-[18px]" />} />
+        <MetricCard value={unresolvedEvents} label="Awaiting review" accent={unresolvedEvents > 0 ? "warning" : "neutral"} icon={<IntegrityIcon className="h-[18px] w-[18px]" />} />
+        <MetricCard value={highSeverityEvents} label="High severity" accent={highSeverityEvents > 0 ? "critical" : "neutral"} icon={<IntegrityIcon className="h-[18px] w-[18px]" />} />
       </div>
 
       <div className="mt-8 space-y-8">
