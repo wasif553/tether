@@ -276,9 +276,9 @@ function countLabel(count: number, singular: string, plural: string = `${singula
 
 const AVAILABILITY_PILL_STYLES: Record<LecturerAvailabilityStatus, string> = {
   Open: "bg-[#ECFDF3] text-[#067647]",
-  Scheduled: "bg-[#EFF6FF] text-[#1D4ED8]",
-  Draft: "bg-[#F2F4F7] text-[#667085]",
-  Closed: "bg-[#F2F4F7] text-[#667085]",
+  Scheduled: "bg-[#EFF6FF] text-lecturer-accent-hover",
+  Draft: "bg-[#F2F4F7] text-lecturer-text-secondary",
+  Closed: "bg-[#F2F4F7] text-lecturer-text-secondary",
 };
 
 function ExamMetric({
@@ -293,11 +293,11 @@ function ExamMetric({
   return (
     <div
       className={`rounded-xl border p-4 ${
-        accent === "warning" ? "border-[#FEDF89] bg-[#FFFAEB]" : "border-[#E4E7EC] bg-white"
+        accent === "warning" ? "border-[#FEDF89] bg-[#FFFAEB]" : "border-lecturer-border bg-lecturer-surface"
       }`}
     >
-      <p className="text-xs font-medium text-[#667085]">{label}</p>
-      <p className="mt-1 text-2xl font-bold text-[#101828]">{value}</p>
+      <p className="text-xs font-medium text-lecturer-text-secondary">{label}</p>
+      <p className="mt-1 text-2xl font-bold text-lecturer-text-primary">{value}</p>
     </div>
   );
 }
@@ -1235,15 +1235,15 @@ export default function LecturerExamPage({
     await loadExam({ preserveSecureForm: true });
   }
 
-  if (loading) return <p className="text-gray-500">Loading...</p>;
+  if (loading) return <p className="text-lecturer-text-secondary">Loading...</p>;
   if (!exam) {
     return (
       <div className="mx-auto max-w-lg">
-        <p className="text-red-600">{loadError ?? "Exam not found"}</p>
+        <p className="text-[#B42318]">{loadError ?? "Exam not found"}</p>
         {loadError && (
           <button
             onClick={() => loadExam()}
-            className="mt-2 rounded border border-gray-300 px-3 py-1.5 text-sm"
+            className="mt-2 rounded border border-lecturer-border px-3 py-1.5 text-sm"
           >
             Try again
           </button>
@@ -1322,8 +1322,8 @@ export default function LecturerExamPage({
     <div className="mx-auto max-w-7xl">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <h1 className="truncate text-2xl font-semibold text-[#101828] sm:text-3xl">{exam.title}</h1>
-          <p className="mt-1.5 flex flex-wrap items-center gap-2 text-sm text-[#667085]">
+          <h1 className="truncate text-2xl font-semibold text-lecturer-text-primary sm:text-3xl">{exam.title}</h1>
+          <p className="mt-1.5 flex flex-wrap items-center gap-2 text-sm text-lecturer-text-secondary">
             <span>{workspaceAudienceLabel}</span>
             <span
               className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${AVAILABILITY_PILL_STYLES[workspaceAvailabilityStatus]}`}
@@ -1331,17 +1331,17 @@ export default function LecturerExamPage({
               {workspaceAvailabilityStatus}
             </span>
           </p>
-          <p className="mt-1 text-sm text-[#667085]">{workspaceAvailabilityLine}</p>
+          <p className="mt-1 text-sm text-lecturer-text-secondary">{workspaceAvailabilityLine}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {exam.questions.some((q) => q.type === "ESSAY") && hasUngradedSubmissions && (
             <button
               onClick={handleMarkEssays}
               disabled={markingEssays}
-              className="flex items-center gap-2 rounded-lg border border-[#E4E7EC] bg-white px-4 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2 disabled:opacity-50"
+              className="flex items-center gap-2 rounded-lg border border-lecturer-border bg-lecturer-surface px-4 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2 disabled:opacity-50"
             >
               {markingEssays && (
-                <span className="h-3 w-3 animate-spin rounded-full border-2 border-[#98A2B3] border-t-transparent" />
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-lecturer-text-muted border-t-transparent" />
               )}
               {markingEssays ? "Marking..." : "Mark essays with AI"}
             </button>
@@ -1350,15 +1350,15 @@ export default function LecturerExamPage({
             onClick={togglePublish}
             className={
               exam.published
-                ? "rounded-lg border border-[#E4E7EC] bg-white px-4 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
-                : "rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
+                ? "rounded-lg border border-lecturer-border bg-lecturer-surface px-4 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
+                : "rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-semibold text-white hover:bg-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
             }
           >
             {exam.published ? "Unpublish" : "Publish"}
           </button>
         </div>
       </div>
-      {markEssaysMessage && <p className="mt-2 text-sm text-[#667085]">{markEssaysMessage}</p>}
+      {markEssaysMessage && <p className="mt-2 text-sm text-lecturer-text-secondary">{markEssaysMessage}</p>}
 
       <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <ExamMetric label="Questions" value={exam.questions.length} />
@@ -1374,7 +1374,7 @@ export default function LecturerExamPage({
       <div
         role="tablist"
         aria-label="Exam workspace sections"
-        className="mt-6 flex gap-1 overflow-x-auto border-b border-[#E4E7EC]"
+        className="mt-6 flex gap-1 overflow-x-auto border-b border-lecturer-border"
         onKeyDown={(e) => {
           if (e.key !== "ArrowRight" && e.key !== "ArrowLeft" && e.key !== "Home" && e.key !== "End") return;
           e.preventDefault();
@@ -1399,10 +1399,10 @@ export default function LecturerExamPage({
             aria-controls={`workspace-panel-${tab.id}`}
             tabIndex={activeTab === tab.id ? 0 : -1}
             onClick={() => setActiveTab(tab.id)}
-            className={`shrink-0 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] ${
+            className={`shrink-0 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent ${
               activeTab === tab.id
-                ? "border-[#2563EB] text-[#2563EB]"
-                : "border-transparent text-[#667085] hover:text-[#101828]"
+                ? "border-lecturer-accent text-lecturer-accent"
+                : "border-transparent text-lecturer-text-secondary hover:text-lecturer-text-primary"
             }`}
           >
             {tab.label}
@@ -1419,54 +1419,54 @@ export default function LecturerExamPage({
       >
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="space-y-6 lg:col-span-2">
-            <section className="rounded-xl border border-[#E4E7EC] bg-white p-5">
-              <h2 className="text-base font-semibold text-[#101828]">Exam status</h2>
+            <section className="rounded-xl border border-lecturer-border bg-lecturer-surface p-5">
+              <h2 className="text-base font-semibold text-lecturer-text-primary">Exam status</h2>
               <dl className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
                 <div>
-                  <dt className="text-xs font-medium text-[#667085]">Lifecycle</dt>
-                  <dd className="mt-1 text-sm font-medium text-[#101828]">
+                  <dt className="text-xs font-medium text-lecturer-text-secondary">Lifecycle</dt>
+                  <dd className="mt-1 text-sm font-medium text-lecturer-text-primary">
                     {exam.published ? "Published" : "Draft"}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-xs font-medium text-[#667085]">Safe Exam Mode</dt>
-                  <dd className="mt-1 text-sm font-medium text-[#101828]">{safeModeStatus}</dd>
+                  <dt className="text-xs font-medium text-lecturer-text-secondary">Safe Exam Mode</dt>
+                  <dd className="mt-1 text-sm font-medium text-lecturer-text-primary">{safeModeStatus}</dd>
                 </div>
                 <div>
-                  <dt className="text-xs font-medium text-[#667085]">Pending grading</dt>
-                  <dd className="mt-1 text-sm font-medium text-[#101828]">
+                  <dt className="text-xs font-medium text-lecturer-text-secondary">Pending grading</dt>
+                  <dd className="mt-1 text-sm font-medium text-lecturer-text-primary">
                     {submissionCounts ? submissionCounts.submitted : "—"}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-xs font-medium text-[#667085]">Marks released</dt>
-                  <dd className="mt-1 text-sm font-medium text-[#101828]">
+                  <dt className="text-xs font-medium text-lecturer-text-secondary">Marks released</dt>
+                  <dd className="mt-1 text-sm font-medium text-lecturer-text-primary">
                     {exam.marksReleasedAt ? "Yes" : "No"}
                   </dd>
                 </div>
               </dl>
             </section>
 
-            <section className="rounded-xl border border-[#E4E7EC] bg-white p-5">
-              <h2 className="text-base font-semibold text-[#101828]">Availability</h2>
-              <p className="mt-2 text-sm text-[#667085]">{workspaceAvailabilityLine}</p>
-              <p className="mt-1 text-sm text-[#667085]">
+            <section className="rounded-xl border border-lecturer-border bg-lecturer-surface p-5">
+              <h2 className="text-base font-semibold text-lecturer-text-primary">Availability</h2>
+              <p className="mt-2 text-sm text-lecturer-text-secondary">{workspaceAvailabilityLine}</p>
+              <p className="mt-1 text-sm text-lecturer-text-secondary">
                 {workspaceCourse
                   ? `Assigned to ${workspaceCourse.code} — ${workspaceCourse.name}.`
                   : "Not assigned to a course — visible institution-wide."}
               </p>
-              <p className="mt-3 text-xs text-[#98A2B3]">
+              <p className="mt-3 text-xs text-lecturer-text-muted">
                 To change dates, course assignment, or the access code, use the Access &amp; delivery tab.
               </p>
             </section>
 
-            <section className="rounded-xl border border-[#E4E7EC] bg-white p-5">
+            <section className="rounded-xl border border-lecturer-border bg-lecturer-surface p-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h2 className="text-base font-semibold text-[#101828]">
+                  <h2 className="text-base font-semibold text-lecturer-text-primary">
                     {exam.marksReleasedAt ? "Marks released" : "Marks not released"}
                   </h2>
-                  <p className="mt-1 text-sm text-[#667085]">
+                  <p className="mt-1 text-sm text-lecturer-text-secondary">
                     {exam.marksReleasedAt
                       ? `Released ${new Date(exam.marksReleasedAt).toLocaleString()}`
                       : "Students cannot see scores or feedback until marks are released."}
@@ -1477,7 +1477,7 @@ export default function LecturerExamPage({
                     type="button"
                     onClick={handleHideMarks}
                     disabled={savingMarksRelease}
-                    className="rounded-lg border border-[#E4E7EC] bg-white px-4 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] disabled:opacity-50"
+                    className="rounded-lg border border-lecturer-border bg-lecturer-surface px-4 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent disabled:opacity-50"
                   >
                     {savingMarksRelease ? "Saving..." : "Hide marks from students"}
                   </button>
@@ -1486,70 +1486,70 @@ export default function LecturerExamPage({
                     type="button"
                     onClick={handleReleaseMarks}
                     disabled={savingMarksRelease}
-                    className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] disabled:opacity-50"
+                    className="rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-semibold text-white hover:bg-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent disabled:opacity-50"
                   >
                     {savingMarksRelease ? "Saving..." : "Release marks to students"}
                   </button>
                 )}
               </div>
-              {marksReleaseMessage && <p className="mt-2 text-sm text-[#667085]">{marksReleaseMessage}</p>}
+              {marksReleaseMessage && <p className="mt-2 text-sm text-lecturer-text-secondary">{marksReleaseMessage}</p>}
             </section>
           </div>
 
           <div className="space-y-6">
-            <section className="rounded-xl border border-[#E4E7EC] bg-white p-5">
-              <h2 className="text-base font-semibold text-[#101828]">Needs attention</h2>
+            <section className="rounded-xl border border-lecturer-border bg-lecturer-surface p-5">
+              <h2 className="text-base font-semibold text-lecturer-text-primary">Needs attention</h2>
               {unresolvedHighRisk ? (
                 <Link
                   href={`/lecturer/exams/${id}/integrity`}
-                  className="mt-3 block rounded-lg border border-[#FEDF89] bg-[#FFFAEB] p-3 text-sm text-[#92400E] hover:border-[#D97706] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  className="mt-3 block rounded-lg border border-[#FEDF89] bg-[#FFFAEB] p-3 text-sm text-[#92400E] hover:border-[#D97706] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 >
                   {countLabel(unresolvedHighRisk, "unresolved high-risk integrity signal")} — review now →
                 </Link>
               ) : (
-                <p className="mt-3 text-sm text-[#667085]">Nothing needs your attention right now.</p>
+                <p className="mt-3 text-sm text-lecturer-text-secondary">Nothing needs your attention right now.</p>
               )}
               {hasUngradedSubmissions && (
-                <p className="mt-2 text-sm text-[#667085]">There are ungraded submissions waiting for review.</p>
+                <p className="mt-2 text-sm text-lecturer-text-secondary">There are ungraded submissions waiting for review.</p>
               )}
             </section>
 
-            <section className="rounded-xl border border-[#E4E7EC] bg-white p-5">
-              <h2 className="text-base font-semibold text-[#101828]">Quick actions</h2>
+            <section className="rounded-xl border border-lecturer-border bg-lecturer-surface p-5">
+              <h2 className="text-base font-semibold text-lecturer-text-primary">Quick actions</h2>
               <div className="mt-3 space-y-1">
                 <Link
                   href={`/lecturer/exams/${id}/submissions`}
-                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 >
                   Submissions
                 </Link>
                 <Link
                   href={`/lecturer/exams/${id}/analytics`}
-                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 >
                   View analytics
                 </Link>
                 <Link
                   href={`/lecturer/exams/${id}/integrity`}
-                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 >
                   Review integrity events
                 </Link>
                 <Link
                   href={`/lecturer/exams/${id}/similarity`}
-                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 >
                   Similarity review
                 </Link>
                 <Link
                   href={`/lecturer/exams/${id}/collusion-analysis`}
-                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 >
                   Cohort integrity analysis
                 </Link>
                 <Link
                   href={`/lecturer/exams/${id}/import-questions`}
-                  className="block rounded-lg px-3 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  className="block rounded-lg px-3 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 >
                   Import from question bank
                 </Link>
@@ -1571,9 +1571,9 @@ export default function LecturerExamPage({
           compact and separate from the full secure-settings form below —
           this section is about WHAT resources are permitted, not the
           technical enforcement controls. */}
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Exam conditions and permitted resources</h2>
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Exam conditions and permitted resources</h2>
       {secureForm && (
-        <div className="mt-3 space-y-4 rounded border border-gray-200 bg-white p-4">
+        <div className="mt-3 space-y-4 rounded border border-lecturer-border bg-lecturer-surface p-4">
           <div>
             <p className="text-sm font-medium">Exam format</p>
             <div className="mt-2 flex flex-wrap gap-2">
@@ -1594,8 +1594,8 @@ export default function LecturerExamPage({
                   }}
                   className={`rounded px-3 py-1.5 text-sm ${
                     secureForm.examMode === mode
-                      ? "bg-black text-white"
-                      : "border border-gray-300 text-gray-700"
+                      ? "bg-lecturer-accent hover:bg-lecturer-accent-hover text-white"
+                      : "border border-lecturer-border text-lecturer-text-primary"
                   }`}
                 >
                   {EXAM_MODE_LABELS[mode]}
@@ -1603,13 +1603,13 @@ export default function LecturerExamPage({
               ))}
             </div>
             {secureForm.examMode === "CLOSED_BOOK" && (
-              <p className="mt-2 text-xs text-gray-500">
+              <p className="mt-2 text-xs text-lecturer-text-secondary">
                 Students must complete the assessment without unauthorised external resources.
                 Stronger secure-exam controls are recommended.
               </p>
             )}
             {secureForm.examMode === "OPEN_BOOK" && (
-              <p className="mt-2 text-xs text-gray-500">
+              <p className="mt-2 text-xs text-lecturer-text-secondary">
                 Students may use only the resources explicitly permitted below. Answer
                 originality and application remain subject to review.
               </p>
@@ -1617,7 +1617,7 @@ export default function LecturerExamPage({
           </div>
 
           {pendingPreset && (
-            <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm">
+            <div className="rounded border border-amber-200 bg-[#FFFAEB] p-3 text-sm">
               <p className="font-medium text-amber-900">
                 Apply the {EXAM_MODE_LABELS[pendingPreset]} preset?
               </p>
@@ -1649,14 +1649,14 @@ export default function LecturerExamPage({
                     }
                     setPendingPreset(null);
                   }}
-                  className="rounded bg-black px-3 py-1.5 text-xs text-white"
+                  className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-3 py-1.5 text-xs text-white"
                 >
                   Apply preset
                 </button>
                 <button
                   type="button"
                   onClick={() => setPendingPreset(null)}
-                  className="rounded border border-gray-300 px-3 py-1.5 text-xs"
+                  className="rounded border border-lecturer-border px-3 py-1.5 text-xs"
                 >
                   Cancel
                 </button>
@@ -1700,12 +1700,12 @@ export default function LecturerExamPage({
                 External AI tools
               </label>
             </div>
-            <p className="mt-2 text-xs text-gray-500">
+            <p className="mt-2 text-xs text-lecturer-text-secondary">
               Set whether the assessment permits AI tools outside Tether Controlled AI (below). This is a
               policy statement, not a technical block — Tether does not prevent a student from opening an
               external AI tool in another window.
             </p>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-lecturer-text-secondary">
               {secureForm.aiToolsAllowed
                 ? "Students may use external AI tools according to the assessment instructions. AI-use answer signals will not be treated as policy violations by themselves."
                 : "AI-use review signals may be considered alongside other evidence, but they do not prove that AI was used."}
@@ -1724,7 +1724,7 @@ export default function LecturerExamPage({
               secureForm,
             );
             return warnings.length > 0 ? (
-              <div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+              <div className="rounded border border-amber-200 bg-[#FFFAEB] p-3 text-xs text-amber-800">
                 <p className="font-medium">Policy warnings (advisory only)</p>
                 <ul className="mt-1 list-disc pl-5">
                   {warnings.map((w) => (
@@ -1747,7 +1747,7 @@ export default function LecturerExamPage({
               secureForm,
             );
             return (
-              <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs">
+              <div className="rounded border border-lecturer-border bg-lecturer-border-subtle p-3 text-xs">
                 <p className="text-sm font-medium">{summary.examModeLabel}</p>
                 {summary.allowed.length > 0 && (
                   <p className="mt-1">
@@ -1772,27 +1772,27 @@ export default function LecturerExamPage({
           <button
             onClick={handleSaveSecureSettings}
             disabled={savingSecure}
-            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+            className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-sm text-white disabled:opacity-50"
           >
             {savingSecure ? "Saving..." : "Save exam conditions"}
           </button>
         </div>
       )}
 
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Safe Exam Mode</h2>
-      <p className="mt-1 text-sm text-gray-500">
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Safe Exam Mode</h2>
+      <p className="mt-1 text-sm text-lecturer-text-secondary">
         Safe Exam Mode records exam integrity signals for lecturer review. It does not
         automatically accuse students of misconduct.
       </p>
       {secureForm && (
-        <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
-          <div className="rounded border border-gray-200 bg-gray-50 p-3">
+        <div className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
+          <div className="rounded border border-lecturer-border bg-lecturer-border-subtle p-3">
             <div className="flex flex-wrap items-center gap-2">
               <span
                 className={
                   exam.secureSettings.secureModeEnabled
                     ? "rounded bg-green-100 px-2 py-0.5 text-sm font-medium text-green-700"
-                    : "rounded bg-gray-200 px-2 py-0.5 text-sm font-medium text-gray-700"
+                    : "rounded bg-gray-200 px-2 py-0.5 text-sm font-medium text-lecturer-text-primary"
                 }
               >
                 {safeModeStatus}
@@ -1806,7 +1806,7 @@ export default function LecturerExamPage({
             {activeSafeModeControls.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {activeSafeModeControls.map((label) => (
-                  <span key={label} className="rounded bg-white px-2 py-0.5 text-xs text-gray-700">
+                  <span key={label} className="rounded bg-lecturer-surface px-2 py-0.5 text-xs text-lecturer-text-primary">
                     {label}
                   </span>
                 ))}
@@ -1822,7 +1822,7 @@ export default function LecturerExamPage({
             Enable Safe Exam Mode
           </label>
 
-          <div className="grid grid-cols-2 gap-2 pl-1 text-sm text-gray-700">
+          <div className="grid grid-cols-2 gap-2 pl-1 text-sm text-lecturer-text-primary">
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -1864,7 +1864,7 @@ export default function LecturerExamPage({
           </div>
 
           <div className="flex items-center gap-3 pl-1">
-            <label className="text-sm text-gray-700">Maximum attempts</label>
+            <label className="text-sm text-lecturer-text-primary">Maximum attempts</label>
             <input
               type="number"
               min={1}
@@ -1872,20 +1872,20 @@ export default function LecturerExamPage({
               disabled={!secureForm.secureModeEnabled}
               value={secureForm.maxAttempts}
               onChange={(e) => setSecureForm({ ...secureForm, maxAttempts: Number(e.target.value) })}
-              className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+              className="w-20 rounded border border-lecturer-border px-2 py-1 text-sm"
             />
             <span className="text-xs text-gray-400">(v1 supports 1 attempt only)</span>
           </div>
 
-          <div className="border-t border-gray-200 pt-3">
+          <div className="border-t border-lecturer-border pt-3">
             <h3 className="text-sm font-medium">Browser-level friction</h3>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-lecturer-text-secondary">
               Browser-level friction makes casual attempts to leave or copy exam content harder
               and records integrity signals for lecturer review. A normal browser cannot fully
               lock the student&apos;s device or close other tabs. Full lockdown requires a
               dedicated lockdown browser.
             </p>
-            <div className="mt-2 grid grid-cols-2 gap-2 pl-1 text-sm text-gray-700">
+            <div className="mt-2 grid grid-cols-2 gap-2 pl-1 text-sm text-lecturer-text-primary">
               <label className="flex items-center gap-2">
                 <input
                   type="checkbox"
@@ -1940,14 +1940,14 @@ export default function LecturerExamPage({
             </div>
           </div>
 
-          <div className="border-t border-gray-200 pt-3">
+          <div className="border-t border-lecturer-border pt-3">
             <h3 className="text-sm font-medium">Camera monitoring</h3>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-lecturer-text-secondary">
               Camera Monitoring v1 checks whether the student&apos;s camera is available during a
               secure exam. It records camera availability signals for lecturer review. It does not
               store video recordings or automatically decide misconduct.
             </p>
-            <div className="mt-2 grid grid-cols-2 gap-2 pl-1 text-sm text-gray-700">
+            <div className="mt-2 grid grid-cols-2 gap-2 pl-1 text-sm text-lecturer-text-primary">
               <label className="flex items-center gap-2">
                 <input
                   type="checkbox"
@@ -1992,7 +1992,7 @@ export default function LecturerExamPage({
               </label>
             </div>
             <div className="mt-2 flex items-center gap-3 pl-1">
-              <label className="text-sm text-gray-700">Camera check interval (seconds)</label>
+              <label className="text-sm text-lecturer-text-primary">Camera check interval (seconds)</label>
               <input
                 type="number"
                 min={10}
@@ -2005,14 +2005,14 @@ export default function LecturerExamPage({
                     cameraHeartbeatIntervalSeconds: Number(e.target.value),
                   })
                 }
-                className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+                className="w-20 rounded border border-lecturer-border px-2 py-1 text-sm"
               />
             </div>
           </div>
 
           <div>
             <h3 className="font-medium">Student verification and AI integrity checks</h3>
-            <p className="mt-1 text-sm text-gray-500">
+            <p className="mt-1 text-sm text-lecturer-text-secondary">
               This is not live proctoring. AI camera checks run locally on the student&apos;s
               device. Video is not recorded, streamed, or stored. Signals are indicators for
               lecturer review only.
@@ -2061,7 +2061,7 @@ export default function LecturerExamPage({
                 />
                 <span>
                   Save evidence frame for phone or second-person warnings
-                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                     When enabled, the system saves a single low-resolution camera frame only when
                     a possible phone or second person is detected. No video is recorded. Off by
                     default.
@@ -2071,15 +2071,15 @@ export default function LecturerExamPage({
             </div>
           </div>
 
-          <div className="border-t border-gray-200 pt-3">
+          <div className="border-t border-lecturer-border pt-3">
             <h3 className="text-sm font-medium">Exam watermark</h3>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-lecturer-text-secondary">
               A low-friction deterrent, not an access control. It discourages screenshots, photos,
               sharing, and uploading exam content to AI tools, and adds traceability if content is
               shared — it does not guarantee AI tools will refuse to answer, and does not prevent
               copying on its own.
             </p>
-            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+            <label className="mt-2 flex items-start gap-2 text-sm text-lecturer-text-primary">
               <input
                 type="checkbox"
                 className="mt-0.5"
@@ -2089,7 +2089,7 @@ export default function LecturerExamPage({
               />
               <span>
                 Show exam watermark
-                <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                   Displays a low-opacity watermark with student and attempt details to discourage
                   copying, screenshots, sharing, and uploading exam content to AI tools.
                 </span>
@@ -2097,13 +2097,13 @@ export default function LecturerExamPage({
             </label>
           </div>
 
-          <div className="border-t border-gray-200 pt-3">
+          <div className="border-t border-lecturer-border pt-3">
             <h3 className="text-sm font-medium">Question delivery</h3>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-lecturer-text-secondary">
               Reduces exposure of the full exam paper. A low-friction control, not a guarantee —
               it does not make cheating impossible, and works alongside the other controls above.
             </p>
-            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+            <label className="mt-2 flex items-start gap-2 text-sm text-lecturer-text-primary">
               <input
                 type="checkbox"
                 className="mt-0.5"
@@ -2113,13 +2113,13 @@ export default function LecturerExamPage({
               />
               <span>
                 Show one question at a time
-                <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                   Students see one question at a time instead of the full exam paper.
                 </span>
               </span>
             </label>
             <div className="mt-2 space-y-2 pl-6">
-              <label className="flex items-start gap-2 text-sm text-gray-700">
+              <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                 <input
                   type="checkbox"
                   className="mt-0.5"
@@ -2131,12 +2131,12 @@ export default function LecturerExamPage({
                 />
                 <span>
                   Allow students to go back to previous questions
-                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                     If disabled, students cannot return to earlier questions after moving forward.
                   </span>
                 </span>
               </label>
-              <label className="flex items-start gap-2 text-sm text-gray-700">
+              <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                 <input
                   type="checkbox"
                   className="mt-0.5"
@@ -2148,12 +2148,12 @@ export default function LecturerExamPage({
                 />
                 <span>
                   Randomise question order
-                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                     Each student receives a stable question order for their attempt.
                   </span>
                 </span>
               </label>
-              <label className="flex items-start gap-2 text-sm text-gray-700">
+              <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                 <input
                   type="checkbox"
                   className="mt-0.5"
@@ -2165,7 +2165,7 @@ export default function LecturerExamPage({
                 />
                 <span>
                   Randomise MCQ option order
-                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                     Multiple-choice options are shown in a stable random order for each student
                     attempt.
                   </span>
@@ -2175,9 +2175,9 @@ export default function LecturerExamPage({
           </div>
 
           {/* Question Navigator v1 — see docs/question-navigator-v1.md. */}
-          <div className="border-t border-gray-200 pt-3">
+          <div className="border-t border-lecturer-border pt-3">
             <h3 className="text-sm font-medium">Question navigator</h3>
-            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+            <label className="mt-2 flex items-start gap-2 text-sm text-lecturer-text-primary">
               <input
                 type="checkbox"
                 className="mt-0.5"
@@ -2187,14 +2187,14 @@ export default function LecturerExamPage({
               />
               <span>
                 Show question navigator
-                <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                   Show students a numbered question grid with answered, skipped and flagged
                   states.
                 </span>
               </span>
             </label>
             <div className="mt-2 space-y-2 pl-6">
-              <label className="flex items-start gap-2 text-sm text-gray-700">
+              <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                 <input
                   type="checkbox"
                   className="mt-0.5"
@@ -2204,13 +2204,13 @@ export default function LecturerExamPage({
                 />
                 <span>
                   Allow students to jump between questions
-                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                     Students may select a future question directly. Returning to earlier
                     questions still depends on the back-navigation setting.
                   </span>
                 </span>
               </label>
-              <label className="flex items-start gap-2 text-sm text-gray-700">
+              <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                 <input
                   type="checkbox"
                   className="mt-0.5"
@@ -2220,7 +2220,7 @@ export default function LecturerExamPage({
                 />
                 <span>
                   Allow students to flag questions for review
-                  <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                  <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                     Students may mark questions to revisit before submitting.
                   </span>
                 </span>
@@ -2228,7 +2228,7 @@ export default function LecturerExamPage({
             </div>
 
             {secureForm.showQuestionNavigator && (
-              <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+              <div className="mt-3 rounded border border-lecturer-border bg-lecturer-border-subtle p-3 text-xs text-lecturer-text-primary">
                 <p className="font-medium">Question navigator: Shown</p>
                 <p>Direct jumping: {secureForm.allowQuestionJumping ? "Allowed" : "Not allowed"}</p>
                 <p>Back navigation: {secureForm.allowBackNavigation ? "Allowed" : "Not allowed"}</p>
@@ -2237,18 +2237,18 @@ export default function LecturerExamPage({
             )}
 
             {secureForm.showQuestionNavigator && !secureForm.allowQuestionJumping && (
-              <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+              <p className="mt-2 rounded border border-amber-200 bg-[#FFFAEB] p-2 text-xs text-amber-800">
                 The navigator will show progress, but students must use the existing Next and
                 Previous controls.
               </p>
             )}
             {secureForm.allowQuestionJumping && !secureForm.allowBackNavigation && (
-              <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+              <p className="mt-2 rounded border border-amber-200 bg-[#FFFAEB] p-2 text-xs text-amber-800">
                 Students may skip forward, but they cannot return to earlier questions.
               </p>
             )}
             {secureForm.allowFlagForReview && !secureForm.allowBackNavigation && (
-              <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+              <p className="mt-2 rounded border border-amber-200 bg-[#FFFAEB] p-2 text-xs text-amber-800">
                 Students may flag earlier questions, but they may not be able to reopen them
                 after moving forward.
               </p>
@@ -2265,15 +2265,15 @@ export default function LecturerExamPage({
               "Tether Controlled AI"; the underlying values
               (DISABLED/BRAINSTORM_ONLY) and every limit/capability field
               are unchanged. */}
-          <div className="border-t border-gray-200 pt-3">
+          <div className="border-t border-lecturer-border pt-3">
             <h3 className="text-sm font-medium">Tether Controlled AI</h3>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-lecturer-text-secondary">
               Allow students to use Tether&apos;s restricted assistant for question clarification,
               planning and reasoning support. It does not provide final answers. Student prompts
               and responses are retained for lecturer review.
             </p>
             <div className="mt-2 flex gap-4">
-              <label className="flex items-center gap-2 text-sm text-gray-700">
+              <label className="flex items-center gap-2 text-sm text-lecturer-text-primary">
                 <input
                   type="radio"
                   name="aiAssistanceMode"
@@ -2282,7 +2282,7 @@ export default function LecturerExamPage({
                 />
                 Off
               </label>
-              <label className="flex items-center gap-2 text-sm text-gray-700">
+              <label className="flex items-center gap-2 text-sm text-lecturer-text-primary">
                 <input
                   type="radio"
                   name="aiAssistanceMode"
@@ -2295,7 +2295,7 @@ export default function LecturerExamPage({
 
             {secureForm.aiAssistanceMode === "BRAINSTORM_ONLY" && (
               <div className="mt-3 space-y-3">
-                <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+                <div className="rounded border border-lecturer-border bg-lecturer-border-subtle p-3 text-xs text-lecturer-text-primary">
                   <p className="font-medium">Controlled guidance enabled</p>
                   <ul className="mt-1 list-disc space-y-0.5 pl-4">
                     <li>Up to {secureForm.aiAssistanceMaxPromptsPerQuestion} request(s) per question</li>
@@ -2305,19 +2305,19 @@ export default function LecturerExamPage({
                   </ul>
                 </div>
 
-                <details className="rounded border border-gray-200">
-                  <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-gray-700">
+                <details className="rounded border border-lecturer-border">
+                  <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-lecturer-text-primary">
                     Advanced Controlled AI settings
                   </summary>
-                  <div className="space-y-3 border-t border-gray-200 p-3">
+                  <div className="space-y-3 border-t border-lecturer-border p-3">
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                      <label className="text-xs text-gray-700">
+                      <label className="text-xs text-lecturer-text-primary">
                         Max prompts per question
                         <input
                           type="number"
                           min={1}
                           max={20}
-                          className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                          className="mt-1 w-full rounded border border-lecturer-border px-2 py-1 text-sm"
                           value={secureForm.aiAssistanceMaxPromptsPerQuestion}
                           onChange={(e) =>
                             setSecureForm({
@@ -2327,13 +2327,13 @@ export default function LecturerExamPage({
                           }
                         />
                       </label>
-                      <label className="text-xs text-gray-700">
+                      <label className="text-xs text-lecturer-text-primary">
                         Max prompts per attempt
                         <input
                           type="number"
                           min={1}
                           max={100}
-                          className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                          className="mt-1 w-full rounded border border-lecturer-border px-2 py-1 text-sm"
                           value={secureForm.aiAssistanceMaxPromptsPerAttempt}
                           onChange={(e) =>
                             setSecureForm({
@@ -2343,14 +2343,14 @@ export default function LecturerExamPage({
                           }
                         />
                       </label>
-                      <label className="text-xs text-gray-700">
+                      <label className="text-xs text-lecturer-text-primary">
                         Max response length (characters)
                         <input
                           type="number"
                           min={200}
                           max={4000}
                           step={100}
-                          className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                          className="mt-1 w-full rounded border border-lecturer-border px-2 py-1 text-sm"
                           value={secureForm.aiAssistanceMaxResponseCharacters}
                           onChange={(e) =>
                             setSecureForm({
@@ -2363,7 +2363,7 @@ export default function LecturerExamPage({
                     </div>
 
                     <div className="space-y-2">
-                      <label className="flex items-start gap-2 text-sm text-gray-700">
+                      <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                         <input
                           type="checkbox"
                           className="mt-0.5"
@@ -2374,7 +2374,7 @@ export default function LecturerExamPage({
                         />
                         <span>Allow concept explanations</span>
                       </label>
-                      <label className="flex items-start gap-2 text-sm text-gray-700">
+                      <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                         <input
                           type="checkbox"
                           className="mt-0.5"
@@ -2385,7 +2385,7 @@ export default function LecturerExamPage({
                         />
                         <span>Allow answer planning (structuring an approach, not the wording)</span>
                       </label>
-                      <label className="flex items-start gap-2 text-sm text-gray-700">
+                      <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                         <input
                           type="checkbox"
                           className="mt-0.5"
@@ -2396,7 +2396,7 @@ export default function LecturerExamPage({
                         />
                         <span>Allow feedback on the student&apos;s own reasoning</span>
                       </label>
-                      <label className="flex items-start gap-2 text-sm text-gray-700">
+                      <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                         <input
                           type="checkbox"
                           className="mt-0.5"
@@ -2409,7 +2409,7 @@ export default function LecturerExamPage({
                       </label>
                     </div>
 
-                    <p className="text-xs text-gray-500">
+                    <p className="text-xs text-lecturer-text-secondary">
                       It is restricted from providing the correct answer, correct MCQ option, marking
                       rubric, or a submission-ready response — see
                       docs/controlled-ai-brainstorming-assistance-v1.md.
@@ -2425,9 +2425,9 @@ export default function LecturerExamPage({
               feature, not an automatic cheating detector — kept
               independent of secureModeEnabled, same as AI Brainstorming
               Assistance above. */}
-          <div className="border-t border-gray-200 pt-3">
+          <div className="border-t border-lecturer-border pt-3">
             <h3 className="text-sm font-medium">Screen-share evidence</h3>
-            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+            <label className="mt-2 flex items-start gap-2 text-sm text-lecturer-text-primary">
               <input
                 type="checkbox"
                 className="mt-0.5"
@@ -2442,7 +2442,7 @@ export default function LecturerExamPage({
               />
               <span>
                 Require students to share their entire screen
-                <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                   Students must share their entire display while completing this exam. Tether
                   records sharing interruptions and may save limited evidence frames for lecturer
                   review.
@@ -2452,7 +2452,7 @@ export default function LecturerExamPage({
 
             {secureForm.screenShareMode === "REQUIRED" && (
               <div className="mt-3 space-y-3 pl-6">
-                <label className="flex items-start gap-2 text-sm text-gray-700">
+                <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                   <input
                     type="checkbox"
                     className="mt-0.5"
@@ -2463,7 +2463,7 @@ export default function LecturerExamPage({
                 </label>
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <label className="text-xs text-gray-700">
+                  <label className="text-xs text-lecturer-text-primary">
                     Evidence interval (seconds)
                     <input
                       type="number"
@@ -2471,7 +2471,7 @@ export default function LecturerExamPage({
                       max={300}
                       step={10}
                       disabled={!secureForm.screenShareCaptureEvidence}
-                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:opacity-50"
+                      className="mt-1 w-full rounded border border-lecturer-border px-2 py-1 text-sm disabled:opacity-50"
                       value={secureForm.screenShareEvidenceIntervalSeconds}
                       onChange={(e) =>
                         setSecureForm({
@@ -2481,14 +2481,14 @@ export default function LecturerExamPage({
                       }
                     />
                   </label>
-                  <label className="text-xs text-gray-700">
+                  <label className="text-xs text-lecturer-text-primary">
                     Max evidence frames per attempt
                     <input
                       type="number"
                       min={1}
                       max={50}
                       disabled={!secureForm.screenShareCaptureEvidence}
-                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm disabled:opacity-50"
+                      className="mt-1 w-full rounded border border-lecturer-border px-2 py-1 text-sm disabled:opacity-50"
                       value={secureForm.screenShareMaxEvidenceFrames}
                       onChange={(e) =>
                         setSecureForm({
@@ -2500,7 +2500,7 @@ export default function LecturerExamPage({
                   </label>
                 </div>
 
-                <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+                <div className="rounded border border-lecturer-border bg-lecturer-border-subtle p-3 text-xs text-lecturer-text-primary">
                   <p className="font-medium">Screen-share evidence: Enabled</p>
                   <ul className="mt-1 list-disc space-y-0.5 pl-4">
                     <li>No audio is recorded.</li>
@@ -2521,15 +2521,15 @@ export default function LecturerExamPage({
           {/* Answer-Development Provenance v1 — see
               docs/answer-development-provenance-v1.md. This is process
               evidence, not a misconduct detector. */}
-          <div className="border-t border-gray-200 pt-3">
+          <div className="border-t border-lecturer-border pt-3">
             <h3 className="text-sm font-medium">Answer-development provenance</h3>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-lecturer-text-secondary">
               Preserve readable answer-development checkpoints for lecturer review. Never records individual keystrokes.
             </p>
-            <label className="mt-2 block text-sm text-gray-700">
+            <label className="mt-2 block text-sm text-lecturer-text-primary">
               <span>Mode</span>
               <select
-                className="mt-1 block w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                className="mt-1 block w-full rounded border border-lecturer-border px-2 py-1 text-sm"
                 value={secureForm.answerProvenanceMode}
                 onChange={(e) => setSecureForm({ ...secureForm, answerProvenanceMode: e.target.value as SecureSettings["answerProvenanceMode"] })}
               >
@@ -2541,14 +2541,14 @@ export default function LecturerExamPage({
 
             {secureForm.answerProvenanceMode !== "OFF" && (
               <div className="mt-3 space-y-3 pl-6">
-                <div className="grid grid-cols-3 gap-2 text-sm text-gray-700">
+                <div className="grid grid-cols-3 gap-2 text-sm text-lecturer-text-primary">
                   <label>
-                    <span className="text-xs text-gray-500">Interval (s)</span>
+                    <span className="text-xs text-lecturer-text-secondary">Interval (s)</span>
                     <input
                       type="number"
                       min={30}
                       max={300}
-                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                      className="mt-1 w-full rounded border border-lecturer-border px-2 py-1 text-sm"
                       value={secureForm.answerVersionIntervalSeconds}
                       onChange={(e) =>
                         setSecureForm({
@@ -2559,12 +2559,12 @@ export default function LecturerExamPage({
                     />
                   </label>
                   <label>
-                    <span className="text-xs text-gray-500">Min. change (chars)</span>
+                    <span className="text-xs text-lecturer-text-secondary">Min. change (chars)</span>
                     <input
                       type="number"
                       min={20}
                       max={1000}
-                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                      className="mt-1 w-full rounded border border-lecturer-border px-2 py-1 text-sm"
                       value={secureForm.answerVersionMinimumCharacterChange}
                       onChange={(e) =>
                         setSecureForm({
@@ -2575,12 +2575,12 @@ export default function LecturerExamPage({
                     />
                   </label>
                   <label>
-                    <span className="text-xs text-gray-500">Max checkpoints/question</span>
+                    <span className="text-xs text-lecturer-text-secondary">Max checkpoints/question</span>
                     <input
                       type="number"
                       min={5}
                       max={100}
-                      className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                      className="mt-1 w-full rounded border border-lecturer-border px-2 py-1 text-sm"
                       value={secureForm.answerVersionMaximumPerQuestion}
                       onChange={(e) =>
                         setSecureForm({
@@ -2592,7 +2592,7 @@ export default function LecturerExamPage({
                   </label>
                 </div>
 
-                <label className="flex items-start gap-2 text-sm text-gray-700">
+                <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                   <input
                     type="checkbox"
                     className="mt-0.5"
@@ -2601,7 +2601,7 @@ export default function LecturerExamPage({
                   />
                   <span>Capture paste metadata (size, timing — never clipboard contents on their own)</span>
                 </label>
-                <label className="flex items-start gap-2 text-sm text-gray-700">
+                <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                   <input
                     type="checkbox"
                     className="mt-0.5"
@@ -2610,7 +2610,7 @@ export default function LecturerExamPage({
                   />
                   <span>Capture deletion/rewrite metadata</span>
                 </label>
-                <label className="flex items-start gap-2 text-sm text-gray-700">
+                <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                   <input
                     type="checkbox"
                     className="mt-0.5"
@@ -2622,8 +2622,8 @@ export default function LecturerExamPage({
 
                 {secureForm.answerProvenanceMode === "DETAILED" && (
                   <div className="space-y-2 border-t border-gray-100 pt-2">
-                    <p className="text-xs font-medium text-gray-600">Detailed-mode workspaces</p>
-                    <label className="flex items-start gap-2 text-sm text-gray-700">
+                    <p className="text-xs font-medium text-lecturer-text-secondary">Detailed-mode workspaces</p>
+                    <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                       <input
                         type="checkbox"
                         className="mt-0.5"
@@ -2632,7 +2632,7 @@ export default function LecturerExamPage({
                       />
                       <span>Outline workspace</span>
                     </label>
-                    <label className="flex items-start gap-2 text-sm text-gray-700">
+                    <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                       <input
                         type="checkbox"
                         className="mt-0.5"
@@ -2641,7 +2641,7 @@ export default function LecturerExamPage({
                       />
                       <span>Calculation working area</span>
                     </label>
-                    <label className="flex items-start gap-2 text-sm text-gray-700">
+                    <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                       <input
                         type="checkbox"
                         className="mt-0.5"
@@ -2655,11 +2655,11 @@ export default function LecturerExamPage({
                         }
                       />
                       <span>
-                        Code working area <span className="text-xs text-gray-500">(execution is not available — see docs)</span>
+                        Code working area <span className="text-xs text-lecturer-text-secondary">(execution is not available — see docs)</span>
                       </span>
                     </label>
                     {secureForm.enableCodeWorkspace && (
-                      <label className="flex items-start gap-2 pl-6 text-sm text-gray-700">
+                      <label className="flex items-start gap-2 pl-6 text-sm text-lecturer-text-primary">
                         <input
                           type="checkbox"
                           className="mt-0.5"
@@ -2669,7 +2669,7 @@ export default function LecturerExamPage({
                         <span>Record code-run requests (no code is actually executed)</span>
                       </label>
                     )}
-                    <label className="flex items-start gap-2 text-sm text-gray-700">
+                    <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                       <input
                         type="checkbox"
                         className="mt-0.5"
@@ -2681,7 +2681,7 @@ export default function LecturerExamPage({
                   </div>
                 )}
 
-                <div className="rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+                <div className="rounded border border-lecturer-border bg-lecturer-border-subtle p-3 text-xs text-lecturer-text-primary">
                   <p className="font-medium">Answer-development provenance: Enabled</p>
                   <ul className="mt-1 list-disc space-y-0.5 pl-4">
                     <li>Individual keystrokes are never recorded.</li>
@@ -2699,16 +2699,16 @@ export default function LecturerExamPage({
               mode and display policy are not independent choices — they
               follow automatically from this classification and are
               locked below. */}
-          <div className="border-t border-gray-200 pt-3">
+          <div className="border-t border-lecturer-border pt-3">
             <h3 className="text-sm font-medium">Assessment type</h3>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-lecturer-text-secondary">
               Classify this assessment. Final examinations must be delivered through Tether Secure Browser.
             </p>
             <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
               {ASSESSMENT_TYPES.map((type) => (
                 <label
                   key={type}
-                  className={`cursor-pointer rounded border p-3 text-sm ${secureForm.assessmentType === type ? "border-gray-500 bg-gray-50" : "border-gray-200"}`}
+                  className={`cursor-pointer rounded border p-3 text-sm ${secureForm.assessmentType === type ? "border-gray-500 bg-lecturer-border-subtle" : "border-lecturer-border"}`}
                 >
                   <div className="flex items-center gap-2">
                     <input
@@ -2736,7 +2736,7 @@ export default function LecturerExamPage({
               ))}
             </div>
             {isFinalExamLocked && (
-              <div className="mt-2 rounded border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800">
+              <div className="mt-2 rounded border border-blue-200 bg-lecturer-accent-subtle p-2 text-xs text-blue-800">
                 <p className="font-medium">Final examinations must be delivered through Tether Secure Browser.</p>
                 <p className="mt-0.5">Students must use a verified Tether Secure Browser session and a compliant single-display setup.</p>
               </div>
@@ -2749,7 +2749,7 @@ export default function LecturerExamPage({
                 already has submissions must be told that plainly, since
                 the save itself will silently only affect NEW attempts. */}
             {!!submissionCounts && submissionCounts.total > 0 && (
-              <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+              <div className="mt-2 rounded border border-amber-200 bg-[#FFFAEB] p-2 text-xs text-amber-800">
                 <p className="font-medium">
                   This exam already has {submissionCounts.total} submission{submissionCounts.total === 1 ? "" : "s"}.
                 </p>
@@ -2766,13 +2766,13 @@ export default function LecturerExamPage({
               Compatibility v1 — see
               docs/secure-client-foundation-seb-v1.md. Cheat-resistant,
               never cheat-proof/impossible to bypass. */}
-          <div className="border-t border-gray-200 pt-3">
+          <div className="border-t border-lecturer-border pt-3">
             <h3 className="text-sm font-medium">Exam delivery</h3>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-lecturer-text-secondary">
               Choose how students access this exam. The web examination platform remains fully functional in every mode.
             </p>
             {isFinalExamLocked && (
-              <p className="mt-1 text-xs text-gray-500">Other delivery modes are unavailable for final examinations.</p>
+              <p className="mt-1 text-xs text-lecturer-text-secondary">Other delivery modes are unavailable for final examinations.</p>
             )}
             <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
               {(
@@ -2855,7 +2855,7 @@ export default function LecturerExamPage({
                 return (
                   <label
                     key={option.value}
-                    className={`rounded border p-3 text-sm ${checked ? "border-gray-500 bg-gray-50" : "border-gray-200"} ${option.disabled ? "opacity-50" : "cursor-pointer"}`}
+                    className={`rounded border p-3 text-sm ${checked ? "border-gray-500 bg-lecturer-border-subtle" : "border-lecturer-border"} ${option.disabled ? "opacity-50" : "cursor-pointer"}`}
                   >
                     <div className="flex items-center gap-2">
                       <input
@@ -2873,7 +2873,7 @@ export default function LecturerExamPage({
                         <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-white">Required for final examinations</span>
                       )}
                     </div>
-                    <p className="mt-1 text-xs text-gray-500">{option.desc}</p>
+                    <p className="mt-1 text-xs text-lecturer-text-secondary">{option.desc}</p>
                     {/* Real Safe Exam Browser client compatibility has not yet
                         been validated against this backend — never claim
                         "production verified" here regardless of whether the
@@ -2881,9 +2881,9 @@ export default function LecturerExamPage({
                         the validated first-party client, so neither Tether
                         option shows this notice. */}
                     {option.needsValidationNotice && (
-                      <p className="mt-1 text-xs text-amber-700">Compatibility validation required.</p>
+                      <p className="mt-1 text-xs text-[#B54708]">Compatibility validation required.</p>
                     )}
-                    {option.disabled && option.disabledReason && <p className="mt-1 text-xs text-amber-700">{option.disabledReason}</p>}
+                    {option.disabled && option.disabledReason && <p className="mt-1 text-xs text-[#B54708]">{option.disabledReason}</p>}
                   </label>
                 );
               })}
@@ -2899,7 +2899,7 @@ export default function LecturerExamPage({
               <p className="text-sm font-medium">Display requirement</p>
               <div className="mt-1 flex flex-col gap-1.5">
                 <label
-                  className={`flex items-start gap-2 text-sm text-gray-700 ${isFinalExamLocked || displayRequirementUiState.unrestrictedDisabled ? "opacity-50" : ""}`}
+                  className={`flex items-start gap-2 text-sm text-lecturer-text-primary ${isFinalExamLocked || displayRequirementUiState.unrestrictedDisabled ? "opacity-50" : ""}`}
                 >
                   <input
                     type="radio"
@@ -2914,13 +2914,13 @@ export default function LecturerExamPage({
                   />
                   <span>
                     No display restriction
-                    <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                    <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                       Students may use the displays permitted by their device and exam client.
                     </span>
                   </span>
                 </label>
                 <label
-                  className={`flex items-start gap-2 text-sm text-gray-700 ${isFinalExamLocked || displayRequirementUiState.singleDisplayRequiredDisabled ? "opacity-50" : ""}`}
+                  className={`flex items-start gap-2 text-sm text-lecturer-text-primary ${isFinalExamLocked || displayRequirementUiState.singleDisplayRequiredDisabled ? "opacity-50" : ""}`}
                 >
                   <input
                     type="radio"
@@ -2954,7 +2954,7 @@ export default function LecturerExamPage({
                     {isFinalExamLocked && (
                       <span className="ml-1.5 rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-medium text-white">Required for final examinations</span>
                     )}
-                    <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                    <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                       Tether Secure Browser checks Windows display topology before and during the examination.
                     </span>
                   </span>
@@ -2965,11 +2965,11 @@ export default function LecturerExamPage({
                   right now" fact lives solely in the notice below
                   (displayRequirementUiState.notice), never repeated here,
                   so the two no longer say the same thing twice. */}
-              <p className="mt-1.5 text-xs text-gray-500">
+              <p className="mt-1.5 text-xs text-lecturer-text-secondary">
                 Standard web exams cannot reliably verify connected, mirrored or extended displays.
               </p>
               {displayPolicyAutoSwitchNotice && (
-                <p className="mt-1.5 rounded border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800">
+                <p className="mt-1.5 rounded border border-blue-200 bg-lecturer-accent-subtle p-2 text-xs text-blue-800">
                   {displayPolicyAutoSwitchNotice}
                 </p>
               )}
@@ -3005,7 +3005,7 @@ export default function LecturerExamPage({
                   perfectly valid, saveable configuration in the
                   UNAVAILABLE case). */}
               {displayRequirementUiState.notice && (
-                <p className="mt-1.5 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                <p className="mt-1.5 rounded border border-amber-200 bg-[#FFFAEB] p-2 text-xs text-amber-800">
                   <span className="block font-medium">{displayRequirementUiState.notice.title}</span>
                   {displayRequirementUiState.notice.message}
                 </p>
@@ -3014,7 +3014,7 @@ export default function LecturerExamPage({
 
             {(secureForm.deliveryMode === "SEB_OPTIONAL" || secureForm.deliveryMode === "SEB_REQUIRED") && (
               <div className="mt-3 space-y-2 pl-1">
-                <label className="flex items-start gap-2 text-sm text-gray-700">
+                <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                   <input
                     type="checkbox"
                     className="mt-0.5"
@@ -3023,7 +3023,7 @@ export default function LecturerExamPage({
                   />
                   <span>Require Browser Exam Key verification</span>
                 </label>
-                <label className="flex items-start gap-2 text-sm text-gray-700">
+                <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                   <input
                     type="checkbox"
                     className="mt-0.5"
@@ -3032,7 +3032,7 @@ export default function LecturerExamPage({
                   />
                   <span>Require Config Key verification</span>
                 </label>
-                <label className="flex items-start gap-2 text-sm text-gray-700">
+                <label className="flex items-start gap-2 text-sm text-lecturer-text-primary">
                   <input
                     type="checkbox"
                     className="mt-0.5"
@@ -3043,11 +3043,11 @@ export default function LecturerExamPage({
                 </label>
                 <Link
                   href={`/lecturer/exams/${id}/secure-client`}
-                  className="mt-2 inline-block rounded border border-gray-300 px-3 py-1.5 text-sm"
+                  className="mt-2 inline-block rounded border border-lecturer-border px-3 py-1.5 text-sm"
                 >
                   Manage Safe Exam Browser configuration &amp; sessions
                 </Link>
-                <p className="rounded border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">
+                <p className="rounded border border-amber-100 bg-[#FFFAEB] p-3 text-xs text-amber-800">
                   Secure examination mode provides stronger controls and additional integrity evidence. It is designed to be
                   cheat-resistant, but no examination technology can prevent every form of unauthorised assistance.
                 </p>
@@ -3055,13 +3055,13 @@ export default function LecturerExamPage({
             )}
           </div>
 
-          <div className="border-t border-gray-200 pt-3">
+          <div className="border-t border-lecturer-border pt-3">
             <h3 className="text-sm font-medium">Question pools</h3>
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-lecturer-text-secondary">
               Create a larger set of questions and draw a smaller random selection for each
               student attempt.
             </p>
-            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+            <label className="mt-2 flex items-start gap-2 text-sm text-lecturer-text-primary">
               <input
                 type="checkbox"
                 className="mt-0.5"
@@ -3082,7 +3082,7 @@ export default function LecturerExamPage({
               />
               <span>Enable question pools</span>
             </label>
-            <label className="mt-2 flex items-start gap-2 text-sm text-gray-700">
+            <label className="mt-2 flex items-start gap-2 text-sm text-lecturer-text-primary">
               <input
                 type="checkbox"
                 className="mt-0.5"
@@ -3097,7 +3097,7 @@ export default function LecturerExamPage({
               />
               <span>
                 Draw a random selection for each student attempt
-                <span className="mt-0.5 block text-xs font-normal text-gray-500">
+                <span className="mt-0.5 block text-xs font-normal text-lecturer-text-secondary">
                   Each student receives a stable random selection from each pool. This is a
                   deterrent, not a guarantee that answer sharing is impossible.
                 </span>
@@ -3108,12 +3108,12 @@ export default function LecturerExamPage({
           <button
             onClick={handleSaveSecureSettings}
             disabled={savingSecure}
-            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+            className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-sm text-white disabled:opacity-50"
           >
             {savingSecure ? "Saving..." : "Save Safe Exam Mode settings"}
           </button>
           {secureSaveMessage && (
-            <p className="text-sm text-gray-600">{secureSaveMessage}</p>
+            <p className="text-sm text-lecturer-text-secondary">{secureSaveMessage}</p>
           )}
         </div>
       )}
@@ -3126,9 +3126,9 @@ export default function LecturerExamPage({
         hidden={activeTab !== "delivery"}
         className="mt-6"
       >
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Course, assignment &amp; schedule</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
-        <p className="text-sm text-gray-600">
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Course, assignment &amp; schedule</h2>
+      <div className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
+        <p className="text-sm text-lecturer-text-secondary">
           Choose who can access this exam: the whole institution, a
           specific course, or individual students you invite directly via
           a standalone link.
@@ -3145,7 +3145,7 @@ export default function LecturerExamPage({
               />
               <span>
                 Institution-wide (legacy)
-                <span className="block text-xs text-gray-500">Visible to every student in your institution.</span>
+                <span className="block text-xs text-lecturer-text-secondary">Visible to every student in your institution.</span>
               </span>
             </label>
             <label className="flex items-start gap-2">
@@ -3157,7 +3157,7 @@ export default function LecturerExamPage({
               />
               <span>
                 Course
-                <span className="block text-xs text-gray-500">Assign to a course you teach.</span>
+                <span className="block text-xs text-lecturer-text-secondary">Assign to a course you teach.</span>
               </span>
             </label>
             <label className="flex items-start gap-2">
@@ -3169,7 +3169,7 @@ export default function LecturerExamPage({
               />
               <span>
                 Standalone exam link
-                <span className="block text-xs text-gray-500">
+                <span className="block text-xs text-lecturer-text-secondary">
                   Invite individual students directly — no course or institution membership required.
                 </span>
               </span>
@@ -3180,7 +3180,7 @@ export default function LecturerExamPage({
           <div>
             <label className="text-sm font-medium">Course</label>
             <select
-              className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="mt-1 block w-full rounded border border-lecturer-border px-3 py-1.5 text-sm"
               value={courseId}
               onChange={(e) => setCourseId(e.target.value)}
             >
@@ -3219,9 +3219,9 @@ export default function LecturerExamPage({
         {audience === "COURSE" && courseId && assignmentMode === "SELECTED_STUDENTS" && (
           <div>
             <label className="text-sm font-medium">Selected students</label>
-            <div className="mt-1 max-h-40 overflow-y-auto rounded border border-gray-200 bg-white p-2">
+            <div className="mt-1 max-h-40 overflow-y-auto rounded border border-lecturer-border bg-lecturer-surface p-2">
               {courseStudents.length === 0 && (
-                <p className="text-sm text-gray-500">No students enrolled in this course yet.</p>
+                <p className="text-sm text-lecturer-text-secondary">No students enrolled in this course yet.</p>
               )}
               {courseStudents.map((s) => (
                 <label key={s.id} className="flex items-center gap-2 py-0.5 text-sm">
@@ -3241,10 +3241,10 @@ export default function LecturerExamPage({
           </div>
         )}
         {audience === "STANDALONE" && (
-          <div className="rounded border border-gray-200 bg-gray-50 p-3">
+          <div className="rounded border border-lecturer-border bg-lecturer-border-subtle p-3">
             {!standaloneInviteUrl && !exam.standaloneInviteEnabled && (
               <>
-                <p className="text-sm text-gray-600">
+                <p className="text-sm text-lecturer-text-secondary">
                   Generate a secure link to invite individual students to this exam. A
                   student who opens the link and accepts gets access — no course or
                   institution membership needed, and no other student can see this exam.
@@ -3252,7 +3252,7 @@ export default function LecturerExamPage({
                 <button
                   onClick={handleGenerateInvite}
                   disabled={generatingInvite}
-                  className="mt-2 rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="mt-2 rounded border border-lecturer-border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   {generatingInvite ? "Generating..." : "Generate link"}
                 </button>
@@ -3267,43 +3267,43 @@ export default function LecturerExamPage({
                     readOnly
                     value={standaloneInviteUrl}
                     onFocus={(e) => e.target.select()}
-                    className="flex-1 rounded border border-gray-300 px-2 py-1.5 text-xs"
+                    className="flex-1 rounded border border-lecturer-border px-2 py-1.5 text-xs"
                   />
                   <button
                     onClick={handleCopyInviteLink}
-                    className="rounded border border-gray-300 px-3 py-1.5 text-xs"
+                    className="rounded border border-lecturer-border px-3 py-1.5 text-xs"
                   >
                     {copiedInviteLink ? "Copied!" : "Copy link"}
                   </button>
                 </div>
-                <p className="mt-1 text-xs text-amber-700">
+                <p className="mt-1 text-xs text-[#B54708]">
                   This link is shown once. Copy it now — it cannot be recovered after you
                   leave or reload this page.
                 </p>
               </>
             )}
             {!standaloneInviteUrl && exam.standaloneInviteEnabled && (
-              <p className="text-sm text-gray-700">Invitation link active.</p>
+              <p className="text-sm text-lecturer-text-primary">Invitation link active.</p>
             )}
             {exam.standaloneInviteEnabled && (
               <div className="mt-3 flex gap-2">
                 <button
                   onClick={handleGenerateInvite}
                   disabled={generatingInvite}
-                  className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="rounded border border-lecturer-border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   {generatingInvite ? "Generating..." : "Regenerate link"}
                 </button>
                 <button
                   onClick={handleDisableInvite}
                   disabled={disablingInvite}
-                  className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="rounded border border-lecturer-border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   {disablingInvite ? "Disabling..." : "Disable"}
                 </button>
               </div>
             )}
-            {inviteMessage && <p className="mt-2 text-sm text-gray-600">{inviteMessage}</p>}
+            {inviteMessage && <p className="mt-2 text-sm text-lecturer-text-secondary">{inviteMessage}</p>}
           </div>
         )}
         <div className="grid gap-2 sm:grid-cols-2">
@@ -3311,7 +3311,7 @@ export default function LecturerExamPage({
             <label className="text-sm font-medium">Available from</label>
             <input
               type="datetime-local"
-              className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="mt-1 block w-full rounded border border-lecturer-border px-3 py-1.5 text-sm"
               value={availableFrom}
               onChange={(e) => setAvailableFrom(e.target.value)}
             />
@@ -3320,7 +3320,7 @@ export default function LecturerExamPage({
             <label className="text-sm font-medium">Available until</label>
             <input
               type="datetime-local"
-              className="mt-1 block w-full rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="mt-1 block w-full rounded border border-lecturer-border px-3 py-1.5 text-sm"
               value={availableUntil}
               onChange={(e) => setAvailableUntil(e.target.value)}
             />
@@ -3329,15 +3329,15 @@ export default function LecturerExamPage({
         <button
           onClick={saveSchedule}
           disabled={savingSchedule}
-          className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+          className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-sm text-white disabled:opacity-50"
         >
           {savingSchedule ? "Saving..." : "Save course & schedule"}
         </button>
-        {scheduleMessage && <p className="text-sm text-gray-600">{scheduleMessage}</p>}
+        {scheduleMessage && <p className="text-sm text-lecturer-text-secondary">{scheduleMessage}</p>}
       </div>
 
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Exam duration</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Exam duration</h2>
+      <div className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
         <div>
           <label className="text-sm font-medium">Standard duration</label>
           <div className="mt-1 flex items-center gap-2">
@@ -3346,47 +3346,47 @@ export default function LecturerExamPage({
               min={1}
               value={durationInput}
               onChange={(e) => setDurationInput(e.target.value)}
-              className="w-24 rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="w-24 rounded border border-lecturer-border px-3 py-1.5 text-sm"
             />
-            <span className="text-sm text-gray-600">minutes</span>
+            <span className="text-sm text-lecturer-text-secondary">minutes</span>
           </div>
-          <p className="mt-1 text-xs text-gray-500">
+          <p className="mt-1 text-xs text-lecturer-text-secondary">
             Applies to students without an individual time accommodation.
           </p>
         </div>
-        <p className="text-xs text-gray-500">
+        <p className="text-xs text-lecturer-text-secondary">
           Existing attempts keep the duration they started with. This change applies to new attempts only.
         </p>
         <button
           onClick={handleSaveDuration}
           disabled={savingDuration}
-          className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+          className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-sm text-white disabled:opacity-50"
         >
           {savingDuration ? "Saving..." : "Save duration"}
         </button>
-        {durationMessage && <p className="text-sm text-gray-600">{durationMessage}</p>}
+        {durationMessage && <p className="text-sm text-lecturer-text-secondary">{durationMessage}</p>}
       </div>
 
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Time accommodations</h2>
-      <p className="mt-1 text-sm text-gray-500">
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Time accommodations</h2>
+      <p className="mt-1 text-sm text-lecturer-text-secondary">
         Provide approved individual time adjustments without changing the standard exam duration. For example, an
         approved Learning Access Plan.
       </p>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
+      <div className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
         {accommodations.length === 0 ? (
-          <p className="text-sm text-gray-500">
+          <p className="text-sm text-lecturer-text-secondary">
             {accommodationsLoaded ? "No time accommodations yet." : "Loading..."}
           </p>
         ) : (
           <div className="space-y-2">
             {accommodations.map((a) => (
-              <div key={a.id} className="rounded border border-gray-200 p-3 text-sm">
+              <div key={a.id} className="rounded border border-lecturer-border p-3 text-sm">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <p className="font-medium">{a.name}</p>
-                    <p className="text-xs text-gray-500">{a.email}</p>
+                    <p className="text-xs text-lecturer-text-secondary">{a.email}</p>
                     {a.hasInProgressAttempt && (
-                      <p className="mt-1 text-xs text-amber-700">
+                      <p className="mt-1 text-xs text-[#B54708]">
                         This student already has an active attempt. Its current duration will not change. This
                         accommodation will apply to a future attempt.
                       </p>
@@ -3394,7 +3394,7 @@ export default function LecturerExamPage({
                   </div>
                   <div className="flex items-center gap-4 text-right">
                     <div>
-                      <p className="text-xs text-gray-500">Adjustment</p>
+                      <p className="text-xs text-lecturer-text-secondary">Adjustment</p>
                       <p>
                         {a.adjustmentMode === "PERCENT_EXTRA"
                           ? `+${a.adjustmentValue}%`
@@ -3404,25 +3404,25 @@ export default function LecturerExamPage({
                       </p>
                     </div>
                     <div>
-                      <p className="text-xs text-gray-500">Standard time</p>
+                      <p className="text-xs text-lecturer-text-secondary">Standard time</p>
                       <p>{exam.durationMins} min</p>
                     </div>
                     <div>
-                      <p className="text-xs text-gray-500">Effective time</p>
+                      <p className="text-xs text-lecturer-text-secondary">Effective time</p>
                       <p className="font-medium">{a.effectiveDurationMins} min</p>
                     </div>
                     <div className="flex flex-col items-end gap-1">
                       <button
                         type="button"
                         onClick={() => handleOpenEditAccommodation(a)}
-                        className="text-sm text-blue-700 underline"
+                        className="text-sm text-lecturer-accent-hover underline"
                       >
                         Edit
                       </button>
                       <button
                         type="button"
                         onClick={() => handleRemoveAccommodation(a)}
-                        className="text-xs text-red-600 underline"
+                        className="text-xs text-[#B42318] underline"
                       >
                         Remove
                       </button>
@@ -3433,18 +3433,18 @@ export default function LecturerExamPage({
             ))}
           </div>
         )}
-        {accommodationsMessage && <p className="text-sm text-gray-600">{accommodationsMessage}</p>}
+        {accommodationsMessage && <p className="text-sm text-lecturer-text-secondary">{accommodationsMessage}</p>}
 
         {!showAccommodationForm ? (
           <button
             type="button"
             onClick={handleOpenAddAccommodation}
-            className="rounded border border-gray-300 px-4 py-2 text-sm"
+            className="rounded border border-lecturer-border px-4 py-2 text-sm"
           >
             + Add accommodation
           </button>
         ) : (
-          <div className="rounded border border-gray-200 bg-gray-50 p-3">
+          <div className="rounded border border-lecturer-border bg-lecturer-border-subtle p-3">
             <p className="text-sm font-medium">
               {editingAccommodationStudentId ? "Edit accommodation" : "Add accommodation"}
             </p>
@@ -3455,7 +3455,7 @@ export default function LecturerExamPage({
                   disabled={editingAccommodationStudentId != null}
                   value={accommodationStudentId}
                   onChange={(e) => setAccommodationStudentId(e.target.value)}
-                  className="mt-1 w-full rounded border border-gray-300 px-3 py-1.5 text-sm disabled:bg-gray-100"
+                  className="mt-1 w-full rounded border border-lecturer-border px-3 py-1.5 text-sm disabled:bg-lecturer-border-subtle"
                 >
                   <option value="">Select a student...</option>
                   {eligibleStudents.map((s) => (
@@ -3465,7 +3465,7 @@ export default function LecturerExamPage({
                   ))}
                 </select>
               </div>
-              <p className="text-xs text-gray-500">Standard duration: {exam.durationMins} minutes</p>
+              <p className="text-xs text-lecturer-text-secondary">Standard duration: {exam.durationMins} minutes</p>
               <div>
                 <label className="block text-sm font-medium">Time adjustment</label>
                 <div className="mt-1 flex flex-wrap gap-3 text-sm">
@@ -3514,9 +3514,9 @@ export default function LecturerExamPage({
                     min={1}
                     value={accommodationValue}
                     onChange={(e) => setAccommodationValue(e.target.value)}
-                    className="w-24 rounded border border-gray-300 px-3 py-1.5 text-sm"
+                    className="w-24 rounded border border-lecturer-border px-3 py-1.5 text-sm"
                   />
-                  <span className="text-sm text-gray-600">minutes extra</span>
+                  <span className="text-sm text-lecturer-text-secondary">minutes extra</span>
                 </div>
               )}
               {accommodationMode === "TOTAL_DURATION" && (
@@ -3526,9 +3526,9 @@ export default function LecturerExamPage({
                     min={1}
                     value={accommodationValue}
                     onChange={(e) => setAccommodationValue(e.target.value)}
-                    className="w-24 rounded border border-gray-300 px-3 py-1.5 text-sm"
+                    className="w-24 rounded border border-lecturer-border px-3 py-1.5 text-sm"
                   />
-                  <span className="text-sm text-gray-600">minutes total</span>
+                  <span className="text-sm text-lecturer-text-secondary">minutes total</span>
                 </div>
               )}
 
@@ -3546,28 +3546,28 @@ export default function LecturerExamPage({
                 }
                 if (effective == null) return null;
                 return (
-                  <div className="rounded border border-gray-200 bg-white p-3">
-                    <p className="text-xs text-gray-500">Effective exam duration</p>
+                  <div className="rounded border border-lecturer-border bg-lecturer-surface p-3">
+                    <p className="text-xs text-lecturer-text-secondary">Effective exam duration</p>
                     <p className="text-lg font-semibold">{effective} minutes</p>
                   </div>
                 );
               })()}
 
-              {accommodationFormError && <p className="text-sm text-red-600">{accommodationFormError}</p>}
+              {accommodationFormError && <p className="text-sm text-[#B42318]">{accommodationFormError}</p>}
 
               <div className="flex gap-2">
                 <button
                   type="button"
                   onClick={handleSaveAccommodation}
                   disabled={savingAccommodation}
-                  className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+                  className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-sm text-white disabled:opacity-50"
                 >
                   {savingAccommodation ? "Saving..." : "Save accommodation"}
                 </button>
                 <button
                   type="button"
                   onClick={handleCancelAccommodationForm}
-                  className="rounded border border-gray-300 px-4 py-2 text-sm"
+                  className="rounded border border-lecturer-border px-4 py-2 text-sm"
                 >
                   Cancel
                 </button>
@@ -3577,10 +3577,10 @@ export default function LecturerExamPage({
         )}
       </div>
 
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Share exam link</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Share exam link</h2>
+      <div className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
         {!exam.published ? (
-          <p className="text-sm text-amber-700">
+          <p className="text-sm text-[#B54708]">
             Publish this exam before sharing the link — unpublished exams cannot be accessed by
             students.
           </p>
@@ -3591,31 +3591,31 @@ export default function LecturerExamPage({
                 readOnly
                 type="text"
                 value={joinLinkUrl}
-                className="flex-1 rounded border border-gray-300 bg-gray-50 px-3 py-1.5 text-sm"
+                className="flex-1 rounded border border-lecturer-border bg-lecturer-border-subtle px-3 py-1.5 text-sm"
                 onFocus={(e) => e.target.select()}
               />
               <button
                 onClick={handleCopyJoinLink}
-                className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+                className="rounded border border-lecturer-border px-3 py-1.5 text-sm"
               >
                 {copiedJoinLink ? "Copied!" : "Copy link"}
               </button>
             </div>
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-lecturer-text-secondary">
               Students must be logged in to access this link. If this exam requires an access
               code, students will still need to enter it after opening the link. This link does
               not grant access on its own — it only works for students who are already authorized
               to take this exam.
             </p>
             {exam.assignmentMode === "STANDALONE" ? (
-              <p className="text-xs text-gray-500">
+              <p className="text-xs text-lecturer-text-secondary">
                 This exam uses a standalone invitation link. This ordinary link only works
                 for students who have already accepted an invitation — see &quot;Standalone
                 exam link&quot; above to invite new students.
               </p>
             ) : (
               courseId && (
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-lecturer-text-secondary">
                   {assignmentMode === "SELECTED_STUDENTS"
                     ? "Only students assigned to this exam will be able to access it via this link."
                     : `Only students enrolled in ${
@@ -3628,9 +3628,9 @@ export default function LecturerExamPage({
         )}
       </div>
 
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Exam access code</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
-        <p className="text-sm text-gray-600">
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Exam access code</h2>
+      <div className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
+        <p className="text-sm text-lecturer-text-secondary">
           Students must enter this code before starting the exam.
         </p>
         <p className="text-sm">
@@ -3639,7 +3639,7 @@ export default function LecturerExamPage({
             className={
               exam.accessCodeRequired
                 ? "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
-                : "rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600"
+                : "rounded bg-lecturer-border-subtle px-2 py-0.5 text-xs text-lecturer-text-secondary"
             }
           >
             {exam.accessCodeRequired ? "Access code enabled" : "No access code"}
@@ -3653,7 +3653,7 @@ export default function LecturerExamPage({
             <input
               type="text"
               minLength={4}
-              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
               value={accessCodeInput}
               onChange={(e) => setAccessCodeInput(e.target.value)}
               placeholder="e.g. ROOM-204"
@@ -3662,7 +3662,7 @@ export default function LecturerExamPage({
           <button
             onClick={handleSetAccessCode}
             disabled={savingAccessCode || !accessCodeInput.trim()}
-            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+            className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-sm text-white disabled:opacity-50"
           >
             {savingAccessCode ? "Saving..." : "Set access code"}
           </button>
@@ -3670,33 +3670,33 @@ export default function LecturerExamPage({
             <button
               onClick={handleClearAccessCode}
               disabled={savingAccessCode}
-              className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-50"
+              className="rounded border border-lecturer-border px-4 py-2 text-sm disabled:opacity-50"
             >
               Clear
             </button>
           )}
         </div>
-        {accessCodeMessage && <p className="text-sm text-gray-600">{accessCodeMessage}</p>}
+        {accessCodeMessage && <p className="text-sm text-lecturer-text-secondary">{accessCodeMessage}</p>}
       </div>
 
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Export results</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Export results</h2>
+      <div className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
         <div>
           <p className="text-sm font-medium">Full marks report</p>
-          <p className="text-xs text-gray-500">
+          <p className="text-xs text-lecturer-text-secondary">
             Every column: scores, integrity risk level, access code/camera settings, and notes.
             For lecturer/institution use.
           </p>
           <div className="mt-2 flex gap-2">
             <a
               href={`/api/lecturer/exams/${id}/export/marks-csv`}
-              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="rounded border border-lecturer-border px-3 py-1.5 text-sm"
             >
               Export marks CSV
             </a>
             <a
               href={`/api/lecturer/exams/${id}/export/marks-xlsx`}
-              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="rounded border border-lecturer-border px-3 py-1.5 text-sm"
             >
               Export marks Excel
             </a>
@@ -3704,20 +3704,20 @@ export default function LecturerExamPage({
         </div>
         <div>
           <p className="text-sm font-medium">Canvas/IRM marks upload export</p>
-          <p className="text-xs text-gray-500">
+          <p className="text-xs text-lecturer-text-secondary">
             Marks-only — no integrity signals, no access code data. For uploading to Canvas or an
             institutional marks system.
           </p>
           <div className="mt-2 flex gap-2">
             <a
               href={`/api/lecturer/exams/${id}/export/upload-csv`}
-              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="rounded border border-lecturer-border px-3 py-1.5 text-sm"
             >
               Export upload-ready CSV
             </a>
             <a
               href={`/api/lecturer/exams/${id}/export/upload-xlsx`}
-              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="rounded border border-lecturer-border px-3 py-1.5 text-sm"
             >
               Export upload-ready Excel
             </a>
@@ -3725,14 +3725,14 @@ export default function LecturerExamPage({
         </div>
         <div>
           <p className="text-sm font-medium">PDF report</p>
-          <p className="text-xs text-gray-500">
+          <p className="text-xs text-lecturer-text-secondary">
             A human-readable summary with marks table and integrity summary, suitable for
             printing or filing.
           </p>
           <div className="mt-2">
             <a
               href={`/api/lecturer/exams/${id}/export/report-pdf`}
-              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="rounded border border-lecturer-border px-3 py-1.5 text-sm"
             >
               Export PDF report
             </a>
@@ -3750,28 +3750,28 @@ export default function LecturerExamPage({
       >
       {secureForm?.enableQuestionPools && (
         <>
-          <h2 className="mt-8 text-lg font-semibold text-[#101828]">Question pools</h2>
-          <p className="mt-1 text-sm text-gray-500">
+          <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Question pools</h2>
+          <p className="mt-1 text-sm text-lecturer-text-secondary">
             Create a larger set of questions and draw a smaller random selection for each student
             attempt.
           </p>
           <div className="mt-3 space-y-2">
-            {pools.length === 0 && <p className="text-gray-500">No pools yet.</p>}
+            {pools.length === 0 && <p className="text-lecturer-text-secondary">No pools yet.</p>}
             {pools.map((pool) => (
-              <div key={pool.id} className="rounded border border-gray-200 bg-white p-3">
+              <div key={pool.id} className="rounded border border-lecturer-border bg-lecturer-surface p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <p className="text-sm font-medium">{pool.name}</p>
-                    <p className="text-xs text-gray-500">{pool.questionCount} question(s) in pool</p>
+                    <p className="text-xs text-lecturer-text-secondary">{pool.questionCount} question(s) in pool</p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <label className="text-xs text-gray-600">Draw this many questions from this pool</label>
+                    <label className="text-xs text-lecturer-text-secondary">Draw this many questions from this pool</label>
                     <input
                       type="number"
                       min={0}
                       defaultValue={pool.drawCount ?? ""}
                       placeholder="all"
-                      className="w-16 rounded border border-gray-300 px-2 py-1 text-sm"
+                      className="w-16 rounded border border-lecturer-border px-2 py-1 text-sm"
                       onBlur={(e) =>
                         handleUpdatePoolDrawCount(
                           pool.id,
@@ -3781,14 +3781,14 @@ export default function LecturerExamPage({
                     />
                     <button
                       onClick={() => handleDeletePool(pool.id)}
-                      className="text-sm text-red-600 underline"
+                      className="text-sm text-[#B42318] underline"
                     >
                       Delete
                     </button>
                   </div>
                 </div>
                 {pool.drawCount != null && pool.drawCount > pool.questionCount && (
-                  <p className="mt-2 text-xs text-amber-700">
+                  <p className="mt-2 text-xs text-[#B54708]">
                     This pool has fewer questions than the draw count. Students will receive all
                     available questions from this pool.
                   </p>
@@ -3796,54 +3796,54 @@ export default function LecturerExamPage({
               </div>
             ))}
           </div>
-          <div className="mt-3 flex flex-wrap items-end gap-2 rounded border border-gray-200 bg-white p-3">
+          <div className="mt-3 flex flex-wrap items-end gap-2 rounded border border-lecturer-border bg-lecturer-surface p-3">
             <div>
-              <label className="block text-xs text-gray-600">Pool name</label>
+              <label className="block text-xs text-lecturer-text-secondary">Pool name</label>
               <input
                 value={newPoolName}
                 onChange={(e) => setNewPoolName(e.target.value)}
-                className="rounded border border-gray-300 px-2 py-1 text-sm"
+                className="rounded border border-lecturer-border px-2 py-1 text-sm"
                 placeholder="e.g. Programming basics"
               />
             </div>
             <div>
-              <label className="block text-xs text-gray-600">Draw this many questions from this pool</label>
+              <label className="block text-xs text-lecturer-text-secondary">Draw this many questions from this pool</label>
               <input
                 type="number"
                 min={0}
                 value={newPoolDrawCount}
                 onChange={(e) => setNewPoolDrawCount(e.target.value)}
-                className="w-24 rounded border border-gray-300 px-2 py-1 text-sm"
+                className="w-24 rounded border border-lecturer-border px-2 py-1 text-sm"
                 placeholder="all"
               />
             </div>
             <button
               onClick={handleCreatePool}
               disabled={!newPoolName.trim()}
-              className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+              className="rounded border border-lecturer-border px-3 py-1.5 text-sm disabled:opacity-50"
             >
               Add pool
             </button>
           </div>
-          {poolsMessage && <p className="mt-2 text-sm text-red-600">{poolsMessage}</p>}
+          {poolsMessage && <p className="mt-2 text-sm text-[#B42318]">{poolsMessage}</p>}
         </>
       )}
 
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Questions</h2>
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Questions</h2>
       <div className="mt-3 space-y-3">
         {exam.questions.length === 0 && (
-          <p className="text-gray-500">No questions yet.</p>
+          <p className="text-lecturer-text-secondary">No questions yet.</p>
         )}
         {exam.questions.map((q, i) => (
-          <div key={q.id} className="rounded border border-gray-200 bg-white p-3">
+          <div key={q.id} className="rounded border border-lecturer-border bg-lecturer-surface p-3">
             <div className="flex items-start justify-between">
               <div>
-                <p className="text-sm text-gray-500">
+                <p className="text-sm text-lecturer-text-secondary">
                   Q{i + 1} · {q.type} · {q.points} pt(s)
                 </p>
                 <p className="mt-1">{q.text}</p>
                 {q.options && (
-                  <ul className="mt-1 list-disc pl-5 text-sm text-gray-600">
+                  <ul className="mt-1 list-disc pl-5 text-sm text-lecturer-text-secondary">
                     {q.options.map((o) => (
                       <li key={o}>{o}</li>
                     ))}
@@ -3856,9 +3856,9 @@ export default function LecturerExamPage({
                 )}
                 {secureForm?.enableQuestionPools && pools.length > 0 && (
                   <div className="mt-2">
-                    <label className="text-xs text-gray-600">Question pool</label>
+                    <label className="text-xs text-lecturer-text-secondary">Question pool</label>
                     <select
-                      className="ml-2 rounded border border-gray-300 px-2 py-1 text-xs"
+                      className="ml-2 rounded border border-lecturer-border px-2 py-1 text-xs"
                       value={q.questionPoolId ?? ""}
                       onChange={(e) => handleAssignQuestionPool(q.id, e.target.value || null)}
                     >
@@ -3874,7 +3874,7 @@ export default function LecturerExamPage({
               </div>
               <button
                 onClick={() => handleDeleteQuestion(q.id)}
-                className="text-sm text-red-600 underline"
+                className="text-sm text-[#B42318] underline"
               >
                 Delete
               </button>
@@ -3883,28 +3883,28 @@ export default function LecturerExamPage({
         ))}
       </div>
 
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Add multiple questions</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
-        <p className="text-sm text-gray-600">
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Add multiple questions</h2>
+      <div className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
+        <p className="text-sm text-lecturer-text-secondary">
           Paste one or more questions in the format below, then preview before importing. Nothing
           is saved until you click &quot;Import questions&quot;, and if any question has an error
           nothing is saved.
         </p>
-        <details className="rounded border border-gray-200 bg-white p-2 text-sm">
+        <details className="rounded border border-lecturer-border bg-lecturer-surface p-2 text-sm">
           <summary className="cursor-pointer font-medium">Show accepted format</summary>
-          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-xs text-gray-700">
+          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-xs text-lecturer-text-primary">
             {BULK_QUESTION_FORMAT_EXAMPLE}
           </pre>
         </details>
         {exam.published && (
-          <p className="text-sm text-amber-700">
+          <p className="text-sm text-[#B54708]">
             This exam is published — imported questions will be visible/available to students
             immediately.
           </p>
         )}
         <textarea
           rows={10}
-          className="w-full rounded border border-gray-300 px-3 py-2 font-mono text-xs"
+          className="w-full rounded border border-lecturer-border px-3 py-2 font-mono text-xs"
           placeholder="QUESTION:&#10;What is 2 + 2?&#10;TYPE: MCQ&#10;OPTIONS:&#10;A. 3&#10;B. 4&#10;ANSWER: B&#10;POINTS: 1"
           value={bulkText}
           onChange={(e) => {
@@ -3916,7 +3916,7 @@ export default function LecturerExamPage({
         <button
           onClick={handlePreviewBulkQuestions}
           disabled={!bulkText.trim()}
-          className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-50"
+          className="rounded border border-lecturer-border px-4 py-2 text-sm disabled:opacity-50"
         >
           Preview
         </button>
@@ -3931,15 +3931,15 @@ export default function LecturerExamPage({
               <div
                 key={row.row}
                 className={`rounded border p-2 text-sm ${
-                  row.errors.length > 0 ? "border-red-300 bg-red-50" : "border-gray-200"
+                  row.errors.length > 0 ? "border-red-300 bg-red-50" : "border-lecturer-border"
                 }`}
               >
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-lecturer-text-secondary">
                   Question {row.row} {row.type ? `· ${row.type}` : ""} {row.points ? `· ${row.points} pt(s)` : ""}
                 </p>
                 <p className="mt-1">{row.text || <em className="text-gray-400">(no text)</em>}</p>
                 {row.errors.length > 0 && (
-                  <ul className="mt-1 list-disc pl-5 text-red-700">
+                  <ul className="mt-1 list-disc pl-5 text-[#B42318]">
                     {row.errors.map((e) => (
                       <li key={e}>{e}</li>
                     ))}
@@ -3954,7 +3954,7 @@ export default function LecturerExamPage({
                   Also save to question bank (optional)
                 </label>
                 <select
-                  className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm"
+                  className="mt-1 w-full rounded border border-lecturer-border px-3 py-2 text-sm"
                   value={bulkSaveToBankId}
                   onChange={(e) => setBulkSaveToBankId(e.target.value)}
                 >
@@ -3971,32 +3971,32 @@ export default function LecturerExamPage({
             <button
               onClick={handleImportBulkQuestions}
               disabled={bulkImporting || bulkPreview.invalidCount > 0 || bulkPreview.rows.length === 0}
-              className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+              className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-sm text-white disabled:opacity-50"
             >
               {bulkImporting ? "Importing..." : `Import ${bulkPreview.validCount} question(s)`}
             </button>
           </div>
         )}
 
-        {bulkError && <p className="text-sm text-red-600">{bulkError}</p>}
+        {bulkError && <p className="text-sm text-[#B42318]">{bulkError}</p>}
         {bulkResult && (
           <div className="text-sm text-green-700">
             <p>
               Imported {bulkResult.created} question(s)
               {bulkResult.bankSaved > 0 && ` and saved ${bulkResult.bankSaved} to the question bank`}.
             </p>
-            {bulkResult.warning && <p className="text-amber-700">{bulkResult.warning}</p>}
+            {bulkResult.warning && <p className="text-[#B54708]">{bulkResult.warning}</p>}
           </div>
         )}
       </div>
 
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Generate questions with AI</h2>
-      <div className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Generate questions with AI</h2>
+      <div className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
         <div>
           <label className="block text-sm font-medium">Source material or topic</label>
           <textarea
             rows={5}
-            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+            className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
             placeholder="Paste lecture notes, a textbook excerpt, or just describe a topic..."
             value={sourceMaterial}
             onChange={(e) => setSourceMaterial(e.target.value)}
@@ -4006,7 +4006,7 @@ export default function LecturerExamPage({
           <div className="flex-1">
             <label className="block text-sm font-medium">Subject</label>
             <input
-              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
             />
@@ -4017,7 +4017,7 @@ export default function LecturerExamPage({
               type="number"
               min={1}
               max={50}
-              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
               value={totalCount}
               onChange={(e) => setTotalCount(Number(e.target.value))}
             />
@@ -4027,7 +4027,7 @@ export default function LecturerExamPage({
         <div>
           <label className="block text-sm font-medium">
             Difficulty mix{" "}
-            <span className={difficultySum === 100 ? "text-gray-500" : "text-red-600"}>
+            <span className={difficultySum === 100 ? "text-lecturer-text-secondary" : "text-[#B42318]"}>
               ({difficultySum}% total)
             </span>
           </label>
@@ -4087,12 +4087,12 @@ export default function LecturerExamPage({
           </div>
         </div>
 
-        {generateError && <p className="text-sm text-red-600">{generateError}</p>}
+        {generateError && <p className="text-sm text-[#B42318]">{generateError}</p>}
 
         <button
           onClick={handleGenerate}
           disabled={generating}
-          className="flex items-center gap-2 rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+          className="flex items-center gap-2 rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-white disabled:opacity-50"
         >
           {generating && (
             <span className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
@@ -4101,12 +4101,12 @@ export default function LecturerExamPage({
         </button>
 
         {generated.length > 0 && (
-          <div className="mt-4 space-y-3 border-t border-gray-200 pt-4">
-            <p className="text-sm text-gray-500">
+          <div className="mt-4 space-y-3 border-t border-lecturer-border pt-4">
+            <p className="text-sm text-lecturer-text-secondary">
               {generated.length} question(s) generated — review and select which to add.
             </p>
             {generated.map((q, i) => (
-              <div key={i} className="rounded border border-gray-200 bg-white p-3">
+              <div key={i} className="rounded border border-lecturer-border bg-lecturer-surface p-3">
                 <div className="flex items-start gap-3">
                   <input
                     type="checkbox"
@@ -4122,13 +4122,13 @@ export default function LecturerExamPage({
                   />
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                      <span className="rounded bg-lecturer-border-subtle px-2 py-0.5 text-xs text-lecturer-text-secondary">
                         {QUESTION_TYPE_LABELS[q.type]}
                       </span>
                       <span
                         className={
                           q.difficulty === "hard"
-                            ? "rounded bg-red-100 px-2 py-0.5 text-xs text-red-700"
+                            ? "rounded bg-red-100 px-2 py-0.5 text-xs text-[#B42318]"
                             : q.difficulty === "medium"
                               ? "rounded bg-yellow-100 px-2 py-0.5 text-xs text-yellow-700"
                               : "rounded bg-green-100 px-2 py-0.5 text-xs text-green-700"
@@ -4146,7 +4146,7 @@ export default function LecturerExamPage({
                           return (
                             <li
                               key={label}
-                              className={isCorrect ? "font-medium text-green-700" : "text-gray-600"}
+                              className={isCorrect ? "font-medium text-green-700" : "text-lecturer-text-secondary"}
                             >
                               {label}. {opt} {isCorrect && "✓"}
                             </li>
@@ -4164,7 +4164,7 @@ export default function LecturerExamPage({
                       {expandedExplanation === i ? "Hide explanation" : "Show explanation"}
                     </button>
                     {expandedExplanation === i && (
-                      <p className="mt-1 text-sm text-gray-500">{q.explanation}</p>
+                      <p className="mt-1 text-sm text-lecturer-text-secondary">{q.explanation}</p>
                     )}
                   </div>
                 </div>
@@ -4173,7 +4173,7 @@ export default function LecturerExamPage({
             <button
               onClick={handleAddSelected}
               disabled={importing || included.every((v) => !v)}
-              className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+              className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-white disabled:opacity-50"
             >
               {importing ? "Adding..." : "Add selected to exam"}
             </button>
@@ -4181,16 +4181,16 @@ export default function LecturerExamPage({
         )}
       </div>
 
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Add questions</h2>
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Add questions</h2>
       <div className="mt-3 space-y-3">
         {manualDrafts.map((draft, index) => (
-          <div key={index} className="rounded border border-gray-200 bg-white p-4">
+          <div key={index} className="rounded border border-lecturer-border bg-lecturer-surface p-4">
             <div className="flex items-center justify-between">
               <p className="text-sm font-medium">Question {index + 1}</p>
               {manualDrafts.length > 1 && (
                 <button
                   onClick={() => removeManualDraftCard(index)}
-                  className="text-xs text-red-600 underline"
+                  className="text-xs text-[#B42318] underline"
                 >
                   Remove
                 </button>
@@ -4200,7 +4200,7 @@ export default function LecturerExamPage({
               <div>
                 <label className="block text-sm font-medium">Type</label>
                 <select
-                  className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                  className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
                   value={draft.type}
                   onChange={(e) =>
                     updateManualDraft(index, { type: e.target.value as ManualQuestionDraft["type"] })
@@ -4214,7 +4214,7 @@ export default function LecturerExamPage({
               <div>
                 <label className="block text-sm font-medium">Question text</label>
                 <textarea
-                  className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                  className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
                   value={draft.text}
                   onChange={(e) => updateManualDraft(index, { text: e.target.value })}
                 />
@@ -4227,7 +4227,7 @@ export default function LecturerExamPage({
                       <input
                         key={optIndex}
                         placeholder={`Option ${String.fromCharCode(65 + optIndex)}`}
-                        className="w-full rounded border border-gray-300 px-3 py-2"
+                        className="w-full rounded border border-lecturer-border px-3 py-2"
                         value={opt}
                         onChange={(e) => updateManualDraftOption(index, optIndex, e.target.value)}
                       />
@@ -4236,7 +4236,7 @@ export default function LecturerExamPage({
                   <label className="mt-2 block text-sm font-medium">Correct answer</label>
                   <input
                     placeholder="Must match one of the options above"
-                    className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                    className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
                     value={draft.correctAnswer}
                     onChange={(e) => updateManualDraft(index, { correctAnswer: e.target.value })}
                   />
@@ -4246,7 +4246,7 @@ export default function LecturerExamPage({
                 <div>
                   <label className="block text-sm font-medium">Correct answer (optional)</label>
                   <input
-                    className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                    className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
                     value={draft.correctAnswer}
                     onChange={(e) => updateManualDraft(index, { correctAnswer: e.target.value })}
                   />
@@ -4257,13 +4257,13 @@ export default function LecturerExamPage({
                 <input
                   type="number"
                   min={1}
-                  className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+                  className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
                   value={draft.points}
                   onChange={(e) => updateManualDraft(index, { points: Number(e.target.value) })}
                 />
               </div>
               {manualErrors[index] && manualErrors[index].length > 0 && (
-                <ul className="list-disc pl-5 text-sm text-red-600">
+                <ul className="list-disc pl-5 text-sm text-[#B42318]">
                   {manualErrors[index].map((e) => (
                     <li key={e}>{e}</li>
                   ))}
@@ -4275,7 +4275,7 @@ export default function LecturerExamPage({
 
         <button
           onClick={addManualDraftCard}
-          className="rounded border border-gray-300 px-4 py-2 text-sm"
+          className="rounded border border-lecturer-border px-4 py-2 text-sm"
         >
           + Add another question
         </button>
@@ -4284,13 +4284,13 @@ export default function LecturerExamPage({
           <button
             onClick={handleSaveManualQuestions}
             disabled={adding}
-            className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+            className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-white disabled:opacity-50"
           >
             {adding ? "Saving..." : "Save all questions"}
           </button>
         </div>
 
-        {addError && <p className="text-sm text-red-600">{addError}</p>}
+        {addError && <p className="text-sm text-[#B42318]">{addError}</p>}
         {addSuccess && <p className="text-sm text-green-700">{addSuccess}</p>}
       </div>
       </div>
@@ -4302,32 +4302,32 @@ export default function LecturerExamPage({
         hidden={activeTab !== "integrations"}
         className="mt-6"
       >
-      <h2 className="mt-8 text-lg font-semibold text-[#101828]">Canvas / LTI linking</h2>
-      <p className="mt-1 text-sm text-gray-500">
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Canvas / LTI linking</h2>
+      <p className="mt-1 text-sm text-lecturer-text-secondary">
         Link a Canvas assignment&apos;s resource link to this exam so students launching from
         Canvas land directly on it. Unlinked Canvas launches never connect to a random exam.
       </p>
 
       <div className="mt-3 space-y-3">
         {ltiLinks.length === 0 && (
-          <p className="text-sm text-gray-500">No Canvas links yet.</p>
+          <p className="text-sm text-lecturer-text-secondary">No Canvas links yet.</p>
         )}
         {ltiLinks.map((link) => (
-          <div key={link.id} className="rounded border border-gray-200 bg-white p-3 text-sm">
+          <div key={link.id} className="rounded border border-lecturer-border bg-lecturer-surface p-3 text-sm">
             <div className="flex items-start justify-between">
               <div>
                 <p className="font-medium">{link.label || "Canvas link"}</p>
-                <p className="text-gray-500">Platform: {link.platform.issuer}</p>
-                <p className="text-gray-500">Resource link ID: {link.resourceLinkId}</p>
-                {link.canvasCourseId && <p className="text-gray-500">Course ID: {link.canvasCourseId}</p>}
+                <p className="text-lecturer-text-secondary">Platform: {link.platform.issuer}</p>
+                <p className="text-lecturer-text-secondary">Resource link ID: {link.resourceLinkId}</p>
+                {link.canvasCourseId && <p className="text-lecturer-text-secondary">Course ID: {link.canvasCourseId}</p>}
                 {link.canvasAssignmentId && (
-                  <p className="text-gray-500">Assignment ID: {link.canvasAssignmentId}</p>
+                  <p className="text-lecturer-text-secondary">Assignment ID: {link.canvasAssignmentId}</p>
                 )}
                 <p className="text-gray-400">Created {new Date(link.createdAt).toLocaleDateString()}</p>
               </div>
               <button
                 onClick={() => handleDeleteLink(link.id)}
-                className="text-sm text-red-600 underline"
+                className="text-sm text-[#B42318] underline"
               >
                 Remove
               </button>
@@ -4336,12 +4336,12 @@ export default function LecturerExamPage({
         ))}
       </div>
 
-      <form onSubmit={handleCreateLink} className="mt-3 space-y-3 rounded border border-gray-200 bg-white p-4">
+      <form onSubmit={handleCreateLink} className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
         <div>
           <label className="block text-sm font-medium">Canvas platform</label>
           <select
             required
-            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+            className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
             value={linkForm.platformId}
             onChange={(e) => setLinkForm({ ...linkForm, platformId: e.target.value })}
           >
@@ -4357,7 +4357,7 @@ export default function LecturerExamPage({
           <label className="block text-sm font-medium">Canvas resource link ID</label>
           <input
             required
-            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+            className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
             value={linkForm.resourceLinkId}
             onChange={(e) => setLinkForm({ ...linkForm, resourceLinkId: e.target.value })}
           />
@@ -4366,7 +4366,7 @@ export default function LecturerExamPage({
           <div className="flex-1">
             <label className="block text-sm font-medium">Canvas course ID (optional)</label>
             <input
-              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
               value={linkForm.canvasCourseId}
               onChange={(e) => setLinkForm({ ...linkForm, canvasCourseId: e.target.value })}
             />
@@ -4374,7 +4374,7 @@ export default function LecturerExamPage({
           <div className="flex-1">
             <label className="block text-sm font-medium">Canvas assignment ID (optional)</label>
             <input
-              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+              className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
               value={linkForm.canvasAssignmentId}
               onChange={(e) => setLinkForm({ ...linkForm, canvasAssignmentId: e.target.value })}
             />
@@ -4383,16 +4383,16 @@ export default function LecturerExamPage({
         <div>
           <label className="block text-sm font-medium">Label (optional)</label>
           <input
-            className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
+            className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
             value={linkForm.label}
             onChange={(e) => setLinkForm({ ...linkForm, label: e.target.value })}
           />
         </div>
-        {linkError && <p className="text-sm text-red-600">{linkError}</p>}
+        {linkError && <p className="text-sm text-[#B42318]">{linkError}</p>}
         <button
           type="submit"
           disabled={creatingLink}
-          className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+          className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-white disabled:opacity-50"
         >
           {creatingLink ? "Linking..." : "Link Canvas resource"}
         </button>

@@ -10,6 +10,12 @@
  */
 
 import { useEffect, useState, use as usePromise } from "react";
+import Link from "next/link";
+import { LecturerPageHeader, PrimaryButton, SecondaryButton } from "@/components/lecturer/LecturerPageHeader";
+import { SectionCard } from "@/components/lecturer/SectionCard";
+import { StatusBadge, availabilityToneFor } from "@/components/lecturer/StatusBadge";
+import { EmptyState, LoadingState } from "@/components/lecturer/EmptyState";
+import { lecturerAvailabilityStatus } from "@/lib/lecturerDashboardGrouping";
 
 type Enrollment = {
   id: string;
@@ -41,6 +47,17 @@ type InvitationRow = {
   createdAt: string;
 };
 
+type CourseExamSummary = {
+  id: string;
+  title: string;
+  published: boolean;
+  availableFrom: string | null;
+  availableUntil: string | null;
+  needsReviewCount: number;
+  course: { id: string } | null;
+  _count: { submissions: number };
+};
+
 type AddStudentState =
   | { kind: "idle" }
   | { kind: "invitation_required"; student: { id: string; name: string; email: string } }
@@ -68,6 +85,7 @@ export default function CourseDetailPage({
   const [revealedInviteUrl, setRevealedInviteUrl] = useState<{ invitationId: string; url: string } | null>(null);
   const [copiedInvite, setCopiedInvite] = useState(false);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [courseExams, setCourseExams] = useState<CourseExamSummary[] | null>(null);
 
   function load() {
     setLoading(true);
@@ -84,10 +102,22 @@ export default function CourseDetailPage({
       .catch(() => setInvitations([]));
   }
 
+  // Reuses the same /api/exams listing the dashboard already fetches —
+  // no new backend endpoint. Filtered client-side to this course so the
+  // course workspace can show "Exams in this course" without inventing
+  // a per-course exams API.
+  function loadCourseExams() {
+    fetch("/api/exams?all=true")
+      .then((res) => (res.ok ? res.json() : []))
+      .then((rows: CourseExamSummary[]) => setCourseExams(rows.filter((exam) => exam.course?.id === id)))
+      .catch(() => setCourseExams([]));
+  }
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
     loadInvitations();
+    loadCourseExams();
   }, [id]);
 
   async function addStudent() {
@@ -185,165 +215,161 @@ export default function CourseDetailPage({
     load();
   }
 
-  if (loading) return <p className="text-gray-500">Loading...</p>;
-  if (!course) return <p className="text-red-600">Course not found.</p>;
+  if (loading) return <LoadingState label="Loading course…" />;
+  if (!course) return <p className="text-sm text-[#B42318]">Course not found.</p>;
 
   const students = course.enrollments.filter((e) => e.role === "STUDENT");
   const lecturers = course.enrollments.filter((e) => e.role === "LECTURER");
   const pendingInvitations = invitations.filter((inv) => inv.status === "PENDING" || inv.status === "EXPIRED");
 
   return (
-    <div className="mx-auto max-w-3xl">
-      <h1 className="text-2xl font-semibold">
-        {course.code} — {course.name}
-      </h1>
-      {course.description && <p className="mt-1 text-gray-600">{course.description}</p>}
+    <div className="mx-auto max-w-4xl space-y-6">
+      <LecturerPageHeader
+        breadcrumbs={[{ label: "Dashboard", href: "/lecturer" }, { label: "Courses", href: "/lecturer/courses" }, { label: course.code }]}
+        title={`${course.code} — ${course.name}`}
+        description={course.description ?? undefined}
+      />
 
-      <div className="mt-6 rounded border border-gray-200 p-4">
-        <h2 className="font-medium">Add a student</h2>
-        <p className="mt-1 text-sm text-gray-500">
-          Add a student using the email on their Tether account.
-        </p>
-        <div className="mt-3 flex items-end gap-2">
+      <SectionCard title="Add a student" subtitle="Add a student using the email on their Tether account.">
+        <div className="flex items-end gap-2">
           <input
             type="email"
             placeholder="student@example.com"
-            className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm"
+            className="flex-1 rounded-lg border border-lecturer-border px-3 py-2 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
-          <button
-            onClick={addStudent}
-            disabled={enrolling || !email.trim()}
-            className="rounded bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
-          >
-            {enrolling ? "Adding..." : "Add student"}
-          </button>
+          <PrimaryButton type="button" onClick={addStudent} disabled={enrolling || !email.trim()}>
+            {enrolling ? "Adding…" : "Add student"}
+          </PrimaryButton>
         </div>
 
-        {addState.kind === "error" && (
-          <p className="mt-2 text-sm text-red-600">{addState.message}</p>
-        )}
+        {addState.kind === "error" && <p className="mt-2 text-sm text-[#B42318]">{addState.message}</p>}
 
         {addState.kind === "invitation_required" && (
-          <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3">
-            <p className="text-sm text-gray-700">
-              This student has a Tether account but is not yet linked to your institution.
-            </p>
-            <button
-              onClick={() => createInvitation(addState.student.email)}
-              disabled={creatingInviteFor === addState.student.email}
-              className="mt-2 rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
-            >
-              {creatingInviteFor === addState.student.email ? "Creating..." : "Create invitation"}
-            </button>
+          <div className="mt-3 rounded-lg border border-lecturer-border bg-lecturer-border-subtle/60 p-3">
+            <p className="text-sm text-lecturer-text-primary">This student has a Tether account but is not yet linked to your institution.</p>
+            <SecondaryButton type="button" onClick={() => createInvitation(addState.student.email)} disabled={creatingInviteFor === addState.student.email} className="mt-2 px-3 py-1.5">
+              {creatingInviteFor === addState.student.email ? "Creating…" : "Create invitation"}
+            </SecondaryButton>
           </div>
         )}
 
-        {inviteError && <p className="mt-2 text-sm text-red-600">{inviteError}</p>}
-      </div>
+        {inviteError && <p className="mt-2 text-sm text-[#B42318]">{inviteError}</p>}
+      </SectionCard>
 
       {pendingInvitations.length > 0 && (
-        <>
-          <h2 className="mt-6 text-lg font-medium">Pending invitations ({pendingInvitations.length})</h2>
-          <div className="mt-2 space-y-2">
+        <SectionCard title={`Pending invitations (${pendingInvitations.length})`}>
+          <div className="space-y-2">
             {pendingInvitations.map((inv) => (
-              <div key={inv.id} className="rounded border border-gray-200 p-3 text-sm">
-                <div className="flex items-center justify-between">
-                  <span>
+              <div key={inv.id} className="rounded-lg border border-lecturer-border p-3 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-lecturer-text-primary">
                     {inv.student.name} — {inv.student.email}
                   </span>
-                  <span
-                    className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
-                      inv.status === "EXPIRED" ? "bg-gray-200 text-gray-700" : "bg-amber-100 text-amber-800"
-                    }`}
-                  >
-                    {inv.status === "EXPIRED" ? "Expired" : "Pending"}
-                  </span>
+                  <StatusBadge tone={inv.status === "EXPIRED" ? "neutral" : "warning"}>{inv.status === "EXPIRED" ? "Expired" : "Pending"}</StatusBadge>
                 </div>
-                <p className="mt-1 text-xs text-gray-500">
-                  Expires {new Date(inv.expiresAt).toLocaleString()}
-                </p>
+                <p className="mt-1 text-xs text-lecturer-text-secondary">Expires {new Date(inv.expiresAt).toLocaleString()}</p>
 
                 {revealedInviteUrl?.invitationId === inv.id ? (
-                  <div className="mt-2 rounded border border-gray-200 bg-gray-50 p-2">
+                  <div className="mt-2 rounded-lg border border-lecturer-border bg-lecturer-border-subtle/60 p-2">
                     <div className="flex items-center gap-2">
                       <input
                         type="text"
                         readOnly
                         value={revealedInviteUrl.url}
                         onFocus={(e) => e.target.select()}
-                        className="flex-1 rounded border border-gray-300 px-2 py-1 text-xs"
+                        className="flex-1 rounded border border-lecturer-border bg-lecturer-surface px-2 py-1 text-xs text-lecturer-text-primary"
                       />
                       <button
                         onClick={handleCopyInvite}
-                        className="rounded border border-gray-300 px-2 py-1 text-xs"
+                        className="rounded border border-lecturer-border px-2 py-1 text-xs font-medium text-lecturer-text-primary hover:bg-lecturer-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                       >
                         {copiedInvite ? "Copied!" : "Copy link"}
                       </button>
                     </div>
-                    <p className="mt-1 text-xs text-gray-500">
-                      Shown once — copy it now. The student must accept this invitation before joining the course.
-                    </p>
+                    <p className="mt-1 text-xs text-lecturer-text-secondary">Shown once — copy it now. The student must accept this invitation before joining the course.</p>
                   </div>
                 ) : (
-                  <p className="mt-1 text-xs text-gray-500">Invitation pending.</p>
+                  <p className="mt-1 text-xs text-lecturer-text-secondary">Invitation pending.</p>
                 )}
 
                 <div className="mt-2 flex gap-2">
                   <button
                     onClick={() => regenerateInvitation(inv.id, inv.student.email)}
                     disabled={creatingInviteFor === inv.id}
-                    className="rounded border border-gray-300 px-2 py-1 text-xs disabled:opacity-50"
+                    className="rounded border border-lecturer-border px-2 py-1 text-xs font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                   >
-                    {creatingInviteFor === inv.id ? "Regenerating..." : "Regenerate invitation"}
+                    {creatingInviteFor === inv.id ? "Regenerating…" : "Regenerate invitation"}
                   </button>
                   <button
                     onClick={() => cancelInvitation(inv.id)}
                     disabled={cancellingId === inv.id}
-                    className="rounded border border-gray-300 px-2 py-1 text-xs text-red-600 disabled:opacity-50"
+                    className="rounded border border-lecturer-border px-2 py-1 text-xs font-medium text-[#B42318] hover:bg-[#FEF3F2] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                   >
-                    {cancellingId === inv.id ? "Cancelling..." : "Cancel invitation"}
+                    {cancellingId === inv.id ? "Cancelling…" : "Cancel invitation"}
                   </button>
                 </div>
               </div>
             ))}
           </div>
-        </>
+        </SectionCard>
       )}
 
-      <h2 className="mt-6 text-lg font-medium">Lecturers ({lecturers.length})</h2>
-      <div className="mt-2 space-y-2">
-        {lecturers.map((e) => (
-          <div key={e.id} className="rounded border border-gray-200 p-3 text-sm">
-            {e.user.name} — {e.user.email}
+      <SectionCard title="Exams in this course" actions={<Link href="/lecturer" className="text-sm font-medium text-lecturer-accent hover:text-lecturer-accent-hover">New exam →</Link>}>
+        {courseExams === null && <LoadingState label="Loading exams…" />}
+        {courseExams !== null && courseExams.length === 0 && <EmptyState title="No exams yet" description="Create an exam from the dashboard and assign it to this course." />}
+        {courseExams !== null && courseExams.length > 0 && (
+          <div className="space-y-2">
+            {courseExams.map((exam) => {
+              const status = lecturerAvailabilityStatus(exam);
+              return (
+                <Link
+                  key={exam.id}
+                  href={`/lecturer/exams/${exam.id}`}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-lecturer-border p-3 text-sm transition-colors hover:border-lecturer-text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+                >
+                  <span className="min-w-0 truncate font-medium text-lecturer-text-primary">{exam.title}</span>
+                  <span className="flex shrink-0 items-center gap-2">
+                    {exam.needsReviewCount > 0 && <StatusBadge tone="warning">{exam.needsReviewCount} signals</StatusBadge>}
+                    <StatusBadge tone={availabilityToneFor(status)}>{status}</StatusBadge>
+                  </span>
+                </Link>
+              );
+            })}
           </div>
-        ))}
-      </div>
+        )}
+      </SectionCard>
 
-      <h2 className="mt-6 text-lg font-medium">Students ({students.length})</h2>
-      <div className="mt-2 space-y-2">
-        {students.length === 0 && <p className="text-gray-500">No students enrolled yet.</p>}
-        {students.map((e) => (
-          <div
-            key={e.id}
-            className="flex items-center justify-between rounded border border-gray-200 p-3 text-sm"
-          >
-            <span>
+      <SectionCard title={`Lecturers (${lecturers.length})`}>
+        <div className="space-y-2">
+          {lecturers.map((e) => (
+            <div key={e.id} className="rounded-lg border border-lecturer-border p-3 text-sm text-lecturer-text-primary">
               {e.user.name} — {e.user.email}
-              {e.user.institutionStudentId && (
-                <span className="text-gray-500"> · ID: {e.user.institutionStudentId}</span>
-              )}
-            </span>
-            <button
-              onClick={() => removeEnrolment(e.user.id)}
-              className="text-xs text-red-600 underline"
-            >
-              Remove
-            </button>
+            </div>
+          ))}
+        </div>
+      </SectionCard>
+
+      <SectionCard title={`Students (${students.length})`}>
+        {students.length === 0 ? (
+          <EmptyState title="No students enrolled yet" />
+        ) : (
+          <div className="space-y-2">
+            {students.map((e) => (
+              <div key={e.id} className="flex items-center justify-between rounded-lg border border-lecturer-border p-3 text-sm">
+                <span className="text-lecturer-text-primary">
+                  {e.user.name} — {e.user.email}
+                  {e.user.institutionStudentId && <span className="text-lecturer-text-secondary"> · ID: {e.user.institutionStudentId}</span>}
+                </span>
+                <button onClick={() => removeEnrolment(e.user.id)} className="text-xs font-medium text-[#B42318] underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#B42318]">
+                  Remove
+                </button>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        )}
+      </SectionCard>
     </div>
   );
 }

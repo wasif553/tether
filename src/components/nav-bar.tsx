@@ -1,10 +1,21 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useSession, signOut } from "next-auth/react";
 
 export function NavBar() {
   const { data: session, status } = useSession();
+  const pathname = usePathname();
+
+  // Lecturer application shell v1 — /lecturer/** routes render their own
+  // persistent sidebar (src/components/lecturer/LecturerShell.tsx) as
+  // their navigation. Rendering this top nav there too would duplicate
+  // navigation and the account/logout control. Every other route
+  // (student, platform admin, unauthenticated, login/signup) keeps this
+  // NavBar exactly as before — this early return is the ONLY change
+  // made here for the redesign.
+  if (pathname?.startsWith("/lecturer")) return null;
 
   return (
     <header className="flex items-center justify-between border-b border-[#E4E7EC] bg-white px-4 py-3">

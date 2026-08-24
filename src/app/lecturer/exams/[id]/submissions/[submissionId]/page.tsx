@@ -3,6 +3,10 @@
 import { useCallback, useEffect, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { LecturerPageHeader, SecondaryLinkButton } from "@/components/lecturer/LecturerPageHeader";
+import { SectionCard } from "@/components/lecturer/SectionCard";
+import { StatusBadge, type StatusTone } from "@/components/lecturer/StatusBadge";
+import { LoadingState } from "@/components/lecturer/EmptyState";
 
 type Question = {
   id: string;
@@ -74,11 +78,7 @@ function parseAiReasoning(raw: string | null | undefined): EssayMarkingResult | 
   }
 }
 
-const CONFIDENCE_STYLES: Record<EssayMarkingResult["confidence"], string> = {
-  HIGH: "bg-green-100 text-green-700",
-  MEDIUM: "bg-amber-100 text-amber-700",
-  LOW: "bg-red-100 text-red-700",
-};
+const CONFIDENCE_TONES: Record<EssayMarkingResult["confidence"], StatusTone> = { HIGH: "success", MEDIUM: "warning", LOW: "critical" };
 
 // Oral Verification Workflow v1 — see docs/oral-verification-workflow-v1.md.
 // Lecturer-controlled: an OralVerification record is only ever created by
@@ -152,12 +152,7 @@ type AiUseReviewAnalysisData = {
   signals: AiUseReviewSignalCard[];
 };
 
-const AI_USE_SIGNAL_LEVEL_STYLES: Record<string, string> = {
-  NONE: "bg-gray-100 text-gray-600",
-  LOW: "bg-blue-100 text-blue-700",
-  MEDIUM: "bg-yellow-100 text-yellow-700",
-  HIGH: "bg-red-100 text-red-700",
-};
+const SIGNAL_LEVEL_TONES: Record<string, StatusTone> = { NONE: "neutral", LOW: "info", MEDIUM: "warning", HIGH: "critical" };
 
 const AI_USE_REVIEW_ACTIONS: Array<{ status: string; label: string }> = [
   { status: "REVIEWED_NO_CONCERN", label: "Reviewed — no concern" },
@@ -209,19 +204,15 @@ type TimingAnalysisData = {
   signals: SessionOrTimingSignal[];
 };
 
-const SESSION_TIMING_LEVEL_STYLES: Record<string, string> = {
-  NONE: "bg-gray-100 text-gray-600",
-  LOW: "bg-blue-100 text-blue-700",
-  MEDIUM: "bg-yellow-100 text-yellow-700",
-  HIGH: "bg-red-100 text-red-700",
-};
-
 const SESSION_TIMING_REVIEW_ACTIONS: Array<{ status: string; label: string }> = [
   { status: "REVIEWED_NO_CONCERN", label: "Reviewed — no concern" },
   { status: "REVIEWED_CONCERN_REMAINS", label: "Concern remains" },
   { status: "ESCALATED", label: "Escalate" },
   { status: "RESOLVED", label: "Resolve" },
 ];
+
+const FIELD_CLASS = "w-full rounded-lg border border-lecturer-border px-2.5 py-1.5 text-xs text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent";
+const CHIP_BUTTON_CLASS = "rounded-lg border border-lecturer-border px-2.5 py-1 text-xs font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent";
 
 export default function GradeSubmissionPage({
   params,
@@ -573,160 +564,117 @@ export default function GradeSubmissionPage({
     setScores((prev) => ({ ...prev, [questionId]: Math.round(aiDraftScore) }));
   }
 
-  if (!data) return <p className="text-gray-500">Loading...</p>;
+  if (!data) return <LoadingState label="Loading submission…" />;
 
   return (
-    <div className="mx-auto max-w-2xl">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">{data.exam.title}</h1>
-        <div className="flex items-center gap-2">
-          <Link
-            href={`/lecturer/submissions/${submissionId}/ai-assistance`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            AI assistance
-          </Link>
-          <Link
-            href={`/lecturer/submissions/${submissionId}/evidence`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            Evidence report
-          </Link>
-          <Link
-            href={`/lecturer/submissions/${submissionId}/answer-development`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
-          >
-            Answer development
-          </Link>
-        </div>
-      </div>
-      <p className="text-sm text-gray-500">
-        Status: {data.status} · Attempt {data.attemptNumber}
-      </p>
+    <div className="mx-auto max-w-3xl space-y-6">
+      <LecturerPageHeader
+        breadcrumbs={[{ label: "Dashboard", href: "/lecturer" }, { label: data.exam.title, href: `/lecturer/exams/${examId}` }, { label: "Grade" }]}
+        title={data.exam.title}
+        description={`Status: ${data.status} · Attempt ${data.attemptNumber}`}
+        actions={
+          <>
+            <SecondaryLinkButton href={`/lecturer/submissions/${submissionId}/ai-assistance`} className="px-3 py-1.5">
+              AI assistance
+            </SecondaryLinkButton>
+            <SecondaryLinkButton href={`/lecturer/submissions/${submissionId}/evidence`} className="px-3 py-1.5">
+              Evidence report
+            </SecondaryLinkButton>
+            <SecondaryLinkButton href={`/lecturer/submissions/${submissionId}/answer-development`} className="px-3 py-1.5">
+              Answer development
+            </SecondaryLinkButton>
+          </>
+        }
+      />
 
       {aiAssistanceSummary?.aiAssistanceEnabled && (
-        <div className="mt-3 rounded border border-gray-200 bg-white p-3 text-sm">
+        <SectionCard>
           <div className="flex items-center justify-between gap-3">
-            <p className="font-medium text-gray-900">Controlled AI activity</p>
-            <Link
-              href={`/lecturer/submissions/${submissionId}/ai-assistance`}
-              className="shrink-0 text-sm text-blue-600 hover:underline"
-            >
+            <p className="font-medium text-lecturer-text-primary">Controlled AI activity</p>
+            <Link href={`/lecturer/submissions/${submissionId}/ai-assistance`} className="shrink-0 text-sm text-lecturer-accent hover:underline">
               View AI activity →
             </Link>
           </div>
           {aiAssistanceSummary.summary.totalRequests === 0 ? (
-            <p className="mt-1 text-gray-600">Enabled — no requests made.</p>
+            <p className="mt-1 text-sm text-lecturer-text-secondary">Enabled — no requests made.</p>
           ) : (
-            <p className="mt-1 text-gray-600">
-              Enabled for attempt · {aiAssistanceSummary.summary.totalRequests} request(s) ·{" "}
-              {aiAssistanceSummary.summary.guidanceShownCount} guidance response(s) shown ·{" "}
-              {aiAssistanceSummary.summary.declinedCount} declined ·{" "}
-              {aiAssistanceSummary.summary.questionsUsedCount} question(s) used
+            <p className="mt-1 text-sm text-lecturer-text-secondary">
+              Enabled for attempt · {aiAssistanceSummary.summary.totalRequests} request(s) · {aiAssistanceSummary.summary.guidanceShownCount} guidance response(s) shown ·{" "}
+              {aiAssistanceSummary.summary.declinedCount} declined · {aiAssistanceSummary.summary.questionsUsedCount} question(s) used
             </p>
           )}
-        </div>
+        </SectionCard>
       )}
-      {aiAssistanceSummary && !aiAssistanceSummary.aiAssistanceEnabled && (
-        <p className="mt-2 text-xs text-gray-500">Controlled AI: Not enabled for this attempt.</p>
-      )}
-      {!aiAssistanceSummary && aiAssistanceSummaryError && (
-        <p className="mt-2 text-xs text-gray-500">Controlled AI activity unavailable.</p>
-      )}
+      {aiAssistanceSummary && !aiAssistanceSummary.aiAssistanceEnabled && <p className="text-xs text-lecturer-text-secondary">Controlled AI: Not enabled for this attempt.</p>}
+      {!aiAssistanceSummary && aiAssistanceSummaryError && <p className="text-xs text-lecturer-text-secondary">Controlled AI activity unavailable.</p>}
 
       {timelineSummary && (
-        <div className="mt-3 rounded border border-gray-200 bg-white p-3 text-sm">
+        <SectionCard>
           <div className="flex items-center justify-between gap-3">
-            <p className="font-medium text-gray-900">Integrity evidence timeline</p>
-            <Link
-              href={`/lecturer/submissions/${submissionId}/timeline`}
-              className="shrink-0 text-sm text-blue-600 hover:underline"
-            >
+            <p className="font-medium text-lecturer-text-primary">Integrity evidence timeline</p>
+            <Link href={`/lecturer/submissions/${submissionId}/timeline`} className="shrink-0 text-sm text-lecturer-accent hover:underline">
               View timeline →
             </Link>
           </div>
-          <p className="mt-1 text-gray-600">
-            Reconstruct this attempt from exam activity, Tether security events and supporting evidence.
+          <p className="mt-1 text-sm text-lecturer-text-secondary">Reconstruct this attempt from exam activity, Tether security events and supporting evidence.</p>
+          <p className="mt-1 text-sm text-lecturer-text-secondary">
+            {timelineSummary.totalEvents} recorded event(s) · {timelineSummary.evidenceAssetCount} evidence frame(s) · {timelineSummary.needsReviewCount} item(s) awaiting review
           </p>
-          <p className="mt-1 text-gray-600">
-            {timelineSummary.totalEvents} recorded event(s) · {timelineSummary.evidenceAssetCount} evidence frame(s) ·{" "}
-            {timelineSummary.needsReviewCount} item(s) awaiting review
-          </p>
-        </div>
+        </SectionCard>
       )}
-      {!timelineSummary && timelineSummaryError && (
-        <p className="mt-2 text-xs text-gray-500">Integrity timeline unavailable.</p>
-      )}
+      {!timelineSummary && timelineSummaryError && <p className="text-xs text-lecturer-text-secondary">Integrity timeline unavailable.</p>}
 
-      <div className="mt-6 space-y-4">
+      <div className="space-y-4">
         {data.exam.questions.map((q, i) => {
           const answer = data.answers.find((a) => a.questionId === q.id);
           const aiResult = parseAiReasoning(answer?.aiReasoning);
           const hasAiDraft = q.type === "ESSAY" && answer?.aiDraftScore != null;
 
           return (
-            <div key={q.id} className="rounded border border-gray-200 p-4">
-              <p className="text-sm text-gray-500">
+            <SectionCard key={q.id}>
+              <p className="text-sm text-lecturer-text-secondary">
                 Q{i + 1} · {q.points} pt(s) · {q.type}
               </p>
-              <p className="mt-1">{q.text}</p>
-              {q.correctAnswer && (
-                <p className="mt-1 text-sm text-green-700">
-                  Correct answer: {q.correctAnswer}
-                </p>
-              )}
-              <p className="mt-2 rounded bg-gray-50 p-2 text-sm">
-                {answer?.response || "(no answer)"}
-              </p>
+              <p className="mt-1 text-sm text-lecturer-text-primary">{q.text}</p>
+              {q.correctAnswer && <p className="mt-1 text-sm text-[#067647]">Correct answer: {q.correctAnswer}</p>}
+              <p className="mt-2 rounded-lg bg-lecturer-border-subtle p-2 text-sm text-lecturer-text-primary">{answer?.response || "(no answer)"}</p>
 
               {hasAiDraft && (
-                <div className="mt-3 rounded border border-blue-200 bg-blue-50 p-3">
+                <div className="mt-3 rounded-lg border border-lecturer-accent-subtle bg-lecturer-accent-subtle p-3">
                   <div className="flex items-center justify-between">
-                    <p className="text-sm font-medium">
+                    <p className="text-sm font-medium text-lecturer-text-primary">
                       AI draft: {answer?.aiDraftScore} / {q.points}
                     </p>
-                    {aiResult && (
-                      <span
-                        className={`rounded px-2 py-0.5 text-xs ${CONFIDENCE_STYLES[aiResult.confidence]}`}
-                      >
-                        {aiResult.confidence}
-                      </span>
-                    )}
+                    {aiResult && <StatusBadge tone={CONFIDENCE_TONES[aiResult.confidence]}>{aiResult.confidence}</StatusBadge>}
                   </div>
                   <div className="mt-2 flex gap-2">
-                    <button
-                      onClick={() => handleAcceptAiDraft(q.id, answer!.aiDraftScore!)}
-                      className="rounded bg-black px-3 py-1 text-xs text-white"
-                    >
+                    <button onClick={() => handleAcceptAiDraft(q.id, answer!.aiDraftScore!)} className="rounded-lg bg-lecturer-accent px-3 py-1 text-xs font-semibold text-white hover:bg-lecturer-accent-hover">
                       Accept AI draft
                     </button>
-                    <button
-                      onClick={() => setExpandedAiDraft(expandedAiDraft === q.id ? null : q.id)}
-                      className="rounded border border-gray-300 px-3 py-1 text-xs"
-                    >
+                    <button onClick={() => setExpandedAiDraft(expandedAiDraft === q.id ? null : q.id)} className={CHIP_BUTTON_CLASS}>
                       {expandedAiDraft === q.id ? "Hide details" : "Show details"}
                     </button>
                   </div>
 
                   {expandedAiDraft === q.id && aiResult && (
-                    <div className="mt-3 space-y-3 border-t border-blue-200 pt-3 text-sm">
+                    <div className="mt-3 space-y-3 border-t border-lecturer-border pt-3 text-sm">
                       <div>
-                        <p className="font-medium">Per-criterion breakdown</p>
+                        <p className="font-medium text-lecturer-text-primary">Per-criterion breakdown</p>
                         <ul className="mt-1 space-y-1">
                           {aiResult.criteriaScores.map((c) => (
-                            <li key={c.criterion} className="text-gray-700">
-                              <span className="font-medium">
+                            <li key={c.criterion} className="text-lecturer-text-secondary">
+                              <span className="font-medium text-lecturer-text-primary">
                                 {c.criterion}: {c.score} / {c.maxMarks}
                               </span>
-                              <p className="text-xs text-gray-500">{c.justification}</p>
+                              <p className="text-xs text-lecturer-text-secondary">{c.justification}</p>
                             </li>
                           ))}
                         </ul>
                       </div>
                       {aiResult.strengths.length > 0 && (
                         <div>
-                          <p className="font-medium">Strengths</p>
-                          <ul className="mt-1 list-disc pl-5 text-gray-700">
+                          <p className="font-medium text-lecturer-text-primary">Strengths</p>
+                          <ul className="mt-1 list-disc pl-5 text-lecturer-text-secondary">
                             {aiResult.strengths.map((s, idx) => (
                               <li key={idx}>{s}</li>
                             ))}
@@ -735,8 +683,8 @@ export default function GradeSubmissionPage({
                       )}
                       {aiResult.areasForImprovement.length > 0 && (
                         <div>
-                          <p className="font-medium">Areas for improvement</p>
-                          <ul className="mt-1 list-disc pl-5 text-gray-700">
+                          <p className="font-medium text-lecturer-text-primary">Areas for improvement</p>
+                          <ul className="mt-1 list-disc pl-5 text-lecturer-text-secondary">
                             {aiResult.areasForImprovement.map((s, idx) => (
                               <li key={idx}>{s}</li>
                             ))}
@@ -744,8 +692,8 @@ export default function GradeSubmissionPage({
                         </div>
                       )}
                       <div>
-                        <p className="font-medium">Overall feedback</p>
-                        <p className="text-gray-700">{aiResult.overallFeedback}</p>
+                        <p className="font-medium text-lecturer-text-primary">Overall feedback</p>
+                        <p className="text-lecturer-text-secondary">{aiResult.overallFeedback}</p>
                       </div>
                     </div>
                   )}
@@ -753,81 +701,56 @@ export default function GradeSubmissionPage({
               )}
 
               <div className="mt-2 flex items-center gap-3">
-                <label className="text-sm">Score</label>
+                <label className="text-sm text-lecturer-text-primary">Score</label>
                 <input
                   type="number"
                   min={0}
                   max={q.points}
-                  className="w-20 rounded border border-gray-300 px-2 py-1"
+                  className="w-20 rounded-lg border border-lecturer-border px-2 py-1 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                   value={scores[q.id] ?? 0}
-                  onChange={(e) =>
-                    setScores({ ...scores, [q.id]: Number(e.target.value) })
-                  }
+                  onChange={(e) => setScores({ ...scores, [q.id]: Number(e.target.value) })}
                 />
-                <span className="text-sm text-gray-500">/ {q.points}</span>
+                <span className="text-sm text-lecturer-text-secondary">/ {q.points}</span>
               </div>
               <input
                 placeholder="Feedback (optional)"
-                className="mt-2 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                className="mt-2 w-full rounded-lg border border-lecturer-border px-2 py-1 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 value={feedback[q.id] ?? ""}
                 onChange={(e) => setFeedback({ ...feedback, [q.id]: e.target.value })}
               />
-            </div>
+            </SectionCard>
           );
         })}
       </div>
 
-      <div className="mt-6">
+      <div>
         <button
           onClick={handleFinalize}
           disabled={saving}
-          className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+          className="rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-semibold text-white hover:bg-lecturer-accent-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
         >
-          {saving ? "Saving..." : "Finalize grade"}
+          {saving ? "Saving…" : "Finalize grade"}
         </button>
       </div>
 
       {data.status === "GRADED" && (
-        <div className="mt-4 rounded border border-gray-200 p-4">
-          <p className="text-sm font-medium">
-            Canvas passback:{" "}
-            {data.canvasPassback ? CANVAS_STATUS_LABELS[data.canvasPassback.status] : "Not checked yet"}
-          </p>
+        <SectionCard>
+          <p className="text-sm font-medium text-lecturer-text-primary">Canvas passback: {data.canvasPassback ? CANVAS_STATUS_LABELS[data.canvasPassback.status] : "Not checked yet"}</p>
           {data.canvasPassback?.scoreGiven != null && (
-            <p className="mt-1 text-sm text-gray-600">
+            <p className="mt-1 text-sm text-lecturer-text-secondary">
               Score sent: {data.canvasPassback.scoreGiven} / {data.canvasPassback.scoreMaximum}
             </p>
           )}
-          {data.canvasPassback?.sentAt && (
-            <p className="text-sm text-gray-500">
-              Sent at: {new Date(data.canvasPassback.sentAt).toLocaleString()}
-            </p>
-          )}
-          {data.canvasPassback?.attemptedAt && (
-            <p className="text-sm text-gray-500">
-              Last attempted: {new Date(data.canvasPassback.attemptedAt).toLocaleString()}
-            </p>
-          )}
-          {data.canvasPassback?.status === "FAILED" && data.canvasPassback.errorMessage && (
-            <p className="mt-1 text-sm text-red-600">{data.canvasPassback.errorMessage}</p>
-          )}
+          {data.canvasPassback?.sentAt && <p className="text-sm text-lecturer-text-secondary">Sent at: {new Date(data.canvasPassback.sentAt).toLocaleString()}</p>}
+          {data.canvasPassback?.attemptedAt && <p className="text-sm text-lecturer-text-secondary">Last attempted: {new Date(data.canvasPassback.attemptedAt).toLocaleString()}</p>}
+          {data.canvasPassback?.status === "FAILED" && data.canvasPassback.errorMessage && <p className="mt-1 text-sm text-[#B42318]">{data.canvasPassback.errorMessage}</p>}
           {data.canvasPassback?.status !== "SKIPPED" && (
-            <button
-              onClick={handlePushGrade}
-              disabled={pushingGrade}
-              className="mt-3 rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-50"
-            >
-              {pushingGrade
-                ? "Sending..."
-                : data.canvasPassback?.status === "SENT"
-                  ? "Resend grade to Canvas"
-                  : data.canvasPassback?.status === "FAILED"
-                    ? "Retry Canvas passback"
-                    : "Send grade to Canvas"}
+            <button onClick={handlePushGrade} disabled={pushingGrade} className={`mt-3 ${CHIP_BUTTON_CLASS} px-4 py-2 disabled:opacity-50`}>
+              {pushingGrade ? "Sending…" : data.canvasPassback?.status === "SENT" ? "Resend grade to Canvas" : data.canvasPassback?.status === "FAILED" ? "Retry Canvas passback" : "Send grade to Canvas"}
             </button>
           )}
-          {pushGradeMessage && <p className="mt-2 text-sm text-gray-600">{pushGradeMessage}</p>}
-        </div>
+          {pushGradeMessage && <p className="mt-2 text-sm text-lecturer-text-secondary">{pushGradeMessage}</p>}
+        </SectionCard>
       )}
 
       {/* AI-Use Answer Review v1 — see docs/ai-use-answer-review-v1.md.
@@ -836,27 +759,19 @@ export default function GradeSubmissionPage({
           a claim that the answer was written by AI, never an automatic
           misconduct finding. Analysis never changes marks, blocks marks
           release, creates misconduct cases, or notifies the student. */}
-      <div className="mt-6 rounded border border-gray-200 p-4">
-        <h2 className="text-lg font-medium">AI-use answer review</h2>
-        <p className="mt-1 text-xs text-gray-500">
-          Review answer characteristics that may warrant closer academic review. These signals do not determine
-          whether AI was used — your lecturer or institution makes the final decision.
-        </p>
-
-        <div className="mt-3 grid grid-cols-2 gap-3 rounded border border-gray-100 bg-gray-50 p-3 text-xs sm:grid-cols-3">
+      <SectionCard title="AI-use answer review" subtitle="Review answer characteristics that may warrant closer academic review. These signals do not determine whether AI was used — your lecturer or institution makes the final decision.">
+        <div className="grid grid-cols-2 gap-3 rounded-lg border border-lecturer-border bg-lecturer-border-subtle/60 p-3 text-xs sm:grid-cols-3">
           <div>
-            <p className="uppercase text-gray-500">Analysis status</p>
-            <p className="mt-1 text-gray-800">{aiUseReviewLoading ? "Loading..." : (aiUseReview?.status ?? "Not yet run")}</p>
+            <p className="text-lecturer-text-secondary uppercase">Analysis status</p>
+            <p className="mt-1 text-lecturer-text-primary">{aiUseReviewLoading ? "Loading..." : (aiUseReview?.status ?? "Not yet run")}</p>
           </div>
           <div>
-            <p className="uppercase text-gray-500">Deterministic checks</p>
-            <p className="mt-1 text-gray-800">
-              {aiUseReview ? `${aiUseReview.summary?.deterministicSignalCount ?? 0} signal(s)` : "—"}
-            </p>
+            <p className="text-lecturer-text-secondary uppercase">Deterministic checks</p>
+            <p className="mt-1 text-lecturer-text-primary">{aiUseReview ? `${aiUseReview.summary?.deterministicSignalCount ?? 0} signal(s)` : "—"}</p>
           </div>
           <div>
-            <p className="uppercase text-gray-500">AI-assisted checks</p>
-            <p className="mt-1 text-gray-800">
+            <p className="text-lecturer-text-secondary uppercase">AI-assisted checks</p>
+            <p className="mt-1 text-lecturer-text-primary">
               {aiUseReview?.summary?.aiAssisted?.status === "NOT_CONFIGURED"
                 ? "AI-assisted review is not configured."
                 : aiUseReview?.summary?.aiAssisted?.status === "FAILED"
@@ -867,26 +782,24 @@ export default function GradeSubmissionPage({
             </p>
           </div>
           <div>
-            <p className="uppercase text-gray-500">Overall signal level</p>
-            <p className="mt-1 text-gray-800">{aiUseReview?.overallSignalLevel ?? "—"}</p>
+            <p className="text-lecturer-text-secondary uppercase">Overall signal level</p>
+            <p className="mt-1 text-lecturer-text-primary">{aiUseReview?.overallSignalLevel ?? "—"}</p>
           </div>
           <div>
-            <p className="uppercase text-gray-500">Last analysed</p>
-            <p className="mt-1 text-gray-800">
-              {aiUseReview?.analysedAt ? new Date(aiUseReview.analysedAt).toLocaleString() : "Never"}
-            </p>
+            <p className="text-lecturer-text-secondary uppercase">Last analysed</p>
+            <p className="mt-1 text-lecturer-text-primary">{aiUseReview?.analysedAt ? new Date(aiUseReview.analysedAt).toLocaleString() : "Never"}</p>
           </div>
           <div>
-            <p className="uppercase text-gray-500">Recommended action</p>
-            <p className="mt-1 text-gray-800">{aiUseReview?.recommendationLabel ?? "—"}</p>
+            <p className="text-lecturer-text-secondary uppercase">Recommended action</p>
+            <p className="mt-1 text-lecturer-text-primary">{aiUseReview?.recommendationLabel ?? "—"}</p>
           </div>
         </div>
 
-        <div className="mt-3 rounded border border-gray-100 bg-gray-50 p-3 text-xs text-gray-600">
-          <p className="font-medium text-gray-700">Related evidence categories</p>
+        <div className="mt-3 rounded-lg border border-lecturer-border bg-lecturer-border-subtle/60 p-3 text-xs text-lecturer-text-secondary">
+          <p className="font-medium text-lecturer-text-primary">Related evidence categories</p>
           <p className="mt-1">
             Answer similarity:{" "}
-            <Link href={`/lecturer/exams/${examId}/similarity`} className="underline">
+            <Link href={`/lecturer/exams/${examId}/similarity`} className="text-lecturer-accent underline">
               View similarity review
             </Link>
           </p>
@@ -894,47 +807,37 @@ export default function GradeSubmissionPage({
         </div>
 
         <div className="mt-3">
-          <button
-            onClick={runAiUseReview}
-            disabled={aiUseReviewRunning}
-            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
-          >
-            {aiUseReviewRunning ? "Running..." : "Run AI-use review"}
+          <button onClick={runAiUseReview} disabled={aiUseReviewRunning} className="rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-semibold text-white hover:bg-lecturer-accent-hover disabled:opacity-50">
+            {aiUseReviewRunning ? "Running…" : "Run AI-use review"}
           </button>
-          {aiUseReviewRunError && <p className="mt-2 text-sm text-red-600">{aiUseReviewRunError}</p>}
+          {aiUseReviewRunError && <p className="mt-2 text-sm text-[#B42318]">{aiUseReviewRunError}</p>}
           {aiUseReview?.status === "FAILED" && (
-            <p className="mt-2 text-sm text-amber-700">
-              The last analysis run failed — this submission&apos;s grade and status are unaffected. Try running it again.
-            </p>
+            <p className="mt-2 text-sm text-[#B54708]">The last analysis run failed — this submission&apos;s grade and status are unaffected. Try running it again.</p>
           )}
         </div>
 
         <div className="mt-4 space-y-3">
-          {(!aiUseReview || aiUseReview.signals.length === 0) && (
-            <p className="text-xs text-gray-500">No AI-use review signals found yet. Run the analysis above.</p>
-          )}
+          {(!aiUseReview || aiUseReview.signals.length === 0) && <p className="text-xs text-lecturer-text-secondary">No AI-use review signals found yet. Run the analysis above.</p>}
           {aiUseReview?.signals.map((s) => (
-            <div key={s.id} className="rounded border border-gray-100 p-3 text-sm">
+            <div key={s.id} className="rounded-lg border border-lecturer-border p-3 text-sm">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">{s.headline}</span>
-                <span className={`rounded px-2 py-0.5 text-xs ${AI_USE_SIGNAL_LEVEL_STYLES[s.signalLevel]}`}>
-                  {s.signalLevel}
-                </span>
-                <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{s.label}</span>
-                <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{s.reviewStatusLabel}</span>
+                <StatusBadge tone="accent">{s.headline}</StatusBadge>
+                <StatusBadge tone={SIGNAL_LEVEL_TONES[s.signalLevel]}>{s.signalLevel}</StatusBadge>
+                <StatusBadge tone="neutral">{s.label}</StatusBadge>
+                <StatusBadge tone="neutral">{s.reviewStatusLabel}</StatusBadge>
               </div>
 
               {s.question && (
-                <p className="mt-2 text-xs text-gray-500">
+                <p className="mt-2 text-xs text-lecturer-text-secondary">
                   Question {s.question.order + 1}: {s.question.text}
                 </p>
               )}
-              <p className="mt-2 text-gray-700">{s.explanation}</p>
+              <p className="mt-2 text-lecturer-text-primary">{s.explanation}</p>
 
               {s.evidence && s.evidence.length > 0 && (
                 <div className="mt-2">
-                  <p className="text-xs font-medium text-gray-600">Evidence</p>
-                  <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-gray-600">
+                  <p className="text-xs font-medium text-lecturer-text-secondary">Evidence</p>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-lecturer-text-secondary">
                     {s.evidence.map((e, i) => (
                       <li key={i}>{e}</li>
                     ))}
@@ -942,31 +845,25 @@ export default function GradeSubmissionPage({
                 </div>
               )}
 
-              <p className="mt-2 text-xs text-amber-700">
-                This is a review signal and is not an automatic academic misconduct decision.
-              </p>
+              <p className="mt-2 text-xs text-[#B54708]">This is a review signal and is not an automatic academic misconduct decision.</p>
 
               <div className="mt-3">
                 <input
                   type="text"
                   placeholder="Optional review note"
-                  className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                  className={FIELD_CLASS}
                   value={aiUseReviewNoteDrafts[s.id] ?? s.reviewNote ?? ""}
                   onChange={(e) => setAiUseReviewNoteDrafts((prev) => ({ ...prev, [s.id]: e.target.value }))}
                 />
                 <div className="mt-2 flex flex-wrap gap-2">
                   {AI_USE_REVIEW_ACTIONS.map((action) => (
-                    <button
-                      key={action.status}
-                      onClick={() => submitAiUseReviewSignalReview(s.id, action.status)}
-                      className="rounded border border-gray-300 px-2 py-1 text-xs"
-                    >
+                    <button key={action.status} onClick={() => submitAiUseReviewSignalReview(s.id, action.status)} className={CHIP_BUTTON_CLASS}>
                       {action.label}
                     </button>
                   ))}
                 </div>
                 {s.reviewedByName && (
-                  <p className="mt-1 text-xs text-gray-400">
+                  <p className="mt-1 text-xs text-lecturer-text-muted">
                     Reviewed by {s.reviewedByName}
                     {s.reviewedAt ? ` on ${new Date(s.reviewedAt).toLocaleString()}` : ""}
                   </p>
@@ -975,7 +872,7 @@ export default function GradeSubmissionPage({
             </div>
           ))}
         </div>
-      </div>
+      </SectionCard>
 
       {/* Exam Session Binding + Time Anomaly Review v1 — see
           docs/exam-session-binding-v1.md and docs/time-anomaly-review-v1.md.
@@ -984,100 +881,85 @@ export default function GradeSubmissionPage({
           (including the cross-submission timing-similarity comparison
           and the combined recommendation) is lecturer-triggered below.
           Every card here is a REVIEW SIGNAL only. */}
-      <div className="mt-6 rounded border border-gray-200 p-4">
-        <h2 className="text-lg font-medium">Session and timing review</h2>
-        <p className="mt-1 text-xs text-gray-500">
-          Review device/session continuity and answer-timing characteristics that may warrant closer academic
-          review. These signals do not determine misconduct — your lecturer or institution makes the final decision.
-        </p>
-
-        <div className="mt-3 grid grid-cols-2 gap-3 rounded border border-gray-100 bg-gray-50 p-3 text-xs sm:grid-cols-3">
+      <SectionCard
+        title="Session and timing review"
+        subtitle="Review device/session continuity and answer-timing characteristics that may warrant closer academic review. These signals do not determine misconduct — your lecturer or institution makes the final decision."
+      >
+        <div className="grid grid-cols-2 gap-3 rounded-lg border border-lecturer-border bg-lecturer-border-subtle/60 p-3 text-xs sm:grid-cols-3">
           <div>
-            <p className="uppercase text-gray-500">Active sessions observed</p>
-            <p className="mt-1 text-gray-800">{sessionReviewLoading ? "Loading..." : sessions.length}</p>
+            <p className="text-lecturer-text-secondary uppercase">Active sessions observed</p>
+            <p className="mt-1 text-lecturer-text-primary">{sessionReviewLoading ? "Loading..." : sessions.length}</p>
           </div>
           <div>
-            <p className="uppercase text-gray-500">Device/browser changes</p>
-            <p className="mt-1 text-gray-800">
+            <p className="text-lecturer-text-secondary uppercase">Device/browser changes</p>
+            <p className="mt-1 text-lecturer-text-primary">
               {sessionSignals.filter((s) => s.signalType === "DEVICE_TOKEN_CHANGED" || s.signalType === "COARSE_DEVICE_PROFILE_CHANGED" || s.signalType === "USER_AGENT_CHANGED").length}
             </p>
           </div>
           <div>
-            <p className="uppercase text-gray-500">Network changes</p>
-            <p className="mt-1 text-gray-800">
-              {sessionSignals.filter((s) => s.signalType === "NETWORK_PREFIX_CHANGED" || s.signalType === "REPEATED_NETWORK_CHANGES").length}
-            </p>
+            <p className="text-lecturer-text-secondary uppercase">Network changes</p>
+            <p className="mt-1 text-lecturer-text-primary">{sessionSignals.filter((s) => s.signalType === "NETWORK_PREFIX_CHANGED" || s.signalType === "REPEATED_NETWORK_CHANGES").length}</p>
           </div>
           <div>
-            <p className="uppercase text-gray-500">Timing signals</p>
-            <p className="mt-1 text-gray-800">{timingAnalysis?.signals.filter((s) => s.signalType !== "INSUFFICIENT_TIMING_DATA").length ?? "—"}</p>
+            <p className="text-lecturer-text-secondary uppercase">Timing signals</p>
+            <p className="mt-1 text-lecturer-text-primary">{timingAnalysis?.signals.filter((s) => s.signalType !== "INSUFFICIENT_TIMING_DATA").length ?? "—"}</p>
           </div>
           <div>
-            <p className="uppercase text-gray-500">Overall recommendation</p>
-            <p className="mt-1 text-gray-800">{timingAnalysis?.recommendationLabel ?? "—"}</p>
+            <p className="text-lecturer-text-secondary uppercase">Overall recommendation</p>
+            <p className="mt-1 text-lecturer-text-primary">{timingAnalysis?.recommendationLabel ?? "—"}</p>
           </div>
           <div>
-            <p className="uppercase text-gray-500">Last analysed</p>
-            <p className="mt-1 text-gray-800">{timingAnalysis?.analysedAt ? new Date(timingAnalysis.analysedAt).toLocaleString() : "Never"}</p>
+            <p className="text-lecturer-text-secondary uppercase">Last analysed</p>
+            <p className="mt-1 text-lecturer-text-primary">{timingAnalysis?.analysedAt ? new Date(timingAnalysis.analysedAt).toLocaleString() : "Never"}</p>
           </div>
         </div>
 
         <div className="mt-3">
-          <button
-            onClick={runTimingAnalysis}
-            disabled={timingRunning}
-            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
-          >
-            {timingRunning ? "Running..." : "Run timing analysis"}
+          <button onClick={runTimingAnalysis} disabled={timingRunning} className="rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-semibold text-white hover:bg-lecturer-accent-hover disabled:opacity-50">
+            {timingRunning ? "Running…" : "Run timing analysis"}
           </button>
-          {timingRunError && <p className="mt-2 text-sm text-red-600">{timingRunError}</p>}
+          {timingRunError && <p className="mt-2 text-sm text-[#B42318]">{timingRunError}</p>}
           {timingAnalysis?.status === "FAILED" && (
-            <p className="mt-2 text-sm text-amber-700">
-              The last timing analysis run failed — this submission&apos;s grade and status are unaffected. Try again.
-            </p>
+            <p className="mt-2 text-sm text-[#B54708]">The last timing analysis run failed — this submission&apos;s grade and status are unaffected. Try again.</p>
           )}
         </div>
 
-        <h3 className="mt-5 text-sm font-medium">Session signals</h3>
+        <h3 className="mt-5 text-sm font-medium text-lecturer-text-primary">Session signals</h3>
         <div className="mt-2 space-y-3">
-          {sessionSignals.length === 0 && <p className="text-xs text-gray-500">No session-binding signals recorded yet.</p>}
+          {sessionSignals.length === 0 && <p className="text-xs text-lecturer-text-secondary">No session-binding signals recorded yet.</p>}
           {sessionSignals.map((s) => (
-            <div key={s.id} className="rounded border border-gray-100 p-3 text-sm">
+            <div key={s.id} className="rounded-lg border border-lecturer-border p-3 text-sm">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">{s.headline ?? "Session review recommended"}</span>
-                <span className={`rounded px-2 py-0.5 text-xs ${SESSION_TIMING_LEVEL_STYLES[s.signalLevel]}`}>{s.signalLevel}</span>
-                <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{s.reviewStatusLabel}</span>
+                <StatusBadge tone="accent">{s.headline ?? "Session review recommended"}</StatusBadge>
+                <StatusBadge tone={SIGNAL_LEVEL_TONES[s.signalLevel]}>{s.signalLevel}</StatusBadge>
+                <StatusBadge tone="neutral">{s.reviewStatusLabel}</StatusBadge>
               </div>
-              <p className="mt-2 text-gray-700">{s.explanation}</p>
+              <p className="mt-2 text-lecturer-text-primary">{s.explanation}</p>
               {s.evidence && s.evidence.length > 0 && (
-                <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-gray-600">
+                <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-lecturer-text-secondary">
                   {s.evidence.map((e, i) => (
                     <li key={i}>{e}</li>
                   ))}
                 </ul>
               )}
-              <p className="mt-2 text-xs text-amber-700">This is a review signal and is not an automatic academic misconduct decision.</p>
+              <p className="mt-2 text-xs text-[#B54708]">This is a review signal and is not an automatic academic misconduct decision.</p>
               <div className="mt-3">
                 <input
                   type="text"
                   placeholder="Optional review note"
-                  className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                  className={FIELD_CLASS}
                   value={sessionTimingNoteDrafts[s.id] ?? s.reviewNote ?? ""}
                   onChange={(e) => setSessionTimingNoteDrafts((prev) => ({ ...prev, [s.id]: e.target.value }))}
                 />
                 <div className="mt-2 flex flex-wrap gap-2">
                   {SESSION_TIMING_REVIEW_ACTIONS.map((action) => (
-                    <button
-                      key={action.status}
-                      onClick={() => submitSessionSignalReview(s.id, action.status)}
-                      className="rounded border border-gray-300 px-2 py-1 text-xs"
-                    >
+                    <button key={action.status} onClick={() => submitSessionSignalReview(s.id, action.status)} className={CHIP_BUTTON_CLASS}>
                       {action.label}
                     </button>
                   ))}
                 </div>
                 {s.reviewedByName && (
-                  <p className="mt-1 text-xs text-gray-400">
+                  <p className="mt-1 text-xs text-lecturer-text-muted">
                     Reviewed by {s.reviewedByName}
                     {s.reviewedAt ? ` on ${new Date(s.reviewedAt).toLocaleString()}` : ""}
                   </p>
@@ -1087,50 +969,46 @@ export default function GradeSubmissionPage({
           ))}
         </div>
 
-        <h3 className="mt-5 text-sm font-medium">Timing signals</h3>
+        <h3 className="mt-5 text-sm font-medium text-lecturer-text-primary">Timing signals</h3>
         <div className="mt-2 space-y-3">
           {(!timingAnalysis || timingAnalysis.signals.filter((s) => s.signalType !== "INSUFFICIENT_TIMING_DATA").length === 0) && (
-            <p className="text-xs text-gray-500">No timing signals found yet. Run the analysis above.</p>
+            <p className="text-xs text-lecturer-text-secondary">No timing signals found yet. Run the analysis above.</p>
           )}
           {timingAnalysis?.signals
             .filter((s) => s.signalType !== "INSUFFICIENT_TIMING_DATA")
             .map((s) => (
-              <div key={s.id} className="rounded border border-gray-100 p-3 text-sm">
+              <div key={s.id} className="rounded-lg border border-lecturer-border p-3 text-sm">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">Timing review recommended</span>
-                  <span className={`rounded px-2 py-0.5 text-xs ${SESSION_TIMING_LEVEL_STYLES[s.signalLevel]}`}>{s.signalLevel}</span>
-                  <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{s.reviewStatusLabel}</span>
+                  <StatusBadge tone="accent">Timing review recommended</StatusBadge>
+                  <StatusBadge tone={SIGNAL_LEVEL_TONES[s.signalLevel]}>{s.signalLevel}</StatusBadge>
+                  <StatusBadge tone="neutral">{s.reviewStatusLabel}</StatusBadge>
                 </div>
-                <p className="mt-2 text-gray-700">{s.explanation}</p>
+                <p className="mt-2 text-lecturer-text-primary">{s.explanation}</p>
                 {s.evidence && s.evidence.length > 0 && (
-                  <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-gray-600">
+                  <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-lecturer-text-secondary">
                     {s.evidence.map((e, i) => (
                       <li key={i}>{e}</li>
                     ))}
                   </ul>
                 )}
-                <p className="mt-2 text-xs text-amber-700">This is a review signal and is not an automatic academic misconduct decision.</p>
+                <p className="mt-2 text-xs text-[#B54708]">This is a review signal and is not an automatic academic misconduct decision.</p>
                 <div className="mt-3">
                   <input
                     type="text"
                     placeholder="Optional review note"
-                    className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                    className={FIELD_CLASS}
                     value={sessionTimingNoteDrafts[s.id] ?? s.reviewNote ?? ""}
                     onChange={(e) => setSessionTimingNoteDrafts((prev) => ({ ...prev, [s.id]: e.target.value }))}
                   />
                   <div className="mt-2 flex flex-wrap gap-2">
                     {SESSION_TIMING_REVIEW_ACTIONS.map((action) => (
-                      <button
-                        key={action.status}
-                        onClick={() => submitTimingSignalReview(s.id, action.status)}
-                        className="rounded border border-gray-300 px-2 py-1 text-xs"
-                      >
+                      <button key={action.status} onClick={() => submitTimingSignalReview(s.id, action.status)} className={CHIP_BUTTON_CLASS}>
                         {action.label}
                       </button>
                     ))}
                   </div>
                   {s.reviewedByName && (
-                    <p className="mt-1 text-xs text-gray-400">
+                    <p className="mt-1 text-xs text-lecturer-text-muted">
                       Reviewed by {s.reviewedByName}
                       {s.reviewedAt ? ` on ${new Date(s.reviewedAt).toLocaleString()}` : ""}
                     </p>
@@ -1140,11 +1018,10 @@ export default function GradeSubmissionPage({
             ))}
         </div>
 
-        <p className="mt-4 text-xs text-gray-500">
-          Requiring oral verification for a session or timing concern uses the same Oral verification section below —
-          this feature never creates an oral-verification request automatically.
+        <p className="mt-4 text-xs text-lecturer-text-secondary">
+          Requiring oral verification for a session or timing concern uses the same Oral verification section below — this feature never creates an oral-verification request automatically.
         </p>
-      </div>
+      </SectionCard>
 
       {/* Oral Verification Workflow v1 — see
           docs/oral-verification-workflow-v1.md. Lecturer-controlled only:
@@ -1152,27 +1029,21 @@ export default function GradeSubmissionPage({
           clicks "Require oral verification" below — never automatically.
           Internal risk scores/comparison details are never shown here to
           students, and lecturerNotes are private to staff. */}
-      <div className="mt-6 rounded border border-gray-200 p-4">
-        <h2 className="text-lg font-medium">Oral verification</h2>
-        <p className="mt-1 text-xs text-gray-500">
-          A lecturer-controlled follow-up discussion, if you want one for this attempt. This is a review
-          workflow, not an accusation — the student sees only a neutral notice, never an internal risk
-          score or comparison detail.
-        </p>
-
+      <SectionCard
+        title="Oral verification"
+        subtitle="A lecturer-controlled follow-up discussion, if you want one for this attempt. This is a review workflow, not an accusation — the student sees only a neutral notice, never an internal risk score or comparison detail."
+      >
         {oralVerifications.map((v) => (
-          <div key={v.id} className="mt-3 rounded border border-gray-100 bg-gray-50 p-3 text-sm">
+          <div key={v.id} className="mt-3 rounded-lg border border-lecturer-border bg-lecturer-border-subtle/60 p-3 text-sm">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
-                {ORAL_VERIFICATION_STATUS_LABELS[v.status] ?? v.status}
-              </span>
-              {v.requestedBy && <span className="text-xs text-gray-500">Requested by {v.requestedBy.name}</span>}
+              <StatusBadge tone="accent">{ORAL_VERIFICATION_STATUS_LABELS[v.status] ?? v.status}</StatusBadge>
+              {v.requestedBy && <span className="text-xs text-lecturer-text-secondary">Requested by {v.requestedBy.name}</span>}
             </div>
-            <p className="mt-2 text-gray-700">Reason: {v.reason}</p>
+            <p className="mt-2 text-lecturer-text-primary">Reason: {v.reason}</p>
 
             {(v.generatedQuestionsJson ?? []).length > 0 && (
               <div className="mt-2">
-                <p className="text-xs font-medium text-gray-600">Follow-up questions (editable):</p>
+                <p className="text-xs font-medium text-lecturer-text-secondary">Follow-up questions (editable):</p>
                 <div className="mt-1 space-y-1">
                   {(editingQuestions[v.id] ?? []).map((q, i) => (
                     <input
@@ -1183,15 +1054,11 @@ export default function GradeSubmissionPage({
                         next[i] = e.target.value;
                         setEditingQuestions((prev) => ({ ...prev, [v.id]: next }));
                       }}
-                      className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                      className={FIELD_CLASS}
                     />
                   ))}
                 </div>
-                <button
-                  onClick={() => updateOralVerification(v.id, { questions: editingQuestions[v.id] })}
-                  disabled={savingVerificationId === v.id}
-                  className="mt-1 rounded border border-gray-300 px-2 py-1 text-xs disabled:opacity-50"
-                >
+                <button onClick={() => updateOralVerification(v.id, { questions: editingQuestions[v.id] })} disabled={savingVerificationId === v.id} className={`mt-1 ${CHIP_BUTTON_CLASS} disabled:opacity-50`}>
                   Save question edits
                 </button>
               </div>
@@ -1199,38 +1066,26 @@ export default function GradeSubmissionPage({
 
             <div className="mt-3 flex flex-wrap gap-2">
               {v.status !== "SCHEDULED" && v.status !== "CANCELLED" && !v.completedAt && (
-                <button
-                  onClick={() => updateOralVerification(v.id, { status: "SCHEDULED" })}
-                  className="rounded border border-gray-300 px-2 py-1 text-xs"
-                >
+                <button onClick={() => updateOralVerification(v.id, { status: "SCHEDULED" })} className={CHIP_BUTTON_CLASS}>
                   Mark scheduled
                 </button>
               )}
               {!v.completedAt && v.status !== "CANCELLED" && (
                 <>
-                  <button
-                    onClick={() => updateOralVerification(v.id, { status: "COMPLETED_NO_CONCERN" })}
-                    className="rounded border border-gray-300 px-2 py-1 text-xs"
-                  >
+                  <button onClick={() => updateOralVerification(v.id, { status: "COMPLETED_NO_CONCERN" })} className={CHIP_BUTTON_CLASS}>
                     Complete — no concern
                   </button>
-                  <button
-                    onClick={() => updateOralVerification(v.id, { status: "COMPLETED_CONCERN_REMAINS" })}
-                    className="rounded border border-gray-300 px-2 py-1 text-xs"
-                  >
+                  <button onClick={() => updateOralVerification(v.id, { status: "COMPLETED_CONCERN_REMAINS" })} className={CHIP_BUTTON_CLASS}>
                     Complete — concern remains
                   </button>
-                  <button
-                    onClick={() => updateOralVerification(v.id, { status: "CANCELLED" })}
-                    className="rounded border border-gray-300 px-2 py-1 text-xs"
-                  >
+                  <button onClick={() => updateOralVerification(v.id, { status: "CANCELLED" })} className={CHIP_BUTTON_CLASS}>
                     Cancel
                   </button>
                 </>
               )}
             </div>
             {v.completedAt && (
-              <p className="mt-2 text-xs text-gray-500">
+              <p className="mt-2 text-xs text-lecturer-text-secondary">
                 Completed {new Date(v.completedAt).toLocaleString()}
                 {v.completedBy ? ` by ${v.completedBy.name}` : ""}
               </p>
@@ -1238,11 +1093,11 @@ export default function GradeSubmissionPage({
           </div>
         ))}
 
-        <div className="mt-3 border-t border-gray-200 pt-3">
-          <label className="block text-xs font-medium text-gray-600">Require oral verification — reason</label>
+        <div className="mt-3 border-t border-lecturer-border pt-3">
+          <label className="block text-xs font-medium text-lecturer-text-secondary">Require oral verification — reason</label>
           <textarea
             rows={2}
-            className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+            className="mt-1 w-full rounded-lg border border-lecturer-border px-2 py-1 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
             value={requestReason}
             onChange={(e) => setRequestReason(e.target.value)}
             placeholder="Why is a follow-up discussion recommended for this attempt?"
@@ -1250,12 +1105,12 @@ export default function GradeSubmissionPage({
           <button
             onClick={requireOralVerification}
             disabled={requestingVerification || !requestReason.trim()}
-            className="mt-2 rounded bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
+            className="mt-2 rounded-lg bg-lecturer-accent px-3 py-1.5 text-sm font-semibold text-white hover:bg-lecturer-accent-hover disabled:opacity-50"
           >
-            {requestingVerification ? "Requesting..." : "Require oral verification"}
+            {requestingVerification ? "Requesting…" : "Require oral verification"}
           </button>
         </div>
-      </div>
+      </SectionCard>
     </div>
   );
 }

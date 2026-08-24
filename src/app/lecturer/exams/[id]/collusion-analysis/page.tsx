@@ -71,19 +71,19 @@ type AnalysisData = {
 };
 
 const CONCERN_STYLES: Record<string, string> = {
-  NONE: "bg-gray-100 text-gray-600",
-  WATCH: "bg-blue-100 text-blue-700",
+  NONE: "bg-lecturer-border-subtle text-lecturer-text-secondary",
+  WATCH: "bg-blue-100 text-lecturer-accent-hover",
   NEEDS_REVIEW: "bg-yellow-100 text-yellow-700",
   HIGHER_CONCERN: "bg-orange-100 text-orange-800",
 };
 
 const REVIEW_STATUS_STYLES: Record<string, string> = {
-  NEEDS_REVIEW: "bg-gray-100 text-gray-600",
+  NEEDS_REVIEW: "bg-lecturer-border-subtle text-lecturer-text-secondary",
   REVIEWED_NO_CONCERN: "bg-green-100 text-green-700",
   REVIEWED_CONCERN_REMAINS: "bg-yellow-100 text-yellow-700",
   ORAL_VERIFICATION_REQUESTED: "bg-purple-100 text-purple-700",
-  ESCALATED: "bg-red-100 text-red-700",
-  RESOLVED: "bg-blue-100 text-blue-700",
+  ESCALATED: "bg-red-100 text-[#B42318]",
+  RESOLVED: "bg-blue-100 text-lecturer-accent-hover",
 };
 
 const FAMILY_LABELS: Record<string, string> = {
@@ -190,12 +190,12 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
     if (res.ok) await load();
   }
 
-  if (loading) return <p className="text-gray-500">Loading cohort integrity analysis...</p>;
+  if (loading) return <p className="text-lecturer-text-secondary">Loading cohort integrity analysis...</p>;
   if (loadError) {
     return (
       <div className="mx-auto max-w-4xl">
-        <p className="text-red-600">{loadError}</p>
-        <button onClick={() => load()} className="mt-2 rounded border border-gray-300 px-3 py-1.5 text-sm">
+        <p className="text-[#B42318]">{loadError}</p>
+        <button onClick={() => load()} className="mt-2 rounded border border-lecturer-border px-3 py-1.5 text-sm">
           Try again
         </button>
       </div>
@@ -208,12 +208,12 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
   return (
     <div className="mx-auto max-w-4xl">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Cohort integrity analysis</h1>
+        <h1 className="text-[28px] font-bold text-lecturer-text-primary">Cohort integrity analysis</h1>
         <Link href={`/lecturer/exams/${examId}`} className="text-sm underline">
           Back to exam
         </Link>
       </div>
-      <p className="mt-2 rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+      <p className="mt-2 rounded border border-lecturer-border bg-lecturer-border-subtle p-3 text-sm text-lecturer-text-primary">
         Review possible coordinated-answer patterns supported by multiple independent signals. These indicators
         require lecturer judgement and do not determine misconduct.
       </p>
@@ -225,50 +225,50 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
         <p>Lecturer judgement remains final. Analysis does not change grades or automatically create a misconduct finding.</p>
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-3 rounded border border-gray-200 p-4 text-sm sm:grid-cols-3">
+      <div className="mt-4 grid grid-cols-2 gap-3 rounded border border-lecturer-border p-4 text-sm sm:grid-cols-3">
         <div>
-          <p className="text-xs uppercase text-gray-500">Submitted attempts</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Submitted attempts</p>
           <p className="mt-1">{data?.submissionCount ?? "—"}</p>
         </div>
         <div>
-          <p className="text-xs uppercase text-gray-500">Analysed pairs</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Analysed pairs</p>
           <p className="mt-1">{data?.eligibleEdgeCount ?? "—"}</p>
         </div>
         <div>
-          <p className="text-xs uppercase text-gray-500">Possible clusters</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Possible clusters</p>
           <p className="mt-1">{data?.clusterCount ?? 0}</p>
         </div>
         <div>
-          <p className="text-xs uppercase text-gray-500">Students included in possible clusters</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Students included in possible clusters</p>
           <p className="mt-1">{studentsIncluded}</p>
         </div>
         <div>
-          <p className="text-xs uppercase text-gray-500">Clusters needing review</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Clusters needing review</p>
           <p className="mt-1">{clustersNeedingReview}</p>
         </div>
         <div>
-          <p className="text-xs uppercase text-gray-500">Last analysis time</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Last analysis time</p>
           <p className="mt-1">{data?.analysedAt ? new Date(data.analysedAt).toLocaleString() : "Never"}</p>
         </div>
       </div>
 
       <div className="mt-4">
-        <button onClick={runAnalysis} disabled={running} className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50">
+        <button onClick={runAnalysis} disabled={running} className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-sm text-white disabled:opacity-50">
           {running ? "Running..." : "Run cohort integrity analysis"}
         </button>
-        {runError && <p className="mt-2 text-sm text-red-600">{runError}</p>}
+        {runError && <p className="mt-2 text-sm text-[#B42318]">{runError}</p>}
         {data?.status === "FAILED" && (
-          <p className="mt-2 text-sm text-amber-700">The last analysis run failed — submissions and grades were not affected. Try running it again.</p>
+          <p className="mt-2 text-sm text-[#B54708]">The last analysis run failed — submissions and grades were not affected. Try running it again.</p>
         )}
         {data?.status === "INSUFFICIENT_DATA" && (
-          <p className="mt-2 text-sm text-gray-600">Not enough submitted attempts yet for cohort-level analysis (at least 3 are needed).</p>
+          <p className="mt-2 text-sm text-lecturer-text-secondary">Not enough submitted attempts yet for cohort-level analysis (at least 3 are needed).</p>
         )}
       </div>
 
       <h2 className="mt-8 text-lg font-medium">Possible coordinated-answer clusters</h2>
       <div className="mt-3 space-y-4">
         {(!data || data.clusters.length === 0) && (
-          <p className="text-gray-500">No concern identified — no possible clusters found yet. Run the analysis above.</p>
+          <p className="text-lecturer-text-secondary">No concern identified — no possible clusters found yet. Run the analysis above.</p>
         )}
         {data?.clusters.map((c) => {
           const expanded = expandedClusterId === c.id;
@@ -281,15 +281,15 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
           const filteredEdges = familyFilter === "ALL" ? clusterEdges : clusterEdges.filter((e) => (e.familyScores ?? {})[familyFilter] != null);
 
           return (
-            <div key={c.id} className="rounded border border-gray-200 p-4 text-sm">
+            <div key={c.id} className="rounded border border-lecturer-border p-4 text-sm">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-medium">Possible coordinated-answer cluster</span>
                 <span className={`rounded px-2 py-0.5 text-xs ${CONCERN_STYLES[c.concernLevel]}`}>{c.concernLevelLabel}</span>
-                <span className={`rounded px-2 py-0.5 text-xs ${REVIEW_STATUS_STYLES[c.reviewStatus] ?? "bg-gray-100 text-gray-600"}`}>
+                <span className={`rounded px-2 py-0.5 text-xs ${REVIEW_STATUS_STYLES[c.reviewStatus] ?? "bg-lecturer-border-subtle text-lecturer-text-secondary"}`}>
                   {c.reviewStatusLabel}
                 </span>
               </div>
-              <ul className="mt-2 list-disc space-y-0.5 pl-5 text-gray-700">
+              <ul className="mt-2 list-disc space-y-0.5 pl-5 text-lecturer-text-primary">
                 <li>{c.memberCount} students</li>
                 <li>{c.edgeCount} supported connections</li>
                 <li>{c.independentFamilyCount} independent supporting signal families</li>
@@ -299,7 +299,7 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
               </ul>
 
               <div className="mt-2">
-                <p className="text-xs text-gray-500">Supporting signal families:</p>
+                <p className="text-xs text-lecturer-text-secondary">Supporting signal families:</p>
                 <div className="mt-1 flex flex-wrap gap-1">
                   {(c.summary?.topSignalFamilies ?? []).map((f) => (
                     <span key={f} className="rounded bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700">
@@ -312,7 +312,7 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
               <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   onClick={() => setExpandedClusterId(expanded ? null : c.id)}
-                  className="rounded border border-gray-300 px-2 py-1 text-xs"
+                  className="rounded border border-lecturer-border px-2 py-1 text-xs"
                 >
                   {expanded ? "Hide details" : "Review cluster"}
                 </button>
@@ -320,7 +320,7 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
                   <button
                     key={action.status}
                     onClick={() => submitClusterReview(c.id, action.status)}
-                    className="rounded border border-gray-300 px-2 py-1 text-xs"
+                    className="rounded border border-lecturer-border px-2 py-1 text-xs"
                   >
                     {action.label}
                   </button>
@@ -331,25 +331,25 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
                 <input
                   type="text"
                   placeholder="Add a private note (visible to staff only)"
-                  className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                  className="w-full rounded border border-lecturer-border px-2 py-1 text-xs"
                   value={reviewNoteDrafts[c.id] ?? c.reviewNote ?? ""}
                   onChange={(e) => setReviewNoteDrafts((prev) => ({ ...prev, [c.id]: e.target.value }))}
                   onBlur={() => saveNoteOnly(c.id)}
                 />
               </div>
               {c.reviewedByName && (
-                <p className="mt-1 text-xs text-gray-400">
+                <p className="mt-1 text-xs text-lecturer-text-muted">
                   Reviewed by {c.reviewedByName}
                   {c.reviewedAt ? ` on ${new Date(c.reviewedAt).toLocaleString()}` : ""}
                 </p>
               )}
 
               {expanded && (
-                <div className="mt-4 border-t border-gray-100 pt-4">
+                <div className="mt-4 border-t border-lecturer-border-subtle pt-4">
                   <h3 className="text-sm font-medium">Members</h3>
                   <table className="mt-2 w-full text-left text-xs">
                     <thead>
-                      <tr className="text-gray-500">
+                      <tr className="text-lecturer-text-secondary">
                         <th className="py-1 pr-2">Student</th>
                         <th className="py-1 pr-2">Attempt</th>
                         <th className="py-1 pr-2">Supporting connections</th>
@@ -359,7 +359,7 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
                     </thead>
                     <tbody>
                       {c.members.map((m, i) => (
-                        <tr key={m.submissionId} className="border-t border-gray-100">
+                        <tr key={m.submissionId} className="border-t border-lecturer-border-subtle">
                           <td className="py-1 pr-2">
                             S{i + 1} — {m.studentName}
                           </td>
@@ -369,7 +369,7 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
                           <td className="py-1 pr-2">
                             <Link
                               href={`/lecturer/exams/${examId}/submissions/${m.submissionId}`}
-                              className="rounded border border-gray-300 px-2 py-0.5 text-xs"
+                              className="rounded border border-lecturer-border px-2 py-0.5 text-xs"
                             >
                               Request oral verification
                             </Link>
@@ -382,7 +382,7 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
                   <h3 className="mt-4 text-sm font-medium">Signal-family matrix (pairwise connections)</h3>
                   <table className="mt-2 w-full text-left text-xs">
                     <thead>
-                      <tr className="text-gray-500">
+                      <tr className="text-lecturer-text-secondary">
                         <th className="py-1 pr-2">Connection</th>
                         <th className="py-1 pr-2">Families</th>
                         <th className="py-1 pr-2">Combined support</th>
@@ -390,7 +390,7 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
                     </thead>
                     <tbody>
                       {clusterEdges.map((e) => (
-                        <tr key={`${e.sourceSubmissionId}-${e.comparedSubmissionId}`} className="border-t border-gray-100">
+                        <tr key={`${e.sourceSubmissionId}-${e.comparedSubmissionId}`} className="border-t border-lecturer-border-subtle">
                           <td className="py-1 pr-2">
                             S{(memberIndexById.get(e.sourceSubmissionId) ?? 0) + 1} ({e.sourceStudentName}) ↔ S
                             {(memberIndexById.get(e.comparedSubmissionId) ?? 0) + 1} ({e.comparedStudentName})
@@ -406,11 +406,11 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
                   <div className="mt-2 space-y-2">
                     {clusterEdges.flatMap((e) =>
                       e.signals.map((s, idx) => (
-                        <div key={`${e.sourceSubmissionId}-${e.comparedSubmissionId}-${idx}`} className="rounded border border-gray-100 p-2">
+                        <div key={`${e.sourceSubmissionId}-${e.comparedSubmissionId}-${idx}`} className="rounded border border-lecturer-border-subtle p-2">
                           <p className="text-xs font-medium">
                             {FAMILY_LABELS[s.signalFamily] ?? s.signalFamily} — {s.signalType}
                           </p>
-                          <p className="text-xs text-gray-600">{s.explanation}</p>
+                          <p className="text-xs text-lecturer-text-secondary">{s.explanation}</p>
                         </div>
                       )),
                     )}
@@ -419,18 +419,18 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
                   <div className="mt-4">
                     <button
                       onClick={() => setShowGraph((prev) => ({ ...prev, [c.id]: !prev[c.id] }))}
-                      className="rounded border border-gray-300 px-2 py-1 text-xs"
+                      className="rounded border border-lecturer-border px-2 py-1 text-xs"
                     >
                       {showGraph[c.id] ? "Hide graph view" : "Show graph view"}
                     </button>
                     {showGraph[c.id] && (
                       <div className="mt-2">
-                        <label className="text-xs text-gray-500">
+                        <label className="text-xs text-lecturer-text-secondary">
                           Filter by signal family:{" "}
                           <select
                             value={familyFilter}
                             onChange={(e) => setFamilyFilter(e.target.value)}
-                            className="rounded border border-gray-300 px-1 py-0.5 text-xs"
+                            className="rounded border border-lecturer-border px-1 py-0.5 text-xs"
                           >
                             <option value="ALL">All families</option>
                             {Object.keys(FAMILY_LABELS).map((f) => (
@@ -451,11 +451,11 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
                             const edge = filteredEdges.find((e) => `${e.sourceSubmissionId}-${e.comparedSubmissionId}` === selectedEdgeKey);
                             if (!edge) return null;
                             return (
-                              <div className="mt-2 rounded border border-gray-200 bg-gray-50 p-2 text-xs">
+                              <div className="mt-2 rounded border border-lecturer-border bg-lecturer-border-subtle p-2 text-xs">
                                 <p className="font-medium">
                                   {edge.sourceStudentName} ↔ {edge.comparedStudentName}
                                 </p>
-                                <p className="text-gray-600">Combined support: {edge.combinedScore.toFixed(2)}</p>
+                                <p className="text-lecturer-text-secondary">Combined support: {edge.combinedScore.toFixed(2)}</p>
                                 <ul className="mt-1 list-disc pl-4">
                                   {edge.signals.map((s, i) => (
                                     <li key={i}>{s.explanation}</li>
@@ -464,7 +464,7 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
                               </div>
                             );
                           })()}
-                        <p className="mt-1 text-xs text-gray-400">
+                        <p className="mt-1 text-xs text-lecturer-text-muted">
                           The graph is one way to explore this cluster — every connection above is also listed as text in the
                           tables above.
                         </p>
@@ -479,7 +479,7 @@ export default function CohortCollusionAnalysisPage({ params }: { params: Promis
       </div>
 
       <h2 className="mt-8 text-lg font-medium">Alternative explanations to consider</h2>
-      <ul className="mt-2 list-disc space-y-0.5 pl-5 text-sm text-gray-700">
+      <ul className="mt-2 list-disc space-y-0.5 pl-5 text-sm text-lecturer-text-primary">
         {ALTERNATIVE_EXPLANATIONS.map((e) => (
           <li key={e}>{e}</li>
         ))}
@@ -510,7 +510,7 @@ function ClusterGraph({
   const maxScore = Math.max(1, ...edges.map((e) => e.combinedScore));
 
   return (
-    <svg viewBox={`0 0 ${size} ${size}`} className="mt-2 w-full max-w-xs rounded border border-gray-100 bg-white" role="img" aria-label="Cluster connection graph">
+    <svg viewBox={`0 0 ${size} ${size}`} className="mt-2 w-full max-w-xs rounded border border-lecturer-border-subtle bg-lecturer-surface" role="img" aria-label="Cluster connection graph">
       {edges.map((e) => {
         const from = positions.get(e.sourceSubmissionId);
         const to = positions.get(e.comparedSubmissionId);

@@ -7,6 +7,12 @@ import {
   lecturerDashboardGroup,
   type LecturerAvailabilityStatus,
 } from "@/lib/lecturerDashboardGrouping";
+import { LecturerPageHeader, PrimaryButton, SecondaryLinkButton } from "@/components/lecturer/LecturerPageHeader";
+import { MetricCard } from "@/components/lecturer/MetricCard";
+import { SectionCard, SectionHeading } from "@/components/lecturer/SectionCard";
+import { StatusBadge, availabilityToneFor } from "@/components/lecturer/StatusBadge";
+import { EmptyState, ErrorState, LoadingState } from "@/components/lecturer/EmptyState";
+import { ExamsIcon, IntegrityIcon, ReportsIcon } from "@/components/lecturer/icons";
 
 type ExamSummary = {
   id: string;
@@ -172,29 +178,18 @@ export default function LecturerDashboard() {
 
   return (
     <div className="mx-auto max-w-7xl">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-[#101828]">Lecturer Dashboard</h1>
-          <p className="mt-1 text-sm text-[#667085]">Manage exams, review integrity signals and prepare upcoming assessments.</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Link
-            href="/lecturer/courses"
-            className="rounded-lg border border-[#E4E7EC] bg-white px-4 py-2 text-sm font-medium text-[#101828] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
-          >
-            Manage courses
-          </Link>
-          <button
-            type="button"
-            onClick={() => (showCreatePanel ? closeCreatePanel() : openCreatePanel())}
-            aria-expanded={showCreatePanel}
-            aria-controls="create-exam-panel"
-            className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
-          >
-            Create exam
-          </button>
-        </div>
-      </div>
+      <LecturerPageHeader
+        title="Lecturer Dashboard"
+        description="Manage assessments, monitor integrity signals and review student activity."
+        actions={
+          <>
+            <SecondaryLinkButton href="/lecturer/courses">Manage courses</SecondaryLinkButton>
+            <PrimaryButton type="button" onClick={() => (showCreatePanel ? closeCreatePanel() : openCreatePanel())} aria-expanded={showCreatePanel} aria-controls="create-exam-panel">
+              Create exam
+            </PrimaryButton>
+          </>
+        }
+      />
 
       {showCreatePanel && (
         <CreateExamPanel
@@ -211,48 +206,40 @@ export default function LecturerDashboard() {
 
       {!loading && !loadError && exams.length > 0 && (
         <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <DashboardMetric label="Active" value={summary.active} accent="success" />
-          <DashboardMetric label="Upcoming" value={summary.upcoming} accent="info" />
-          <DashboardMetric label="Needs review" value={summary.needsReview} accent={summary.needsReview > 0 ? "warning" : "neutral"} />
-          <DashboardMetric label="Drafts" value={summary.drafts} accent="neutral" />
+          <MetricCard label="Active exams" value={summary.active} accent="success" icon={<ExamsIcon className="h-3.5 w-3.5" />} />
+          <MetricCard label="Upcoming" value={summary.upcoming} accent="info" icon={<ReportsIcon className="h-3.5 w-3.5" />} />
+          <MetricCard
+            label="Needs review"
+            value={summary.needsReview}
+            accent={summary.needsReview > 0 ? "warning" : "neutral"}
+            icon={<IntegrityIcon className="h-3.5 w-3.5" />}
+          />
+          <MetricCard label="Drafts" value={summary.drafts} accent="neutral" icon={<ExamsIcon className="h-3.5 w-3.5" />} />
         </div>
       )}
 
       <div className="mt-6 space-y-8">
-        {loading && <p className="text-sm text-[#667085]">Loading exams…</p>}
+        {loading && <LoadingState label="Loading exams…" />}
 
-        {!loading && loadError && (
-          <div className="rounded-xl border border-[#E4E7EC] bg-[#FEF2F2] p-4 text-sm text-[#DC2626]">
-            <p>{loadError}</p>
-            <button
-              type="button"
-              onClick={() => loadExams(showAllClosed)}
-              className="mt-2 rounded font-medium underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#DC2626]"
-            >
-              Try again
-            </button>
-          </div>
-        )}
+        {!loading && loadError && <ErrorState message={loadError} onRetry={() => loadExams(showAllClosed)} />}
 
         {!loading && !loadError && exams.length === 0 && (
-          <div className="rounded-xl border border-[#E4E7EC] bg-white p-10 text-center">
-            <p className="text-base font-semibold text-[#101828]">No exams yet</p>
-            <p className="mx-auto mt-1 max-w-sm text-sm text-[#667085]">Create your first exam to start preparing an assessment.</p>
-            <button
-              type="button"
-              onClick={openCreatePanel}
-              className="mt-4 rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
-            >
-              Create exam
-            </button>
-          </div>
+          <EmptyState
+            title="No exams yet"
+            description="Create your first exam to start preparing an assessment."
+            action={
+              <PrimaryButton type="button" onClick={openCreatePanel}>
+                Create exam
+              </PrimaryButton>
+            }
+          />
         )}
 
         {needsAttention.length > 0 && <ReviewQueue exams={needsAttention} />}
 
         {active.length > 0 && (
           <section>
-            <SectionHeader title="Active" />
+            <SectionHeading title="Active" />
             <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
               {active.map((exam) => (
                 <ExamCard key={exam.id} exam={exam} action="Open →" />
@@ -263,7 +250,7 @@ export default function LecturerDashboard() {
 
         {upcoming.length > 0 && (
           <section>
-            <SectionHeader title="Upcoming" />
+            <SectionHeading title="Upcoming" />
             <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
               {upcoming.map((exam) => (
                 <ExamCard key={exam.id} exam={exam} />
@@ -274,7 +261,7 @@ export default function LecturerDashboard() {
 
         {draft.length > 0 && (
           <section>
-            <SectionHeader title="Drafts" muted />
+            <SectionHeading title="Drafts" muted />
             <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
               {draft.map((exam) => (
                 <ExamCard key={exam.id} exam={exam} variant="muted" action="Continue editing →" />
@@ -285,7 +272,7 @@ export default function LecturerDashboard() {
 
         {recentlyClosed.length > 0 && (
           <section>
-            <SectionHeader title="Recent examinations" muted />
+            <SectionHeading title="Recently closed" muted />
             <div className="mt-3 space-y-2">
               {recentlyClosed.map((exam) => (
                 <ExamCard key={exam.id} exam={exam} variant="muted" />
@@ -301,14 +288,14 @@ export default function LecturerDashboard() {
                 type="button"
                 onClick={loadFullHistory}
                 disabled={loadingHistory}
-                className="rounded text-sm font-medium text-[#667085] underline underline-offset-2 hover:text-[#101828] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                className="rounded text-sm font-medium text-lecturer-text-secondary underline underline-offset-2 hover:text-lecturer-text-primary disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
               >
                 {loadingHistory ? "Loading…" : "Show all older examinations"}
               </button>
             ) : (
               olderClosed.length > 0 && (
                 <section>
-                  <SectionHeader title="Older examinations" muted />
+                  <SectionHeading title="Older examinations" muted />
                   <div className="mt-3 space-y-2">
                     {olderClosed.map((exam) => (
                       <ExamCard key={exam.id} exam={exam} variant="muted" />
@@ -344,95 +331,51 @@ function CreateExamPanel({
   onCancel: () => void;
 }) {
   return (
-    <div id="create-exam-panel" className="mt-4 rounded-xl border border-[#E4E7EC] bg-white p-4 sm:p-5">
-      <form onSubmit={onSubmit} className="flex flex-col gap-4 sm:flex-row sm:items-end">
-        <div className="flex-1">
-          <label htmlFor="create-exam-title" className="block text-sm font-medium text-[#101828]">
-            Exam title
-          </label>
-          <input
-            id="create-exam-title"
-            required
-            className="mt-1 w-full rounded-lg border border-[#E4E7EC] px-3 py-2 text-sm text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
-            value={title}
-            onChange={(e) => onTitleChange(e.target.value)}
-          />
-        </div>
-        <div className="w-full sm:w-36">
-          <label htmlFor="create-exam-duration" className="block text-sm font-medium text-[#101828]">
-            Duration (min)
-          </label>
-          <input
-            id="create-exam-duration"
-            required
-            type="number"
-            min={1}
-            className="mt-1 w-full rounded-lg border border-[#E4E7EC] px-3 py-2 text-sm text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
-            value={durationMins}
-            onChange={(e) => onDurationChange(Number(e.target.value))}
-          />
-        </div>
-        <div className="flex gap-2">
-          <button
-            type="submit"
-            disabled={creating}
-            className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
-          >
-            {creating ? "Creating…" : "Create"}
-          </button>
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-lg border border-[#E4E7EC] px-4 py-2 text-sm font-medium text-[#667085] hover:bg-[#F7F8FA] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
-          >
-            Cancel
-          </button>
-        </div>
-      </form>
-      {error && <p className="mt-3 text-sm text-[#DC2626]">{error}</p>}
-    </div>
-  );
-}
-
-function DashboardMetric({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: number;
-  accent: "success" | "info" | "warning" | "neutral";
-}) {
-  const dotColor = {
-    success: "bg-[#067647]",
-    info: "bg-[#2563EB]",
-    warning: "bg-[#D97706]",
-    neutral: "bg-[#98A2B3]",
-  }[accent];
-  const isWarning = accent === "warning";
-
-  return (
-    <div
-      className={`rounded-xl border p-4 ${isWarning ? "border-[#FEDF89] bg-[#FFFAEB]" : "border-[#E4E7EC] bg-white"}`}
-    >
-      <div className="flex items-center gap-1.5">
-        <span className={`h-1.5 w-1.5 rounded-full ${dotColor}`} aria-hidden="true" />
-        <span className="text-sm font-medium text-[#667085]">{label}</span>
+    <SectionCard className="mt-4" padded={false}>
+      <div id="create-exam-panel" className="p-4 sm:p-5">
+        <form onSubmit={onSubmit} className="flex flex-col gap-4 sm:flex-row sm:items-end">
+          <div className="flex-1">
+            <label htmlFor="create-exam-title" className="block text-sm font-medium text-lecturer-text-primary">
+              Exam title
+            </label>
+            <input
+              id="create-exam-title"
+              required
+              className="mt-1 w-full rounded-lg border border-lecturer-border px-3 py-2 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+              value={title}
+              onChange={(e) => onTitleChange(e.target.value)}
+            />
+          </div>
+          <div className="w-full sm:w-36">
+            <label htmlFor="create-exam-duration" className="block text-sm font-medium text-lecturer-text-primary">
+              Duration (min)
+            </label>
+            <input
+              id="create-exam-duration"
+              required
+              type="number"
+              min={1}
+              className="mt-1 w-full rounded-lg border border-lecturer-border px-3 py-2 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+              value={durationMins}
+              onChange={(e) => onDurationChange(Number(e.target.value))}
+            />
+          </div>
+          <div className="flex gap-2">
+            <PrimaryButton type="submit" disabled={creating}>
+              {creating ? "Creating…" : "Create"}
+            </PrimaryButton>
+            <button
+              type="button"
+              onClick={onCancel}
+              className="rounded-lg border border-lecturer-border px-4 py-2 text-sm font-medium text-lecturer-text-secondary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+        {error && <p className="mt-3 text-sm text-[#B42318]">{error}</p>}
       </div>
-      <div className="mt-1.5 text-2xl font-bold text-[#101828]">{value}</div>
-    </div>
-  );
-}
-
-function SectionHeader({ title, badge, subtitle, muted }: { title: string; badge?: string; subtitle?: string; muted?: boolean }) {
-  return (
-    <div>
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <h2 className={muted ? "text-sm font-semibold text-[#667085]" : "text-lg font-semibold text-[#101828]"}>{title}</h2>
-        {badge && <span className="text-sm font-medium text-[#667085]">{badge}</span>}
-      </div>
-      {subtitle && <p className="mt-0.5 text-sm text-[#667085]">{subtitle}</p>}
-    </div>
+    </SectionCard>
   );
 }
 
@@ -451,33 +394,29 @@ function ReviewQueue({ exams }: { exams: ExamSummary[] }) {
 
   return (
     <section>
-      <SectionHeader
-        title="Needs your attention"
-        badge={countLabel(exams.length, "exam")}
-        subtitle="Integrity signals awaiting lecturer review."
-      />
+      <SectionHeading title="Needs your attention" badge={countLabel(exams.length, "exam")} subtitle="Integrity signals awaiting lecturer review." />
 
-      <div className="mt-3 overflow-hidden rounded-xl border border-[#E4E7EC] border-l-4 border-l-[#D97706] bg-white">
-        <div className={`hidden border-b border-[#E4E7EC] bg-[#F7F8FA] px-4 py-2 text-xs font-medium uppercase tracking-wide text-[#667085] ${REVIEW_COLUMNS}`}>
+      <SectionCard accent="warning" padded={false} className="mt-3">
+        <div className={`hidden border-b border-lecturer-border bg-lecturer-border-subtle/60 px-4 py-2 text-xs font-medium tracking-wide text-lecturer-text-secondary uppercase ${REVIEW_COLUMNS}`}>
           <span>Exam / course</span>
           <span>Status</span>
           <span>Submissions</span>
           <span>Integrity signals</span>
           <span className="text-right">Action</span>
         </div>
-        <ul className="divide-y divide-[#E4E7EC]">
+        <ul className="divide-y divide-lecturer-border">
           {visible.map((exam) => (
             <ReviewRow key={exam.id} exam={exam} />
           ))}
         </ul>
-      </div>
+      </SectionCard>
 
       {hasMore && (
         <div className="mt-3">
           <button
             type="button"
             onClick={() => setShowAll((v) => !v)}
-            className="rounded text-sm font-medium text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+            className="rounded text-sm font-medium text-lecturer-accent hover:text-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
           >
             {showAll ? "Show fewer" : `Show all ${countLabel(exams.length, "exam")}`}
           </button>
@@ -503,52 +442,39 @@ function ReviewRow({ exam }: { exam: ExamSummary }) {
       <div className="min-w-0">
         <Link
           href={`/lecturer/exams/${exam.id}`}
-          className="truncate rounded text-sm font-semibold text-[#101828] hover:text-[#2563EB] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+          className="truncate rounded text-sm font-semibold text-lecturer-text-primary hover:text-lecturer-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
         >
           {exam.title}
         </Link>
         {exam.course && (
-          <p className="truncate text-xs text-[#667085]">
+          <p className="truncate text-xs text-lecturer-text-secondary">
             {exam.course.code} — {exam.course.name}
           </p>
         )}
       </div>
       <div className="mt-2 md:mt-0">
-        <StatusPill status={status} />
+        <StatusBadge tone={availabilityToneFor(status)}>{status}</StatusBadge>
       </div>
-      <div className="mt-2 text-sm text-[#667085] md:mt-0">{countLabel(exam._count.submissions, "submission")}</div>
+      <div className="mt-2 text-sm text-lecturer-text-secondary md:mt-0">{countLabel(exam._count.submissions, "submission")}</div>
       <div className="mt-2 md:mt-0">
-        <span className="inline-flex items-center rounded-full bg-[#FEF3C7] px-2 py-0.5 text-xs font-medium text-[#92400E]">
-          {countLabel(exam.needsReviewCount, "signal")}
-        </span>
+        <StatusBadge tone="warning">{countLabel(exam.needsReviewCount, "signal")}</StatusBadge>
       </div>
       <div className="mt-2 flex flex-col items-start gap-1 md:mt-0 md:items-end">
         <Link
           href={`/lecturer/exams/${exam.id}`}
-          className="rounded text-sm font-semibold text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+          className="rounded text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
         >
           Open exam →
         </Link>
         <Link
           href={`/lecturer/exams/${exam.id}/integrity`}
-          className="rounded text-sm font-medium text-[#667085] hover:text-[#101828] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+          className="rounded text-sm font-medium text-lecturer-text-secondary hover:text-lecturer-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
         >
           Review signals
         </Link>
       </div>
     </li>
   );
-}
-
-const STATUS_PILL_STYLES: Record<LecturerAvailabilityStatus, string> = {
-  Open: "bg-[#ECFDF3] text-[#067647]",
-  Scheduled: "bg-[#EFF6FF] text-[#1D4ED8]",
-  Draft: "bg-[#F2F4F7] text-[#667085]",
-  Closed: "bg-[#F2F4F7] text-[#667085]",
-};
-
-function StatusPill({ status }: { status: LecturerAvailabilityStatus }) {
-  return <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_PILL_STYLES[status]}`}>{status}</span>;
 }
 
 // Essential fields only (title, course, submission/review counts already
@@ -566,26 +492,26 @@ function ExamCard({ exam, variant = "default", action }: { exam: ExamSummary; va
   return (
     <Link
       href={`/lecturer/exams/${exam.id}`}
-      className={`block rounded-xl border p-4 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] ${
-        muted ? "border-[#E4E7EC] bg-staff-canvas hover:border-[#98A2B3]" : "border-[#E4E7EC] bg-white hover:border-[#98A2B3]"
+      className={`block rounded-xl border p-4 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent ${
+        muted ? "border-lecturer-border bg-staff-canvas hover:border-lecturer-text-muted" : "border-lecturer-border bg-lecturer-surface hover:border-lecturer-text-muted"
       }`}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-[#101828]">{exam.title}</p>
+          <p className="truncate text-sm font-semibold text-lecturer-text-primary">{exam.title}</p>
           {exam.course && (
-            <p className="mt-0.5 truncate text-xs text-[#667085]">
+            <p className="mt-0.5 truncate text-xs text-lecturer-text-secondary">
               {exam.course.code} — {exam.course.name}
             </p>
           )}
         </div>
-        <StatusPill status={status} />
+        <StatusBadge tone={availabilityToneFor(status)}>{status}</StatusBadge>
       </div>
       <div className="mt-2 flex items-end justify-between gap-3">
-        <p className="text-xs text-[#667085]">
+        <p className="text-xs text-lecturer-text-secondary">
           {countLabel(exam._count.questions, "question")} · {exam.durationMins} min · {countLabel(exam._count.submissions, "submission")}
         </p>
-        {action && <span className="shrink-0 text-xs font-medium text-[#2563EB]">{action}</span>}
+        {action && <span className="shrink-0 text-xs font-medium text-lecturer-accent">{action}</span>}
       </div>
     </Link>
   );

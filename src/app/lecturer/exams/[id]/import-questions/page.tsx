@@ -89,15 +89,15 @@ export default function ImportQuestionsPage({
 
   return (
     <div className="mx-auto max-w-3xl">
-      <h1 className="text-2xl font-semibold">Import from question bank</h1>
+      <h1 className="text-[28px] font-bold text-lecturer-text-primary">Import from question bank</h1>
 
       <div className="mt-6 grid grid-cols-3 gap-6">
         <div>
-          <h2 className="text-sm font-medium text-gray-500">Your banks</h2>
+          <h2 className="text-sm font-medium text-lecturer-text-secondary">Your banks</h2>
           <div className="mt-2 space-y-1">
-            {loadingBanks && <p className="text-sm text-gray-500">Loading...</p>}
+            {loadingBanks && <p className="text-sm text-lecturer-text-secondary">Loading...</p>}
             {!loadingBanks && banks.length === 0 && (
-              <p className="text-sm text-gray-500">No question banks yet.</p>
+              <p className="text-sm text-lecturer-text-secondary">No question banks yet.</p>
             )}
             {banks.map((bank) => (
               <button
@@ -105,8 +105,8 @@ export default function ImportQuestionsPage({
                 onClick={() => openBank(bank.id)}
                 className={
                   selectedBankId === bank.id
-                    ? "block w-full rounded bg-black px-3 py-2 text-left text-sm text-white"
-                    : "block w-full rounded border border-gray-200 px-3 py-2 text-left text-sm"
+                    ? "block w-full rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-3 py-2 text-left text-sm text-white"
+                    : "block w-full rounded border border-lecturer-border px-3 py-2 text-left text-sm"
                 }
               >
                 {bank.title}
@@ -117,17 +117,17 @@ export default function ImportQuestionsPage({
         </div>
 
         <div className="col-span-2">
-          <h2 className="text-sm font-medium text-gray-500">Questions</h2>
+          <h2 className="text-sm font-medium text-lecturer-text-secondary">Questions</h2>
           <div className="mt-2 space-y-2">
-            {!selectedBankId && <p className="text-sm text-gray-500">Select a bank to view its questions.</p>}
-            {loadingQuestions && <p className="text-sm text-gray-500">Loading...</p>}
+            {!selectedBankId && <p className="text-sm text-lecturer-text-secondary">Select a bank to view its questions.</p>}
+            {loadingQuestions && <p className="text-sm text-lecturer-text-secondary">Loading...</p>}
             {selectedBankId && !loadingQuestions && questions.length === 0 && (
-              <p className="text-sm text-gray-500">This bank has no questions.</p>
+              <p className="text-sm text-lecturer-text-secondary">This bank has no questions.</p>
             )}
             {questions.map((q) => (
               <label
                 key={q.id}
-                className="flex items-start gap-2 rounded border border-gray-200 p-3 text-sm"
+                className="flex items-start gap-2 rounded border border-lecturer-border p-3 text-sm"
               >
                 <input
                   type="checkbox"
@@ -136,8 +136,8 @@ export default function ImportQuestionsPage({
                   onChange={() => toggleSelected(q.id)}
                 />
                 <div>
-                  <div className="flex items-center gap-2 text-xs text-gray-500">
-                    <span className="rounded bg-gray-100 px-2 py-0.5">{q.type}</span>
+                  <div className="flex items-center gap-2 text-xs text-lecturer-text-secondary">
+                    <span className="rounded bg-lecturer-border-subtle px-2 py-0.5">{q.type}</span>
                     {q.difficulty && <span>{q.difficulty}</span>}
                     {q.topic && <span>· {q.topic}</span>}
                     <span>· {q.points} pt(s)</span>
@@ -150,13 +150,13 @@ export default function ImportQuestionsPage({
         </div>
       </div>
 
-      {message && <p className="mt-4 text-sm text-gray-600">{message}</p>}
+      {message && <p className="mt-4 text-sm text-lecturer-text-secondary">{message}</p>}
 
       <div className="mt-6 flex items-center gap-3">
         <button
           onClick={handleImport}
           disabled={importing || selected.size === 0}
-          className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
+          className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-sm text-white disabled:opacity-50"
         >
           {importing ? "Importing..." : `Import selected (${selected.size})`}
         </button>

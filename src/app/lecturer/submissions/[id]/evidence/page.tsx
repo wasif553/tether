@@ -215,11 +215,11 @@ type IntegrityReview = {
 const EXAM_MODE_LABELS_MAP: Record<string, string> = { CLOSED_BOOK: "Closed-book", OPEN_BOOK: "Open-book", CUSTOM: "Custom" };
 
 const REVIEW_STATUS_STYLES: Record<string, string> = {
-  NEEDS_REVIEW: "bg-gray-100 text-gray-600",
+  NEEDS_REVIEW: "bg-lecturer-border-subtle text-lecturer-text-secondary",
   REVIEWED_NO_CONCERN: "bg-green-100 text-green-700",
   REVIEWED_CONCERN_REMAINS: "bg-yellow-100 text-yellow-700",
-  ESCALATED: "bg-red-100 text-red-700",
-  RESOLVED: "bg-blue-100 text-blue-700",
+  ESCALATED: "bg-red-100 text-[#B42318]",
+  RESOLVED: "bg-blue-100 text-lecturer-accent-hover",
 };
 
 const REVIEW_RECOMMENDATION_LABELS: Record<string, string> = {
@@ -237,10 +237,10 @@ const REVIEW_ACTIONS: Array<{ status: string; label: string }> = [
 ];
 
 const RISK_LEVEL_STYLES: Record<string, string> = {
-  CLEAN: "bg-gray-100 text-gray-600",
-  LOW: "bg-blue-100 text-blue-700",
+  CLEAN: "bg-lecturer-border-subtle text-lecturer-text-secondary",
+  LOW: "bg-blue-100 text-lecturer-accent-hover",
   MEDIUM: "bg-yellow-100 text-yellow-700",
-  HIGH: "bg-red-100 text-red-700",
+  HIGH: "bg-red-100 text-[#B42318]",
 };
 
 const RISK_LEVEL_LABELS: Record<string, string> = {
@@ -259,10 +259,10 @@ const CATEGORY_FILTER_ORDER: IntegrityEventCategory[] = ["evidence", "camera", "
 
 function severityBadge(severity: string) {
   const styles: Record<string, string> = {
-    HIGH: "bg-red-100 text-red-700",
+    HIGH: "bg-red-100 text-[#B42318]",
     MEDIUM: "bg-yellow-100 text-yellow-700",
-    LOW: "bg-blue-100 text-blue-700",
-    INFO: "bg-gray-100 text-gray-600",
+    LOW: "bg-blue-100 text-lecturer-accent-hover",
+    INFO: "bg-lecturer-border-subtle text-lecturer-text-secondary",
   };
   return (
     <span className={`rounded px-2 py-0.5 text-xs ${styles[severity] ?? styles.INFO}`}>
@@ -414,31 +414,31 @@ export default function EvidenceReportPage({
     return events.filter((e) => categoryForEventType(e.eventType) === categoryFilter);
   }, [events, categoryFilter]);
 
-  if (loading) return <p className="text-gray-500">Loading evidence report...</p>;
-  if (error) return <p className="text-red-600">{error}</p>;
-  if (!data) return <p className="text-red-600">No data available.</p>;
+  if (loading) return <p className="text-lecturer-text-secondary">Loading evidence report...</p>;
+  if (error) return <p className="text-[#B42318]">{error}</p>;
+  if (!data) return <p className="text-[#B42318]">No data available.</p>;
 
   return (
     <div className="mx-auto max-w-3xl">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Evidence report</h1>
+        <h1 className="text-[28px] font-bold text-lecturer-text-primary">Evidence report</h1>
         <div className="flex gap-2">
           <a
             href={`/api/lecturer/submissions/${id}/evidence.csv`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+            className="rounded border border-lecturer-border px-3 py-1.5 text-sm"
           >
             Export CSV
           </a>
           <Link
             href={`/lecturer/exams/${data.exam.id}/submissions/${data.submissionId}`}
-            className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+            className="rounded border border-lecturer-border px-3 py-1.5 text-sm"
           >
             Back to grading
           </Link>
         </div>
       </div>
 
-      <p className="mt-2 rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+      <p className="mt-2 rounded border border-lecturer-border bg-lecturer-border-subtle p-3 text-sm text-lecturer-text-primary">
         {data.disclaimer}
       </p>
 
@@ -449,12 +449,12 @@ export default function EvidenceReportPage({
           misconduct finding — the lecturer/institution makes the final
           decision. */}
       <h2 className="mt-8 text-lg font-medium">Evidence review</h2>
-      {reviewLoading && <p className="mt-2 text-sm text-gray-500">Loading evidence review...</p>}
+      {reviewLoading && <p className="mt-2 text-sm text-lecturer-text-secondary">Loading evidence review...</p>}
       {!reviewLoading && review && (
         <>
-          <div className="mt-3 grid grid-cols-2 gap-3 rounded border border-gray-200 p-4 text-sm sm:grid-cols-3">
+          <div className="mt-3 grid grid-cols-2 gap-3 rounded border border-lecturer-border p-4 text-sm sm:grid-cols-3">
             <div>
-              <p className="text-xs uppercase text-gray-500">Overall review status</p>
+              <p className="text-xs uppercase text-lecturer-text-secondary">Overall review status</p>
               <p className="mt-1">
                 <span className={`rounded px-2 py-0.5 text-xs ${REVIEW_STATUS_STYLES[review.summary.overallReviewStatus]}`}>
                   {review.summary.overallReviewStatus === "NEEDS_REVIEW" ? "Needs review" : review.summary.overallReviewStatus}
@@ -462,15 +462,15 @@ export default function EvidenceReportPage({
               </p>
             </div>
             <div>
-              <p className="text-xs uppercase text-gray-500">Items needing review</p>
+              <p className="text-xs uppercase text-lecturer-text-secondary">Items needing review</p>
               <p className="mt-1">{review.summary.needsReviewCount}</p>
             </div>
             <div>
-              <p className="text-xs uppercase text-gray-500">Evidence frames</p>
+              <p className="text-xs uppercase text-lecturer-text-secondary">Evidence frames</p>
               <p className="mt-1">{review.summary.evidenceFrameCount}</p>
             </div>
             <div>
-              <p className="text-xs uppercase text-gray-500">Last reviewer activity</p>
+              <p className="text-xs uppercase text-lecturer-text-secondary">Last reviewer activity</p>
               <p className="mt-1">
                 {review.summary.lastReviewActivityAt
                   ? `${new Date(review.summary.lastReviewActivityAt).toLocaleString()}${review.summary.lastReviewer ? ` — ${review.summary.lastReviewer}` : ""}`
@@ -478,42 +478,42 @@ export default function EvidenceReportPage({
               </p>
             </div>
             <div>
-              <p className="text-xs uppercase text-gray-500">Recommended next action</p>
+              <p className="text-xs uppercase text-lecturer-text-secondary">Recommended next action</p>
               <p className="mt-1">
-                <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
+                <span className="rounded bg-lecturer-accent-subtle px-2 py-0.5 text-xs font-medium text-lecturer-accent-hover">
                   {REVIEW_RECOMMENDATION_LABELS[review.recommendation.recommendation] ?? review.recommendation.recommendation}
                 </span>
               </p>
             </div>
           </div>
 
-          <div className="mt-3 rounded border border-gray-200 p-4 text-sm">
-            <p className="text-xs uppercase text-gray-500">Policy applied to this attempt</p>
+          <div className="mt-3 rounded border border-lecturer-border p-4 text-sm">
+            <p className="text-xs uppercase text-lecturer-text-secondary">Policy applied to this attempt</p>
             {review.policy.available ? (
               <>
                 <p className="mt-1 font-medium">{EXAM_MODE_LABELS_MAP[review.policy.examMode]}</p>
-                <p className="mt-1 text-xs text-gray-600">
+                <p className="mt-1 text-xs text-lecturer-text-secondary">
                   Calculator {review.policy.calculatorAllowed ? "allowed" : "not allowed"} · Notes{" "}
                   {review.policy.notesAllowed ? "allowed" : "not allowed"} · Internet{" "}
                   {review.policy.internetAllowed ? "allowed" : "not allowed"} · AI tools{" "}
                   {review.policy.aiToolsAllowed ? "allowed" : "not allowed"}
                 </p>
                 {review.policy.secureControls.length > 0 && (
-                  <p className="mt-1 text-xs text-gray-500">Secure controls: {review.policy.secureControls.join(", ")}</p>
+                  <p className="mt-1 text-xs text-lecturer-text-secondary">Secure controls: {review.policy.secureControls.join(", ")}</p>
                 )}
               </>
             ) : (
-              <p className="mt-1 text-gray-500">{review.policy.message}</p>
+              <p className="mt-1 text-lecturer-text-secondary">{review.policy.message}</p>
             )}
           </div>
 
           {bulkSelection.size > 0 && (
-            <div className="mt-3 flex items-center gap-2 rounded border border-gray-200 bg-gray-50 p-3 text-sm">
+            <div className="mt-3 flex items-center gap-2 rounded border border-lecturer-border bg-lecturer-border-subtle p-3 text-sm">
               <span>{bulkSelection.size} event(s) selected</span>
               <button
                 type="button"
                 onClick={() => setBulkConfirming(true)}
-                className="rounded bg-black px-3 py-1.5 text-xs text-white"
+                className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-3 py-1.5 text-xs text-white"
               >
                 Mark selected as Reviewed — no concern
               </button>
@@ -529,14 +529,14 @@ export default function EvidenceReportPage({
                 <button
                   type="button"
                   onClick={confirmBulkNoConcern}
-                  className="rounded bg-black px-3 py-1.5 text-xs text-white"
+                  className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-3 py-1.5 text-xs text-white"
                 >
                   Confirm
                 </button>
                 <button
                   type="button"
                   onClick={() => setBulkConfirming(false)}
-                  className="rounded border border-gray-300 px-3 py-1.5 text-xs"
+                  className="rounded border border-lecturer-border px-3 py-1.5 text-xs"
                 >
                   Cancel
                 </button>
@@ -546,12 +546,12 @@ export default function EvidenceReportPage({
 
           <div className="mt-3 space-y-3">
             {review.events.length === 0 && (
-              <p className="rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-500">
+              <p className="rounded border border-lecturer-border bg-lecturer-border-subtle p-4 text-sm text-lecturer-text-secondary">
                 No reviewable integrity events for this submission.
               </p>
             )}
             {review.events.map((e) => (
-              <div key={e.id} className="rounded border border-gray-200 p-4 text-sm">
+              <div key={e.id} className="rounded border border-lecturer-border p-4 text-sm">
                 <div className="flex flex-wrap items-center gap-2">
                   <input
                     type="checkbox"
@@ -563,26 +563,26 @@ export default function EvidenceReportPage({
                   <span className={`rounded px-2 py-0.5 text-xs ${REVIEW_STATUS_STYLES[e.reviewStatus] ?? REVIEW_STATUS_STYLES.NEEDS_REVIEW}`}>
                     {e.reviewStatusLabel}
                   </span>
-                  <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">Signal: {e.severity}</span>
-                  <span className="text-xs text-gray-400">{new Date(e.occurredAt).toLocaleString()}</span>
+                  <span className="rounded bg-lecturer-border-subtle px-2 py-0.5 text-xs text-lecturer-text-secondary">Signal: {e.severity}</span>
+                  <span className="text-xs text-lecturer-text-muted">{new Date(e.occurredAt).toLocaleString()}</span>
                 </div>
 
-                <p className="mt-2 text-xs font-medium text-gray-600">Policy interpretation:</p>
-                <p className="text-gray-700">{e.policyInterpretation.explanation}</p>
-                <p className="mt-1 text-xs text-amber-700">Limitation: {e.policyInterpretation.limitation}</p>
+                <p className="mt-2 text-xs font-medium text-lecturer-text-secondary">Policy interpretation:</p>
+                <p className="text-lecturer-text-primary">{e.policyInterpretation.explanation}</p>
+                <p className="mt-1 text-xs text-[#B54708]">Limitation: {e.policyInterpretation.limitation}</p>
 
                 {e.evidenceFrame && (
                   <button
                     type="button"
                     onClick={() => openEvidenceFrame(e.evidenceFrame!.id, e.eventLabel, e.occurredAt)}
-                    className="mt-2 rounded border border-gray-300 px-2 py-1 text-xs"
+                    className="mt-2 rounded border border-lecturer-border px-2 py-1 text-xs"
                   >
                     View evidence frame
                   </button>
                 )}
 
                 {e.reviewedAt && (
-                  <p className="mt-2 text-xs text-gray-500">
+                  <p className="mt-2 text-xs text-lecturer-text-secondary">
                     Decision: {e.reviewStatusLabel} by {e.reviewedByName ?? "—"} on {new Date(e.reviewedAt).toLocaleString()}
                     {e.reviewNote && ` — ${e.reviewNote}`}
                   </p>
@@ -592,7 +592,7 @@ export default function EvidenceReportPage({
                   <input
                     type="text"
                     placeholder="Optional review note"
-                    className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                    className="w-full rounded border border-lecturer-border px-2 py-1 text-xs"
                     value={reviewNoteDrafts[e.id] ?? ""}
                     onChange={(ev) => setReviewNoteDrafts((prev) => ({ ...prev, [e.id]: ev.target.value }))}
                   />
@@ -601,7 +601,7 @@ export default function EvidenceReportPage({
                       <button
                         key={action.status}
                         onClick={() => submitEventReview(e.id, action.status)}
-                        className="rounded border border-gray-300 px-2 py-1 text-xs"
+                        className="rounded border border-lecturer-border px-2 py-1 text-xs"
                       >
                         {action.label}
                       </button>
@@ -609,13 +609,13 @@ export default function EvidenceReportPage({
                     <button
                       type="button"
                       onClick={() => setExpandedEventId(expandedEventId === e.id ? null : e.id)}
-                      className="rounded border border-gray-300 px-2 py-1 text-xs"
+                      className="rounded border border-lecturer-border px-2 py-1 text-xs"
                     >
                       {expandedEventId === e.id ? "Hide comments" : `Comments (${e.comments.length})`}
                     </button>
                     <Link
                       href={`/lecturer/exams/${data.exam.id}/submissions/${data.submissionId}`}
-                      className="rounded border border-gray-300 px-2 py-1 text-xs"
+                      className="rounded border border-lecturer-border px-2 py-1 text-xs"
                     >
                       Require oral verification
                     </Link>
@@ -623,38 +623,38 @@ export default function EvidenceReportPage({
                 </div>
 
                 {expandedEventId === e.id && (
-                  <div className="mt-3 border-t border-gray-200 pt-3">
-                    {e.comments.length === 0 && <p className="text-xs text-gray-400">No comments yet.</p>}
+                  <div className="mt-3 border-t border-lecturer-border pt-3">
+                    {e.comments.length === 0 && <p className="text-xs text-lecturer-text-muted">No comments yet.</p>}
                     {e.comments.map((c) => (
                       <div key={c.id} className="mt-2 text-xs">
-                        <p className="font-medium text-gray-700">
+                        <p className="font-medium text-lecturer-text-primary">
                           {c.authorName} — {c.authorRole === "LECTURER" ? "Lecturer" : c.authorRole === "PLATFORM_ADMIN" ? "Platform admin" : c.authorRole}
                         </p>
-                        <p className="text-gray-400">{new Date(c.createdAt).toLocaleString()}</p>
-                        <p className="mt-0.5 text-gray-700">{c.comment}</p>
+                        <p className="text-lecturer-text-muted">{new Date(c.createdAt).toLocaleString()}</p>
+                        <p className="mt-0.5 text-lecturer-text-primary">{c.comment}</p>
                       </div>
                     ))}
                     <div className="mt-2 flex gap-2">
                       <input
                         type="text"
                         placeholder="Add a comment"
-                        className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                        className="w-full rounded border border-lecturer-border px-2 py-1 text-xs"
                         value={commentDrafts[e.id] ?? ""}
                         onChange={(ev) => setCommentDrafts((prev) => ({ ...prev, [e.id]: ev.target.value }))}
                       />
                       <button
                         type="button"
                         onClick={() => submitComment(e.id)}
-                        className="rounded border border-gray-300 px-2 py-1 text-xs"
+                        className="rounded border border-lecturer-border px-2 py-1 text-xs"
                       >
                         Add comment
                       </button>
                     </div>
                     {e.statusHistory.length > 0 && (
                       <div className="mt-3">
-                        <p className="text-xs font-medium text-gray-600">Status history</p>
+                        <p className="text-xs font-medium text-lecturer-text-secondary">Status history</p>
                         {e.statusHistory.map((h) => (
-                          <p key={h.id} className="mt-1 text-xs text-gray-500">
+                          <p key={h.id} className="mt-1 text-xs text-lecturer-text-secondary">
                             {h.fromStatus ?? "NEEDS_REVIEW"} → {h.toStatus} by {h.changedByName} (
                             {h.changedByRole === "LECTURER" ? "Lecturer" : "Platform admin"}) on{" "}
                             {new Date(h.createdAt).toLocaleString()}
@@ -670,59 +670,59 @@ export default function EvidenceReportPage({
         </>
       )}
 
-      <div className="mt-6 grid grid-cols-2 gap-3 rounded border border-gray-200 p-4 text-sm sm:grid-cols-3">
+      <div className="mt-6 grid grid-cols-2 gap-3 rounded border border-lecturer-border p-4 text-sm sm:grid-cols-3">
         <div>
-          <p className="text-xs uppercase text-gray-500">Student</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Student</p>
           <p>{data.student.name}</p>
-          <p className="text-gray-500">{data.student.email}</p>
+          <p className="text-lecturer-text-secondary">{data.student.email}</p>
         </div>
         <div>
-          <p className="text-xs uppercase text-gray-500">Exam</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Exam</p>
           <p>{data.exam.title}</p>
         </div>
         <div>
-          <p className="text-xs uppercase text-gray-500">Status</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Status</p>
           <p>{data.status}</p>
         </div>
         <div>
-          <p className="text-xs uppercase text-gray-500">Started</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Started</p>
           <p>{new Date(data.startedAt).toLocaleString()}</p>
         </div>
         <div>
-          <p className="text-xs uppercase text-gray-500">Submitted</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Submitted</p>
           <p>{data.submittedAt ? new Date(data.submittedAt).toLocaleString() : "—"}</p>
         </div>
         <div>
-          <p className="text-xs uppercase text-gray-500">Score</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Score</p>
           <p>{data.totalScore != null ? data.totalScore : "—"}</p>
         </div>
         <div>
-          <p className="text-xs uppercase text-gray-500">Integrity risk</p>
+          <p className="text-xs uppercase text-lecturer-text-secondary">Integrity risk</p>
           <p>
             <span
               className={`rounded px-2 py-0.5 text-xs ${RISK_LEVEL_STYLES[data.riskLevel]}`}
             >
               {RISK_LEVEL_LABELS[data.riskLevel]}
             </span>{" "}
-            <span className="text-gray-500">(score: {data.riskScore})</span>
+            <span className="text-lecturer-text-secondary">(score: {data.riskScore})</span>
           </p>
         </div>
       </div>
 
       {data.canvasPassback && (
-        <div className="mt-4 rounded border border-gray-200 p-4 text-sm">
-          <p className="text-xs uppercase text-gray-500">Canvas grade passback (optional module)</p>
+        <div className="mt-4 rounded border border-lecturer-border p-4 text-sm">
+          <p className="text-xs uppercase text-lecturer-text-secondary">Canvas grade passback (optional module)</p>
           <p>Status: {data.canvasPassback.status}</p>
           {data.canvasPassback.scoreGiven != null && <p>Score sent: {data.canvasPassback.scoreGiven}</p>}
           {data.canvasPassback.errorMessage && (
-            <p className="text-red-600">Error: {data.canvasPassback.errorMessage}</p>
+            <p className="text-[#B42318]">Error: {data.canvasPassback.errorMessage}</p>
           )}
         </div>
       )}
 
       {data.aiMarking && (
-        <div className="mt-4 rounded border border-gray-200 p-4 text-sm">
-          <p className="text-xs uppercase text-gray-500">AI draft marking (optional module)</p>
+        <div className="mt-4 rounded border border-lecturer-border p-4 text-sm">
+          <p className="text-xs uppercase text-lecturer-text-secondary">AI draft marking (optional module)</p>
           <p>
             {data.aiMarking.aiDraftedCount} of {data.aiMarking.answeredEssayCount} answered essay
             answer(s) have an AI draft score. AI drafts are never final — a lecturer must approve
@@ -735,9 +735,9 @@ export default function EvidenceReportPage({
       {(() => {
         const ne = data.networkEvidence;
         const signalStyle: Record<string, string> = {
-          Normal: "bg-gray-100 text-gray-600",
+          Normal: "bg-lecturer-border-subtle text-lecturer-text-secondary",
           "Needs review": "bg-yellow-100 text-yellow-700",
-          "High review signal": "bg-red-100 text-red-700",
+          "High review signal": "bg-red-100 text-[#B42318]",
         };
         const loc = (
           e: { country: string | null; region: string | null; city: string | null; locationAccuracy: string } | null,
@@ -749,15 +749,15 @@ export default function EvidenceReportPage({
         };
         return (
           <div className="mt-3 space-y-4">
-            <div className="flex items-center gap-2 rounded border border-gray-200 p-3">
-              <span className="text-xs text-gray-500">Network review signal:</span>
+            <div className="flex items-center gap-2 rounded border border-lecturer-border p-3">
+              <span className="text-xs text-lecturer-text-secondary">Network review signal:</span>
               <span className={`rounded px-2 py-0.5 text-xs ${signalStyle[ne.reviewSignal] ?? signalStyle.Normal}`}>
                 {ne.reviewSignal}
               </span>
             </div>
-            <div className="grid grid-cols-2 gap-3 rounded border border-gray-200 p-4 text-sm">
+            <div className="grid grid-cols-2 gap-3 rounded border border-lecturer-border p-4 text-sm">
               <div>
-                <p className="text-xs font-medium uppercase text-gray-500">At exam open</p>
+                <p className="text-xs font-medium uppercase text-lecturer-text-secondary">At exam open</p>
                 {ne.start ? (
                   <>
                     <p className="mt-1">IP: {ne.start.ipAddress ?? "—"}</p>
@@ -766,16 +766,16 @@ export default function EvidenceReportPage({
                     {ne.start.vpnOrProxySignal && (
                       <p className="text-yellow-700">VPN/proxy signal detected</p>
                     )}
-                    <p className="mt-1 text-xs text-gray-400">
+                    <p className="mt-1 text-xs text-lecturer-text-muted">
                       Captured {new Date(ne.start.capturedAt).toLocaleString()}
                     </p>
                   </>
                 ) : (
-                  <p className="text-gray-400">Not recorded</p>
+                  <p className="text-lecturer-text-muted">Not recorded</p>
                 )}
               </div>
               <div>
-                <p className="text-xs font-medium uppercase text-gray-500">At submission</p>
+                <p className="text-xs font-medium uppercase text-lecturer-text-secondary">At submission</p>
                 {ne.submit ? (
                   <>
                     <p className="mt-1">IP: {ne.submit.ipAddress ?? "—"}</p>
@@ -787,12 +787,12 @@ export default function EvidenceReportPage({
                     {ne.submit.vpnOrProxySignal && (
                       <p className="text-yellow-700">VPN/proxy signal detected</p>
                     )}
-                    <p className="mt-1 text-xs text-gray-400">
+                    <p className="mt-1 text-xs text-lecturer-text-muted">
                       Captured {new Date(ne.submit.capturedAt).toLocaleString()}
                     </p>
                   </>
                 ) : (
-                  <p className="text-gray-400">Not recorded</p>
+                  <p className="text-lecturer-text-muted">Not recorded</p>
                 )}
               </div>
             </div>
@@ -807,27 +807,27 @@ export default function EvidenceReportPage({
         <div className="mt-8">
           <h2 className="text-lg font-medium">AI-assisted camera integrity signals</h2>
           <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">
                 {data.aiCameraIntegritySummary.possiblePhoneCount}
               </p>
-              <p className="text-xs text-gray-500">Possible phone visible</p>
+              <p className="text-xs text-lecturer-text-secondary">Possible phone visible</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">
                 {data.aiCameraIntegritySummary.possibleSecondPersonCount}
               </p>
-              <p className="text-xs text-gray-500">Possible additional person visible</p>
+              <p className="text-xs text-lecturer-text-secondary">Possible additional person visible</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.aiCameraIntegritySummary.noPersonCount}</p>
-              <p className="text-xs text-gray-500">No person visible</p>
+              <p className="text-xs text-lecturer-text-secondary">No person visible</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">
                 {data.aiCameraIntegritySummary.cameraBlockedOrDarkCount}
               </p>
-              <p className="text-xs text-gray-500">Camera blocked/dark</p>
+              <p className="text-xs text-lecturer-text-secondary">Camera blocked/dark</p>
             </div>
           </div>
           <p className="mt-3 rounded border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">
@@ -844,40 +844,40 @@ export default function EvidenceReportPage({
         <div className="mt-8">
           <h2 className="text-lg font-medium">Screen-share integrity signals</h2>
           <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.startedCount}</p>
-              <p className="text-xs text-gray-500">Sharing started</p>
+              <p className="text-xs text-lecturer-text-secondary">Sharing started</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.interruptedCount}</p>
-              <p className="text-xs text-gray-500">Interruptions</p>
+              <p className="text-xs text-lecturer-text-secondary">Interruptions</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.restoredCount}</p>
-              <p className="text-xs text-gray-500">Restorations</p>
+              <p className="text-xs text-lecturer-text-secondary">Restorations</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.surfaceRejectedCount}</p>
-              <p className="text-xs text-gray-500">Non-monitor shares rejected</p>
+              <p className="text-xs text-lecturer-text-secondary">Non-monitor shares rejected</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.permissionDeniedCount}</p>
-              <p className="text-xs text-gray-500">Permission denied</p>
+              <p className="text-xs text-lecturer-text-secondary">Permission denied</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.unavailableCount}</p>
-              <p className="text-xs text-gray-500">Unavailable</p>
+              <p className="text-xs text-lecturer-text-secondary">Unavailable</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.evidenceFrameCount}</p>
-              <p className="text-xs text-gray-500">Evidence frames captured</p>
+              <p className="text-xs text-lecturer-text-secondary">Evidence frames captured</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.screenShareIntegritySummary.evidenceCaptureFailedCount}</p>
-              <p className="text-xs text-gray-500">Capture failures</p>
+              <p className="text-xs text-lecturer-text-secondary">Capture failures</p>
             </div>
           </div>
-          <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+          <div className="mt-3 rounded border border-lecturer-border bg-lecturer-border-subtle p-3 text-xs text-lecturer-text-primary">
             <p className="font-medium">Policy at the time of this attempt</p>
             <p className="mt-1">
               Mode: {data.screenShareIntegritySummary.policy.mode} · Evidence capture:{" "}
@@ -908,25 +908,25 @@ export default function EvidenceReportPage({
         <div className="mt-8">
           <h2 className="text-lg font-medium">Lockdown detection signals</h2>
           <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.lockdownDetectionSummary.remoteControlCount}</p>
-              <p className="text-xs text-gray-500">Remote-control software</p>
+              <p className="text-xs text-lecturer-text-secondary">Remote-control software</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.lockdownDetectionSummary.screenCaptureCount}</p>
-              <p className="text-xs text-gray-500">Screen-capture software</p>
+              <p className="text-xs text-lecturer-text-secondary">Screen-capture software</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.lockdownDetectionSummary.debuggingToolCount}</p>
-              <p className="text-xs text-gray-500">Debugging tools</p>
+              <p className="text-xs text-lecturer-text-secondary">Debugging tools</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.lockdownDetectionSummary.prohibitedApplicationCount}</p>
-              <p className="text-xs text-gray-500">Other prohibited applications</p>
+              <p className="text-xs text-lecturer-text-secondary">Other prohibited applications</p>
             </div>
-            <div className="rounded border border-gray-200 p-3 text-center">
+            <div className="rounded border border-lecturer-border p-3 text-center">
               <p className="text-2xl font-semibold">{data.lockdownDetectionSummary.closedCount}</p>
-              <p className="text-xs text-gray-500">Closed by student</p>
+              <p className="text-xs text-lecturer-text-secondary">Closed by student</p>
             </div>
           </div>
           <p className="mt-3 rounded border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">
@@ -942,35 +942,35 @@ export default function EvidenceReportPage({
           table — distinguished per-frame by `kind` (see
           evidenceFrameSourceLabel in src/lib/screenShareEvidence.ts). */}
       <h2 className="mt-8 text-lg font-medium">Evidence frames</h2>
-      <p className="mt-1 text-sm text-gray-600">
+      <p className="mt-1 text-sm text-lecturer-text-secondary">
         Low-resolution camera and screen-share evidence frames saved for review. These are review
         signals, not automatic misconduct decisions.
       </p>
       {data.evidenceFrames.length === 0 ? (
-        <p className="mt-3 rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-500">
+        <p className="mt-3 rounded border border-lecturer-border bg-lecturer-border-subtle p-4 text-sm text-lecturer-text-secondary">
           No evidence frames were saved for this submission.
         </p>
       ) : (
         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
           {data.evidenceFrames.map((frame) => (
-            <div key={frame.id} className="rounded border border-gray-200 p-3 text-sm">
+            <div key={frame.id} className="rounded border border-lecturer-border p-3 text-sm">
               <div className="flex items-center justify-between gap-2">
                 <span className="rounded bg-purple-50 px-2 py-0.5 text-xs font-medium text-purple-700">
                   {evidenceFrameSourceLabel(frame.kind)}
                 </span>
-                <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
+                <span className="rounded bg-lecturer-accent-subtle px-2 py-0.5 text-xs font-medium text-lecturer-accent-hover">
                   {labelForEventType(frame.eventType)}
                 </span>
-                <span className="text-xs text-gray-400">{formatByteSize(frame.byteSize)}</span>
+                <span className="text-xs text-lecturer-text-muted">{formatByteSize(frame.byteSize)}</span>
               </div>
-              <p className="mt-2 text-xs text-gray-500">{new Date(frame.occurredAt).toLocaleString()}</p>
-              <p className="text-xs text-gray-400">{frame.contentType}</p>
+              <p className="mt-2 text-xs text-lecturer-text-secondary">{new Date(frame.occurredAt).toLocaleString()}</p>
+              <p className="text-xs text-lecturer-text-muted">{frame.contentType}</p>
               <button
                 type="button"
                 onClick={() =>
                   openEvidenceFrame(frame.id, `${evidenceFrameSourceLabel(frame.kind)} — ${labelForEventType(frame.eventType)}`, frame.occurredAt)
                 }
-                className="mt-3 rounded border border-gray-300 px-2 py-1 text-xs"
+                className="mt-3 rounded border border-lecturer-border px-2 py-1 text-xs"
               >
                 View evidence frame
               </button>
@@ -985,7 +985,7 @@ export default function EvidenceReportPage({
           type="button"
           onClick={() => setCategoryFilter("all")}
           className={`rounded px-2 py-1 ${
-            categoryFilter === "all" ? "bg-black text-white" : "border border-gray-300 text-gray-600"
+            categoryFilter === "all" ? "bg-lecturer-accent hover:bg-lecturer-accent-hover text-white" : "border border-lecturer-border text-lecturer-text-secondary"
           }`}
         >
           All ({events.length})
@@ -996,20 +996,20 @@ export default function EvidenceReportPage({
             type="button"
             onClick={() => setCategoryFilter(category)}
             className={`rounded px-2 py-1 ${
-              categoryFilter === category ? "bg-black text-white" : "border border-gray-300 text-gray-600"
+              categoryFilter === category ? "bg-lecturer-accent hover:bg-lecturer-accent-hover text-white" : "border border-lecturer-border text-lecturer-text-secondary"
             }`}
           >
             {INTEGRITY_EVENT_CATEGORY_LABELS[category]} ({categoryCounts[category]})
           </button>
         ))}
       </div>
-      <p className="mt-2 text-xs text-gray-500">
+      <p className="mt-2 text-xs text-lecturer-text-secondary">
         Showing {filteredEvents.length} of {events.length} event(s), newest first.
       </p>
-      <div className="mt-3 overflow-x-auto rounded border border-gray-200">
+      <div className="mt-3 overflow-x-auto rounded border border-lecturer-border">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-gray-200 bg-gray-50 text-left">
+            <tr className="border-b border-lecturer-border bg-lecturer-border-subtle text-left">
               <th className="p-2">Time</th>
               <th className="p-2">Event type</th>
               <th className="p-2">Severity</th>
@@ -1020,7 +1020,7 @@ export default function EvidenceReportPage({
           <tbody>
             {filteredEvents.length === 0 && (
               <tr>
-                <td colSpan={5} className="p-4 text-center text-gray-500">
+                <td colSpan={5} className="p-4 text-center text-lecturer-text-secondary">
                   {events.length === 0
                     ? "No integrity events recorded"
                     : "No events in this category"}
@@ -1028,19 +1028,19 @@ export default function EvidenceReportPage({
               </tr>
             )}
             {filteredEvents.map((e, i) => (
-              <tr key={i} className="border-b border-gray-100 align-top">
+              <tr key={i} className="border-b border-lecturer-border-subtle align-top">
                 <td className="whitespace-nowrap p-2">{new Date(e.occurredAt).toLocaleString()}</td>
                 <td className="p-2">{e.eventLabel}</td>
                 <td className="p-2">{severityBadge(e.severity)}</td>
                 <td className="max-w-xs p-2">
                   {e.message}
                   {e.confidenceBand && (
-                    <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600">
+                    <span className="ml-2 rounded bg-lecturer-border-subtle px-1.5 py-0.5 text-xs text-lecturer-text-secondary">
                       {e.confidenceBand} confidence
                     </span>
                   )}
                   {e.remoteSessionDetail && (
-                    <div className="mt-1 text-xs text-gray-500">
+                    <div className="mt-1 text-xs text-lecturer-text-secondary">
                       {e.remoteSessionDetail.previousState && e.remoteSessionDetail.currentState && (
                         <span className="mr-2">
                           {e.remoteSessionDetail.previousState} → {e.remoteSessionDetail.currentState}
@@ -1054,13 +1054,13 @@ export default function EvidenceReportPage({
                   )}
                   {hasEvidenceFrame(e) && (
                     <div className="mt-1">
-                      <span className="mr-2 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-700">
+                      <span className="mr-2 rounded bg-lecturer-accent-subtle px-1.5 py-0.5 text-xs text-lecturer-accent-hover">
                         Evidence frame available
                       </span>
                       <button
                         type="button"
                         onClick={() => openEvidenceFrame(e.evidenceFrame!.id, e.eventLabel, e.occurredAt)}
-                        className="rounded border border-gray-300 px-1.5 py-0.5 text-xs"
+                        className="rounded border border-lecturer-border px-1.5 py-0.5 text-xs"
                       >
                         View evidence frame
                       </button>
@@ -1073,10 +1073,10 @@ export default function EvidenceReportPage({
                       Reviewed{e.resolvedByName ? ` by ${e.resolvedByName}` : ""}
                     </span>
                   ) : (
-                    <span className="text-gray-500">Review recommended</span>
+                    <span className="text-lecturer-text-secondary">Review recommended</span>
                   )}
                   {e.resolutionNote && (
-                    <p className="mt-1 text-xs text-gray-500">Note: {e.resolutionNote}</p>
+                    <p className="mt-1 text-xs text-lecturer-text-secondary">Note: {e.resolutionNote}</p>
                   )}
                 </td>
               </tr>
@@ -1086,25 +1086,25 @@ export default function EvidenceReportPage({
       </div>
 
       {viewingEvidence && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-lg rounded border border-gray-300 bg-white p-5 shadow-lg">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-lecturer-accent hover:bg-lecturer-accent-hover/40 p-4">
+          <div className="w-full max-w-lg rounded border border-lecturer-border bg-lecturer-surface p-5 shadow-lg">
             <div className="flex items-center justify-between">
               <p className="text-base font-semibold">Evidence frame</p>
               <button
                 type="button"
                 onClick={closeEvidenceFrame}
-                className="rounded border border-gray-300 px-2 py-1 text-xs"
+                className="rounded border border-lecturer-border px-2 py-1 text-xs"
               >
                 Close
               </button>
             </div>
-            <p className="mt-1 text-sm text-gray-700">{viewingEvidence.eventLabel}</p>
-            <p className="text-xs text-gray-500">
+            <p className="mt-1 text-sm text-lecturer-text-primary">{viewingEvidence.eventLabel}</p>
+            <p className="text-xs text-lecturer-text-secondary">
               {new Date(viewingEvidence.occurredAt).toLocaleString()}
             </p>
-            <div className="mt-3 flex min-h-[120px] items-center justify-center rounded border border-gray-200 bg-gray-50">
-              {viewingEvidence.loading && <p className="text-sm text-gray-500">Loading...</p>}
-              {viewingEvidence.error && <p className="p-3 text-sm text-red-600">{viewingEvidence.error}</p>}
+            <div className="mt-3 flex min-h-[120px] items-center justify-center rounded border border-lecturer-border bg-lecturer-border-subtle">
+              {viewingEvidence.loading && <p className="text-sm text-lecturer-text-secondary">Loading...</p>}
+              {viewingEvidence.error && <p className="p-3 text-sm text-[#B42318]">{viewingEvidence.error}</p>}
               {viewingEvidence.objectUrl && (
                 // eslint-disable-next-line @next/next/no-img-element -- authenticated blob: URL, not a static asset
                 <img

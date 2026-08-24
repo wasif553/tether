@@ -80,7 +80,7 @@ export default function AiAssistanceReviewPage({ params }: { params: Promise<{ i
       .catch((err) => setError(err.message));
   }, [id]);
 
-  if (error) return <p className="mx-auto max-w-3xl text-sm text-red-600">{error}</p>;
+  if (error) return <p className="mx-auto max-w-3xl text-sm text-[#B42318]">{error}</p>;
   if (!review) return <p className="mx-auto max-w-3xl text-sm text-[#667085]">Loading…</p>;
 
   const { summary } = review;
@@ -95,7 +95,7 @@ export default function AiAssistanceReviewPage({ params }: { params: Promise<{ i
       </Link>
 
       <p className="mt-3 text-sm font-medium text-[#667085]">Controlled AI activity</p>
-      <h1 className="mt-1 text-2xl font-bold text-[#101828]">{review.student.name}</h1>
+      <h1 className="mt-1 text-[28px] font-bold text-lecturer-text-primary">{review.student.name}</h1>
       <p className="mt-1 text-sm text-[#667085]">
         {review.student.email} · {review.exam.title}
       </p>
@@ -110,7 +110,7 @@ export default function AiAssistanceReviewPage({ params }: { params: Promise<{ i
       )}
 
       {review.aiAssistanceEnabled && (
-        <div className="mt-4 rounded-xl border border-[#E4E7EC] bg-white p-4">
+        <div className="mt-4 rounded-xl border border-[#E4E7EC] bg-lecturer-surface p-4">
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
             <div>
               <p className="text-xs font-medium text-[#667085]">Requests</p>
@@ -141,7 +141,7 @@ export default function AiAssistanceReviewPage({ params }: { params: Promise<{ i
           <h2 className="text-sm font-semibold text-[#101828]">AI interaction record</h2>
           <div className="mt-2 space-y-3">
             {review.interactions.map((interaction) => (
-              <div key={interaction.id} className="rounded-xl border border-[#E4E7EC] bg-white p-4">
+              <div key={interaction.id} className="rounded-xl border border-[#E4E7EC] bg-lecturer-surface p-4">
                 <div className="flex items-center justify-between gap-3 text-xs text-[#667085]">
                   <span>
                     {interaction.questionText.slice(0, 80)}

@@ -19,7 +19,7 @@ const pageSource = fs.readFileSync(path.join(__dirname, "page.tsx"), "utf8");
 
 function reviewRowBlock(): string {
   const start = pageSource.indexOf("function ReviewRow(");
-  const end = pageSource.indexOf("\nconst STATUS_PILL_STYLES", start);
+  const end = pageSource.indexOf("\nfunction ExamCard(", start);
   expect(start).toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
   return pageSource.slice(start, end);
@@ -81,9 +81,8 @@ describe("Lecturer Dashboard — Needs your attention: ReviewRow navigation", ()
 describe("Lecturer Dashboard — existing exam navigation unchanged (Active/Upcoming/Drafts/Recent/Older)", () => {
   it("ExamCard still links straight to the Exam Workspace (/lecturer/exams/{id}), never to Integrity Review", () => {
     const start = pageSource.indexOf("function ExamCard(");
-    const end = pageSource.indexOf("\nfunction SectionHeader", start);
     expect(start).toBeGreaterThan(-1);
-    const block = pageSource.slice(start, end);
+    const block = pageSource.slice(start);
     expect(block).toMatch(/href=\{`\/lecturer\/exams\/\$\{exam\.id\}`\}/);
     expect(block).not.toMatch(/\/integrity`\}/);
   });

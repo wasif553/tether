@@ -147,7 +147,7 @@ export default function SecureClientSessionDetailPage({ params }: { params: Prom
     }
   }
 
-  if (!detail) return <p className="p-6 text-gray-500">Loading…</p>;
+  if (!detail) return <p className="p-6 text-lecturer-text-secondary">Loading…</p>;
 
   const timeline = [
     { at: detail.startedAt, label: "Session started" },
@@ -168,52 +168,52 @@ export default function SecureClientSessionDetailPage({ params }: { params: Prom
       <Link href={`/lecturer/submissions/${detail.submissionId}/evidence`} className="text-sm underline">
         ← Back to submission
       </Link>
-      <h1 className="mt-2 text-2xl font-semibold">Secure-client session</h1>
+      <h1 className="mt-2 text-[28px] font-bold text-lecturer-text-primary">Secure-client session</h1>
       {/* Production administration hardening v1, Part G — examTitle was
           already returned by the API but never rendered anywhere on this
           page; a lecturer reviewing several sessions had no way to tell
           which exam this one belonged to without navigating back. */}
-      <p className="text-sm text-gray-600">{detail.examTitle}</p>
-      <p className="mt-1 text-sm text-gray-600">
+      <p className="text-sm text-lecturer-text-secondary">{detail.examTitle}</p>
+      <p className="mt-1 text-sm text-lecturer-text-secondary">
         Review client verification, device preflight and session continuity. These signals support lecturer review and do
         not by themselves establish misconduct.
       </p>
 
       <div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
         <div>
-          <p className="text-xs text-gray-500">Student</p>
+          <p className="text-xs text-lecturer-text-secondary">Student</p>
           <p className="font-medium">{detail.studentName}</p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Client</p>
+          <p className="text-xs text-lecturer-text-secondary">Client</p>
           <p className="font-medium">{detail.clientType}</p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Status</p>
+          <p className="text-xs text-lecturer-text-secondary">Status</p>
           <p className="font-medium">{detail.status.replaceAll("_", " ").toLowerCase()}</p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Verification</p>
+          <p className="text-xs text-lecturer-text-secondary">Verification</p>
           <p className="font-medium">{detail.verificationStatus.replaceAll("_", " ").toLowerCase()}</p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Client version</p>
+          <p className="text-xs text-lecturer-text-secondary">Client version</p>
           <p className="font-medium">{detail.clientVersion ?? "Unknown"}</p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Assessment type</p>
+          <p className="text-xs text-lecturer-text-secondary">Assessment type</p>
           <p className="font-medium">{detail.assessmentType.replaceAll("_", " ").toLowerCase()}</p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Required delivery mode</p>
+          <p className="text-xs text-lecturer-text-secondary">Required delivery mode</p>
           <p className="font-medium">{detail.deliveryMode.replaceAll("_", " ").toLowerCase()}</p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Display policy</p>
+          <p className="text-xs text-lecturer-text-secondary">Display policy</p>
           <p className="font-medium">{detail.displayPolicy.replaceAll("_", " ").toLowerCase()}</p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Policy snapshot version</p>
+          <p className="text-xs text-lecturer-text-secondary">Policy snapshot version</p>
           <p className="font-medium">
             {detail.policyVersion} (schema {detail.policySchemaVersion})
           </p>
@@ -223,8 +223,8 @@ export default function SecureClientSessionDetailPage({ params }: { params: Prom
       <h2 className="mt-6 text-sm font-semibold">Timeline</h2>
       <ul className="mt-2 space-y-1 text-sm">
         {timeline.map((entry, i) => (
-          <li key={i} className="text-gray-700">
-            <span className="text-gray-400">{new Date(entry.at).toLocaleString()}</span> — {entry.label}
+          <li key={i} className="text-lecturer-text-primary">
+            <span className="text-lecturer-text-muted">{new Date(entry.at).toLocaleString()}</span> — {entry.label}
           </li>
         ))}
       </ul>
@@ -232,11 +232,11 @@ export default function SecureClientSessionDetailPage({ params }: { params: Prom
       <h2 className="mt-6 text-sm font-semibold">Preflight / attestation results</h2>
       <ul className="mt-2 space-y-1 text-sm">
         {attestations.map((a) => (
-          <li key={a.id} className="rounded border border-gray-200 p-2">
+          <li key={a.id} className="rounded border border-lecturer-border p-2">
             <span className="font-medium">{a.overallStatus}</span> — {new Date(a.serverReceivedAt).toLocaleString()}
           </li>
         ))}
-        {attestations.length === 0 && <li className="text-xs text-gray-400">No attestation recorded yet.</li>}
+        {attestations.length === 0 && <li className="text-xs text-lecturer-text-muted">No attestation recorded yet.</li>}
       </ul>
 
       <h2 className="mt-6 text-sm font-semibold">Recovery</h2>
@@ -250,17 +250,17 @@ export default function SecureClientSessionDetailPage({ params }: { params: Prom
           tetherAttestationRunner.ts) — this panel only DISPLAYS it, never
           decides anything on its own. */}
       {detail.recoveryOfSessionId && (
-        <div className="mt-2 rounded border border-gray-200 p-3 text-sm">
+        <div className="mt-2 rounded border border-lecturer-border p-3 text-sm">
           <p className="font-medium">Prior session</p>
           {priorSession ? (
-            <ul className="mt-1 space-y-0.5 text-xs text-gray-700">
+            <ul className="mt-1 space-y-0.5 text-xs text-lecturer-text-primary">
               <li>Status: {priorSession.status.replaceAll("_", " ").toLowerCase()}</li>
               <li>Installation verified: {priorSession.installationAttestationVerified ? "Yes" : "No"}</li>
               <li>Had a bound installation: {priorSession.hadBoundInstallation ? "Yes" : "No"}</li>
               {priorSession.endReason && <li>Ended: {priorSession.endReason}</li>}
             </ul>
           ) : (
-            <p className="mt-1 text-xs text-gray-500">Prior session record not found.</p>
+            <p className="mt-1 text-xs text-lecturer-text-secondary">Prior session record not found.</p>
           )}
           {detail.installationAttestationFailureReason === "DEVICE_CHANGE_DETECTED" && (
             <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
@@ -274,13 +274,13 @@ export default function SecureClientSessionDetailPage({ params }: { params: Prom
 
       <ul className="mt-2 space-y-1 text-sm">
         {grants.map((g) => (
-          <li key={g.id} className="rounded border border-gray-200 p-2">
+          <li key={g.id} className="rounded border border-lecturer-border p-2">
             Issued by {g.issuedByName} at {new Date(g.issuedAt).toLocaleString()} — {g.reason}
             {g.consumedAt && " (consumed)"}
             {g.revokedAt && " (revoked)"}
           </li>
         ))}
-        {grants.length === 0 && <li className="text-xs text-gray-400">No recovery grant issued for this session.</li>}
+        {grants.length === 0 && <li className="text-xs text-lecturer-text-muted">No recovery grant issued for this session.</li>}
       </ul>
 
       {/* Part G — a plain-language, clearly non-authoritative suggestion
@@ -288,28 +288,28 @@ export default function SecureClientSessionDetailPage({ params }: { params: Prom
           gates or auto-fills anything — the lecturer still must type a
           reason and click a button themselves for any action to occur. */}
       {suggestedNextStep(detail, priorSession) && (
-        <p className="mt-2 rounded border border-gray-200 bg-gray-50 p-2 text-xs text-gray-700">
+        <p className="mt-2 rounded border border-lecturer-border bg-lecturer-border-subtle p-2 text-xs text-lecturer-text-primary">
           <span className="font-medium">Suggestion (not a decision):</span> {suggestedNextStep(detail, priorSession)}
         </p>
       )}
 
       <div className="mt-3 space-y-2">
         <textarea
-          className="w-full rounded border border-gray-300 p-2 text-sm"
+          className="w-full rounded border border-lecturer-border p-2 text-sm"
           rows={2}
           placeholder="Reason (required for recovery grant or override)"
           value={reason}
           onChange={(e) => setReason(e.target.value)}
         />
         <div className="flex gap-2">
-          <button onClick={issueRecoveryGrant} disabled={!reason.trim()} className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50">
+          <button onClick={issueRecoveryGrant} disabled={!reason.trim()} className="rounded border border-lecturer-border px-3 py-1.5 text-sm disabled:opacity-50">
             Issue recovery grant
           </button>
-          <button onClick={grantOverride} disabled={!reason.trim()} className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50">
+          <button onClick={grantOverride} disabled={!reason.trim()} className="rounded border border-lecturer-border px-3 py-1.5 text-sm disabled:opacity-50">
             Grant override
           </button>
         </div>
-        {message && <p className="rounded border border-gray-200 bg-gray-50 p-2 text-xs">{message}</p>}
+        {message && <p className="rounded border border-lecturer-border bg-lecturer-border-subtle p-2 text-xs">{message}</p>}
       </div>
 
       <div className="mt-6 rounded border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">

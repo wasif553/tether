@@ -3,6 +3,11 @@
 import { useEffect, useMemo, useState, use as usePromise } from "react";
 import Link from "next/link";
 import { lecturerAvailabilityStatus, type LecturerAvailabilityStatus } from "@/lib/lecturerDashboardGrouping";
+import { LecturerPageHeader } from "@/components/lecturer/LecturerPageHeader";
+import { MetricCard } from "@/components/lecturer/MetricCard";
+import { SectionHeading } from "@/components/lecturer/SectionCard";
+import { StatusBadge, availabilityToneFor } from "@/components/lecturer/StatusBadge";
+import { ErrorState, LoadingState } from "@/components/lecturer/EmptyState";
 
 type Summary = {
   totalStudentsStarted: number;
@@ -112,57 +117,12 @@ const MARKING_LABELS: Record<string, string> = {
   GRADED: "Marked",
 };
 
-const AVAILABILITY_PILL_STYLES: Record<LecturerAvailabilityStatus, string> = {
-  Open: "bg-[#ECFDF3] text-[#067647]",
-  Scheduled: "bg-[#EFF6FF] text-[#1D4ED8]",
-  Draft: "bg-[#F2F4F7] text-[#667085]",
-  Closed: "bg-[#F2F4F7] text-[#667085]",
-};
-
 // Presentation-only "is this cohort tiny" cutoff for score-distribution
 // and insights wording (e.g. "Limited data · based on 1 graded
 // submission"). This does NOT change any analytics calculation, bin, or
 // threshold in src/lib/analytics.ts — it only decides whether to show an
 // extra caveat sentence.
 const SMALL_SAMPLE_THRESHOLD = 5;
-
-function AnalyticsMetric({
-  label,
-  value,
-  caption,
-  accent = "neutral",
-}: {
-  label: string;
-  value: string;
-  caption?: string;
-  accent?: "neutral" | "info" | "warning";
-}) {
-  const dotColor = { neutral: "bg-[#98A2B3]", info: "bg-[#2563EB]", warning: "bg-[#D97706]" }[accent];
-  const tintClasses = accent === "warning" ? "border-[#FEDF89] bg-[#FFFAEB]" : "border-[#E4E7EC] bg-white";
-
-  return (
-    <div className={`rounded-xl border p-4 ${tintClasses}`}>
-      <div className="flex items-center gap-1.5">
-        <span className={`h-1.5 w-1.5 rounded-full ${dotColor}`} aria-hidden="true" />
-        <span className="text-sm font-medium text-[#667085]">{label}</span>
-      </div>
-      <div className="mt-1.5 text-2xl font-bold text-[#101828]">{value}</div>
-      {caption && <p className="mt-0.5 text-xs text-[#667085]">{caption}</p>}
-    </div>
-  );
-}
-
-function SectionHeader({ title, badge, subtitle }: { title: string; badge?: string; subtitle?: string }) {
-  return (
-    <div>
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <h2 className="text-lg font-semibold text-[#101828]">{title}</h2>
-        {badge && <span className="text-sm font-medium text-[#667085]">{badge}</span>}
-      </div>
-      {subtitle && <p className="mt-0.5 max-w-2xl text-sm text-[#667085]">{subtitle}</p>}
-    </div>
-  );
-}
 
 const QUESTION_ROW_COLUMNS = "md:grid md:grid-cols-[1.4fr_130px_90px_150px_110px_170px] md:items-center md:gap-4";
 
@@ -177,43 +137,39 @@ function QuestionAnalyticsRow({ q }: { q: QuestionAnalytics }) {
   const timeLabel = q.averageTimeSpentSeconds != null ? `${Math.round(q.averageTimeSpentSeconds)}s` : "Not enough data";
 
   return (
-    <li className={`border-b border-[#E4E7EC] px-4 py-3 last:border-b-0 ${QUESTION_ROW_COLUMNS}`}>
+    <li className={`border-b border-lecturer-border px-4 py-3 last:border-b-0 ${QUESTION_ROW_COLUMNS}`}>
       <div className="min-w-0">
-        <p className="truncate text-sm font-medium text-[#101828]" title={q.questionText}>
+        <p className="truncate text-sm font-medium text-lecturer-text-primary" title={q.questionText}>
           {q.questionText}
         </p>
-        <p className="text-xs text-[#667085]">{q.maxScore} pt(s)</p>
+        <p className="text-xs text-lecturer-text-secondary">{q.maxScore} pt(s)</p>
       </div>
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Type</p>
-        <p className="text-sm text-[#101828]">{QUESTION_TYPE_LABELS[q.questionType] ?? q.questionType}</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Type</p>
+        <p className="text-sm text-lecturer-text-primary">{QUESTION_TYPE_LABELS[q.questionType] ?? q.questionType}</p>
       </div>
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Attempts</p>
-        <p className="text-sm text-[#101828]">{q.attempts}</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Attempts</p>
+        <p className="text-sm text-lecturer-text-primary">{q.attempts}</p>
       </div>
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Average score / Correct</p>
-        <p className="text-sm text-[#101828]">{scoreLabel}</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Average score / Correct</p>
+        <p className="text-sm text-lecturer-text-primary">{scoreLabel}</p>
       </div>
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Average time</p>
-        <p className="text-sm text-[#101828]">{timeLabel}</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Average time</p>
+        <p className="text-sm text-lecturer-text-primary">{timeLabel}</p>
       </div>
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Review status</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Review status</p>
         {!hasData ? (
-          <span className="text-sm text-[#667085]">Not enough data</span>
+          <span className="text-sm text-lecturer-text-secondary">Not enough data</span>
         ) : q.reviewRecommended ? (
-          <span className="inline-flex items-center rounded-full bg-[#FFFAEB] px-2 py-0.5 text-xs font-medium text-[#92400E]">
-            Review suggested
-          </span>
+          <StatusBadge tone="warning">Review suggested</StatusBadge>
         ) : (
-          <span className="inline-flex items-center rounded-full bg-[#ECFDF3] px-2 py-0.5 text-xs font-medium text-[#067647]">
-            Looks healthy
-          </span>
+          <StatusBadge tone="success">Looks healthy</StatusBadge>
         )}
-        {q.reviewReason && <p className="mt-0.5 text-xs text-[#667085]">{q.reviewReason}</p>}
+        {q.reviewReason && <p className="mt-0.5 text-xs text-lecturer-text-secondary">{q.reviewReason}</p>}
       </div>
     </li>
   );
@@ -225,34 +181,34 @@ function StudentResultRow({ examId, s }: { examId: string; s: StudentResult }) {
   const scoreLabel = s.totalScore != null ? `${s.totalScore} / ${s.maxScore} (${pct(s.scorePct)})` : "—";
 
   return (
-    <li className={`border-b border-[#E4E7EC] px-4 py-3 last:border-b-0 ${STUDENT_ROW_COLUMNS}`}>
+    <li className={`border-b border-lecturer-border px-4 py-3 last:border-b-0 ${STUDENT_ROW_COLUMNS}`}>
       <div className="min-w-0">
-        <p className="truncate text-sm font-semibold text-[#101828]">{s.studentName}</p>
-        <p className="truncate text-xs text-[#667085]">
+        <p className="truncate text-sm font-semibold text-lecturer-text-primary">{s.studentName}</p>
+        <p className="truncate text-xs text-lecturer-text-secondary">
           {s.studentEmail} · Attempt {s.attemptNumber}
         </p>
       </div>
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Marking</p>
-        <p className="text-sm text-[#101828]">{MARKING_LABELS[s.status] ?? s.status}</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Marking</p>
+        <p className="text-sm text-lecturer-text-primary">{MARKING_LABELS[s.status] ?? s.status}</p>
       </div>
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Score</p>
-        <p className="text-sm text-[#101828]">{scoreLabel}</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Score</p>
+        <p className="text-sm text-lecturer-text-primary">{scoreLabel}</p>
       </div>
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Submitted</p>
-        <p className="text-sm text-[#101828]">{dateStr(s.submittedAt)}</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Submitted</p>
+        <p className="text-sm text-lecturer-text-primary">{dateStr(s.submittedAt)}</p>
       </div>
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Graded</p>
-        <p className="text-sm text-[#101828]">{dateStr(s.gradedAt)}</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Graded</p>
+        <p className="text-sm text-lecturer-text-primary">{dateStr(s.gradedAt)}</p>
       </div>
       <div className="mt-3 md:mt-0 md:text-right">
         {s.status !== "IN_PROGRESS" && (
           <Link
             href={`/lecturer/exams/${examId}/submissions/${s.submissionId}`}
-            className="rounded text-sm font-semibold text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+            className="rounded text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
           >
             {s.status === "GRADED" ? "Review →" : "Grade →"}
           </Link>
@@ -265,7 +221,7 @@ function StudentResultRow({ examId, s }: { examId: string; s: StudentResult }) {
 const INSIGHT_STYLES: Record<Insight["severity"], string> = {
   HIGH: "border-[#FECDCA] bg-[#FEF2F2]",
   WARNING: "border-[#FEDF89] bg-[#FFFAEB]",
-  INFO: "border-[#E4E7EC] bg-white",
+  INFO: "border-lecturer-border bg-lecturer-surface",
 };
 
 export default function ExamAnalyticsPage({
@@ -340,85 +296,67 @@ export default function ExamAnalyticsPage({
     return Math.round((data.summary.passRatePct / 100) * data.summary.totalGraded);
   }, [data]);
 
-  if (loading) return <p className="mx-auto max-w-7xl text-sm text-[#667085]">Loading analytics…</p>;
+  if (loading) return <LoadingState label="Loading analytics…" />;
 
-  if (error) {
-    return (
-      <div className="mx-auto max-w-7xl">
-        <p className="text-sm text-[#DC2626]">{error}</p>
-        <button
-          type="button"
-          onClick={load}
-          className="mt-2 rounded text-sm font-medium text-[#2563EB] underline underline-offset-2 hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
+  if (error) return <ErrorState message={error} onRetry={load} />;
 
-  if (!data) return <p className="mx-auto max-w-7xl text-sm text-[#DC2626]">No analytics available.</p>;
+  if (!data) return <ErrorState message="No analytics available." />;
 
   const { summary, integritySummary, integrityRiskSummary } = data;
   const isSmallSample = summary.totalGraded > 0 && summary.totalGraded < SMALL_SAMPLE_THRESHOLD;
 
   return (
     <div className="mx-auto max-w-7xl">
-      <div>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-sm font-medium text-[#667085]">Analytics</p>
+      <LecturerPageHeader
+        breadcrumbs={[{ label: "Dashboard", href: "/lecturer" }, { label: examTitle ?? "Exam", href: `/lecturer/exams/${id}` }, { label: "Analytics" }]}
+        title={
+          <span className="flex flex-wrap items-center gap-2">
+            {examTitle ?? "Exam"}
+            {availabilityStatus && <StatusBadge tone={availabilityToneFor(availabilityStatus)}>{availabilityStatus}</StatusBadge>}
+          </span>
+        }
+        description="Performance, question outcomes, and integrity review signals."
+        actions={
           <a
             href={`/api/lecturer/exams/${id}/analytics/export.csv`}
-            className="rounded-lg border border-[#E4E7EC] bg-white px-3 py-1.5 text-sm font-medium text-[#101828] hover:bg-[#F9FAFB] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB] focus-visible:ring-offset-2"
+            className="rounded-lg border border-lecturer-border bg-lecturer-surface px-3 py-1.5 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
           >
             Export CSV
           </a>
-        </div>
-        <div className="mt-1 flex flex-wrap items-center gap-2">
-          <h1 className="text-3xl font-bold text-[#101828]">{examTitle ?? "Exam"}</h1>
-          {availabilityStatus && (
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${AVAILABILITY_PILL_STYLES[availabilityStatus]}`}>
-              {availabilityStatus}
-            </span>
-          )}
-        </div>
-        <p className="mt-1 text-sm text-[#667085]">Performance, question outcomes, and integrity review signals.</p>
-        <Link
-          href={`/lecturer/exams/${id}`}
-          className="mt-2 inline-block rounded text-sm font-medium text-[#667085] hover:text-[#101828] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
-        >
-          ← Back to exam
-        </Link>
-      </div>
+        }
+      />
 
       <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
-        <AnalyticsMetric
+        <MetricCard
           label="Average score"
           value={pct(summary.averageScorePct)}
-          caption={summary.totalGraded > 0 ? countLabel(summary.totalGraded, "graded submission") : undefined}
         />
-        <AnalyticsMetric
+        <MetricCard
           label="Median score"
           value={pct(summary.medianScorePct)}
-          caption={summary.totalGraded > 0 ? countLabel(summary.totalGraded, "graded submission") : undefined}
         />
-        <AnalyticsMetric
+        <MetricCard
           label="Pass rate"
           value={pct(summary.passRatePct)}
-          caption={passedCount != null ? `${passedCount} of ${summary.totalGraded} passed` : undefined}
         />
-        <AnalyticsMetric label="Completion" value={pct(summary.completionRatePct)} />
-        <AnalyticsMetric label="Submitted" value={`${summary.totalSubmitted} / ${summary.totalStudentsStarted}`} />
-        <AnalyticsMetric
+        <MetricCard label="Completion" value={pct(summary.completionRatePct)} />
+        <MetricCard label="Submitted" value={`${summary.totalSubmitted} / ${summary.totalStudentsStarted}`} />
+        <MetricCard
           label="Awaiting marking"
-          value={String(summary.pendingGradingCount)}
+          value={summary.pendingGradingCount}
           accent={summary.pendingGradingCount > 0 ? "warning" : "neutral"}
         />
       </div>
+      {(summary.totalGraded > 0 || passedCount != null) && (
+        <p className="mt-2 text-xs text-lecturer-text-secondary">
+          {summary.totalGraded > 0 && countLabel(summary.totalGraded, "graded submission")}
+          {passedCount != null && ` · ${passedCount} of ${summary.totalGraded} passed`}
+        </p>
+      )}
 
       <div className="mt-8 space-y-8">
         <section>
-          <SectionHeader
+          <SectionHeading
             title="Score distribution"
             subtitle={
               summary.totalGraded > 0
@@ -428,20 +366,20 @@ export default function ExamAnalyticsPage({
                 : undefined
             }
           />
-          <div className="mt-3 rounded-xl border border-[#E4E7EC] bg-white p-4">
+          <div className="mt-3 rounded-xl border border-lecturer-border bg-lecturer-surface p-4">
             {data.scoreDistribution.every((b) => b.count === 0) ? (
-              <p className="text-sm text-[#667085]">Not enough graded submissions yet.</p>
+              <p className="text-sm text-lecturer-text-secondary">Not enough graded submissions yet.</p>
             ) : (
               <div className="flex items-end gap-1">
                 {data.scoreDistribution.map((band) => (
                   <div key={band.band} className="flex flex-1 flex-col items-center gap-1">
                     <div
-                      className="w-full rounded-t bg-[#2563EB]"
+                      className="w-full rounded-t bg-lecturer-accent"
                       style={{ height: `${(band.count / maxBandCount) * 120 + (band.count > 0 ? 4 : 0)}px` }}
                       title={`${band.band}%: ${band.count}`}
                     />
-                    <span className="text-[10px] text-[#667085]">{band.band}</span>
-                    <span className="text-[10px] text-[#98A2B3]">{band.count}</span>
+                    <span className="text-[10px] text-lecturer-text-secondary">{band.band}</span>
+                    <span className="text-[10px] text-lecturer-text-muted">{band.count}</span>
                   </div>
                 ))}
               </div>
@@ -450,10 +388,10 @@ export default function ExamAnalyticsPage({
         </section>
 
         <section>
-          <SectionHeader title="Question analysis" subtitle="Per-question performance across all finalized submissions." />
-          <div className="mt-3 overflow-hidden rounded-xl border border-[#E4E7EC] bg-white">
+          <SectionHeading title="Question analysis" subtitle="Per-question performance across all finalized submissions." />
+          <div className="mt-3 overflow-hidden rounded-xl border border-lecturer-border bg-lecturer-surface">
             <div
-              className={`hidden border-b border-[#E4E7EC] px-4 py-2 text-xs font-medium text-[#667085] md:grid ${QUESTION_ROW_COLUMNS}`}
+              className={`hidden border-b border-lecturer-border px-4 py-2 text-xs font-medium text-lecturer-text-secondary md:grid ${QUESTION_ROW_COLUMNS}`}
               aria-hidden="true"
             >
               <span>Question</span>
@@ -463,9 +401,7 @@ export default function ExamAnalyticsPage({
               <span>Average time</span>
               <span>Review status</span>
             </div>
-            {data.questionAnalytics.length === 0 && (
-              <p className="p-6 text-center text-sm text-[#667085]">No questions in this exam yet.</p>
-            )}
+            {data.questionAnalytics.length === 0 && <p className="p-6 text-center text-sm text-lecturer-text-secondary">No questions in this exam yet.</p>}
             <ul>
               {data.questionAnalytics.map((q) => (
                 <QuestionAnalyticsRow key={q.questionId} q={q} />
@@ -475,10 +411,10 @@ export default function ExamAnalyticsPage({
         </section>
 
         <section>
-          <SectionHeader title="Student results" subtitle="Every attempt on this exam, most recently started first." />
-          <div className="mt-3 overflow-hidden rounded-xl border border-[#E4E7EC] bg-white">
+          <SectionHeading title="Student results" subtitle="Every attempt on this exam, most recently started first." />
+          <div className="mt-3 overflow-hidden rounded-xl border border-lecturer-border bg-lecturer-surface">
             <div
-              className={`hidden border-b border-[#E4E7EC] px-4 py-2 text-xs font-medium text-[#667085] md:grid ${STUDENT_ROW_COLUMNS}`}
+              className={`hidden border-b border-lecturer-border px-4 py-2 text-xs font-medium text-lecturer-text-secondary md:grid ${STUDENT_ROW_COLUMNS}`}
               aria-hidden="true"
             >
               <span>Student</span>
@@ -488,9 +424,7 @@ export default function ExamAnalyticsPage({
               <span>Graded</span>
               <span className="text-right">Action</span>
             </div>
-            {data.studentResults.length === 0 && (
-              <p className="p-6 text-center text-sm text-[#667085]">No students have started this exam yet.</p>
-            )}
+            {data.studentResults.length === 0 && <p className="p-6 text-center text-sm text-lecturer-text-secondary">No students have started this exam yet.</p>}
             <ul>
               {data.studentResults.map((s) => (
                 <StudentResultRow key={s.submissionId} examId={id} s={s} />
@@ -500,23 +434,17 @@ export default function ExamAnalyticsPage({
         </section>
 
         <section>
-          <SectionHeader title="Integrity review" />
-          <div className="mt-3 rounded-xl border border-[#E4E7EC] bg-white p-5">
+          <SectionHeading title="Integrity review" />
+          <div className="mt-3 rounded-xl border border-lecturer-border bg-lecturer-surface p-5">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <AnalyticsMetric label={pluralWord(integritySummary.totalEvents, "event")} value={String(integritySummary.totalEvents)} />
-              <AnalyticsMetric label={pluralWord(integritySummary.studentsWithEvents, "student")} value={String(integritySummary.studentsWithEvents)} />
-              <AnalyticsMetric
-                label="Awaiting review"
-                value={String(integritySummary.unresolvedEvents)}
-                accent={integritySummary.unresolvedEvents > 0 ? "warning" : "neutral"}
-              />
-              <AnalyticsMetric label="High severity" value={String(integritySummary.highSeverityEvents)} accent={integritySummary.highSeverityEvents > 0 ? "warning" : "neutral"} />
+              <MetricCard label={pluralWord(integritySummary.totalEvents, "event")} value={integritySummary.totalEvents} />
+              <MetricCard label={pluralWord(integritySummary.studentsWithEvents, "student")} value={integritySummary.studentsWithEvents} />
+              <MetricCard label="Awaiting review" value={integritySummary.unresolvedEvents} accent={integritySummary.unresolvedEvents > 0 ? "warning" : "neutral"} />
+              <MetricCard label="High severity" value={integritySummary.highSeverityEvents} accent={integritySummary.highSeverityEvents > 0 ? "warning" : "neutral"} />
             </div>
 
-            <h3 className="mt-5 text-sm font-semibold text-[#101828]">Review priority by session</h3>
-            <p className="mt-0.5 text-xs text-[#667085]">
-              These scores help prioritise evidence for human review; they are not misconduct determinations.
-            </p>
+            <h3 className="mt-5 text-sm font-semibold text-lecturer-text-primary">Review priority by session</h3>
+            <p className="mt-0.5 text-xs text-lecturer-text-secondary">These scores help prioritise evidence for human review; they are not misconduct determinations.</p>
             <div className="mt-3 space-y-1.5">
               <PriorityBar label="High priority" count={integrityRiskSummary.highRiskSessions} total={totalRiskSessions(integrityRiskSummary)} tone="high" />
               <PriorityBar label="Medium priority" count={integrityRiskSummary.mediumRiskSessions} total={totalRiskSessions(integrityRiskSummary)} tone="medium" />
@@ -525,15 +453,14 @@ export default function ExamAnalyticsPage({
             </div>
 
             {integrityRiskSummary.highRiskStudentCount > 0 && (
-              <p className="mt-3 text-xs text-[#667085]">
-                {countLabel(integrityRiskSummary.highRiskStudentCount, "student")}{" "}
-                {integrityRiskSummary.highRiskStudentCount === 1 ? "has" : "have"} at least one high-priority session for review.
+              <p className="mt-3 text-xs text-lecturer-text-secondary">
+                {countLabel(integrityRiskSummary.highRiskStudentCount, "student")} {integrityRiskSummary.highRiskStudentCount === 1 ? "has" : "have"} at least one high-priority session for review.
               </p>
             )}
 
             <Link
               href={`/lecturer/exams/${id}/integrity`}
-              className="mt-4 inline-block rounded text-sm font-semibold text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+              className="mt-4 inline-block rounded text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
             >
               Open integrity review →
             </Link>
@@ -541,28 +468,26 @@ export default function ExamAnalyticsPage({
         </section>
 
         <section>
-          <SectionHeader title="Insights" />
+          <SectionHeading title="Insights" />
           <div className="mt-3 space-y-2">
             {isSmallSample && (
-              <div className="rounded-xl border border-[#E4E7EC] bg-white p-3">
-                <p className="text-sm font-medium text-[#101828]">Limited performance data</p>
-                <p className="mt-1 text-sm text-[#667085]">
-                  Analytics currently include {countLabel(summary.totalGraded, "graded submission")}.
-                </p>
+              <div className="rounded-xl border border-lecturer-border bg-lecturer-surface p-3">
+                <p className="text-sm font-medium text-lecturer-text-primary">Limited performance data</p>
+                <p className="mt-1 text-sm text-lecturer-text-secondary">Analytics currently include {countLabel(summary.totalGraded, "graded submission")}.</p>
               </div>
             )}
-            {data.insights.length === 0 && <p className="text-sm text-[#667085]">No insights yet.</p>}
+            {data.insights.length === 0 && <p className="text-sm text-lecturer-text-secondary">No insights yet.</p>}
             {data.insights.map((insight, i) => {
               const isIntegrityInsight = /integrity/i.test(insight.title) || /integrity/i.test(insight.description);
               return (
                 <div key={i} className={`rounded-xl border p-4 ${INSIGHT_STYLES[insight.severity]}`}>
-                  <p className="text-sm font-semibold text-[#101828]">{insight.title}</p>
-                  <p className="mt-1 text-sm text-[#667085]">{insight.description}</p>
-                  <p className="mt-1 text-sm text-[#667085]">{insight.recommendedAction}</p>
+                  <p className="text-sm font-semibold text-lecturer-text-primary">{insight.title}</p>
+                  <p className="mt-1 text-sm text-lecturer-text-secondary">{insight.description}</p>
+                  <p className="mt-1 text-sm text-lecturer-text-secondary">{insight.recommendedAction}</p>
                   {isIntegrityInsight && (
                     <Link
                       href={`/lecturer/exams/${id}/integrity`}
-                      className="mt-2 inline-block rounded text-sm font-semibold text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                      className="mt-2 inline-block rounded text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                     >
                       Open integrity review →
                     </Link>
@@ -584,8 +509,8 @@ function totalRiskSessions(r: IntegrityRiskSummary): number {
 const PRIORITY_BAR_COLORS: Record<"high" | "medium" | "low" | "none", string> = {
   high: "bg-[#DC2626]",
   medium: "bg-[#D97706]",
-  low: "bg-[#2563EB]",
-  none: "bg-[#98A2B3]",
+  low: "bg-lecturer-accent",
+  none: "bg-lecturer-text-muted",
 };
 
 function PriorityBar({
@@ -602,11 +527,11 @@ function PriorityBar({
   const widthPct = total > 0 ? Math.max(count > 0 ? 4 : 0, (count / total) * 100) : 0;
   return (
     <div className="flex items-center gap-3">
-      <span className="w-28 shrink-0 text-xs font-medium text-[#667085]">{label}</span>
-      <div className="h-2 flex-1 overflow-hidden rounded-full bg-[#F2F4F7]">
+      <span className="w-28 shrink-0 text-xs font-medium text-lecturer-text-secondary">{label}</span>
+      <div className="h-2 flex-1 overflow-hidden rounded-full bg-lecturer-border-subtle">
         <div className={`h-full rounded-full ${PRIORITY_BAR_COLORS[tone]}`} style={{ width: `${widthPct}%` }} />
       </div>
-      <span className="w-6 shrink-0 text-right text-xs font-medium text-[#101828]">{count}</span>
+      <span className="w-6 shrink-0 text-right text-xs font-medium text-lecturer-text-primary">{count}</span>
     </div>
   );
 }

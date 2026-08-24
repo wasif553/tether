@@ -59,7 +59,7 @@ describe("submission review page — Controlled AI activity summary card (Sectio
 
   it("never derives or displays an AI risk/misconduct score from this summary", () => {
     const cardStart = pageSource.indexOf("Controlled AI activity");
-    const cardEnd = pageSource.indexOf("<div className=\"mt-6 space-y-4\">");
+    const cardEnd = pageSource.indexOf("<div className=\"space-y-4\">");
     const cardBlock = pageSource.slice(cardStart, cardEnd);
     expect(cardBlock.toLowerCase()).not.toMatch(/risk score|misconduct|suspicion|dependency/);
   });
@@ -78,7 +78,7 @@ describe("submission review page — Integrity evidence timeline compact card (S
 
   it("renders 'Integrity evidence timeline' with the factual explanation and count summary — no percentage, no score", () => {
     const cardStart = pageSource.indexOf("Integrity evidence timeline");
-    const cardEnd = pageSource.indexOf("<div className=\"mt-6 space-y-4\">");
+    const cardEnd = pageSource.indexOf("<div className=\"space-y-4\">");
     const cardBlock = pageSource.slice(cardStart, cardEnd);
     expect(cardBlock).toMatch(/Reconstruct this attempt from exam activity, Tether security events and supporting evidence\./);
     expect(cardBlock).toMatch(/timelineSummary\.totalEvents/);

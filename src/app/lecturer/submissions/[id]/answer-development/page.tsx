@@ -77,7 +77,7 @@ function timelineLabelForEvent(e: EventRow): string {
 
 function DiffView({ segments }: { segments: DiffSegment[] }) {
   return (
-    <div className="whitespace-pre-wrap rounded border border-gray-200 p-3 text-sm leading-relaxed">
+    <div className="whitespace-pre-wrap rounded border border-lecturer-border p-3 text-sm leading-relaxed">
       {segments.map((seg, i) => {
         if (seg.type === "equal") return <span key={i}>{seg.text}</span>;
         if (seg.type === "added")
@@ -87,7 +87,7 @@ function DiffView({ segments }: { segments: DiffSegment[] }) {
             </span>
           );
         return (
-          <span key={i} className="rounded bg-gray-200 text-gray-600 line-through">
+          <span key={i} className="rounded bg-gray-200 text-lecturer-text-secondary line-through">
             {seg.text}
           </span>
         );
@@ -125,17 +125,17 @@ function QuestionPanel({ q }: { q: QuestionData }) {
   const diff = versionA && versionB ? diffAnswerText(versionA.responseText, versionB.responseText) : null;
 
   return (
-    <div className="mt-4 rounded border border-gray-200 p-4">
+    <div className="mt-4 rounded border border-lecturer-border p-4">
       <h3 className="text-sm font-semibold">Question {q.questionId}</h3>
 
       {q.observations.length > 0 && (
         <div className="mt-2 space-y-1">
           {q.observations.map((o, i) => (
-            <div key={i} className="rounded border border-gray-200 bg-gray-50 p-2 text-xs">
+            <div key={i} className="rounded border border-lecturer-border bg-lecturer-border-subtle p-2 text-xs">
               <span className="font-medium">{o.code.replaceAll("_", " ").toLowerCase()}</span>
               {" — "}
-              <span className="text-gray-600">{RECOMMENDATION_LABELS[o.recommendation] ?? o.recommendation}</span>
-              <p className="mt-1 text-gray-600">{o.explanation}</p>
+              <span className="text-lecturer-text-secondary">{RECOMMENDATION_LABELS[o.recommendation] ?? o.recommendation}</span>
+              <p className="mt-1 text-lecturer-text-secondary">{o.explanation}</p>
             </div>
           ))}
         </div>
@@ -146,7 +146,7 @@ function QuestionPanel({ q }: { q: QuestionData }) {
           <button
             key={f}
             onClick={() => setFilter(f)}
-            className={`rounded border px-2 py-1 ${filter === f ? "border-gray-500 bg-gray-100" : "border-gray-200"}`}
+            className={`rounded border px-2 py-1 ${filter === f ? "border-gray-500 bg-lecturer-border-subtle" : "border-lecturer-border"}`}
           >
             {f.charAt(0) + f.slice(1).toLowerCase()}
           </button>
@@ -155,18 +155,18 @@ function QuestionPanel({ q }: { q: QuestionData }) {
 
       <ul className="mt-3 space-y-1 text-sm">
         {filtered.map((entry, i) => (
-          <li key={i} className="text-gray-700">
-            <span className="text-gray-400">{new Date(entry.atMs).toLocaleTimeString()}</span> — {entry.label}
+          <li key={i} className="text-lecturer-text-primary">
+            <span className="text-lecturer-text-muted">{new Date(entry.atMs).toLocaleTimeString()}</span> — {entry.label}
           </li>
         ))}
-        {filtered.length === 0 && <li className="text-gray-400">No activity for this filter.</li>}
+        {filtered.length === 0 && <li className="text-lecturer-text-muted">No activity for this filter.</li>}
       </ul>
 
       {q.versions.length >= 2 && (
-        <div className="mt-4 border-t border-gray-200 pt-3">
-          <p className="text-xs font-medium text-gray-600">Compare versions</p>
+        <div className="mt-4 border-t border-lecturer-border pt-3">
+          <p className="text-xs font-medium text-lecturer-text-secondary">Compare versions</p>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
-            <select value={compareA} onChange={(e) => setCompareA(e.target.value)} className="rounded border border-gray-300 px-2 py-1">
+            <select value={compareA} onChange={(e) => setCompareA(e.target.value)} className="rounded border border-lecturer-border px-2 py-1">
               <option value="">Previous version</option>
               {q.versions.map((v) => (
                 <option key={v.id} value={v.id}>
@@ -175,7 +175,7 @@ function QuestionPanel({ q }: { q: QuestionData }) {
               ))}
             </select>
             <span>vs</span>
-            <select value={compareB} onChange={(e) => setCompareB(e.target.value)} className="rounded border border-gray-300 px-2 py-1">
+            <select value={compareB} onChange={(e) => setCompareB(e.target.value)} className="rounded border border-lecturer-border px-2 py-1">
               <option value="">Selected version</option>
               {q.versions.map((v) => (
                 <option key={v.id} value={v.id}>
@@ -186,7 +186,7 @@ function QuestionPanel({ q }: { q: QuestionData }) {
           </div>
           {diff && (
             <div className="mt-2">
-              <p className="text-xs text-gray-500">
+              <p className="text-xs text-lecturer-text-secondary">
                 +{diff.charactersAdded} / -{diff.charactersRemoved} characters ({Math.round(diff.changeRatio * 100)}% changed) ·{" "}
                 {new Date(versionB!.serverReceivedAt).toLocaleString()} · {CHANGE_TYPE_LABELS[versionB!.changeType] ?? versionB!.changeType}
               </p>
@@ -219,11 +219,11 @@ export default function AnswerDevelopmentPage({ params }: { params: Promise<{ id
 
   return (
     <div className="mx-auto max-w-3xl">
-      <Link href={`/lecturer/exams`} className="text-sm text-gray-500">
+      <Link href={`/lecturer/exams`} className="text-sm text-lecturer-text-secondary">
         &larr; Back
       </Link>
-      <h1 className="mt-2 text-2xl font-semibold">Answer development</h1>
-      <p className="mt-1 text-sm text-gray-600">
+      <h1 className="mt-2 text-[28px] font-bold text-lecturer-text-primary">Answer development</h1>
+      <p className="mt-1 text-sm text-lecturer-text-secondary">
         Review how the response developed over time. This is process evidence and does not by itself establish misconduct.
       </p>
 
@@ -233,11 +233,11 @@ export default function AnswerDevelopmentPage({ params }: { params: Promise<{ id
         approach. Lecturer judgement remains final. No grade is automatically changed by anything on this page.
       </div>
 
-      {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
-      {!data && !error && <p className="mt-4 text-gray-500">Loading…</p>}
+      {error && <p className="mt-4 text-sm text-[#B42318]">{error}</p>}
+      {!data && !error && <p className="mt-4 text-lecturer-text-secondary">Loading…</p>}
 
       {data && !data.enabled && (
-        <p className="mt-4 text-sm text-gray-500">Answer-development provenance was not enabled for this attempt.</p>
+        <p className="mt-4 text-sm text-lecturer-text-secondary">Answer-development provenance was not enabled for this attempt.</p>
       )}
 
       {data && data.enabled && (
@@ -252,13 +252,13 @@ export default function AnswerDevelopmentPage({ params }: { params: Promise<{ id
             <Stat label="Code working" value={data.summary.codeWorkingArtifactCount} />
             <Stat label="Source declarations" value={data.summary.sourceDeclarationCount} />
           </div>
-          <p className="mt-2 text-xs text-gray-500">
+          <p className="mt-2 text-xs text-lecturer-text-secondary">
             First meaningful input:{" "}
             {data.summary.firstMeaningfulInputAt ? new Date(data.summary.firstMeaningfulInputAt).toLocaleString() : "—"} · Final
             submission: {data.summary.finalSubmissionAt ? new Date(data.summary.finalSubmissionAt).toLocaleString() : "—"}
           </p>
 
-          {data.perQuestion.length === 0 && <p className="mt-4 text-sm text-gray-500">No development data recorded for this attempt.</p>}
+          {data.perQuestion.length === 0 && <p className="mt-4 text-sm text-lecturer-text-secondary">No development data recorded for this attempt.</p>}
           {data.perQuestion.map((q) => (
             <QuestionPanel key={q.questionId} q={q} />
           ))}
@@ -270,9 +270,9 @@ export default function AnswerDevelopmentPage({ params }: { params: Promise<{ id
 
 function Stat({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded border border-gray-200 p-3 text-center">
+    <div className="rounded border border-lecturer-border p-3 text-center">
       <p className="text-2xl font-semibold">{value}</p>
-      <p className="text-xs text-gray-500">{label}</p>
+      <p className="text-xs text-lecturer-text-secondary">{label}</p>
     </div>
   );
 }

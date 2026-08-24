@@ -2,6 +2,9 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { LecturerPageHeader, PrimaryButton } from "@/components/lecturer/LecturerPageHeader";
+import { SectionCard } from "@/components/lecturer/SectionCard";
+import { EmptyState, LoadingState } from "@/components/lecturer/EmptyState";
 
 type BankSummary = {
   id: string;
@@ -56,67 +59,55 @@ export default function QuestionBanksPage() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Question Banks</h1>
-        <button
-          onClick={() => setShowForm((v) => !v)}
-          className="rounded bg-black px-4 py-2 text-sm text-white"
-        >
-          New bank
-        </button>
-      </div>
+    <div className="mx-auto max-w-4xl">
+      <LecturerPageHeader
+        breadcrumbs={[{ label: "Dashboard", href: "/lecturer" }, { label: "Question Banks" }]}
+        title="Question Banks"
+        description="Reusable libraries of questions you can import into any exam."
+        actions={
+          <PrimaryButton type="button" onClick={() => setShowForm((v) => !v)} aria-expanded={showForm}>
+            New bank
+          </PrimaryButton>
+        }
+      />
 
       {showForm && (
-        <form
-          onSubmit={handleCreate}
-          className="mt-4 flex items-end gap-3 rounded border border-gray-200 p-4"
-        >
-          <div className="flex-1">
-            <label className="block text-sm font-medium">Title</label>
-            <input
-              required
-              autoFocus
-              className="mt-1 w-full rounded border border-gray-300 px-3 py-2"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={creating}
-            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-50"
-          >
-            {creating ? "Creating..." : "Create"}
-          </button>
-        </form>
+        <SectionCard className="mt-4">
+          <form onSubmit={handleCreate} className="flex items-end gap-3">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-lecturer-text-primary">Title</label>
+              <input
+                required
+                autoFocus
+                className="mt-1 w-full rounded-lg border border-lecturer-border px-3 py-2 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+              />
+            </div>
+            <PrimaryButton type="submit" disabled={creating}>
+              {creating ? "Creating…" : "Create"}
+            </PrimaryButton>
+          </form>
+        </SectionCard>
       )}
-      {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+      {error && <p className="mt-2 text-sm text-[#B42318]">{error}</p>}
 
-      <div className="mt-6 space-y-3">
-        {loading && <p className="text-gray-500">Loading...</p>}
-        {!loading && banks.length === 0 && (
-          <p className="text-gray-500">
-            No question banks yet. Create one to start building a reusable library of questions.
-          </p>
-        )}
+      <div className="mt-5 space-y-2">
+        {loading && <LoadingState label="Loading question banks…" />}
+        {!loading && banks.length === 0 && <EmptyState title="No question banks yet" description="Create one to start building a reusable library of questions." />}
         {banks.map((bank) => (
-          <div
-            key={bank.id}
-            className="flex items-center justify-between rounded border border-gray-200 p-4"
-          >
-            <div>
-              <p className="font-medium">{bank.title}</p>
-              <p className="text-sm text-gray-500">
+          <div key={bank.id} className="flex items-center justify-between gap-3 rounded-xl border border-lecturer-border bg-lecturer-surface p-4">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-lecturer-text-primary">{bank.title}</p>
+              <p className="mt-0.5 truncate text-xs text-lecturer-text-secondary">
                 {[bank.subject, bank.courseCode].filter(Boolean).join(" · ")}
                 {bank.subject || bank.courseCode ? " · " : ""}
-                {bank._count.questions} question(s) · Updated{" "}
-                {new Date(bank.updatedAt).toLocaleDateString()}
+                {bank._count.questions} question(s) · Updated {new Date(bank.updatedAt).toLocaleDateString()}
               </p>
             </div>
             <Link
               href={`/lecturer/question-banks/${bank.id}`}
-              className="rounded border border-gray-300 px-3 py-1.5 text-sm"
+              className="shrink-0 rounded-lg border border-lecturer-border px-3 py-1.5 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
             >
               Open
             </Link>

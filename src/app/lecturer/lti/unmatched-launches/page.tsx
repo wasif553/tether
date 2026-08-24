@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { LecturerPageHeader } from "@/components/lecturer/LecturerPageHeader";
+import { EmptyState, LoadingState } from "@/components/lecturer/EmptyState";
 
 type UnmatchedLaunch = {
   id: string;
@@ -68,28 +70,26 @@ export default function UnmatchedLaunchesPage() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl">
-      <h1 className="text-2xl font-semibold">Unmatched Canvas Launches</h1>
-      <p className="mt-1 text-sm text-gray-500">
-        These are recent Canvas launches that didn&apos;t match any SES exam. Link each one to an
-        exam so future launches for that Canvas assignment route correctly.
-      </p>
+    <div className="mx-auto max-w-4xl">
+      <LecturerPageHeader
+        breadcrumbs={[{ label: "Dashboard", href: "/lecturer" }, { label: "Canvas / LTI", href: "/lecturer/settings/lti" }, { label: "Unmatched launches" }]}
+        title="Unmatched Canvas Launches"
+        description="Recent Canvas launches that didn't match any Tether exam. Link each one to an exam so future launches for that Canvas assignment route correctly."
+      />
 
-      {message && <p className="mt-3 text-sm text-gray-600">{message}</p>}
+      {message && <p className="mt-3 text-sm text-lecturer-text-primary">{message}</p>}
 
       <div className="mt-6 space-y-3">
-        {loading && <p className="text-gray-500">Loading...</p>}
-        {!loading && launches.length === 0 && (
-          <p className="text-gray-500">No unmatched launches right now.</p>
-        )}
+        {loading && <LoadingState label="Loading unmatched launches…" />}
+        {!loading && launches.length === 0 && <EmptyState title="No unmatched launches right now" />}
         {launches.map((l) => (
-          <div key={l.id} className="rounded border border-gray-200 p-4 text-sm">
-            <div className="flex flex-wrap gap-4 text-gray-600">
+          <div key={l.id} className="rounded-xl border border-lecturer-border bg-lecturer-surface p-4 text-sm">
+            <div className="flex flex-wrap gap-4 text-lecturer-text-secondary">
               <span>Launched: {new Date(l.createdAt).toLocaleString()}</span>
               <span>Platform: {l.platformIssuer}</span>
               <span>Role: {l.launchRole ?? "Unknown"}</span>
             </div>
-            <div className="mt-1 flex flex-wrap gap-4 text-gray-500">
+            <div className="mt-1 flex flex-wrap gap-4 text-lecturer-text-muted">
               <span>Resource link ID: {l.resourceLinkId}</span>
               {l.deploymentId && <span>Deployment ID: {l.deploymentId}</span>}
               {l.canvasCourseId && <span>Course ID: {l.canvasCourseId}</span>}
@@ -98,11 +98,11 @@ export default function UnmatchedLaunchesPage() {
             </div>
             <div className="mt-3 flex items-center gap-2">
               <select
-                className="rounded border border-gray-300 px-2 py-1 text-sm"
+                className="rounded-lg border border-lecturer-border px-2 py-1.5 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 value={selectedExamId[l.id] ?? ""}
                 onChange={(e) => setSelectedExamId({ ...selectedExamId, [l.id]: e.target.value })}
               >
-                <option value="">Select an exam...</option>
+                <option value="">Select an exam…</option>
                 {exams.map((exam) => (
                   <option key={exam.id} value={exam.id}>
                     {exam.title}
@@ -112,9 +112,9 @@ export default function UnmatchedLaunchesPage() {
               <button
                 onClick={() => handleLink(l.id)}
                 disabled={linkingId === l.id || !selectedExamId[l.id]}
-                className="rounded bg-black px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                className="rounded-lg bg-lecturer-accent px-3 py-1.5 text-sm font-semibold text-white hover:bg-lecturer-accent-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
               >
-                {linkingId === l.id ? "Linking..." : "Link to exam"}
+                {linkingId === l.id ? "Linking…" : "Link to exam"}
               </button>
             </div>
           </div>

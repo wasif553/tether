@@ -23,6 +23,32 @@
   --staff-surface-subtle: #f9fafb;
   --staff-border: #d0d5dd;
   --staff-border-subtle: #e4e7ec;
+
+  /* Lecturer application shell v1 (preview/ui-redesign-2026-08-24) —
+     commercial SaaS visual system for /lecturer/** only, consumed by
+     src/components/lecturer/*. Deliberately its own token set, layered
+     on top of (not replacing) --staff-* above: --staff-canvas now
+     carries the redesign's cool blue-grey app background value so the
+     existing src/app/lecturer/layout.tsx bg-staff-canvas usage picks it
+     up for free, while everything sidebar/accent/text-specific below is
+     new and additive. Student exam-taking, lockdown, and platform-admin
+     surfaces never import these. */
+  --staff-canvas: #f4f7fb;
+  --lecturer-sidebar: #0b2948;
+  --lecturer-sidebar-elevated: #0f3459;
+  --lecturer-sidebar-active: #14497a;
+  --lecturer-sidebar-border: #16375c;
+  --lecturer-sidebar-text: #c7d6e8;
+  --lecturer-sidebar-text-muted: #7f9cbd;
+  --lecturer-accent: #087e8b;
+  --lecturer-accent-hover: #066570;
+  --lecturer-accent-subtle: #e6f4f5;
+  --lecturer-surface: #ffffff;
+  --lecturer-border: #e2e8f0;
+  --lecturer-border-subtle: #edf2f7;
+  --lecturer-text-primary: #10233f;
+  --lecturer-text-secondary: #667085;
+  --lecturer-text-muted: #98a2b3;
 }
 
 @theme inline {
@@ -33,6 +59,21 @@
   --color-staff-surface-subtle: var(--staff-surface-subtle);
   --color-staff-border: var(--staff-border);
   --color-staff-border-subtle: var(--staff-border-subtle);
+  --color-lecturer-sidebar: var(--lecturer-sidebar);
+  --color-lecturer-sidebar-elevated: var(--lecturer-sidebar-elevated);
+  --color-lecturer-sidebar-active: var(--lecturer-sidebar-active);
+  --color-lecturer-sidebar-border: var(--lecturer-sidebar-border);
+  --color-lecturer-sidebar-text: var(--lecturer-sidebar-text);
+  --color-lecturer-sidebar-text-muted: var(--lecturer-sidebar-text-muted);
+  --color-lecturer-accent: var(--lecturer-accent);
+  --color-lecturer-accent-hover: var(--lecturer-accent-hover);
+  --color-lecturer-accent-subtle: var(--lecturer-accent-subtle);
+  --color-lecturer-surface: var(--lecturer-surface);
+  --color-lecturer-border: var(--lecturer-border);
+  --color-lecturer-border-subtle: var(--lecturer-border-subtle);
+  --color-lecturer-text-primary: var(--lecturer-text-primary);
+  --color-lecturer-text-secondary: var(--lecturer-text-secondary);
+  --color-lecturer-text-muted: var(--lecturer-text-muted);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }

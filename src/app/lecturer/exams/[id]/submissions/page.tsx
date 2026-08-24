@@ -2,6 +2,11 @@
 
 import { useEffect, useMemo, useState, use as usePromise } from "react";
 import Link from "next/link";
+import { LecturerPageHeader } from "@/components/lecturer/LecturerPageHeader";
+import { MetricCard } from "@/components/lecturer/MetricCard";
+import { StatusBadge, type StatusTone } from "@/components/lecturer/StatusBadge";
+import { EmptyState, ErrorState, LoadingState } from "@/components/lecturer/EmptyState";
+import { SubmissionsIcon, IntegrityIcon } from "@/components/lecturer/icons";
 
 type CanvasStatus = "NOT_READY" | "PENDING" | "SENT" | "FAILED" | "SKIPPED" | null;
 
@@ -56,10 +61,10 @@ const SYSTEM_CHECK_LABELS: Record<"READY" | "READY_WITH_WARNINGS" | "NOT_READY",
   NOT_READY: "Not ready",
 };
 
-const SYSTEM_CHECK_STYLES: Record<"READY" | "READY_WITH_WARNINGS" | "NOT_READY", string> = {
-  READY: "bg-[#ECFDF3] text-[#067647]",
-  READY_WITH_WARNINGS: "bg-[#FFFAEB] text-[#92400E]",
-  NOT_READY: "bg-[#FEF2F2] text-[#DC2626]",
+const SYSTEM_CHECK_TONES: Record<"READY" | "READY_WITH_WARNINGS" | "NOT_READY", StatusTone> = {
+  READY: "success",
+  READY_WITH_WARNINGS: "warning",
+  NOT_READY: "critical",
 };
 
 // Tether System Check and Exam Readiness v1 — a report on the student's
@@ -67,16 +72,13 @@ const SYSTEM_CHECK_STYLES: Record<"READY" | "READY_WITH_WARNINGS" | "NOT_READY",
 // separate from marking status: this says nothing about whether the
 // submission has been graded.
 function SystemCheckBadge({ systemCheck }: { systemCheck: SubmissionRow["systemCheck"] }) {
-  if (!systemCheck) {
-    return <span className="rounded-full bg-[#F2F4F7] px-2 py-0.5 text-xs font-medium text-[#667085]">Not checked</span>;
-  }
+  if (!systemCheck) return <StatusBadge tone="neutral">Not checked</StatusBadge>;
   return (
-    <span
-      className={`rounded-full px-2 py-0.5 text-xs font-medium ${SYSTEM_CHECK_STYLES[systemCheck.overallStatus]}`}
-      title={`System check: ${new Date(systemCheck.checkedAt).toLocaleString()}${systemCheck.clientVersion ? ` — client ${systemCheck.clientVersion}` : ""}`}
-    >
-      System check: {SYSTEM_CHECK_LABELS[systemCheck.overallStatus]}
-    </span>
+    <StatusBadge tone={SYSTEM_CHECK_TONES[systemCheck.overallStatus]} className="cursor-default">
+      <span title={`System check: ${new Date(systemCheck.checkedAt).toLocaleString()}${systemCheck.clientVersion ? ` — client ${systemCheck.clientVersion}` : ""}`}>
+        System check: {SYSTEM_CHECK_LABELS[systemCheck.overallStatus]}
+      </span>
+    </StatusBadge>
   );
 }
 
@@ -88,33 +90,29 @@ const CANVAS_STATUS_LABELS: Record<NonNullable<CanvasStatus>, string> = {
   SKIPPED: "Not linked to Canvas",
 };
 
-const CANVAS_STATUS_STYLES: Record<NonNullable<CanvasStatus>, string> = {
-  NOT_READY: "bg-[#F2F4F7] text-[#667085]",
-  PENDING: "bg-[#EFF6FF] text-[#1D4ED8]",
-  SENT: "bg-[#ECFDF3] text-[#067647]",
-  FAILED: "bg-[#FEF2F2] text-[#DC2626]",
-  SKIPPED: "bg-[#F2F4F7] text-[#98A2B3]",
+const CANVAS_STATUS_TONES: Record<NonNullable<CanvasStatus>, StatusTone> = {
+  NOT_READY: "neutral",
+  PENDING: "info",
+  SENT: "success",
+  FAILED: "critical",
+  SKIPPED: "neutral",
 };
 
 function CanvasBadge({ status }: { status: CanvasStatus }) {
   if (!status) return null;
-  return (
-    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${CANVAS_STATUS_STYLES[status]}`}>
-      Canvas: {CANVAS_STATUS_LABELS[status]}
-    </span>
-  );
+  return <StatusBadge tone={CANVAS_STATUS_TONES[status]}>Canvas: {CANVAS_STATUS_LABELS[status]}</StatusBadge>;
 }
 
 // Tether Secure Exam Recovery and Resilient Autosave v1 (Part 12) — same
 // badge micro-pattern as CanvasBadge/SystemCheckBadge above.
-const RECOVERY_BADGE_STYLES: Record<string, string> = {
-  ACTIVE: "bg-[#ECFDF3] text-[#067647]",
-  Resumed: "bg-[#EFF6FF] text-[#1D4ED8]",
-  TEMPORARILY_DISCONNECTED: "bg-[#FFFAEB] text-[#92400E]",
-  MANUAL_REVIEW_REQUIRED: "bg-[#FEF2F2] text-[#DC2626]",
-  SUBMITTED: "bg-[#F2F4F7] text-[#667085]",
-  EXPIRED: "bg-[#F2F4F7] text-[#98A2B3]",
-  DEFAULT: "bg-[#F2F4F7] text-[#667085]",
+const RECOVERY_BADGE_TONES: Record<string, StatusTone> = {
+  ACTIVE: "success",
+  Resumed: "info",
+  TEMPORARILY_DISCONNECTED: "warning",
+  MANUAL_REVIEW_REQUIRED: "critical",
+  SUBMITTED: "neutral",
+  EXPIRED: "neutral",
+  DEFAULT: "neutral",
 };
 
 function RecoveryBadge({ recovery }: { recovery: SubmissionRow["recovery"] }) {
@@ -128,9 +126,9 @@ function RecoveryBadge({ recovery }: { recovery: SubmissionRow["recovery"] }) {
     .filter(Boolean)
     .join(" · ");
   return (
-    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${RECOVERY_BADGE_STYLES[styleKey] ?? RECOVERY_BADGE_STYLES.DEFAULT}`} title={title}>
-      {recovery.label}
-    </span>
+    <StatusBadge tone={RECOVERY_BADGE_TONES[styleKey] ?? RECOVERY_BADGE_TONES.DEFAULT}>
+      <span title={title}>{recovery.label}</span>
+    </StatusBadge>
   );
 }
 
@@ -140,10 +138,10 @@ function RecoveryBadge({ recovery }: { recovery: SubmissionRow["recovery"] }) {
 // warrants an eye-catching colour — a resolved/closed episode is calm
 // (informational), and "detection unavailable" is neutral (a technical
 // fact, not a signal about the student).
-const LOCKDOWN_BADGE_STYLES: Record<string, string> = {
-  DETECTED: "bg-[#FEF2F2] text-[#DC2626]",
-  CLOSED: "bg-[#F2F4F7] text-[#667085]",
-  DETECTION_UNAVAILABLE: "bg-[#FFFAEB] text-[#92400E]",
+const LOCKDOWN_BADGE_TONES: Record<string, StatusTone> = {
+  DETECTED: "critical",
+  CLOSED: "neutral",
+  DETECTION_UNAVAILABLE: "warning",
 };
 
 function LockdownBadge({ lockdown }: { lockdown: SubmissionRow["lockdown"] }) {
@@ -158,9 +156,9 @@ function LockdownBadge({ lockdown }: { lockdown: SubmissionRow["lockdown"] }) {
     .filter(Boolean)
     .join(" · ");
   return (
-    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${LOCKDOWN_BADGE_STYLES[lockdown.state] ?? LOCKDOWN_BADGE_STYLES.CLOSED}`} title={title}>
-      {lockdown.label}
-    </span>
+    <StatusBadge tone={LOCKDOWN_BADGE_TONES[lockdown.state] ?? LOCKDOWN_BADGE_TONES.CLOSED}>
+      <span title={title}>{lockdown.label}</span>
+    </StatusBadge>
   );
 }
 
@@ -198,34 +196,6 @@ function hasAnySignal(s: SubmissionRow): boolean {
   );
 }
 
-function SubmissionMetric({
-  label,
-  value,
-  accent = "neutral",
-}: {
-  label: string;
-  value: number;
-  accent?: "neutral" | "info" | "warning" | "success";
-}) {
-  const dotColor = {
-    neutral: "bg-[#98A2B3]",
-    info: "bg-[#2563EB]",
-    warning: "bg-[#D97706]",
-    success: "bg-[#067647]",
-  }[accent];
-  const tintClasses = accent === "warning" ? "border-[#FEDF89] bg-[#FFFAEB]" : "border-[#E4E7EC] bg-white";
-
-  return (
-    <div className={`rounded-xl border p-4 ${tintClasses}`}>
-      <div className="flex items-center gap-1.5">
-        <span className={`h-1.5 w-1.5 rounded-full ${dotColor}`} aria-hidden="true" />
-        <span className="text-sm font-medium text-[#667085]">{label}</span>
-      </div>
-      <div className="mt-1.5 text-2xl font-bold text-[#101828]">{value}</div>
-    </div>
-  );
-}
-
 const ROW_COLUMNS = "md:grid md:grid-cols-[1fr_120px_120px_170px_80px_140px] md:items-center md:gap-4";
 
 function SubmissionListRow({ examId, submission: s }: { examId: string; submission: SubmissionRow }) {
@@ -234,30 +204,28 @@ function SubmissionListRow({ examId, submission: s }: { examId: string; submissi
   const submittedDisplay = s.submittedAt ? new Date(s.submittedAt).toLocaleString() : "—";
 
   return (
-    <li className={`border-b border-[#E4E7EC] px-4 py-3 last:border-b-0 ${ROW_COLUMNS}`}>
+    <li className={`border-b border-lecturer-border px-4 py-3 last:border-b-0 ${ROW_COLUMNS}`}>
       <div className="min-w-0">
-        <p className="truncate text-sm font-semibold text-[#101828]">{s.student.name}</p>
-        <p className="truncate text-xs text-[#667085]">
+        <p className="truncate text-sm font-semibold text-lecturer-text-primary">{s.student.name}</p>
+        <p className="truncate text-xs text-lecturer-text-secondary">
           {s.student.email} · Attempt {s.attemptNumber}
         </p>
       </div>
 
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Submitted</p>
-        <p className="text-sm text-[#101828]">{submittedDisplay}</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Submitted</p>
+        <p className="text-sm text-lecturer-text-primary">{submittedDisplay}</p>
       </div>
 
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Marking</p>
-        <p className="text-sm text-[#101828]">{MARKING_LABELS[s.status]}</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Marking</p>
+        <p className="text-sm text-lecturer-text-primary">{MARKING_LABELS[s.status]}</p>
       </div>
 
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Integrity</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Integrity</p>
         {review ? (
-          <span className="inline-flex items-center rounded-full bg-[#FEF3C7] px-2 py-0.5 text-xs font-medium text-[#92400E]">
-            Needs review
-          </span>
+          <StatusBadge tone="warning">Needs review</StatusBadge>
         ) : hasAnySignal(s) ? (
           <div className="flex flex-wrap gap-1">
             <SystemCheckBadge systemCheck={s.systemCheck} />
@@ -266,26 +234,26 @@ function SubmissionListRow({ examId, submission: s }: { examId: string; submissi
             <LockdownBadge lockdown={s.lockdown} />
           </div>
         ) : (
-          <span className="text-sm text-[#667085]">No signals recorded</span>
+          <span className="text-sm text-lecturer-text-secondary">No signals recorded</span>
         )}
       </div>
 
       <div className="mt-2 md:mt-0">
-        <p className="text-xs font-medium text-[#667085] md:sr-only">Score</p>
-        <p className="text-sm text-[#101828]">{scoreDisplay}</p>
+        <p className="text-xs font-medium text-lecturer-text-secondary md:sr-only">Score</p>
+        <p className="text-sm text-lecturer-text-primary">{scoreDisplay}</p>
       </div>
 
       <div className="mt-3 flex items-center justify-between gap-3 md:mt-0 md:justify-end">
         <Link
           href={`/lecturer/submissions/${s.id}/evidence`}
-          className="rounded text-sm font-medium text-[#667085] hover:text-[#101828] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+          className="rounded text-sm font-medium text-lecturer-text-secondary hover:text-lecturer-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
         >
           Evidence
         </Link>
         {s.status !== "IN_PROGRESS" && (
           <Link
             href={`/lecturer/exams/${examId}/submissions/${s.id}`}
-            className="rounded text-sm font-semibold text-[#2563EB] hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+            className="rounded text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
           >
             {s.status === "GRADED" ? "Review →" : "Grade →"}
           </Link>
@@ -372,59 +340,35 @@ export default function SubmissionsListPage({
   const markedCount = submissions.filter((s) => s.status === "GRADED").length;
   const needsReviewCount = submissions.filter(needsReview).length;
 
-  if (loading) return <p className="mx-auto max-w-7xl text-sm text-[#667085]">Loading submissions…</p>;
+  if (loading) return <LoadingState label="Loading submissions…" />;
 
-  if (error) {
-    return (
-      <div className="mx-auto max-w-7xl">
-        <p className="text-sm text-[#DC2626]">{error}</p>
-        <button
-          type="button"
-          onClick={load}
-          className="mt-2 rounded text-sm font-medium text-[#2563EB] underline underline-offset-2 hover:text-[#1D4ED8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
+  if (error) return <ErrorState message={error} onRetry={load} />;
 
   return (
     <div className="mx-auto max-w-7xl">
-      <div>
-        <p className="text-sm font-medium text-[#667085]">Submissions</p>
-        <h1 className="mt-1 text-3xl font-bold text-[#101828]">{examTitle ?? "Exam"}</h1>
-        <p className="mt-1 text-sm text-[#667085]">Review student attempts, marking status, and integrity evidence.</p>
-        <Link
-          href={`/lecturer/exams/${id}`}
-          className="mt-2 inline-block rounded text-sm font-medium text-[#667085] hover:text-[#101828] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
-        >
-          ← Back to exam
-        </Link>
-      </div>
+      <LecturerPageHeader
+        breadcrumbs={[{ label: "Dashboard", href: "/lecturer" }, { label: examTitle ?? "Exam", href: `/lecturer/exams/${id}` }, { label: "Submissions" }]}
+        title={examTitle ?? "Exam"}
+        description="Review student attempts, marking status, and integrity evidence."
+      />
 
       {submissions.length > 0 && (
         <div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <SubmissionMetric label="Submitted" value={submittedCount} accent="info" />
-          <SubmissionMetric label="Awaiting marking" value={awaitingMarkingCount} accent="neutral" />
-          <SubmissionMetric label="Needs review" value={needsReviewCount} accent={needsReviewCount > 0 ? "warning" : "neutral"} />
-          <SubmissionMetric label="Marked" value={markedCount} accent="success" />
+          <MetricCard label="Submitted" value={submittedCount} accent="info" icon={<SubmissionsIcon className="h-3.5 w-3.5" />} />
+          <MetricCard label="Awaiting marking" value={awaitingMarkingCount} accent="neutral" icon={<SubmissionsIcon className="h-3.5 w-3.5" />} />
+          <MetricCard label="Needs review" value={needsReviewCount} accent={needsReviewCount > 0 ? "warning" : "neutral"} icon={<IntegrityIcon className="h-3.5 w-3.5" />} />
+          <MetricCard label="Marked" value={markedCount} accent="success" icon={<SubmissionsIcon className="h-3.5 w-3.5" />} />
         </div>
       )}
 
       <div className="mt-8">
         {submissions.length === 0 ? (
-          <div className="rounded-xl border border-[#E4E7EC] bg-white p-10 text-center">
-            <p className="text-base font-semibold text-[#101828]">No submissions yet</p>
-            <p className="mx-auto mt-1 max-w-sm text-sm text-[#667085]">
-              Student attempts will appear here after they submit this exam.
-            </p>
-          </div>
+          <EmptyState title="No submissions yet" description="Student attempts will appear here after they submit this exam." />
         ) : (
           <>
             <div className="flex flex-wrap items-end gap-3">
               <div>
-                <label htmlFor="submission-search" className="block text-xs font-medium text-[#667085]">
+                <label htmlFor="submission-search" className="block text-xs font-medium text-lecturer-text-secondary">
                   Search
                 </label>
                 <input
@@ -432,19 +376,19 @@ export default function SubmissionsListPage({
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search students..."
-                  className="mt-1 w-56 rounded-lg border border-[#E4E7EC] bg-white px-2.5 py-1.5 text-sm text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  placeholder="Search students…"
+                  className="mt-1 w-56 rounded-lg border border-lecturer-border bg-lecturer-surface px-2.5 py-1.5 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 />
               </div>
               <div>
-                <label htmlFor="filter-marking" className="block text-xs font-medium text-[#667085]">
+                <label htmlFor="filter-marking" className="block text-xs font-medium text-lecturer-text-secondary">
                   Marking
                 </label>
                 <select
                   id="filter-marking"
                   value={markingFilter}
                   onChange={(e) => setMarkingFilter(e.target.value as MarkingFilterValue)}
-                  className="mt-1 rounded-lg border border-[#E4E7EC] bg-white px-2.5 py-1.5 text-sm text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  className="mt-1 rounded-lg border border-lecturer-border bg-lecturer-surface px-2.5 py-1.5 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 >
                   <option value="all">All</option>
                   <option value="IN_PROGRESS">In progress</option>
@@ -453,14 +397,14 @@ export default function SubmissionsListPage({
                 </select>
               </div>
               <div>
-                <label htmlFor="filter-integrity" className="block text-xs font-medium text-[#667085]">
+                <label htmlFor="filter-integrity" className="block text-xs font-medium text-lecturer-text-secondary">
                   Integrity
                 </label>
                 <select
                   id="filter-integrity"
                   value={integrityFilter}
                   onChange={(e) => setIntegrityFilter(e.target.value as IntegrityFilterValue)}
-                  className="mt-1 rounded-lg border border-[#E4E7EC] bg-white px-2.5 py-1.5 text-sm text-[#101828] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  className="mt-1 rounded-lg border border-lecturer-border bg-lecturer-surface px-2.5 py-1.5 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 >
                   <option value="all">All</option>
                   <option value="needs-review">Needs review</option>
@@ -470,7 +414,7 @@ export default function SubmissionsListPage({
                 <button
                   type="button"
                   onClick={clearFilters}
-                  className="rounded pb-1.5 text-sm font-medium text-[#667085] underline underline-offset-2 hover:text-[#101828] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
+                  className="rounded pb-1.5 text-sm font-medium text-lecturer-text-secondary underline underline-offset-2 hover:text-lecturer-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
                 >
                   Clear filters
                 </button>
@@ -478,14 +422,14 @@ export default function SubmissionsListPage({
             </div>
 
             {hasActiveFilters && (
-              <p className="mt-2 text-xs text-[#667085]">
+              <p className="mt-2 text-xs text-lecturer-text-secondary">
                 {countLabel(filtered.length, "submission")} of {submissions.length.toLocaleString()} shown
               </p>
             )}
 
-            <div className="mt-3 overflow-hidden rounded-xl border border-[#E4E7EC] bg-white">
+            <div className="mt-3 overflow-hidden rounded-xl border border-lecturer-border bg-lecturer-surface">
               <div
-                className={`hidden border-b border-[#E4E7EC] px-4 py-2 text-xs font-medium text-[#667085] md:grid ${ROW_COLUMNS}`}
+                className={`hidden border-b border-lecturer-border px-4 py-2 text-xs font-medium text-lecturer-text-secondary md:grid ${ROW_COLUMNS}`}
                 aria-hidden="true"
               >
                 <span>Student</span>
@@ -495,9 +439,7 @@ export default function SubmissionsListPage({
                 <span>Score</span>
                 <span className="text-right">Action</span>
               </div>
-              {filtered.length === 0 && (
-                <p className="p-6 text-center text-sm text-[#667085]">No submissions match the current filters.</p>
-              )}
+              {filtered.length === 0 && <p className="p-6 text-center text-sm text-lecturer-text-secondary">No submissions match the current filters.</p>}
               <ul>
                 {filtered.map((s) => (
                   <SubmissionListRow key={s.id} examId={id} submission={s} />

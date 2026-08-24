@@ -191,7 +191,7 @@ export default function IntegrityEvidenceTimelinePage({ params }: { params: Prom
       .catch((err) => setError(err.message));
   }, [id]);
 
-  if (error) return <p className="mx-auto max-w-3xl text-sm text-red-600">{error}</p>;
+  if (error) return <p className="mx-auto max-w-3xl text-sm text-[#B42318]">{error}</p>;
   if (!timeline) return <p className="mx-auto max-w-3xl text-sm text-[#667085]">Loading…</p>;
 
   const { summary } = timeline;
@@ -207,7 +207,7 @@ export default function IntegrityEvidenceTimelinePage({ params }: { params: Prom
         &larr; Back to submission
       </Link>
 
-      <h1 className="mt-3 text-2xl font-bold text-[#101828]">Integrity evidence timeline</h1>
+      <h1 className="mt-3 text-[28px] font-bold text-lecturer-text-primary">Integrity evidence timeline</h1>
       <p className="mt-1 text-sm text-[#667085]">
         {timeline.student.name} · {timeline.exam.title}
       </p>
@@ -216,7 +216,7 @@ export default function IntegrityEvidenceTimelinePage({ params }: { params: Prom
         lecturer review and do not by themselves determine academic misconduct.
       </p>
 
-      <div className="mt-4 rounded-xl border border-[#E4E7EC] bg-white p-4">
+      <div className="mt-4 rounded-xl border border-[#E4E7EC] bg-lecturer-surface p-4">
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <SummaryChip label="Attempt status" value={summary.attemptStatus} />
           <SummaryChip label="Recorded events" value={summary.totalEvents} />
@@ -248,7 +248,7 @@ export default function IntegrityEvidenceTimelinePage({ params }: { params: Prom
         ))}
       </div>
 
-      <div className="mt-3 rounded-xl border border-[#E4E7EC] bg-white p-4">
+      <div className="mt-3 rounded-xl border border-[#E4E7EC] bg-lecturer-surface p-4">
         {visibleEvents.length === 0 ? (
           <p className="text-sm text-[#667085]">No events match this filter.</p>
         ) : (
