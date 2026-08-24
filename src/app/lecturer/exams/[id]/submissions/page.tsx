@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, use as usePromise } from "react";
+import { useEffect, useMemo, useRef, useState, use as usePromise } from "react";
 import Link from "next/link";
 import { LecturerPageHeader } from "@/components/lecturer/LecturerPageHeader";
 import { MetricCard } from "@/components/lecturer/MetricCard";
@@ -350,6 +350,7 @@ export default function SubmissionsListPage({
         breadcrumbs={[{ label: "Dashboard", href: "/lecturer" }, { label: examTitle ?? "Exam", href: `/lecturer/exams/${id}` }, { label: "Submissions" }]}
         title={examTitle ?? "Exam"}
         description="Review student attempts, marking status, and integrity evidence."
+        actions={<ExportMarksMenu examId={id} disabled={submissions.length === 0} />}
       />
 
       {submissions.length > 0 && (
@@ -449,6 +450,73 @@ export default function SubmissionsListPage({
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// Exam Archive Lifecycle v1 — Marks Export. See
+// docs/exam-archive-lifecycle-v1.md. Two plain `<a href>` downloads
+// (GET /api/lecturer/exams/[examId]/marks-export[?detail=true]) — no
+// client-side mutation, so no fetch/loading state needed, matching the
+// existing "Export CSV" link pattern already used on the Analytics and
+// Integrity pages. Disabled (not hidden) with an explanatory title when
+// there are no submissions yet, rather than producing a headers-only
+// file silently.
+function ExportMarksMenu({ examId, disabled }: { examId: string; disabled: boolean }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onClickOutside(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, [open]);
+
+  if (disabled) {
+    return (
+      <span
+        title="Export marks once at least one student has submitted this exam."
+        className="cursor-not-allowed rounded-lg border border-lecturer-border bg-lecturer-surface px-4 py-2 text-sm font-medium text-lecturer-text-muted"
+      >
+        Export marks
+      </span>
+    );
+  }
+
+  return (
+    <div ref={rootRef} className="relative inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="rounded-lg border border-lecturer-border bg-lecturer-surface px-4 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
+      >
+        Export marks ▾
+      </button>
+      {open && (
+        <div role="menu" className="absolute right-0 z-20 mt-1.5 w-48 overflow-hidden rounded-xl border border-lecturer-border bg-lecturer-surface p-1.5 shadow-lg">
+          <a
+            href={`/api/lecturer/exams/${examId}/marks-export`}
+            role="menuitem"
+            onClick={() => setOpen(false)}
+            className="block rounded-md px-3 py-2 text-sm text-lecturer-text-primary hover:bg-lecturer-border-subtle"
+          >
+            Summary CSV
+          </a>
+          <a
+            href={`/api/lecturer/exams/${examId}/marks-export?detail=true`}
+            role="menuitem"
+            onClick={() => setOpen(false)}
+            className="block rounded-md px-3 py-2 text-sm text-lecturer-text-primary hover:bg-lecturer-border-subtle"
+          >
+            Detailed CSV (per question)
+          </a>
+        </div>
+      )}
     </div>
   );
 }

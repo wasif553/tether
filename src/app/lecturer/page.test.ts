@@ -83,11 +83,21 @@ describe("Lecturer Dashboard — existing exam navigation unchanged (Active/Upco
     const start = pageSource.indexOf("function ExamCard(");
     expect(start).toBeGreaterThan(-1);
     const block = pageSource.slice(start);
-    expect(block).toMatch(/href=\{`\/lecturer\/exams\/\$\{exam\.id\}`\}/);
+    // Exam Archive Lifecycle v1 — the href is now built once
+    // (`const href = \`/lecturer/exams/${exam.id}\`;`) and reused via
+    // `href={href}` at every Link, rather than the template literal
+    // appearing inline at each JSX site — same destination, refactored
+    // to also feed the actions menu's own href prop without repeating it.
+    expect(block).toMatch(/const href = `\/lecturer\/exams\/\$\{exam\.id\}`;/);
+    expect(block).not.toMatch(/\/integrity`;/);
     expect(block).not.toMatch(/\/integrity`\}/);
   });
 
   it("ExamCard is used, unchanged, for Active/Upcoming/Drafts/Recent/Older sections", () => {
-    expect(pageSource).toMatch(/<ExamCard key=\{exam\.id\} exam=\{exam\} action="Open →" \/>/);
+    // Exam Archive Lifecycle v1 — Active/Upcoming/Drafts now also pass
+    // onCardChanged (wiring the archive/delete actions menu), so this no
+    // longer anchors to an immediate "/>" — it only needs to confirm the
+    // Active section's call site still exists with its own action text.
+    expect(pageSource).toMatch(/<ExamCard key=\{exam\.id\} exam=\{exam\} action="Open →"/);
   });
 });

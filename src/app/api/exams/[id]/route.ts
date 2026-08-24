@@ -11,6 +11,7 @@ import type { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionWhere, institutionErrorResponse, requireInstitutionId } from "@/lib/institutionScope";
 import { assertCanAssignExamToCourse, assertStudentsInCourse, CourseAssignmentError } from "@/lib/courseAssignment";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
+import { checkExamDeleteEligibility } from "@/lib/examDeleteEligibility";
 
 const updateExamSchema = z
   .object({
@@ -42,6 +43,12 @@ const updateExamSchema = z
     selectedStudentIds: z.array(z.string().min(1)).optional(),
     availableFrom: z.string().datetime().nullable().optional(),
     availableUntil: z.string().datetime().nullable().optional(),
+    // Exam Archive Lifecycle v1 — see docs/exam-archive-lifecycle-v1.md.
+    // true sets archivedAt to now(); false clears it (Restore); omitted
+    // leaves it untouched. Deliberately a boolean toggle here (mirroring
+    // `published`'s own pattern) rather than letting the client set an
+    // arbitrary archivedAt timestamp directly.
+    archived: z.boolean().optional(),
   })
   .refine(
     (data) =>
@@ -200,6 +207,7 @@ export async function PATCH(
       selectedStudentIds,
       availableFrom,
       availableUntil,
+      archived,
       ...rest
     } = parsed.data;
 
@@ -325,6 +333,14 @@ export async function PATCH(
         ...(availableUntil !== undefined
           ? { availableUntil: availableUntil ? new Date(availableUntil) : null }
           : {}),
+        // Exam Archive Lifecycle v1 — archived: true stamps archivedAt to
+        // now(); archived: false (Restore) clears it. Omitted leaves the
+        // exam's current archived state untouched. Restoring never sets
+        // any other field — the exam falls back into its natural
+        // Draft/Scheduled/Open/Closed grouping purely because it's no
+        // longer excluded from the default GET /api/exams response (see
+        // that route's own archivedAt filtering).
+        ...(archived !== undefined ? { archivedAt: archived ? new Date() : null } : {}),
         ...(mergedSecureSettings
           ? { secureSettings: mergedSecureSettings as Prisma.InputJsonValue }
           : {}),
@@ -387,6 +403,19 @@ export async function DELETE(
     const { id } = await params;
     const exam = await getOwnedExam(id, session.user.id, session);
     if (!exam) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+    // Exam Archive Lifecycle v1 — see docs/exam-archive-lifecycle-v1.md
+    // and src/lib/examDeleteEligibility.ts. Authoritative server-side
+    // check performed BEFORE any delete is attempted — this route never
+    // trusts the caller's own belief that the exam is safe to delete.
+    // Every relation from Exam down to Submission/IntegrityEvent/
+    // evidence/secure-client tables is onDelete: Cascade, so an
+    // unconditional delete would silently destroy academic and
+    // integrity records. Fails closed: denied unless proven safe.
+    const eligibility = await checkExamDeleteEligibility(id);
+    if (!eligibility.eligible) {
+      return NextResponse.json({ error: eligibility.reason }, { status: 409 });
+    }
 
     await prisma.exam.delete({ where: { id } });
     return NextResponse.json({ ok: true });

@@ -48,6 +48,7 @@ import {
 } from "@/lib/examTimeAccommodation";
 import { MetricCard } from "@/components/lecturer/MetricCard";
 import { QuestionBankIcon, SubmissionsIcon, IntegrityIcon, ReportsIcon } from "@/components/lecturer/icons";
+import { ExamActionsMenu } from "@/components/lecturer/ExamActionsMenu";
 
 type Question = {
   id: string;
@@ -203,6 +204,8 @@ type Exam = {
   marksReleasedById: string | null;
   // Standalone Exam Link v1 — see docs/standalone-exam-link-v1.md.
   standaloneInviteEnabled: boolean;
+  // Exam Archive Lifecycle v1 — see docs/exam-archive-lifecycle-v1.md.
+  archivedAt: string | null;
 };
 
 type LecturerCourse = {
@@ -1315,7 +1318,7 @@ export default function LecturerExamPage({
           <p className="mt-1 text-sm text-lecturer-text-secondary">{workspaceAvailabilityLine}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {exam.questions.some((q) => q.type === "ESSAY") && hasUngradedSubmissions && (
+          {!exam.archivedAt && exam.questions.some((q) => q.type === "ESSAY") && hasUngradedSubmissions && (
             <button
               onClick={handleMarkEssays}
               disabled={markingEssays}
@@ -1327,19 +1330,46 @@ export default function LecturerExamPage({
               {markingEssays ? "Marking..." : "Mark essays with AI"}
             </button>
           )}
-          <button
-            onClick={togglePublish}
-            className={
-              exam.published
-                ? "rounded-lg border border-lecturer-border bg-lecturer-surface px-4 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
-                : "rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-semibold text-white hover:bg-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
-            }
-          >
-            {exam.published ? "Unpublish" : "Publish"}
-          </button>
+          {!exam.archivedAt && (
+            <button
+              onClick={togglePublish}
+              className={
+                exam.published
+                  ? "rounded-lg border border-lecturer-border bg-lecturer-surface px-4 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
+                  : "rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-semibold text-white hover:bg-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
+              }
+            >
+              {exam.published ? "Unpublish" : "Publish"}
+            </button>
+          )}
+          <ExamActionsMenu
+            examId={exam.id}
+            examTitle={exam.title}
+            archived={Boolean(exam.archivedAt)}
+            deletable={!exam.published && (submissionCounts?.total ?? 0) === 0}
+            href={`/lecturer/exams/${exam.id}`}
+            onChanged={loadExam}
+          />
         </div>
       </div>
       {markEssaysMessage && <p className="mt-2 text-sm text-lecturer-text-secondary">{markEssaysMessage}</p>}
+
+      {exam.archivedAt && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-lecturer-border bg-lecturer-border-subtle/60 p-4">
+          <div>
+            <p className="text-sm font-semibold text-lecturer-text-primary">Archived exam</p>
+            <p className="mt-0.5 text-sm text-lecturer-text-secondary">Restore this exam to make changes.</p>
+          </div>
+          <ExamActionsMenu
+            examId={exam.id}
+            examTitle={exam.title}
+            archived
+            deletable={false}
+            href={`/lecturer/exams/${exam.id}`}
+            onChanged={loadExam}
+          />
+        </div>
+      )}
 
       <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <MetricCard label="Questions" value={exam.questions.length} icon={<QuestionBankIcon className="h-[18px] w-[18px]" />} />

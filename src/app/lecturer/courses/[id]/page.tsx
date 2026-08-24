@@ -316,7 +316,20 @@ export default function CourseDetailPage({
         </SectionCard>
       )}
 
-      <SectionCard title="Exams in this course" actions={<Link href="/lecturer" className="text-sm font-medium text-lecturer-accent hover:text-lecturer-accent-hover">New exam →</Link>}>
+      <SectionCard
+        title="Exams in this course"
+        actions={
+          <>
+            {/* Exam Archive Lifecycle v1 — this list already excludes archived exams (GET /api/exams excludes them server-side by default); this link is the explicit path to see them. */}
+            <Link href="/lecturer/exams" className="text-sm font-medium text-lecturer-text-secondary hover:text-lecturer-text-primary">
+              View archived
+            </Link>
+            <Link href="/lecturer" className="text-sm font-medium text-lecturer-accent hover:text-lecturer-accent-hover">
+              New exam →
+            </Link>
+          </>
+        }
+      >
         {courseExams === null && <LoadingState label="Loading exams…" />}
         {courseExams !== null && courseExams.length === 0 && <EmptyState title="No exams yet" description="Create an exam from the dashboard and assign it to this course." />}
         {courseExams !== null && courseExams.length > 0 && (

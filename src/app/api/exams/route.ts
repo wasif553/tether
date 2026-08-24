@@ -60,7 +60,14 @@ type LecturerScope = { createdById: string; institution: { institutionId?: strin
 async function loadLecturerNeedsReviewCounts(scope: LecturerScope): Promise<Map<string, number>> {
   const reviewCounts = await prisma.integrityEvent.groupBy({
     by: ["examId"],
-    where: { reviewStatus: "NEEDS_REVIEW", exam: { createdById: scope.createdById, ...scope.institution } },
+    // Exam Archive Lifecycle v1 — excludes archived exams from this
+    // aggregate too, so an archived exam's signals can never distort a
+    // needsReviewCount looked up for a currently-listed (non-archived)
+    // exam id. Harmless either way (a lookup for an archived exam's id
+    // never happens from the default list), but keeps this query's own
+    // scope consistent with loadCurrentLecturerExams/oldLecturerExamsWhere
+    // below rather than silently diverging.
+    where: { reviewStatus: "NEEDS_REVIEW", exam: { createdById: scope.createdById, ...scope.institution, archivedAt: null } },
     _count: { _all: true },
   });
   return new Map(reviewCounts.map((row) => [row.examId, row._count._all]));
@@ -84,6 +91,11 @@ async function loadCurrentLecturerExams(scope: LecturerScope, now: Date, needsRe
     where: {
       createdById: scope.createdById,
       ...scope.institution,
+      // Exam Archive Lifecycle v1 — archived exams never appear in any
+      // default/current lecturer view, however active/needing-review
+      // they'd otherwise look. See GET's own ?archived=true branch for
+      // the ONLY query path that returns archived exams.
+      archivedAt: null,
       OR: [
         { published: false },
         { availableFrom: { gt: now } },
@@ -101,10 +113,21 @@ function oldLecturerExamsWhere(scope: LecturerScope, now: Date, needsReviewExamI
   return {
     createdById: scope.createdById,
     ...scope.institution,
+    // Exam Archive Lifecycle v1 — see loadCurrentLecturerExams's own note above.
+    archivedAt: null,
     published: true,
     availableUntil: { lt: now },
     ...(needsReviewExamIds.length ? { id: { notIn: needsReviewExamIds } } : {}),
   };
+}
+
+/** Exam Archive Lifecycle v1 — the ONLY query path that ever returns an archived exam. Deliberately separate from every other query above rather than a shared flag, so an archived exam can never leak into a default response by a missed conditional. */
+async function loadArchivedLecturerExams(scope: LecturerScope) {
+  return prisma.exam.findMany({
+    where: { createdById: scope.createdById, ...scope.institution, archivedAt: { not: null } },
+    orderBy: { archivedAt: "desc" },
+    include: lecturerExamInclude,
+  });
 }
 
 /** `take`/`skip`-bounded — the query that stops payload size from growing with a lecturer's accumulated closed-exam count. */
@@ -159,6 +182,15 @@ export async function GET(req?: Request) {
     const historyOffsetRaw = url?.searchParams.get("historyOffset");
     const historyLimitRaw = url?.searchParams.get("historyLimit");
     const isHistoryPageRequest = historyOffsetRaw != null || historyLimitRaw != null;
+
+    // Exam Archive Lifecycle v1 — a completely separate response branch,
+    // never merged with the default/current/history queries above, so an
+    // archived exam can only ever be returned when this exact param is
+    // present. See docs/exam-archive-lifecycle-v1.md.
+    if (url?.searchParams.get("archived") === "true") {
+      const archivedExams = await loadArchivedLecturerExams(scope);
+      return NextResponse.json(archivedExams.map((exam) => sanitizeLecturerExam(exam, needsReviewByExamId)));
+    }
 
     if (isHistoryPageRequest) {
       const offset = Math.max(0, Number(historyOffsetRaw) || 0);

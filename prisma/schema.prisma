@@ -379,6 +379,22 @@ model Exam {
   marksReleasedAt    DateTime?
   marksReleasedById  String?
 
+  // Exam Archive Lifecycle v1 — see docs/exam-archive-lifecycle-v1.md.
+  // Lecturer-facing organisational flag ONLY: excludes an exam from the
+  // lecturer's default operational views (dashboard, exam index,
+  // course exam list, needs-review/active/upcoming/draft counts) without
+  // deleting or altering any academic record. Deliberately the single
+  // minimal field per the "prefer existing mechanism, else one nullable
+  // DateTime" rule — no separate boolean, no new lifecycle enum. Never
+  // read by any student-facing route: archiving must never change
+  // whether a student can access/join/submit an already-published exam
+  // (see that doc's "What archive does NOT do"). Restoring simply clears
+  // this field; the exam falls back into its natural
+  // Draft/Scheduled/Open/Closed grouping via the EXISTING
+  // lecturerAvailabilityStatus()/lecturerDashboardGroup() logic in
+  // src/lib/lecturerDashboardGrouping.ts — no second status system.
+  archivedAt DateTime?
+
   // Course, Enrolment, Exam Assignment, Scheduling v1 — see
   // docs/course-enrolment-and-exam-assignment.md. courseId is nullable:
   // a null value means this is a legacy institution-wide exam, which

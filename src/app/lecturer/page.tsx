@@ -12,6 +12,7 @@ import { SectionCard, SectionHeading } from "@/components/lecturer/SectionCard";
 import { StatusBadge, availabilityToneFor } from "@/components/lecturer/StatusBadge";
 import { EmptyState, ErrorState, LoadingState } from "@/components/lecturer/EmptyState";
 import { ExamsIcon, IntegrityIcon, ReportsIcon } from "@/components/lecturer/icons";
+import { ExamActionsMenu } from "@/components/lecturer/ExamActionsMenu";
 
 type ExamSummary = {
   id: string;
@@ -241,7 +242,7 @@ export default function LecturerDashboard() {
             <SectionHeading title="Active" />
             <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
               {active.map((exam) => (
-                <ExamCard key={exam.id} exam={exam} action="Open →" />
+                <ExamCard key={exam.id} exam={exam} action="Open →" onCardChanged={() => loadExams(showAllClosed)} />
               ))}
             </div>
           </section>
@@ -252,7 +253,7 @@ export default function LecturerDashboard() {
             <SectionHeading title="Upcoming" />
             <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
               {upcoming.map((exam) => (
-                <ExamCard key={exam.id} exam={exam} />
+                <ExamCard key={exam.id} exam={exam} onCardChanged={() => loadExams(showAllClosed)} />
               ))}
             </div>
           </section>
@@ -263,7 +264,7 @@ export default function LecturerDashboard() {
             <SectionHeading title="Drafts" muted />
             <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
               {draft.map((exam) => (
-                <ExamCard key={exam.id} exam={exam} action="Continue editing →" />
+                <ExamCard key={exam.id} exam={exam} action="Continue editing →" onCardChanged={() => loadExams(showAllClosed)} />
               ))}
             </div>
           </section>
@@ -274,7 +275,7 @@ export default function LecturerDashboard() {
             <SectionHeading title="Recently closed" muted />
             <div className="mt-3 space-y-2">
               {recentlyClosed.map((exam) => (
-                <ExamCard key={exam.id} exam={exam} variant="archived" />
+                <ExamCard key={exam.id} exam={exam} variant="history" />
               ))}
             </div>
           </section>
@@ -297,7 +298,7 @@ export default function LecturerDashboard() {
                   <SectionHeading title="Older examinations" muted />
                   <div className="mt-3 space-y-2">
                     {olderClosed.map((exam) => (
-                      <ExamCard key={exam.id} exam={exam} variant="archived" />
+                      <ExamCard key={exam.id} exam={exam} variant="history" />
                     ))}
                   </div>
                 </section>
@@ -482,7 +483,7 @@ function ReviewRow({ exam }: { exam: ExamSummary }) {
 
 // Essential fields only (title, course, submission/review counts already
 // cheaply available from the single aggregate query, one status pill) —
-// no per-exam extra DB round trip. `variant="archived"` is reserved for
+// no per-exam extra DB round trip. `variant="history"` is reserved for
 // genuinely lower-priority historical rows (Recently closed/Older
 // examinations) — a subtly quieter surface is appropriate there. Drafts
 // deliberately use the SAME "default" white-card treatment as Active
@@ -494,36 +495,67 @@ function ReviewRow({ exam }: { exam: ExamSummary }) {
 // "Open →", "Continue editing →") so it's clear the whole card is
 // clickable — never a second link/destination, purely a visual hint on
 // the SAME existing /lecturer/exams/${exam.id} link.
-function ExamCard({ exam, variant = "default", action }: { exam: ExamSummary; variant?: "default" | "archived"; action?: string }) {
+// Exam Archive Lifecycle v1 — an archived exam is excluded from GET
+// /api/exams entirely (see src/app/api/exams/route.ts), so ExamCard on
+// the dashboard never actually receives one; onCardChanged only ever
+// needs to handle "Archive" (and, for eligible drafts, "Delete"). The
+// menu button is a SIBLING to the title Link, not nested inside it — an
+// <a> containing a <button> is invalid HTML, the same nested-interactive-
+// element pattern ReviewRow above was already rewritten to avoid.
+function ExamCard({
+  exam,
+  variant = "default",
+  action,
+  onCardChanged,
+}: {
+  exam: ExamSummary;
+  variant?: "default" | "history";
+  action?: string;
+  onCardChanged?: () => void;
+}) {
   const status = lecturerAvailabilityStatus(exam);
-  const archived = variant === "archived";
+  const history = variant === "history";
+  const href = `/lecturer/exams/${exam.id}`;
 
   return (
-    <Link
-      href={`/lecturer/exams/${exam.id}`}
-      className={`block rounded-xl border p-4 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent ${
-        archived
-          ? "border-lecturer-border bg-staff-canvas hover:border-lecturer-text-muted"
-          : "border-lecturer-border bg-lecturer-surface hover:border-lecturer-accent/50 hover:shadow-sm"
+    <div
+      className={`rounded-xl border p-4 transition-all ${
+        history ? "border-lecturer-border bg-staff-canvas" : "border-lecturer-border bg-lecturer-surface hover:border-lecturer-accent/50 hover:shadow-sm"
       }`}
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-lecturer-text-primary">{exam.title}</p>
+        <Link href={href} className="min-w-0 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent">
+          <p className="truncate text-sm font-semibold text-lecturer-text-primary hover:text-lecturer-accent">{exam.title}</p>
           {exam.course && (
             <p className="mt-0.5 truncate text-xs text-lecturer-text-secondary">
               {exam.course.code} — {exam.course.name}
             </p>
           )}
+        </Link>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <StatusBadge tone={availabilityToneFor(status)}>{status}</StatusBadge>
+          {onCardChanged && (
+            <ExamActionsMenu
+              examId={exam.id}
+              examTitle={exam.title}
+              archived={false}
+              deletable={!exam.published && exam._count.submissions === 0}
+              href={href}
+              onChanged={onCardChanged}
+            />
+          )}
         </div>
-        <StatusBadge tone={availabilityToneFor(status)}>{status}</StatusBadge>
       </div>
       <div className="mt-2 flex items-end justify-between gap-3">
         <p className="text-xs text-lecturer-text-secondary">
           {countLabel(exam._count.questions, "question")} · {exam.durationMins} min · {countLabel(exam._count.submissions, "submission")}
         </p>
-        {action && <span className="shrink-0 text-xs font-medium text-lecturer-accent">{action}</span>}
+        {action && (
+          <Link href={href} className="shrink-0 text-xs font-medium text-lecturer-accent hover:text-lecturer-accent-hover">
+            {action}
+          </Link>
+        )}
       </div>
-    </Link>
+    </div>
   );
 }
