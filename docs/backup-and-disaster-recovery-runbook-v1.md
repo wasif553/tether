@@ -580,13 +580,16 @@ values), and the accompanying documentation package
 `docs/configuration-reconstruction-checklist-v1.md`,
 `docs/configuration-recovery-test-record-v1.md`,
 `docs/configuration-loss-dr-exercise-checklist-v1.md`) all now exist.
-`.env.example` was reconciled against the register — 13 genuinely
-active, currently-read variables that were missing from the template
-(`EVIDENCE_RETENTION_DAYS`, `TETHER_CLIENT_OPTIONAL_ENABLED`,
+`.env.example` was reconciled against the register — **13 register
+entries, representing 16 distinct environment-variable NAMES**, that
+were genuinely active/currently-read but missing from the template were
+added (`EVIDENCE_RETENTION_DAYS`, `TETHER_CLIENT_OPTIONAL_ENABLED`,
 `TETHER_MOCK_SECURE_CLIENT_ENABLED` and its institution allowlist,
 `TETHER_DIAGNOSTIC_LOGGING_ENABLED`,
 `TETHER_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS`, the four
-`TETHER_BLOCK_*` lockdown toggles, `TETHER_INSTALLER_DOWNLOAD_URL`,
+`TETHER_BLOCK_*` lockdown toggles (one register entry,
+`TETHER_BLOCK_DEBUG_TOOLS`, groups all four via `aliasNames` — the
+source of the 13-vs-16 discrepancy), `TETHER_INSTALLER_DOWNLOAD_URL`,
 `TETHER_RELEASE_STATUS`, `TETHER_RELEASE_NOTES_URL`,
 `TETHER_SUPPORT_CONTACT`, `NEXT_PUBLIC_TETHER_PHONE_CALIBRATION_ENABLED`,
 `TETHER_TIMING_HEADERS_ENABLED`) were added — names and safe/blank
@@ -596,34 +599,45 @@ values only, verified by `register.test.ts`'s own secret-leak tests. The
 `npm run config:recovery-audit` actively fails if that ever happens by
 mistake.
 
-**`CONFIGURATION RECOVERY SYNTHETIC EXERCISE: PASS`** — performed
-entirely with synthetic values generated fresh for the test, never any
-real `.env`/`.env.local` file's contents (both exist in this repository
-and were deliberately never read or used): (1) a disposable local
-Postgres container was created and `prisma db push`'d successfully
-using a synthetic `DATABASE_URL`, proving the database-connection
-reconstruction step works end to end; (2) a standalone, isolated Node
-process — never loading any `.env` file, only its own freshly-generated
-in-process values (`AUTH_SECRET`, `EXAM_BINDING_HMAC_SECRET`,
-`NETWORK_EVIDENCE_SALT`, a fresh Ed25519 keypair for the secure-launch
-signing keys, `local_dev`-mode evidence storage config, a fake
-Anthropic key) — imported this repository's own real
-`src/lib/env/readiness.ts`, `src/lib/sessionBinding.ts`, and
+**`CONFIGURATION RECOVERY SYNTHETIC EXERCISE: PASS`.** The authoritative
+exercise ran entirely with synthetic values generated fresh for the
+test: (1) a disposable local Postgres container was created and
+`prisma db push`'d successfully using a synthetic `DATABASE_URL`,
+proving the database-connection reconstruction step works end to end;
+(2) a standalone, isolated Node process — never loading any `.env` file,
+only its own freshly-generated in-process values (`AUTH_SECRET`,
+`EXAM_BINDING_HMAC_SECRET`, `NETWORK_EVIDENCE_SALT`, a fresh Ed25519
+keypair for the secure-launch signing keys, `local_dev`-mode evidence
+storage config, a fake Anthropic key) — imported this repository's own
+real `src/lib/env/readiness.ts`, `src/lib/sessionBinding.ts`, and
 `src/lib/networkEvidence.ts` modules directly and confirmed: every
 readiness check correctly reported the synthetic values as configured;
 `detectDangerousEnvCombinations()` reported zero findings; the real
 `hmacHash()` function produced a genuine 64-character HMAC-SHA256 using
 the synthetic secret; `isNetworkEvidenceSaltConfigured()` returned true.
-**An earlier attempt in this same pass to boot the full Next.js dev
-server was aborted and is recorded honestly, not hidden**: `next dev`
-auto-loads `.env.local`/`.env` from the repository root for any
-variable name not explicitly overridden, which meant unset names (e.g.
-`LTI_*`) were silently picked up from this repository's real,
-untouched `.env.local` — violating this exercise's own "never use a
-real `.env` file" rule. That approach was abandoned in favour of the
-isolated-process design above, which cannot load any file-based
-configuration at all. All synthetic material (the temporary env file, the
-generated keypair, the disposable container) was deleted immediately
+
+**One aborted Next.js dev-server attempt auto-loaded existing local
+`.env`/`.env.local` configuration before that behaviour was detected.**
+Recorded precisely, not hidden and not overstated: an earlier attempt in
+this same pass tried to boot the full Next.js dev server on top of the
+synthetic values; `next dev` auto-loads `.env.local`/`.env` from the
+repository root for any variable name not explicitly overridden, so
+unset names (e.g. `LTI_*`) were loaded from this repository's real,
+pre-existing `.env.local` into that child process's own environment —
+this was caught before the dev server was used for anything, and that
+attempt was immediately killed. **No secret value from those files was
+intentionally inspected, printed, copied, committed, uploaded, or
+written to any documentation, log, or the recovery test record** — the
+attempt was aborted at the moment the auto-load was noticed, before any
+request was made against the running server or its configuration was
+otherwise examined. This is not the same claim as "those files were
+never read at all" — the child process itself did load them — and this
+document does not make that stronger claim. That approach was abandoned
+in favour of the isolated-process design above, which cannot load any
+file-based configuration at all and is the exercise this pass's
+`PASS` result is actually based on. All synthetic material (the
+temporary env file, the generated keypair, the disposable container)
+was deleted immediately
 after the exercise — confirmed via `git status --short` showing no
 residue.
 
@@ -1399,4 +1413,5 @@ marked complete:
 | v1.4 | 2026-08-23 | Section 8 updated with a runtime correction: the `supabase-managed` adapter's dump commands were previously routed through `docker exec` into a toolbox container that does not contain the Supabase CLI runtime, so the path could not actually execute. Corrected to run the Supabase CLI (now a pinned `devDependency`) directly on the host inside a temporary `supabase link`-ed workspace, with `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` carried only via subprocess environment; exclusion flag corrected from the nonexistent `--exclude-table` to `-x`/`--exclude`, applied to the data dump only, matching current official Supabase guidance exactly — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). Remains `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED` — not yet run against a real Supabase project. No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
 | v1.5 | 2026-08-23 | Section 8 updated with a read-only correction: `supabase link` (not a guaranteed read-only operation — observed to issue `CREATE SCHEMA`/`CREATE TABLE` statements against `supabase_migrations` as a side effect) removed entirely from the backup path. Replaced with `supabase init` (purely local) plus a passwordless `--db-url` + `PGPASSWORD`-subprocess-environment mechanism, verified directly against the pinned CLI (2.115.0) against a disposable local Postgres container (`SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS`). `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` are no longer required. Backup path now invokes only `init`/`db dump` — never `link`/`push`/`pull`/`reset`/`migration repair`/`config push`/`projects create`-`delete`/Storage mutation, locked with a regression-guard test — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). Remains `SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED` — not yet run against a real Supabase Production project. No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
 | v1.6 | 2026-08-24 | Section 8 updated: the bundle-restore-rehearsal target was corrected from Postgres 16 to Postgres 17, resolving the `SET transaction_timeout = 0;` restore failure previously observed on `supabase-managed`-produced bundles (Supabase CLI's own internal `pg_dump` is version 17.x). `scripts/releaseValidation/docker.ts`'s shared disposable-container helper gained a narrow, optional `image` parameter (default unchanged: `postgres:16-alpine`, used by `release:validate` and the existing single-file `backup:verify --restore`); `scripts/backupCreation/bundleRestoreRehearsal.ts` is the one caller that requests `postgres:17-alpine`. Re-verified end to end: both a `local-generic` bundle (2 tables/4 rows) and a `supabase-managed` bundle (1 table/2 rows, `data.sql` confirmed still containing `SET transaction_timeout = 0;`) restored successfully into the corrected target — `overallPassed: true` for both. Tamper detection re-confirmed on a copy of the bundle; the original bundle's SHA-256 was reconfirmed unchanged. No dump content was rewritten, sanitised, or stripped to achieve compatibility — verification still runs against the original hashed bytes — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
-| v1.7 | 2026-08-24 | Section 13 rewritten: replaced the small hand-maintained Configuration Recovery Register table with a full Configuration & Secrets Recovery v1 package — a machine-readable, value-free canonical register (`scripts/configurationRecovery/register.ts`, 75 entries, built from actual `process.env` read sites), a repository/static-analysis-only audit tool (`npm run config:recovery-audit`), and four new documents (`docs/configuration-and-secrets-recovery-v1.md`, `docs/configuration-reconstruction-checklist-v1.md`, `docs/configuration-recovery-test-record-v1.md`, `docs/configuration-loss-dr-exercise-checklist-v1.md`). `.env.example` reconciled — 13 genuinely active, currently-read variables that were missing were added (names/safe values only); the `ARCHIVE_*` group deliberately left out (`FUTURE_NOT_PROVISIONED`). `CONFIGURATION_RECOVERY_SYNTHETIC_EXERCISE: PASS` — a real disposable-Postgres `prisma db push` plus an isolated in-process validation against this repository's own real readiness/HMAC code, using only synthetic values, never any real `.env`/`.env.local` content (an earlier `next dev`-based attempt was aborted and reported honestly after it was found to auto-load unset names from the real `.env.local`). Remains `AUTHORITATIVE SECRET RECOVERY SOURCE: NOT YET SELECTED` and `PRE-PILOT CONFIGURATION RECOVERY GATE: OPEN` — see `docs/configuration-and-secrets-recovery-v1.md` (`operations/configuration-secrets-recovery-v1` branch). No Production secret values read, no Production contact, no credentials rotated/revoked, no cloud resources/spend, no schema/migration, no branding/native/release-metadata change. |
+| v1.7 | 2026-08-24 | Section 13 rewritten: replaced the small hand-maintained Configuration Recovery Register table with a full Configuration & Secrets Recovery v1 package — a machine-readable, value-free canonical register (`scripts/configurationRecovery/register.ts`, 75 entries, built from actual `process.env` read sites), a repository/static-analysis-only audit tool (`npm run config:recovery-audit`), and four new documents (`docs/configuration-and-secrets-recovery-v1.md`, `docs/configuration-reconstruction-checklist-v1.md`, `docs/configuration-recovery-test-record-v1.md`, `docs/configuration-loss-dr-exercise-checklist-v1.md`). `.env.example` reconciled — 13 genuinely active, currently-read variables that were missing were added (names/safe values only); the `ARCHIVE_*` group deliberately left out (`FUTURE_NOT_PROVISIONED`). `CONFIGURATION_RECOVERY_SYNTHETIC_EXERCISE: PASS` — a real disposable-Postgres `prisma db push` plus an isolated in-process validation against this repository's own real readiness/HMAC code, using only synthetic values (one earlier `next dev`-based attempt auto-loaded the repository's real, pre-existing `.env.local` for unset variable names before that behaviour was noticed and the attempt was immediately aborted — no value from it was inspected, printed, copied, committed, or recorded anywhere; the isolated-process design that produced the actual `PASS` result never loads any file-based configuration at all). Remains `AUTHORITATIVE SECRET RECOVERY SOURCE: NOT YET SELECTED` and `PRE-PILOT CONFIGURATION RECOVERY GATE: OPEN` — see `docs/configuration-and-secrets-recovery-v1.md` (`operations/configuration-secrets-recovery-v1` branch). No Production secret values read, no Production contact, no credentials rotated/revoked, no cloud resources/spend, no schema/migration, no branding/native/release-metadata change. |
+| v1.8 | 2026-08-24 | Section 13 corrected on three points, none changing what was actually built: (1) `.env.example`'s own comments for `EXAM_BINDING_HMAC_SECRET`/`NETWORK_EVIDENCE_SALT` previously described a stale "random per-process fallback" behaviour current code does not have (both now FAIL CLOSED — `register.test.ts` locks this permanently); (2) the v1.7 row's "never any real `.env`/`.env.local` content" phrasing overstated the synthetic exercise — the aborted `next dev` attempt DID auto-load the repository's real `.env.local` for unset names before that was noticed and the attempt was killed, with no value from it ever inspected/printed/copied/committed/recorded; the wording here and in Section 13's own prose now states this precisely instead of overstating or concealing it; (3) the "13 variables missing from `.env.example`" figure is now stated as what it actually is — 13 register ENTRIES representing 16 distinct env var NAMES (one entry, `TETHER_BLOCK_DEBUG_TOOLS`, groups 4 independently-toggleable names) — and the audit tool (`scripts/configurationRecovery/audit.ts`) now exposes both counts (`templatePresenceExpectedEntryCount`/`templatePresenceExpectedNameCount`) permanently rather than requiring a hand-recount. No runtime code changed. See `docs/configuration-and-secrets-recovery-v1.md` (`operations/configuration-secrets-recovery-v1` branch). No Production contact, no credential rotation, no cloud resources/spend, no schema/migration, no branding/native/release-metadata change. |

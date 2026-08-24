@@ -12,6 +12,56 @@ import { CONFIGURATION_RECOVERY_REGISTER, getConfigRecoveryEntry, type ConfigRec
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const registerSource = fs.readFileSync(path.join(REPO_ROOT, "scripts", "configurationRecovery", "register.ts"), "utf8");
+const envExampleContent = fs.readFileSync(path.join(REPO_ROOT, ".env.example"), "utf8");
+
+/** Returns the .env.example comment block immediately preceding a given `NAME=` declaration line — narrow, targeted extraction (not a generic prose parser) used only to check these two specific variables' own comment text. */
+function envExampleCommentBlockFor(name: string): string {
+  const lines = envExampleContent.split("\n");
+  const declIndex = lines.findIndex((line) => line.startsWith(`${name}=`));
+  expect(declIndex, `no "${name}=" declaration line found in .env.example`).toBeGreaterThanOrEqual(0);
+  let start = declIndex;
+  while (start > 0 && lines[start - 1].trimStart().startsWith("#")) start -= 1;
+  return lines.slice(start, declIndex).join("\n");
+}
+
+describe("[ISSUE 1] .env.example never claims a random-per-process fallback for a fail-closed secret", () => {
+  it("[1] NETWORK_EVIDENCE_SALT's own comment block does not describe a random fallback", () => {
+    const block = envExampleCommentBlockFor("NETWORK_EVIDENCE_SALT");
+    expect(block).not.toMatch(/random per-process/i);
+    expect(block).toMatch(/FAILS CLOSED/);
+  });
+
+  it("[2] EXAM_BINDING_HMAC_SECRET's own comment block does not describe a random fallback", () => {
+    const block = envExampleCommentBlockFor("EXAM_BINDING_HMAC_SECRET");
+    expect(block).not.toMatch(/random per-process/i);
+    expect(block).toMatch(/FAILS CLOSED/);
+  });
+
+  it("[3][4] both remain PRESERVE_EXACT_VALUE and required in the canonical register — the template correction did not drift from the register's own classification", () => {
+    const salt = getConfigRecoveryEntry("NETWORK_EVIDENCE_SALT");
+    const hmac = getConfigRecoveryEntry("EXAM_BINDING_HMAC_SECRET");
+    expect(salt.recoveryClass).toBe("PRESERVE_EXACT_VALUE");
+    expect(salt.required).toBe(true);
+    expect(hmac.recoveryClass).toBe("PRESERVE_EXACT_VALUE");
+    expect(hmac.required).toBe(true);
+  });
+
+  it("[7] this test file's own fs.readFileSync calls never target .env.local or a bare .env path", () => {
+    const thisFileSource = fs.readFileSync(path.join(__dirname, "register.test.ts"), "utf8");
+    // Every readFileSync(...) call's own argument text, matched narrowly
+    // by call syntax — not a blanket string ban (this file's surrounding
+    // prose legitimately discusses .env/.env.local as concepts). Reads of
+    // .env.example (tracked, safe) and *.md docs are expected and fine;
+    // this only rejects a call that references .env.local, or a bare
+    // ".env" that is not immediately ".env.example".
+    const readFileSyncCalls = [...thisFileSource.matchAll(/readFileSync\(([^)]*)\)/g)].map((m) => m[1]);
+    expect(readFileSyncCalls.length).toBeGreaterThan(0);
+    for (const call of readFileSyncCalls) {
+      expect(call, `readFileSync call "${call}" references .env.local`).not.toMatch(/\.env\.local/);
+      expect(call, `readFileSync call "${call}" references a bare .env path`).not.toMatch(/["'`]\.env["'`]|\.env["'`](?!\.example)/);
+    }
+  });
+});
 
 describe("[1][2] the register type holds names/metadata only — no value-shaped field exists", () => {
   it("the ConfigRecoveryEntry type declares no value/secret/password/private-key/token VALUE field", () => {

@@ -78,6 +78,28 @@ describe("[1] register entries are structurally valid against the real register"
   });
 });
 
+describe("[ISSUE 3] template drift counts are computed, never hand-maintained", () => {
+  it("summary distinguishes entry count from distinct-name count when an entry groups multiple independently-toggleable names via aliasNames", () => {
+    const register = [baseEntry({ name: "GROUPED_TOGGLE_A", aliasNames: ["GROUPED_TOGGLE_B", "GROUPED_TOGGLE_C"], templatePresenceExpected: true }), baseEntry({ name: "SOLO_TOGGLE", templatePresenceExpected: true })];
+    const result = auditConfigurationRecovery({ register, envExampleContent: "GROUPED_TOGGLE_A=\nGROUPED_TOGGLE_B=\nGROUPED_TOGGLE_C=\nSOLO_TOGGLE=\n" });
+    expect(result.summary.templatePresenceExpectedEntryCount).toBe(2);
+    expect(result.summary.templatePresenceExpectedNameCount).toBe(4);
+  });
+
+  it("the real register's own computed counts: entry count and name count differ by exactly the number of extra grouped-alias names among templatePresenceExpected entries", () => {
+    const expectedEntries = CONFIGURATION_RECOVERY_REGISTER.filter((e) => e.templatePresenceExpected);
+    const expectedNameCount = expectedEntries.reduce((sum, e) => sum + 1 + e.aliasNames.length, 0);
+    const result = auditConfigurationRecovery({ register: CONFIGURATION_RECOVERY_REGISTER, envExampleContent: "" });
+    expect(result.summary.templatePresenceExpectedEntryCount).toBe(expectedEntries.length);
+    expect(result.summary.templatePresenceExpectedNameCount).toBe(expectedNameCount);
+    // Documents the known discrepancy source directly, rather than a
+    // prose number that could silently go stale: TETHER_BLOCK_DEBUG_TOOLS
+    // alone contributes 3 extra names (4 total) beyond its own 1 entry.
+    const blockToggles = expectedEntries.find((e) => e.name === "TETHER_BLOCK_DEBUG_TOOLS");
+    expect(blockToggles?.aliasNames.length).toBe(3);
+  });
+});
+
 describe("[2] required register entries appear in .env.example where appropriate", () => {
   it("flags MISSING_FROM_ENV_EXAMPLE for a templatePresenceExpected entry absent from the template", () => {
     const register = [baseEntry({ name: "MISSING_ONE", templatePresenceExpected: true })];

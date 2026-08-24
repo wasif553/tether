@@ -37,6 +37,7 @@ async function main(): Promise<void> {
   });
 
   log(`Register entries: ${result.summary.totalEntries}`);
+  log(`Entries expecting .env.example presence: ${result.summary.templatePresenceExpectedEntryCount} (representing ${result.summary.templatePresenceExpectedNameCount} distinct env var NAMES, since a few entries group multiple independently-toggleable names via aliasNames — see AuditResult's own doc comment)`);
   log("By category:");
   for (const [category, count] of Object.entries(result.summary.byCategory).sort()) {
     log(`  ${category}: ${count}`);

@@ -30,6 +30,21 @@ export type AuditResult = {
     totalEntries: number;
     byCategory: Record<string, number>;
     activeSecretsWithoutRecoveryClass: number;
+    /**
+     * These two numbers can legitimately differ: a handful of register
+     * entries group multiple INDEPENDENTLY-toggleable env var names under
+     * one entry via `aliasNames` for register brevity (e.g.
+     * `TETHER_BLOCK_DEBUG_TOOLS` groups 4 separate lockdown-toggle names
+     * — see that entry's own `notes` field) — this is a different case
+     * from a true multi-representation fallback group (e.g. the LTI
+     * `*_B64`/`*_PATH`/raw key forms, where only ONE of the three is ever
+     * actually set). Report BOTH numbers rather than picking one, so a
+     * "how many names does .env.example actually need" question is
+     * always answered precisely instead of by a hand-counted prose
+     * number that can silently drift from the real register.
+     */
+    templatePresenceExpectedEntryCount: number;
+    templatePresenceExpectedNameCount: number;
   };
 };
 
@@ -133,10 +148,14 @@ export function auditConfigurationRecovery(params: { register: readonly ConfigRe
     }
   }
 
+  const templatePresenceExpectedEntries = params.register.filter((e) => e.templatePresenceExpected);
+  const templatePresenceExpectedEntryCount = templatePresenceExpectedEntries.length;
+  const templatePresenceExpectedNameCount = templatePresenceExpectedEntries.reduce((sum, e) => sum + 1 + e.aliasNames.length, 0);
+
   const passed = findings.every((f) => f.severity !== "ERROR");
   return {
     findings,
     passed,
-    summary: { totalEntries: params.register.length, byCategory, activeSecretsWithoutRecoveryClass },
+    summary: { totalEntries: params.register.length, byCategory, activeSecretsWithoutRecoveryClass, templatePresenceExpectedEntryCount, templatePresenceExpectedNameCount },
   };
 }
