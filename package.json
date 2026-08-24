@@ -20,6 +20,7 @@
     "backup:verify-bundle": "tsx scripts/verify-backup-bundle.ts",
     "evidence:retention": "tsx scripts/run-evidence-retention.ts",
     "evidence:archive": "tsx scripts/run-evidence-archive.ts",
+    "config:recovery-audit": "tsx scripts/audit-configuration-recovery.ts",
     "backfill:activated-at": "tsx scripts/backfill-submission-activated-at.ts"
   },
   "dependencies": {

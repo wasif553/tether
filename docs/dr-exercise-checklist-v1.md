@@ -155,11 +155,39 @@ release-metadata reconciliation gap this item exists to surface.)*
 
 ## J. Configuration recovery review
 
-- [ ] Configuration Recovery Register (runbook Section 13) consulted for
-      the variables relevant to this exercise's scope.
+*(See [`docs/configuration-and-secrets-recovery-v1.md`](configuration-and-secrets-recovery-v1.md)
+for the full framework this section operationalises; use
+[`docs/configuration-loss-dr-exercise-checklist-v1.md`](configuration-loss-dr-exercise-checklist-v1.md)
+instead of this section for a dedicated configuration-loss exercise.)*
+
+- [ ] Authoritative configuration register available — the canonical
+      register (`scripts/configurationRecovery/register.ts`, runbook
+      Section 13) consulted for the variables relevant to this
+      exercise's scope.
+- [ ] Recovery source identified for this exercise (synthetic values for
+      a rehearsal; real authoritative source — currently `NOT YET
+      SELECTED` — only for a real event).
+- [ ] Runtime source vs authoritative recovery source distinguished —
+      a Vercel environment variable was NOT treated as an independent
+      recovery source merely because it currently holds the value.
+- [ ] Critical exact-value secrets (`PRESERVE_EXACT_VALUE` items —
+      `EXAM_BINDING_HMAC_SECRET`, `NETWORK_EVIDENCE_SALT`,
+      `TETHER_SEB_KEY_ENCRYPTION_KEYS_JSON`) confirmed recoverable, or
+      their loss explicitly recorded as such.
+- [ ] Rotatable credentials (`ROTATE_OR_REISSUE` items) have a clear
+      reissue procedure identified for this exercise's scope.
+- [ ] Non-secret configuration (`RECONSTRUCT_CONFIGURATION`/
+      `PROVIDER_LOOKUP` items) confirmed reconstructable from documented
+      sources.
+- [ ] If a full environment rebuild was in scope: confirmed it did not
+      rely on reading the OLD deployment's own configuration (a genuine
+      reconstruction, not a copy).
+- [ ] `npm run config:recovery-audit` run — result recorded.
 - [ ] Confirmed no secret **values** were written into this checklist,
-      the Restore Test Record, or any exercise notes — names/locations
-      only.
+      the Restore Test Record, the Configuration Recovery Test Record,
+      or any exercise notes — names/locations only.
+- [ ] If critical flows were exercised as part of this review, observed
+      recovery duration recorded (measured only — never a target).
 
 ## K. Privacy/retention reconciliation
 

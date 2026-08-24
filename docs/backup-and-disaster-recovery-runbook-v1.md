@@ -544,33 +544,103 @@ Three distinct scenarios, not to be conflated:
 
 ## 13. Configuration and secrets recovery
 
-**Configuration Recovery Register** — names and locations only, never
-values:
+**Superseded by a full Configuration & Secrets Recovery v1 package** —
+see [`docs/configuration-and-secrets-recovery-v1.md`](configuration-and-secrets-recovery-v1.md)
+for the complete framework. This section now summarises and cross-links
+rather than maintaining a second, independently-drifting copy of the
+register.
 
-| Configuration item | System | Environment | Required for service? | Recovery owner | Authoritative source/location | Last verification | Recovery notes |
-|---|---|---|---|---|---|---|---|
-| `DATABASE_URL` | Postgres/Prisma | Production | Yes | *(not yet assigned — PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | Connection string to primary Supabase project |
-| `SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_URL` | Supabase | Production | Yes | *(PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase | Production | Yes | *(PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | Highest-sensitivity credential in this table |
-| `AUTH_SECRET` | NextAuth | Production | Yes | *(PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | Rotating invalidates all active sessions |
-| `EVIDENCE_STORAGE_PROVIDER`, `EVIDENCE_STORAGE_BUCKET` | Evidence storage | Production | Yes | *(PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | Selects/targets the primary evidence bucket |
-| `EXAM_BINDING_HMAC_SECRET` | Session binding | Production | Yes | *(PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | Session-binding hashes become unverifiable if lost and rotated without a migration plan |
-| `NETWORK_EVIDENCE_SALT` | Network evidence | Production | Yes | *(PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | |
-| `RESEND_API_KEY`, `PASSWORD_RESET_FROM_EMAIL` | Email (Resend) | Production | Yes (for password reset/notifications) | *(PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | |
-| `ANTHROPIC_API_KEY` | Optional AI features | Production | Only if AI features enabled | *(PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | |
-| `ARCHIVE_STORAGE_PROVIDER`, `ARCHIVE_SUPABASE_URL`, `ARCHIVE_SUPABASE_SERVICE_ROLE_KEY`, `ARCHIVE_STORAGE_BUCKET`, `ARCHIVE_SOURCE_ENVIRONMENT`, `ARCHIVE_EXPECTED_PRIMARY_PROJECT_REF` | Evidence archive | Not yet configured anywhere | Not yet — archive not provisioned (Section 9) | *(PRE-PILOT OPERATIONAL DECISION)* | Documented only in `docs/tether-evidence-archive-plan.md` — **not present in `.env.example`** | N/A — not yet in use | Will need adding to the canonical env template once the archive project exists |
-| `TETHER_SECURE_CLIENT_SIGNING_PRIVATE_KEY` / `_PUBLIC_KEY` / `_KEY_ID` | Secure-client launch-manifest signing | Production | Yes, if Secure Browser mode used | *(PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | See `docs/secure-launch-signing-key-runbook.md` for this key's own dedicated runbook |
-| `TETHER_SEB_KEY_ENCRYPTION_KEYS_JSON` / `_ACTIVE_KEY_ID` | SEB config encryption | Production | Yes, if SEB experimental mode used | *(PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | |
-| `TETHER_INSTALLER_DOWNLOAD_URL`, `TETHER_RELEASE_STATUS` | Secure Browser release | Production | Yes, for Secure Browser distribution | *(PRE-PILOT OPERATIONAL DECISION)* | Vercel project environment variables | Not verified in this pass | See Section 14 |
+The small hand-maintained table this section previously held is
+replaced by a **machine-readable, VALUE-FREE canonical register**
+(`scripts/configurationRecovery/register.ts`, 75 entries as of this
+pass) — built from actual `process.env.<NAME>` read sites in this
+repository, not guessed from plausible-sounding names — queryable via
+`npm run config:recovery-audit`, and structurally guarded against ever
+holding a secret VALUE (see that document's own secret-leak tests).
+
+**Three concepts this register keeps separate** (see
+`docs/configuration-and-secrets-recovery-v1.md` Section 2 for the full
+explanation): **runtime source** (where the running service reads a
+value from today — for almost everything, a Vercel environment
+variable), **recovery method** (how it would be reconstructed after
+loss — `PRESERVE_EXACT_VALUE` / `ROTATE_OR_REISSUE` /
+`RECONSTRUCT_CONFIGURATION` / `PROVIDER_LOOKUP` / `BOOTSTRAP_ONLY` /
+`FUTURE_NOT_PROVISIONED`), and **authoritative recovery source** (where
+the recoverable material is independently held — for every real secret
+today, `NOT YET SELECTED`). **A Vercel environment variable is never
+described as an independent recovery source merely because it currently
+holds the value, and GitHub is never described as a secret-value
+recovery source at all.**
+
+**`CONFIGURATION RECOVERY INVENTORY/TOOLING: IMPLEMENTED`** — the
+canonical register, `npm run config:recovery-audit` (repository/
+static-analysis only — never reads a real deployment's environment
+values), and the accompanying documentation package
+(`docs/configuration-and-secrets-recovery-v1.md`,
+`docs/configuration-reconstruction-checklist-v1.md`,
+`docs/configuration-recovery-test-record-v1.md`,
+`docs/configuration-loss-dr-exercise-checklist-v1.md`) all now exist.
+`.env.example` was reconciled against the register — 13 genuinely
+active, currently-read variables that were missing from the template
+(`EVIDENCE_RETENTION_DAYS`, `TETHER_CLIENT_OPTIONAL_ENABLED`,
+`TETHER_MOCK_SECURE_CLIENT_ENABLED` and its institution allowlist,
+`TETHER_DIAGNOSTIC_LOGGING_ENABLED`,
+`TETHER_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS`, the four
+`TETHER_BLOCK_*` lockdown toggles, `TETHER_INSTALLER_DOWNLOAD_URL`,
+`TETHER_RELEASE_STATUS`, `TETHER_RELEASE_NOTES_URL`,
+`TETHER_SUPPORT_CONTACT`, `NEXT_PUBLIC_TETHER_PHONE_CALIBRATION_ENABLED`,
+`TETHER_TIMING_HEADERS_ENABLED`) were added — names and safe/blank
+values only, verified by `register.test.ts`'s own secret-leak tests. The
+`ARCHIVE_*` group was deliberately NOT added, since it remains
+`FUTURE_NOT_PROVISIONED` (Section 9 above) —
+`npm run config:recovery-audit` actively fails if that ever happens by
+mistake.
+
+**`CONFIGURATION RECOVERY SYNTHETIC EXERCISE: PASS`** — performed
+entirely with synthetic values generated fresh for the test, never any
+real `.env`/`.env.local` file's contents (both exist in this repository
+and were deliberately never read or used): (1) a disposable local
+Postgres container was created and `prisma db push`'d successfully
+using a synthetic `DATABASE_URL`, proving the database-connection
+reconstruction step works end to end; (2) a standalone, isolated Node
+process — never loading any `.env` file, only its own freshly-generated
+in-process values (`AUTH_SECRET`, `EXAM_BINDING_HMAC_SECRET`,
+`NETWORK_EVIDENCE_SALT`, a fresh Ed25519 keypair for the secure-launch
+signing keys, `local_dev`-mode evidence storage config, a fake
+Anthropic key) — imported this repository's own real
+`src/lib/env/readiness.ts`, `src/lib/sessionBinding.ts`, and
+`src/lib/networkEvidence.ts` modules directly and confirmed: every
+readiness check correctly reported the synthetic values as configured;
+`detectDangerousEnvCombinations()` reported zero findings; the real
+`hmacHash()` function produced a genuine 64-character HMAC-SHA256 using
+the synthetic secret; `isNetworkEvidenceSaltConfigured()` returned true.
+**An earlier attempt in this same pass to boot the full Next.js dev
+server was aborted and is recorded honestly, not hidden**: `next dev`
+auto-loads `.env.local`/`.env` from the repository root for any
+variable name not explicitly overridden, which meant unset names (e.g.
+`LTI_*`) were silently picked up from this repository's real,
+untouched `.env.local` — violating this exercise's own "never use a
+real `.env` file" rule. That approach was abandoned in favour of the
+isolated-process design above, which cannot load any file-based
+configuration at all. All synthetic material (the temporary env file, the
+generated keypair, the disposable container) was deleted immediately
+after the exercise — confirmed via `git status --short` showing no
+residue.
+
+- **`AUTHORITATIVE SECRET RECOVERY SOURCE: NOT YET SELECTED`** — for
+  every real secret in the register.
+- **`REAL PRODUCTION CONFIGURATION RECOVERY TEST: NOT YET EXECUTED`**
+- **`PRE-PILOT CONFIGURATION RECOVERY GATE: OPEN`** — the framework and
+  tooling now exist and pass a real synthetic exercise, but recoverable
+  real secret material has not yet been escrowed in an approved
+  independent recovery source and tested. This section, and the package
+  it links to, do not close this gate by themselves.
 
 **This runbook does not state that GitHub is an acceptable secret-value
 backup** — none of these variables are committed to the repository
 (confirmed: every sensitive entry in `.env.example` is blank/placeholder,
-and `.gitignore` excludes all `.env*` files except `.env.example`
-itself). **The authoritative secret-management source of truth is
-currently undocumented** — marked **PRE-PILOT OPERATIONAL DECISION**
-throughout this table, and consolidated as the **PRE-PILOT CONFIGURATION
-RECOVERY GATE** (Section 37).
+verified by `register.test.ts`'s own secret-leak tests, and `.gitignore`
+excludes all `.env*` files except `.env.example` itself).
 
 ## 14. Secure Browser release artifact recovery
 
@@ -1329,3 +1399,4 @@ marked complete:
 | v1.4 | 2026-08-23 | Section 8 updated with a runtime correction: the `supabase-managed` adapter's dump commands were previously routed through `docker exec` into a toolbox container that does not contain the Supabase CLI runtime, so the path could not actually execute. Corrected to run the Supabase CLI (now a pinned `devDependency`) directly on the host inside a temporary `supabase link`-ed workspace, with `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` carried only via subprocess environment; exclusion flag corrected from the nonexistent `--exclude-table` to `-x`/`--exclude`, applied to the data dump only, matching current official Supabase guidance exactly — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). Remains `SUPABASE_MANAGED_SOURCE_RUNTIME_TEST: DEFERRED` — not yet run against a real Supabase project. No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
 | v1.5 | 2026-08-23 | Section 8 updated with a read-only correction: `supabase link` (not a guaranteed read-only operation — observed to issue `CREATE SCHEMA`/`CREATE TABLE` statements against `supabase_migrations` as a side effect) removed entirely from the backup path. Replaced with `supabase init` (purely local) plus a passwordless `--db-url` + `PGPASSWORD`-subprocess-environment mechanism, verified directly against the pinned CLI (2.115.0) against a disposable local Postgres container (`SUPABASE_CLI_DIRECT_RUNTIME_TEST: PASS`). `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` are no longer required. Backup path now invokes only `init`/`db dump` — never `link`/`push`/`pull`/`reset`/`migration repair`/`config push`/`projects create`-`delete`/Storage mutation, locked with a regression-guard test — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). Remains `SUPABASE_MANAGED_PRODUCTION_RUNTIME_TEST: DEFERRED` — not yet run against a real Supabase Production project. No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
 | v1.6 | 2026-08-24 | Section 8 updated: the bundle-restore-rehearsal target was corrected from Postgres 16 to Postgres 17, resolving the `SET transaction_timeout = 0;` restore failure previously observed on `supabase-managed`-produced bundles (Supabase CLI's own internal `pg_dump` is version 17.x). `scripts/releaseValidation/docker.ts`'s shared disposable-container helper gained a narrow, optional `image` parameter (default unchanged: `postgres:16-alpine`, used by `release:validate` and the existing single-file `backup:verify --restore`); `scripts/backupCreation/bundleRestoreRehearsal.ts` is the one caller that requests `postgres:17-alpine`. Re-verified end to end: both a `local-generic` bundle (2 tables/4 rows) and a `supabase-managed` bundle (1 table/2 rows, `data.sql` confirmed still containing `SET transaction_timeout = 0;`) restored successfully into the corrected target — `overallPassed: true` for both. Tamper detection re-confirmed on a copy of the bundle; the original bundle's SHA-256 was reconfirmed unchanged. No dump content was rewritten, sanitised, or stripped to achieve compatibility — verification still runs against the original hashed bytes — see `docs/database-backup-operations-v1.md` (`operations/production-database-backup-v1` branch). No schema, migration, or application-behaviour change. No Production contact, Production backup, or cloud resource/spend. |
+| v1.7 | 2026-08-24 | Section 13 rewritten: replaced the small hand-maintained Configuration Recovery Register table with a full Configuration & Secrets Recovery v1 package — a machine-readable, value-free canonical register (`scripts/configurationRecovery/register.ts`, 75 entries, built from actual `process.env` read sites), a repository/static-analysis-only audit tool (`npm run config:recovery-audit`), and four new documents (`docs/configuration-and-secrets-recovery-v1.md`, `docs/configuration-reconstruction-checklist-v1.md`, `docs/configuration-recovery-test-record-v1.md`, `docs/configuration-loss-dr-exercise-checklist-v1.md`). `.env.example` reconciled — 13 genuinely active, currently-read variables that were missing were added (names/safe values only); the `ARCHIVE_*` group deliberately left out (`FUTURE_NOT_PROVISIONED`). `CONFIGURATION_RECOVERY_SYNTHETIC_EXERCISE: PASS` — a real disposable-Postgres `prisma db push` plus an isolated in-process validation against this repository's own real readiness/HMAC code, using only synthetic values, never any real `.env`/`.env.local` content (an earlier `next dev`-based attempt was aborted and reported honestly after it was found to auto-load unset names from the real `.env.local`). Remains `AUTHORITATIVE SECRET RECOVERY SOURCE: NOT YET SELECTED` and `PRE-PILOT CONFIGURATION RECOVERY GATE: OPEN` — see `docs/configuration-and-secrets-recovery-v1.md` (`operations/configuration-secrets-recovery-v1` branch). No Production secret values read, no Production contact, no credentials rotated/revoked, no cloud resources/spend, no schema/migration, no branding/native/release-metadata change. |
