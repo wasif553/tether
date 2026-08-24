@@ -29,6 +29,29 @@
  *    treated as a secret-value recovery source at all (see
  *    docs/configuration-and-secrets-recovery-v1.md's own explicit
  *    statement of this).
+ *
+ * ALIAS MODEL — one entry's `aliasNames` means ONE thing, always:
+ * alternative/fallback representations of the SAME logical
+ * configuration value, where the running code checks them in a fixed
+ * priority order and only ONE is ever actually expected to be set (the
+ * LTI `*_B64`/`*_PATH`/raw key triples; `NEXT_PUBLIC_SUPABASE_URL` as
+ * `SUPABASE_URL`'s fallback; `GIT_COMMIT_SHA` as
+ * `VERCEL_GIT_COMMIT_SHA`'s fallback). It does NOT mean "these names are
+ * read independently but I grouped them to shorten the register" — that
+ * was a real modelling error found in an earlier pass (four independent
+ * `TETHER_BLOCK_*` lockdown toggles, `LTI_TOOL_NAME`/`LTI_TOOL_DESCRIPTION`,
+ * and `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` were all previously
+ * mis-grouped this way) — because the audit's own "is this entry
+ * represented in `.env.example`" check is satisfied by ANY ONE
+ * name/alias being present, so a genuinely independent variable's own
+ * deletion from the template could go completely undetected as long as
+ * a sibling it was wrongly grouped with remained. Every independent
+ * variable now has its own entry with `aliasNames: []`, even where that
+ * makes this file longer. `register.test.ts`'s `[12]` test locks every
+ * remaining non-empty `aliasNames` group in this file against an
+ * explicit allowlist of genuine alternate-representation groups, so a
+ * future accidental re-grouping is caught immediately rather than
+ * inferred from variable-name similarity.
  */
 
 /** Where the running service currently reads this configuration item's value from. */
@@ -68,7 +91,23 @@ export type AuthoritativeRecoverySourceStatus = "NOT_YET_SELECTED";
 export type ConfigRecoveryEntry = {
   /** The env var name exactly as read via `process.env.<NAME>`. */
   name: string;
-  /** Alternate/fallback representations of the SAME logical value — e.g. `LTI_PRIVATE_KEY_B64` / `LTI_PRIVATE_KEY_PATH` / `LTI_PRIVATE_KEY` (checked in that priority order), or `NEXT_PUBLIC_SUPABASE_URL` as `SUPABASE_URL`'s fallback. Never a DIFFERENT logical secret. */
+  /**
+   * ONE meaning, never overloaded: alternative/fallback representations
+   * of the SAME logical configuration value — e.g. `LTI_PRIVATE_KEY_B64`
+   * / `LTI_PRIVATE_KEY_PATH` / `LTI_PRIVATE_KEY` (checked in that
+   * priority order, only ONE is ever actually set), or
+   * `NEXT_PUBLIC_SUPABASE_URL` as `SUPABASE_URL`'s fallback. See this
+   * module's own "Alias model" doc comment for the full test — the short
+   * version: if the running code reads two names INDEPENDENTLY of each
+   * other (each with its own default, each meaningfully settable at the
+   * same time as the other), they are NOT aliases of one entry — they
+   * are two separate `ConfigRecoveryEntry` objects, even if that makes
+   * the register longer. Never use this field merely to shorten the
+   * register. `register.test.ts`'s own `[12]` test locks every
+   * non-empty group in this file against an explicit allowlist, so a
+   * future accidental re-grouping is caught immediately, not inferred
+   * from name similarity.
+   */
   aliasNames: string[];
   category: ConfigCategory;
   sensitivity: ConfigSensitivity;
@@ -396,20 +435,45 @@ export const CONFIGURATION_RECOVERY_REGISTER: readonly ConfigRecoveryEntry[] = [
     authoritativeRecoverySourceStatus: null,
   },
   {
+    // Independent variable, not a true alias — see this module's own
+    // "Alias model" doc comment. LTI_TOOL_NAME and LTI_TOOL_DESCRIPTION
+    // are two SEPARATE fields (a title and a description), each read
+    // with its own independent `||` default in
+    // src/app/api/lti/config/route.ts:61,63 — neither is a fallback
+    // representation of the other's value. Previously grouped together
+    // for register brevity only, which was a modelling error (see
+    // register.test.ts's own regression guard for the corrected model).
     name: "LTI_TOOL_NAME",
-    aliasNames: ["LTI_TOOL_DESCRIPTION"],
+    aliasNames: [],
     category: "OPTIONAL_PRODUCTION_RUNTIME",
     sensitivity: "NON_SECRET",
     environment: "PRODUCTION_AND_PREVIEW",
     runtimeSource: "VERCEL_ENVIRONMENT_VARIABLE",
     recoveryClass: "RECONSTRUCT_CONFIGURATION",
     required: false,
-    affectedCapability: "Cosmetic branding shown in /api/lti/config.",
-    lossImpact: "Safe defaults apply if unset.",
+    affectedCapability: "Cosmetic branding (tool title) shown in /api/lti/config.",
+    lossImpact: "Safe default (\"Safe Exam System\") applies if unset.",
     rotationImpact: null,
     recoveryDependency: null,
     templatePresenceExpected: true,
-    sourceReference: ".env.example",
+    sourceReference: "src/app/api/lti/config/route.ts:61; .env.example",
+    authoritativeRecoverySourceStatus: null,
+  },
+  {
+    name: "LTI_TOOL_DESCRIPTION",
+    aliasNames: [],
+    category: "OPTIONAL_PRODUCTION_RUNTIME",
+    sensitivity: "NON_SECRET",
+    environment: "PRODUCTION_AND_PREVIEW",
+    runtimeSource: "VERCEL_ENVIRONMENT_VARIABLE",
+    recoveryClass: "RECONSTRUCT_CONFIGURATION",
+    required: false,
+    affectedCapability: "Cosmetic branding (tool description) shown in /api/lti/config.",
+    lossImpact: "Safe default (\"Secure online examination platform with integrity review\") applies if unset.",
+    rotationImpact: null,
+    recoveryDependency: null,
+    templatePresenceExpected: true,
+    sourceReference: "src/app/api/lti/config/route.ts:63; .env.example",
     authoritativeRecoverySourceStatus: null,
   },
   {
@@ -1074,23 +1138,84 @@ export const CONFIGURATION_RECOVERY_REGISTER: readonly ConfigRecoveryEntry[] = [
     sourceReference: "docs/production-environment-register.md — NOT currently present in .env.example (drift; corrected by this pass)",
     authoritativeRecoverySourceStatus: null,
   },
+  // Four INDEPENDENT lockdown-capability toggles — see this module's own
+  // "Alias model" doc comment. Each is read at its own line in
+  // src/lib/tetherLockdownConfig.ts, with its own independent default;
+  // none is a fallback representation of another's value. Previously
+  // grouped as one entry via aliasNames for register brevity, which was
+  // a modelling error — deleting one from .env.example while the other
+  // three remained present would have gone undetected, since the old
+  // "any name present satisfies the entry" check only required ONE of
+  // the four to exist. Corrected: four separate entries, each
+  // independently checked for template presence (see
+  // register.test.ts's own regression guard).
   {
     name: "TETHER_BLOCK_DEBUG_TOOLS",
-    aliasNames: ["TETHER_BLOCK_REMOTE_CONTROL", "TETHER_BLOCK_SCREEN_CAPTURE_TOOLS", "TETHER_BLOCK_VIRTUAL_MACHINES"],
+    aliasNames: [],
     category: "OPTIONAL_PRODUCTION_RUNTIME",
     sensitivity: "NON_SECRET",
     environment: "PRODUCTION_AND_PREVIEW",
     runtimeSource: "VERCEL_ENVIRONMENT_VARIABLE",
     recoveryClass: "RECONSTRUCT_CONFIGURATION",
     required: false,
-    affectedCapability: "Lockdown-capability toggles for the Tether native client's own enforcement behaviour.",
-    lossImpact: "Safe defaults apply if unset.",
+    affectedCapability: "Lockdown toggle: governs Visual Studio, Process Explorer, and other debug-tool detection/blocking on the Tether native client.",
+    lossImpact: "Safe default (false — detect-only, higher false-positive risk) applies if unset.",
     rotationImpact: null,
     recoveryDependency: null,
     templatePresenceExpected: true,
-    sourceReference: "docs/production-environment-register.md — NOT currently present in .env.example (drift; corrected by this pass)",
+    sourceReference: "src/lib/tetherLockdownConfig.ts:79; .env.example",
     authoritativeRecoverySourceStatus: null,
-    notes: "Four independent toggles grouped here for register brevity — each is read/consulted independently, not a true multi-representation alias group like the *_B64/*_PATH LTI keys.",
+  },
+  {
+    name: "TETHER_BLOCK_REMOTE_CONTROL",
+    aliasNames: [],
+    category: "OPTIONAL_PRODUCTION_RUNTIME",
+    sensitivity: "NON_SECRET",
+    environment: "PRODUCTION_AND_PREVIEW",
+    runtimeSource: "VERCEL_ENVIRONMENT_VARIABLE",
+    recoveryClass: "RECONSTRUCT_CONFIGURATION",
+    required: false,
+    affectedCapability: "Lockdown toggle: governs every REMOTE_CONTROL-class tool's detection/blocking on the Tether native client.",
+    lossImpact: "Safe default (true) applies if unset.",
+    rotationImpact: null,
+    recoveryDependency: null,
+    templatePresenceExpected: true,
+    sourceReference: "src/lib/tetherLockdownConfig.ts:77; .env.example",
+    authoritativeRecoverySourceStatus: null,
+  },
+  {
+    name: "TETHER_BLOCK_SCREEN_CAPTURE_TOOLS",
+    aliasNames: [],
+    category: "OPTIONAL_PRODUCTION_RUNTIME",
+    sensitivity: "NON_SECRET",
+    environment: "PRODUCTION_AND_PREVIEW",
+    runtimeSource: "VERCEL_ENVIRONMENT_VARIABLE",
+    recoveryClass: "RECONSTRUCT_CONFIGURATION",
+    required: false,
+    affectedCapability: "Lockdown toggle: governs OBS and other dedicated screen-capture tool detection/blocking on the Tether native client.",
+    lossImpact: "Safe default (true) applies if unset.",
+    rotationImpact: null,
+    recoveryDependency: null,
+    templatePresenceExpected: true,
+    sourceReference: "src/lib/tetherLockdownConfig.ts:78; .env.example",
+    authoritativeRecoverySourceStatus: null,
+  },
+  {
+    name: "TETHER_BLOCK_VIRTUAL_MACHINES",
+    aliasNames: [],
+    category: "OPTIONAL_PRODUCTION_RUNTIME",
+    sensitivity: "NON_SECRET",
+    environment: "PRODUCTION_AND_PREVIEW",
+    runtimeSource: "VERCEL_ENVIRONMENT_VARIABLE",
+    recoveryClass: "RECONSTRUCT_CONFIGURATION",
+    required: false,
+    affectedCapability: "Lockdown toggle: governs Hyper-V console, VMware, and other virtual-machine detection/blocking on the Tether native client.",
+    lossImpact: "Safe default (false) applies if unset.",
+    rotationImpact: null,
+    recoveryDependency: null,
+    templatePresenceExpected: true,
+    sourceReference: "src/lib/tetherLockdownConfig.ts:80; .env.example",
+    authoritativeRecoverySourceStatus: null,
   },
 
   // ── Tether release / distribution metadata (NAMES only — see branding freeze) ──
@@ -1200,23 +1325,47 @@ export const CONFIGURATION_RECOVERY_REGISTER: readonly ConfigRecoveryEntry[] = [
   },
 
   // ── Superseded / not actually read (kept so drift is surfaced, not hidden) ──
+  // SUPABASE_ACCESS_TOKEN and SUPABASE_DB_PASSWORD are two DIFFERENT
+  // historical/deprecated credentials from an earlier, superseded
+  // backup-adapter design — not alternate representations of one
+  // logical secret (see this module's own "Alias model" doc comment).
+  // Previously grouped via aliasNames for register brevity, which was a
+  // modelling error; corrected to two independent entries.
   {
     name: "SUPABASE_ACCESS_TOKEN",
-    aliasNames: ["SUPABASE_DB_PASSWORD"],
+    aliasNames: [],
     category: "DEPRECATED_DOCUMENTED_NOT_USED",
     sensitivity: "SECRET",
     environment: "NOT_APPLICABLE",
     runtimeSource: "NOT_APPLICABLE",
     recoveryClass: null,
     required: false,
-    affectedCapability: "None — an earlier design of the Supabase-managed backup adapter would have required these; the shipped design (scripts/backupCreation/supabaseCliExecutor.ts) explicitly does not read either, using a passwordless --db-url + PGPASSWORD (derived from the already-parsed source connection) instead. Referenced only inside supabaseCliExecutor.test.ts, purely for defensive test-environment isolation (saving/restoring an ambient value that might otherwise leak between tests) — never read by any real script.",
-    lossImpact: "Not applicable — nothing reads these names.",
+    affectedCapability: "None — an earlier design of the Supabase-managed backup adapter would have required this; the shipped design (scripts/backupCreation/supabaseCliExecutor.ts) explicitly does not read it, using a passwordless --db-url + PGPASSWORD (derived from the already-parsed source connection) instead. Referenced only inside supabaseCliExecutor.test.ts, purely for defensive test-environment isolation (saving/restoring an ambient value that might otherwise leak between tests) — never read by any real script.",
+    lossImpact: "Not applicable — nothing reads this name.",
     rotationImpact: null,
     recoveryDependency: null,
     templatePresenceExpected: false,
-    sourceReference: "scripts/backupCreation/supabaseCliExecutor.ts:57-62 (explicit doc-comment statement that neither is required)",
+    sourceReference: "scripts/backupCreation/supabaseCliExecutor.ts:57-62 (explicit doc-comment statement that neither this nor SUPABASE_DB_PASSWORD is required)",
     authoritativeRecoverySourceStatus: null,
-    notes: "Kept here precisely so a future reader who sees these names in test-isolation code does not mistake them for live configuration.",
+    notes: "Kept here precisely so a future reader who sees this name in test-isolation code does not mistake it for live configuration.",
+  },
+  {
+    name: "SUPABASE_DB_PASSWORD",
+    aliasNames: [],
+    category: "DEPRECATED_DOCUMENTED_NOT_USED",
+    sensitivity: "SECRET",
+    environment: "NOT_APPLICABLE",
+    runtimeSource: "NOT_APPLICABLE",
+    recoveryClass: null,
+    required: false,
+    affectedCapability: "None — same superseded backup-adapter design as SUPABASE_ACCESS_TOKEN, but historically a distinct credential (a database password, not an API access token) — never an alternate representation of it. Referenced only inside supabaseCliExecutor.test.ts, purely for defensive test-environment isolation — never read by any real script.",
+    lossImpact: "Not applicable — nothing reads this name.",
+    rotationImpact: null,
+    recoveryDependency: null,
+    templatePresenceExpected: false,
+    sourceReference: "scripts/backupCreation/supabaseCliExecutor.ts:57-62 (explicit doc-comment statement that neither this nor SUPABASE_ACCESS_TOKEN is required)",
+    authoritativeRecoverySourceStatus: null,
+    notes: "Kept here precisely so a future reader who sees this name in test-isolation code does not mistake it for live configuration.",
   },
 
   // ── Backup operator tooling (see docs/database-backup-operations-v1.md) ──

@@ -95,17 +95,23 @@ describe("[1][2] current-state TOTAL metrics — templatePresenceExpectedEntryCo
     expect(result.summary.templatePresenceExpectedNameCount).toBe(4);
   });
 
-  it("the real register's own current totals: entry count and name count differ by exactly the number of extra grouped-alias names among templatePresenceExpected entries", () => {
+  it("the real register's own current totals: entry count and name count differ by exactly the total alias-name count among templatePresenceExpected entries", () => {
     const expectedEntries = CONFIGURATION_RECOVERY_REGISTER.filter((e) => e.templatePresenceExpected);
     const expectedNameCount = expectedEntries.reduce((sum, e) => sum + 1 + e.aliasNames.length, 0);
     const result = auditConfigurationRecovery({ register: CONFIGURATION_RECOVERY_REGISTER, envExampleContent: "" });
     expect(result.summary.templatePresenceExpectedEntryCount).toBe(expectedEntries.length);
     expect(result.summary.templatePresenceExpectedNameCount).toBe(expectedNameCount);
-    // Documents the known discrepancy source directly, rather than a
-    // prose number that could silently go stale: TETHER_BLOCK_DEBUG_TOOLS
-    // alone contributes 3 extra names (4 total) beyond its own 1 entry.
-    const blockToggles = expectedEntries.find((e) => e.name === "TETHER_BLOCK_DEBUG_TOOLS");
-    expect(blockToggles?.aliasNames.length).toBe(3);
+    // Documents the discrepancy source directly, rather than a prose
+    // number that could silently go stale: after the alias-model fix,
+    // the ONLY entries contributing extra names are genuine
+    // multi-representation groups (e.g. LTI_PRIVATE_KEY_B64's 2
+    // aliases) — independent variables like the lockdown toggles now
+    // each have their own entry with aliasNames: [] and contribute
+    // exactly 1 name each, matching their own entry count.
+    const ltiPrivateKey = expectedEntries.find((e) => e.name === "LTI_PRIVATE_KEY_B64");
+    expect(ltiPrivateKey?.aliasNames.length).toBe(2);
+    const blockToggle = expectedEntries.find((e) => e.name === "TETHER_BLOCK_DEBUG_TOOLS");
+    expect(blockToggle?.aliasNames.length).toBe(0);
   });
 
   it("[6] audit output never describes these totals as historical 'added' or 'drift' counts", async () => {
@@ -142,11 +148,69 @@ describe("[3][4][5] current-state DRIFT metrics — templateMissingEntryCount/Na
     expect(result.summary.templateMissingNameCount).toBe(2);
   });
 
-  it("a fully-satisfied template (including via an alias, not just the canonical name) reports zero missing", () => {
+  it("[11] an entry satisfied via its alias (not the canonical name) has zero missing ENTRIES, but the canonical name itself is still individually missing from the template", () => {
     const register = [baseEntry({ name: "PRESENT_VIA_ALIAS", aliasNames: ["PRESENT_VIA_ALIAS_ALT"], templatePresenceExpected: true })];
     const result = auditConfigurationRecovery({ register, envExampleContent: "PRESENT_VIA_ALIAS_ALT=\n" });
+    // The logical item IS representable (its alias is present) — never
+    // incorrectly counted as a missing ENTRY just because one
+    // particular form is absent while another remains.
+    expect(result.summary.templateMissingEntryCount).toBe(0);
+    // But the canonical name itself is genuinely absent from the
+    // template — this project's own convention documents every
+    // supported form, so that is a real (lower-severity) gap.
+    expect(result.summary.templateMissingNameCount).toBe(1);
+  });
+
+  it("a template documenting every supported name/alias form reports zero missing on both metrics", () => {
+    const register = [baseEntry({ name: "FULLY_DOCUMENTED", aliasNames: ["FULLY_DOCUMENTED_ALT"], templatePresenceExpected: true })];
+    const result = auditConfigurationRecovery({ register, envExampleContent: "FULLY_DOCUMENTED=\nFULLY_DOCUMENTED_ALT=\n" });
     expect(result.summary.templateMissingEntryCount).toBe(0);
     expect(result.summary.templateMissingNameCount).toBe(0);
+  });
+});
+
+describe("[ALIAS MODEL FIX] name-level template drift is detected precisely, using the real corrected register", () => {
+  it("[5][6][7] deleting ONE of the four independent lockdown toggles from a synthetic template is detected as its own missing entry — never masked by the other three remaining present", async () => {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const repoRoot = path.resolve(__dirname, "..", "..");
+    const realEnvExampleContent = await fs.readFile(path.join(repoRoot, ".env.example"), "utf8");
+    // Simulate deleting exactly one line — TETHER_BLOCK_SCREEN_CAPTURE_TOOLS — while the other three lockdown toggles remain present.
+    const tamperedEnvExampleContent = realEnvExampleContent
+      .split("\n")
+      .filter((line) => !line.startsWith("TETHER_BLOCK_SCREEN_CAPTURE_TOOLS="))
+      .join("\n");
+    const before = auditConfigurationRecovery({ register: CONFIGURATION_RECOVERY_REGISTER, envExampleContent: realEnvExampleContent });
+    const after = auditConfigurationRecovery({ register: CONFIGURATION_RECOVERY_REGISTER, envExampleContent: tamperedEnvExampleContent });
+    expect(before.summary.templateMissingEntryCount).toBe(0);
+    // [5] the current missing NAME count increments.
+    expect(after.summary.templateMissingNameCount).toBe(before.summary.templateMissingNameCount + 1);
+    // [6] a real ERROR finding is produced for exactly that name.
+    const finding = after.findings.find((f) => f.code === "MISSING_FROM_ENV_EXAMPLE" && f.entryName === "TETHER_BLOCK_SCREEN_CAPTURE_TOOLS");
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe("ERROR");
+    expect(after.passed).toBe(false);
+    // [7] the sibling toggles' continued presence does NOT mask this — each is its own independent entry now, so no other finding disappears or compensates.
+    expect(after.findings.filter((f) => f.code === "MISSING_FROM_ENV_EXAMPLE").length).toBe(1);
+  });
+
+  it("[9] a true alias group with only ONE supported form present in the template produces a WARNING for each individually-missing form, never an ERROR", () => {
+    const register = [baseEntry({ name: "TRUE_ALIAS_PRIMARY", aliasNames: ["TRUE_ALIAS_SECONDARY", "TRUE_ALIAS_TERTIARY"], templatePresenceExpected: true })];
+    const result = auditConfigurationRecovery({ register, envExampleContent: "TRUE_ALIAS_PRIMARY=\n" });
+    const warnings = result.findings.filter((f) => f.code === "EXPECTED_ENV_NAME_MISSING_FROM_TEMPLATE");
+    expect(warnings.length).toBe(2);
+    for (const w of warnings) expect(w.severity).toBe("WARNING");
+    expect(result.findings.some((f) => f.code === "MISSING_FROM_ENV_EXAMPLE")).toBe(false);
+    expect(result.passed).toBe(true); // WARNING never fails the audit.
+  });
+
+  it("[10] a COMPLETELY absent true-alias group increments templateMissingEntryCount by exactly ONE, not once per alias", () => {
+    const register = [baseEntry({ name: "TRUE_ALIAS_PRIMARY", aliasNames: ["TRUE_ALIAS_SECONDARY", "TRUE_ALIAS_TERTIARY"], templatePresenceExpected: true })];
+    const result = auditConfigurationRecovery({ register, envExampleContent: "" });
+    expect(result.summary.templateMissingEntryCount).toBe(1);
+    expect(result.findings.filter((f) => f.code === "MISSING_FROM_ENV_EXAMPLE").length).toBe(1);
+    // No per-name WARNING duplicated on top of the entry-level ERROR.
+    expect(result.findings.filter((f) => f.code === "EXPECTED_ENV_NAME_MISSING_FROM_TEMPLATE").length).toBe(0);
   });
 });
 

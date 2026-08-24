@@ -318,3 +318,93 @@ describe("register structural integrity", () => {
     expect(sample).not.toHaveProperty("value");
   });
 });
+
+describe("[ALIAS MODEL FIX] independent lockdown toggles are separate entries, never grouped as aliases", () => {
+  it("[1] TETHER_BLOCK_DEBUG_TOOLS has aliasNames: []", () => {
+    expect(getConfigRecoveryEntry("TETHER_BLOCK_DEBUG_TOOLS").aliasNames).toEqual([]);
+  });
+
+  it("[2] TETHER_BLOCK_REMOTE_CONTROL has its own entry with aliasNames: []", () => {
+    const entry = getConfigRecoveryEntry("TETHER_BLOCK_REMOTE_CONTROL");
+    expect(entry.name).toBe("TETHER_BLOCK_REMOTE_CONTROL");
+    expect(entry.aliasNames).toEqual([]);
+  });
+
+  it("[3] TETHER_BLOCK_SCREEN_CAPTURE_TOOLS has its own entry with aliasNames: []", () => {
+    const entry = getConfigRecoveryEntry("TETHER_BLOCK_SCREEN_CAPTURE_TOOLS");
+    expect(entry.name).toBe("TETHER_BLOCK_SCREEN_CAPTURE_TOOLS");
+    expect(entry.aliasNames).toEqual([]);
+  });
+
+  it("[4] TETHER_BLOCK_VIRTUAL_MACHINES has its own entry with aliasNames: []", () => {
+    const entry = getConfigRecoveryEntry("TETHER_BLOCK_VIRTUAL_MACHINES");
+    expect(entry.name).toBe("TETHER_BLOCK_VIRTUAL_MACHINES");
+    expect(entry.aliasNames).toEqual([]);
+  });
+
+  it("all four lockdown toggles are four DISTINCT register entries, not one grouped entry", () => {
+    const names = ["TETHER_BLOCK_DEBUG_TOOLS", "TETHER_BLOCK_REMOTE_CONTROL", "TETHER_BLOCK_SCREEN_CAPTURE_TOOLS", "TETHER_BLOCK_VIRTUAL_MACHINES"];
+    const entries = names.map((n) => getConfigRecoveryEntry(n));
+    expect(new Set(entries).size).toBe(4);
+    for (const entry of entries) {
+      expect(entry.templatePresenceExpected).toBe(true);
+      expect(entry.aliasNames).toEqual([]);
+    }
+  });
+
+  it("LTI_TOOL_NAME and LTI_TOOL_DESCRIPTION are two independent entries, not grouped as aliases (each has its own independent default in the real read site)", () => {
+    const name = getConfigRecoveryEntry("LTI_TOOL_NAME");
+    const description = getConfigRecoveryEntry("LTI_TOOL_DESCRIPTION");
+    expect(name).not.toBe(description);
+    expect(name.aliasNames).toEqual([]);
+    expect(description.aliasNames).toEqual([]);
+  });
+
+  it("SUPABASE_ACCESS_TOKEN and SUPABASE_DB_PASSWORD are two independent entries — different historical credentials, not alternate representations of one secret", () => {
+    const token = getConfigRecoveryEntry("SUPABASE_ACCESS_TOKEN");
+    const password = getConfigRecoveryEntry("SUPABASE_DB_PASSWORD");
+    expect(token).not.toBe(password);
+    expect(token.aliasNames).toEqual([]);
+    expect(password.aliasNames).toEqual([]);
+  });
+});
+
+describe("[8][12] every remaining non-empty aliasNames group is a genuine alternate/fallback representation of one logical value", () => {
+  // Explicit allowlist — never inferred from name similarity (per this
+  // task's own instruction). Each group here is independently verified
+  // against its real read site: the running code checks these names in
+  // a fixed priority order and only ONE is ever actually expected to be
+  // set, unlike the independent-variable groups corrected above.
+  const ALLOWED_TRUE_ALIAS_GROUPS: Record<string, { aliases: string[]; verifiedReadSite: string }> = {
+    LTI_PRIVATE_KEY_B64: { aliases: ["LTI_PRIVATE_KEY_PATH", "LTI_PRIVATE_KEY"], verifiedReadSite: "src/lib/lti/keys.ts readKey() — priority order *_B64 -> *_PATH -> raw, only one used" },
+    LTI_PUBLIC_KEY_B64: { aliases: ["LTI_PUBLIC_KEY_PATH", "LTI_PUBLIC_KEY"], verifiedReadSite: "src/lib/lti/keys.ts readKey() — priority order *_B64 -> *_PATH -> raw, only one used" },
+    SUPABASE_URL: { aliases: ["NEXT_PUBLIC_SUPABASE_URL"], verifiedReadSite: "src/lib/evidenceStorage.ts / src/lib/evidenceArchive.ts — `env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL`, one fallback value" },
+    VERCEL_GIT_COMMIT_SHA: { aliases: ["GIT_COMMIT_SHA"], verifiedReadSite: "src/app/api/version/route.ts — one fallback value for the same build-commit field" },
+  };
+
+  it("[12] every non-empty aliasNames group in the real register is exactly the allowlisted set — no more, no fewer", () => {
+    const actualGroups = CONFIGURATION_RECOVERY_REGISTER.filter((e) => e.aliasNames.length > 0);
+    const actualNames = new Set(actualGroups.map((e) => e.name));
+    const allowedNames = new Set(Object.keys(ALLOWED_TRUE_ALIAS_GROUPS));
+    expect(actualNames).toEqual(allowedNames);
+    for (const entry of actualGroups) {
+      expect(entry.aliasNames).toEqual(ALLOWED_TRUE_ALIAS_GROUPS[entry.name].aliases);
+    }
+  });
+
+  it("[8] each allowlisted true-alias entry is grounded in a verified read site, and this module's own doc comment states the one-meaning rule", () => {
+    for (const [name, info] of Object.entries(ALLOWED_TRUE_ALIAS_GROUPS)) {
+      const entry = getConfigRecoveryEntry(name);
+      expect(entry.sourceReference.length).toBeGreaterThan(0);
+      expect(info.verifiedReadSite.length).toBeGreaterThan(0);
+    }
+    expect(registerSource).toMatch(/ALIAS MODEL — one entry's `aliasNames` means ONE thing, always/);
+  });
+
+  it("the independent-variable groups this fix corrected are explicitly NOT in the allowlist", () => {
+    const allowedNames = new Set(Object.keys(ALLOWED_TRUE_ALIAS_GROUPS));
+    expect(allowedNames.has("TETHER_BLOCK_DEBUG_TOOLS")).toBe(false);
+    expect(allowedNames.has("LTI_TOOL_NAME")).toBe(false);
+    expect(allowedNames.has("SUPABASE_ACCESS_TOKEN")).toBe(false);
+  });
+});

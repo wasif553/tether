@@ -55,20 +55,32 @@ export type AuditResult = {
     templatePresenceExpectedEntryCount: number;
     templatePresenceExpectedNameCount: number;
     /**
-     * CURRENT-STATE DRIFT — how many `templatePresenceExpected` entries
-     * (and, per-entry, how many of their represented names) are NOT
-     * currently satisfied by `.env.example`, right now, on this exact
-     * register/template pair. Unlike the totals above, these numbers are
-     * expected to reach `0`/`0` once `.env.example` is fully reconciled,
-     * and are exactly what should be re-checked on every future run of
-     * `npm run config:recovery-audit` — this is the genuinely ongoing
-     * drift metric, computed fresh from current state every time, never
-     * from Git history. `templateMissingNameCount` sums, over only the
-     * entries that are CURRENTLY missing (i.e. none of their name/alias
-     * forms are present), how many total name-slots (`1 +
-     * aliasNames.length`) each represents — it does not independently
-     * re-evaluate an alias whose SIBLING name already satisfies that same
-     * entry's own any-of-these-names presence check.
+     * CURRENT-STATE DRIFT — computed fresh from current state every
+     * time, never from Git history; both are expected to reach `0` once
+     * `.env.example` is fully reconciled, and are exactly what should be
+     * re-checked on every future run of `npm run config:recovery-audit`.
+     * The two answer DIFFERENT questions, deliberately kept apart:
+     *
+     * - `templateMissingEntryCount` — how many LOGICAL entries have NONE
+     *   of their supported name/alias forms present in `.env.example`.
+     *   This is the functional-completeness question: "is this
+     *   configuration item representable at all in the template?" A true
+     *   alias group (e.g. the LTI key triples) only needs ONE of its
+     *   forms present to satisfy this — that is what aliases are for.
+     *
+     * - `templateMissingNameCount` — how many INDIVIDUAL env var NAMES,
+     *   summed across every `templatePresenceExpected` entry, are simply
+     *   absent from `.env.example` — checked independently per name, not
+     *   gated on whether a sibling alias happens to be present. Since
+     *   `.env.example` is the canonical operator template and this
+     *   project's own convention documents every supported alternative
+     *   form as its own line (see the LTI key triple, all three of
+     *   which appear in the real `.env.example`), a template that
+     *   documents `LTI_PRIVATE_KEY_B64` but omits `LTI_PRIVATE_KEY_PATH`/
+     *   `LTI_PRIVATE_KEY` has 0 missing ENTRIES (the item is still
+     *   functionally representable) but 2 missing NAMES (an incomplete
+     *   template) — see `EXPECTED_ENV_NAME_MISSING_FROM_TEMPLATE` below
+     *   for the finding this produces.
      */
     templateMissingEntryCount: number;
     templateMissingNameCount: number;
@@ -132,11 +144,29 @@ export function auditConfigurationRecovery(params: { register: readonly ConfigRe
 
     // Template presence expectation.
     const allNamesForEntry = [entry.name, ...entry.aliasNames];
-    const anyPresentInTemplate = allNamesForEntry.some((n) => envExampleNames.has(n));
-    if (entry.templatePresenceExpected && !anyPresentInTemplate) {
-      findings.push({ code: "MISSING_FROM_ENV_EXAMPLE", severity: "ERROR", entryName: entry.name, message: `"${entry.name}" (or one of its documented alias forms) is expected in .env.example but was not found.` });
-      templateMissingEntryCount += 1;
-      templateMissingNameCount += allNamesForEntry.length;
+    const missingNamesForEntry = allNamesForEntry.filter((n) => !envExampleNames.has(n));
+    const anyPresentInTemplate = missingNamesForEntry.length < allNamesForEntry.length;
+    if (entry.templatePresenceExpected) {
+      if (!anyPresentInTemplate) {
+        // Fully missing: one clear entry-level finding, not one per name
+        // (see this file's own AuditResult doc comment on
+        // templateMissingEntryCount vs templateMissingNameCount).
+        findings.push({ code: "MISSING_FROM_ENV_EXAMPLE", severity: "ERROR", entryName: entry.name, message: `"${entry.name}" (or one of its documented alias forms) is expected in .env.example but was not found.` });
+        templateMissingEntryCount += 1;
+        templateMissingNameCount += allNamesForEntry.length;
+      } else if (missingNamesForEntry.length > 0) {
+        // Partially missing: the logical entry IS represented (at least
+        // one supported form is present), but this project's own
+        // convention documents every supported alternative form as its
+        // own line — surface each individually-absent form as its own,
+        // lower-severity finding, never duplicating the entry-level one
+        // above (which does not apply here since the entry itself is
+        // satisfied).
+        templateMissingNameCount += missingNamesForEntry.length;
+        for (const missingName of missingNamesForEntry) {
+          findings.push({ code: "EXPECTED_ENV_NAME_MISSING_FROM_TEMPLATE", severity: "WARNING", entryName: entry.name, message: `"${missingName}" is a documented alternative form of "${entry.name}" and is expected in .env.example, but only some of that entry's supported forms are present — "${entry.name}" itself is still satisfied (at least one supported form exists), so this is a template-completeness gap, not a functional one.` });
+        }
+      }
     }
     if (!entry.templatePresenceExpected && entry.category === "FUTURE_NOT_PROVISIONED" && anyPresentInTemplate) {
       findings.push({ code: "FUTURE_ITEM_PRESENT_IN_TEMPLATE", severity: "ERROR", entryName: entry.name, message: `"${entry.name}" is FUTURE_NOT_PROVISIONED but appears in .env.example — a not-yet-provisioned item must not be added to the template merely because its architecture exists.` });

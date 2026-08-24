@@ -586,24 +586,37 @@ the time this branch was built — not a figure `npm run
 config:recovery-audit` recomputes on demand; see that tool's own
 `templateMissingEntryCount`/`templateMissingNameCount` fields below for
 the genuinely ongoing, current-state equivalent, which read `0`/`0` once
-reconciled): **13 register entries, representing 16 distinct
-environment-variable NAMES**, that were genuinely active/currently-read
-but missing from the template at that time were added
+reconciled): **16 previously undocumented environment-variable NAMES
+were added** to `.env.example` — names and safe/blank values only,
+verified by `register.test.ts`'s own secret-leak tests
 (`EVIDENCE_RETENTION_DAYS`, `TETHER_CLIENT_OPTIONAL_ENABLED`,
 `TETHER_MOCK_SECURE_CLIENT_ENABLED` and its institution allowlist,
 `TETHER_DIAGNOSTIC_LOGGING_ENABLED`,
 `TETHER_SECURE_LAUNCH_CONSUME_TRANSACTION_TIMEOUT_MS`, the four
-`TETHER_BLOCK_*` lockdown toggles (one register entry,
-`TETHER_BLOCK_DEBUG_TOOLS`, groups all four via `aliasNames` — the
-source of the 13-vs-16 discrepancy), `TETHER_INSTALLER_DOWNLOAD_URL`,
+`TETHER_BLOCK_*` lockdown toggles, `TETHER_INSTALLER_DOWNLOAD_URL`,
 `TETHER_RELEASE_STATUS`, `TETHER_RELEASE_NOTES_URL`,
 `TETHER_SUPPORT_CONTACT`, `NEXT_PUBLIC_TETHER_PHONE_CALIBRATION_ENABLED`,
-`TETHER_TIMING_HEADERS_ENABLED`) were added — names and safe/blank
-values only, verified by `register.test.ts`'s own secret-leak tests. The
-`ARCHIVE_*` group was deliberately NOT added, since it remains
-`FUTURE_NOT_PROVISIONED` (Section 9 above) —
-`npm run config:recovery-audit` actively fails if that ever happens by
-mistake.
+`TETHER_TIMING_HEADERS_ENABLED`). **The first implementation of this
+pass represented those 16 names as 13 register entries, which was itself
+a modelling error, since corrected**: four of the sixteen names — the
+independent `TETHER_BLOCK_*` lockdown toggles — were incorrectly grouped
+into a single `TETHER_BLOCK_DEBUG_TOOLS` entry via `aliasNames`, even
+though each is read completely independently
+(`src/lib/tetherLockdownConfig.ts`) with its own default. `aliasNames`
+is reserved exclusively for genuine alternate/fallback representations
+of ONE logical value (e.g. the LTI key `*_B64`/`*_PATH`/raw triples,
+where only one form is ever actually set) — grouping independent
+variables that way meant the audit's own "is this entry represented"
+check could be satisfied by any ONE of the four toggles, so deleting
+three of them from `.env.example` while leaving one behind would have
+gone completely undetected. The register model has been corrected: every
+independent variable now has its own entry with `aliasNames: []` (see
+`register.test.ts`'s `[ALIAS MODEL FIX]` tests, which lock the remaining
+non-empty `aliasNames` groups against an explicit allowlist of verified
+genuine alternates, never inferred from name similarity). The `ARCHIVE_*`
+group was deliberately NOT added to the template, since it remains
+`FUTURE_NOT_PROVISIONED` (Section 9 above) — `npm run
+config:recovery-audit` actively fails if that ever happens by mistake.
 
 **Ongoing, current-state coverage** (as opposed to the one-time
 historical figure above) is what `npm run config:recovery-audit` itself
@@ -611,10 +624,13 @@ reports on every run, computed fresh from the register and
 `.env.example` as they exist right now — never from Git history:
 register entries expecting template presence (current total), the
 distinct names that represents (current total), and how many of each are
-currently missing. As of this pass: 62 entries / 71 names expected,
-**0 entries / 0 names missing** — the reconciliation above is fully
-satisfied, and this is the number future changes should keep at zero,
-not the historical 13/16 above.
+currently missing — now checked precisely at the individual-NAME level,
+not merely "is any one supported form present" (which is what let the
+lockdown-toggle modelling error above go undetected in the first place).
+As of this pass: 66 entries / 71 names expected, **0 entries / 0 names
+missing** — the reconciliation above is fully satisfied, and this is the
+number future changes should keep at zero, not the historical 13/16
+above.
 
 **`CONFIGURATION RECOVERY SYNTHETIC EXERCISE: PASS`.** The authoritative
 exercise ran entirely with synthetic values generated fresh for the
@@ -1433,3 +1449,4 @@ marked complete:
 | v1.7 | 2026-08-24 | Section 13 rewritten: replaced the small hand-maintained Configuration Recovery Register table with a full Configuration & Secrets Recovery v1 package — a machine-readable, value-free canonical register (`scripts/configurationRecovery/register.ts`, 75 entries, built from actual `process.env` read sites), a repository/static-analysis-only audit tool (`npm run config:recovery-audit`), and four new documents (`docs/configuration-and-secrets-recovery-v1.md`, `docs/configuration-reconstruction-checklist-v1.md`, `docs/configuration-recovery-test-record-v1.md`, `docs/configuration-loss-dr-exercise-checklist-v1.md`). `.env.example` reconciled — 13 genuinely active, currently-read variables that were missing were added (names/safe values only); the `ARCHIVE_*` group deliberately left out (`FUTURE_NOT_PROVISIONED`). `CONFIGURATION_RECOVERY_SYNTHETIC_EXERCISE: PASS` — a real disposable-Postgres `prisma db push` plus an isolated in-process validation against this repository's own real readiness/HMAC code, using only synthetic values (one earlier `next dev`-based attempt auto-loaded the repository's real, pre-existing `.env.local` for unset variable names before that behaviour was noticed and the attempt was immediately aborted — no value from it was inspected, printed, copied, committed, or recorded anywhere; the isolated-process design that produced the actual `PASS` result never loads any file-based configuration at all). Remains `AUTHORITATIVE SECRET RECOVERY SOURCE: NOT YET SELECTED` and `PRE-PILOT CONFIGURATION RECOVERY GATE: OPEN` — see `docs/configuration-and-secrets-recovery-v1.md` (`operations/configuration-secrets-recovery-v1` branch). No Production secret values read, no Production contact, no credentials rotated/revoked, no cloud resources/spend, no schema/migration, no branding/native/release-metadata change. |
 | v1.8 | 2026-08-24 | Section 13 corrected on three points, none changing what was actually built: (1) `.env.example`'s own comments for `EXAM_BINDING_HMAC_SECRET`/`NETWORK_EVIDENCE_SALT` previously described a stale "random per-process fallback" behaviour current code does not have (both now FAIL CLOSED — `register.test.ts` locks this permanently); (2) the v1.7 row's "never any real `.env`/`.env.local` content" phrasing overstated the synthetic exercise — the aborted `next dev` attempt DID auto-load the repository's real `.env.local` for unset names before that was noticed and the attempt was killed, with no value from it ever inspected/printed/copied/committed/recorded; the wording here and in Section 13's own prose now states this precisely instead of overstating or concealing it; (3) the "13 variables missing from `.env.example`" figure is now stated as what it actually is — 13 register ENTRIES representing 16 distinct env var NAMES (one entry, `TETHER_BLOCK_DEBUG_TOOLS`, groups 4 independently-toggleable names) — and the audit tool (`scripts/configurationRecovery/audit.ts`) now exposes both counts (`templatePresenceExpectedEntryCount`/`templatePresenceExpectedNameCount`) permanently rather than requiring a hand-recount. No runtime code changed. See `docs/configuration-and-secrets-recovery-v1.md` (`operations/configuration-secrets-recovery-v1` branch). No Production contact, no credential rotation, no cloud resources/spend, no schema/migration, no branding/native/release-metadata change. |
 | v1.9 | 2026-08-24 | Corrects v1.8's own overstatement: `templatePresenceExpectedEntryCount`/`templatePresenceExpectedNameCount` (`scripts/configurationRecovery/audit.ts`) count TODAY's register expectations regardless of `.env.example`'s actual state — they were NOT, and are not now, a recomputation of the historical 13-entry/16-name branch reconciliation (this audit has no access to Git history and cannot recompute what changed on a merged branch). That 13/16 figure remains documented in Section 13 above labelled explicitly as a one-time recorded result of this implementation pass, not an ongoing audit output. Two genuinely new, genuinely ongoing current-state metrics were added instead — `templateMissingEntryCount`/`templateMissingNameCount`, computed fresh from the current register vs. current `.env.example` on every run, both `0` once reconciled (confirmed: `0`/`0` against this branch's own `.env.example`) — these are what should be watched for regression going forward, not the historical figure. CLI output relabelled accordingly ("current total" / "current" missing counts). No runtime code changed, no register entry reclassified. See `docs/configuration-and-secrets-recovery-v1.md` (`operations/configuration-secrets-recovery-v1` branch). No Production contact, no env-file read, no credential action, no schema/migration, no branding/native/release-metadata change. |
+| v1.10 | 2026-08-24 | Corrects a genuine `aliasNames` modelling error in `scripts/configurationRecovery/register.ts`, found by review: `aliasNames` is meant to hold only alternate/fallback representations of ONE logical value, but three groups were mis-used to shorten the register instead — the four independent `TETHER_BLOCK_*` lockdown toggles (each read completely independently, its own default), `LTI_TOOL_NAME`/`LTI_TOOL_DESCRIPTION` (a title and a description, not the same field), and `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_PASSWORD` (two different historical/deprecated credentials). Because the audit's "is this entry represented in `.env.example`" check was satisfied by ANY ONE name/alias, an independent variable mis-grouped this way could be silently deleted from the template without the audit ever noticing, as long as a wrongly-grouped sibling remained — a real detection gap in the "current-state drift" metrics added in v1.9. Fixed: register entry count 75 → **80** (independent variables split into their own entries, `aliasNames: []`); the register's own module-level doc comment now states the one-meaning rule explicitly, and `register.test.ts`'s new `[ALIAS MODEL FIX]` tests lock the four remaining true-alias groups (`LTI_PRIVATE_KEY_B64`, `LTI_PUBLIC_KEY_B64`, `SUPABASE_URL`, `VERCEL_GIT_COMMIT_SHA`) against an explicit, individually-verified allowlist — never inferred from name similarity. `scripts/configurationRecovery/audit.ts` gained precise per-NAME drift detection (`templateMissingNameCount` now checks every supported form independently, not gated on a sibling's presence) and a new `EXPECTED_ENV_NAME_MISSING_FROM_TEMPLATE` (WARNING) finding for a true alias group's partially-undocumented forms, distinct from the existing `MISSING_FROM_ENV_EXAMPLE` (ERROR) finding for a fully-unrepresented entry. Current-state totals updated: 66 entries / 71 names expected, 0/0 missing. Section 13's historical wording corrected to describe the 13-vs-16 figure as itself a product of the modelling error, not a neutral fact — see that section for the corrected wording. No runtime application code changed (this register and its audit tool are documentation/tooling only), no register entry's actual classification changed, only its structural representation. See `docs/configuration-and-secrets-recovery-v1.md` (`operations/configuration-secrets-recovery-v1` branch). No Production contact, no env-file read, no credential action, no schema/migration, no branding/native/release-metadata change. |
