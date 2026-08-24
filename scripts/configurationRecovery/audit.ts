@@ -43,14 +43,24 @@ export type AuditResult = {
      * in a changelog entry, derived once from that branch's own
      * baseline-vs-feature diff, never re-derived here after the fact.
      *
-     * The two numbers can legitimately differ from each other: a handful
-     * of register entries group multiple INDEPENDENTLY-toggleable env var
-     * names under one entry via `aliasNames` for register brevity (e.g.
-     * `TETHER_BLOCK_DEBUG_TOOLS` groups 4 separate lockdown-toggle names
-     * — see that entry's own `notes` field) — a different case from a
-     * true multi-representation fallback group (e.g. the LTI
-     * `*_B64`/`*_PATH`/raw key forms, where only ONE of the three is ever
-     * actually set).
+     * The two numbers can legitimately differ from each other, but only
+     * for ONE reason: `aliasNames` holds exclusively genuine alternate /
+     * fallback representations of a SINGLE logical configuration value —
+     * never independent variables grouped for register brevity (that
+     * grouping was a modelling bug, corrected in full — see
+     * `register.test.ts`'s `[ALIAS MODEL FIX]` tests, which lock the
+     * remaining alias groups against an explicit, individually-verified
+     * allowlist). So one logical entry can still expand to more than one
+     * documented name when it legitimately supports more than one
+     * representation, e.g.:
+     *   `LTI_PRIVATE_KEY_B64` / `LTI_PRIVATE_KEY_PATH` / `LTI_PRIVATE_KEY`
+     *   `LTI_PUBLIC_KEY_B64` / `LTI_PUBLIC_KEY_PATH` / `LTI_PUBLIC_KEY`
+     *   `SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_URL`
+     *   `VERCEL_GIT_COMMIT_SHA` / `GIT_COMMIT_SHA`
+     * Independent configuration variables (e.g. the four separate
+     * `TETHER_BLOCK_*` lockdown toggles) must always have independent
+     * register entries and must never be grouped via `aliasNames` merely
+     * for brevity.
      */
     templatePresenceExpectedEntryCount: number;
     templatePresenceExpectedNameCount: number;
