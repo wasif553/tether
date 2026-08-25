@@ -663,7 +663,7 @@ describe("Exam layout stability — question card min-height floor", () => {
     // combination appears elsewhere in the file for unrelated cards).
     const anchor = source.indexOf('{oneQuestion.loading && <p className="text-gray-500">Loading question...</p>}');
     expect(anchor).toBeGreaterThan(-1);
-    const cardIdx = source.indexOf('rounded border border-gray-200 p-4"', anchor);
+    const cardIdx = source.indexOf('rounded border border-gray-200 bg-white p-4"', anchor);
     expect(cardIdx).toBeGreaterThan(-1);
     const lineStart = source.lastIndexOf("\n", cardIdx);
     const line = source.slice(lineStart, cardIdx + 40);
@@ -680,7 +680,7 @@ describe("Exam layout stability — question card min-height floor", () => {
   });
 
   it("the fix is a pure className addition — no new key prop, no conditional remount, no animation/transition class introduced on the card", () => {
-    const cardIdx = source.indexOf('min-h-[280px] rounded border border-gray-200 p-4"');
+    const cardIdx = source.indexOf('min-h-[280px] rounded border border-gray-200 bg-white p-4"');
     expect(cardIdx).toBeGreaterThan(-1);
     const surrounding = source.slice(cardIdx - 200, cardIdx + 200);
     expect(surrounding).not.toMatch(/\bkey=\{/);
@@ -738,16 +738,18 @@ describe("Exam layout stability — RecoveryStatusBanner call site never re-gate
 // See the JSX's own doc comments for the CSS-grid mechanics.
 describe("Exam workspace — desktop left-navigator two-column layout", () => {
   it("the one-question-mode workspace wrapper uses a bounded-navigator/flexible-question grid at lg: and above, with items-start to prevent column-height stretching", () => {
-    // Question-scoped brainstorm sidebar v1 — this grid class is now
-    // COMPUTED (oneQuestionGridColsClass/oneQuestionGridWrapperClass,
-    // declared alongside showQuestionNavigatorPanel), since a third
-    // (AI sidebar) column can also apply — no longer one static inline
-    // ternary literal. The navigator-only branch still resolves to the
-    // exact same class string at runtime; assert against the source of
-    // that computation instead of the old single literal.
-    const colsIdx = source.indexOf('"lg:grid-cols-[260px_minmax(0,1fr)]"');
+    // Question-scoped brainstorm sidebar v1 / Approved student exam +
+    // Brainstorm layout v1 — this grid class is now COMPUTED
+    // (oneQuestionGridColsClass/oneQuestionGridWrapperClass, declared
+    // alongside showQuestionNavigatorPanel), since a third (AI sidebar)
+    // column can also apply, at its own min-[1200px]: breakpoint — no
+    // longer one static inline ternary literal. The navigator-only
+    // branch still resolves to the exact same 2-column class string at
+    // `lg:`; assert against the source of that computation instead of
+    // the old single literal.
+    const colsIdx = source.indexOf("lg:grid-cols-[220px_minmax(560px,1fr)]");
     expect(colsIdx).toBeGreaterThan(-1);
-    const wrapperTemplateIdx = source.indexOf("lg:items-start lg:gap-6");
+    const wrapperTemplateIdx = source.indexOf("lg:items-start lg:gap-5");
     expect(wrapperTemplateIdx).toBeGreaterThan(-1);
   });
 
@@ -771,7 +773,7 @@ describe("Exam workspace — desktop left-navigator two-column layout", () => {
   });
 
   it("the previously-established min-h-[280px] question-card floor is preserved unchanged by this layout pass", () => {
-    expect(source).toContain('min-h-[280px] rounded border border-gray-200 p-4"');
+    expect(source).toContain('min-h-[280px] rounded border border-gray-200 bg-white p-4"');
   });
 
   it("the no-navigator/no-AI-sidebar branch of the workspace wrapper's className is exactly \"mt-6\" — no grid/column classes leak into the single-column case", () => {
@@ -937,8 +939,8 @@ describe("Remove routine save UI — left-nav slot from e9727a827706576c0d3c7956
   });
 
   it("the two-column grid classes and the sticky navigator wrapper are still present (now computed, for the added AI-sidebar column — see Question-scoped brainstorm sidebar v1) and unmodified respectively", () => {
-    expect(source).toContain('"lg:grid-cols-[260px_minmax(0,1fr)]"');
-    expect(source).toContain("lg:items-start lg:gap-6");
+    expect(source).toContain("lg:grid-cols-[220px_minmax(560px,1fr)]");
+    expect(source).toContain("lg:items-start lg:gap-5");
     expect(source).toContain('className="mb-4 lg:sticky lg:top-4 lg:mb-0"');
   });
 });

@@ -2,8 +2,9 @@
 
 /**
  * Controlled AI Brainstorming Assistance v1 — student panel. See
- * docs/controlled-ai-brainstorming-assistance-v1.md and
- * docs/question-scoped-brainstorm-sidebar-v1.md.
+ * docs/controlled-ai-brainstorming-assistance-v1.md,
+ * docs/question-scoped-brainstorm-sidebar-v1.md, and
+ * docs/approved-exam-brainstorm-layout-v1.md.
  *
  * Only ever rendered by the parent when aiAssistanceMode is
  * BRAINSTORM_ONLY for this exam (see src/app/student/exams/[id]/page.tsx)
@@ -18,6 +19,13 @@
  * question's transcript with the wrong one. Nothing here changes the
  * server-side guardrails, limits, or evidence semantics — this is a
  * pure read of what the server already enforces and already stored.
+ *
+ * Approved student exam + Brainstorm layout v1 — neutral white/gray
+ * surfaces throughout (no purple/blue decoration); the sidebar
+ * (`sidebar` prop true) treatment — sticky, always expanded, no mobile
+ * toggle — now activates at the approved >=1200px workspace breakpoint
+ * (`min-[1200px]:`) rather than the default 1024px `lg:`, matching the
+ * page's own 3-column grid threshold (see page.tsx).
  */
 import { useEffect, useId, useRef, useState } from "react";
 
@@ -205,60 +213,73 @@ export function AiBrainstormPanel(props: {
   const remainingSummary =
     promptsRemainingForQuestion != null ? `${promptsRemainingForQuestion} prompt(s) remaining` : "";
 
-  const bodyVisibilityClass = props.sidebar ? `${expanded ? "flex" : "hidden"} lg:flex` : expanded ? "block" : "hidden";
+  // Approved student exam + Brainstorm layout v1 — the sidebar
+  // treatment (sticky, always expanded, no toggle) activates at the
+  // same >=1200px threshold as the page's own 3-column grid
+  // (min-[1200px]:, not the default 1024px lg:) — below it, Brainstorm
+  // is the same collapsible section/drawer at every narrower tier.
+  const bodyVisibilityClass = props.sidebar
+    ? `${expanded ? "flex" : "hidden"} min-[1200px]:flex`
+    : expanded
+      ? "block"
+      : "hidden";
   const containerClass = props.sidebar
-    ? "rounded border border-indigo-200 bg-indigo-50/50 lg:sticky lg:top-4 lg:flex lg:max-h-[calc(100vh-2rem)] lg:flex-col"
-    : "mt-3 rounded border border-indigo-200 bg-indigo-50/50";
+    ? "rounded border border-gray-200 bg-white min-[1200px]:sticky min-[1200px]:top-4 min-[1200px]:flex min-[1200px]:max-h-[calc(100vh-2rem)] min-[1200px]:flex-col"
+    : "mt-3 rounded border border-gray-200 bg-white";
 
   return (
     <section aria-label={`Tether Brainstorm, question ${props.questionNumber} of ${props.totalQuestions}`} className={containerClass}>
       {/* Mobile/narrow-screen compact toggle (Part 15) — a dedicated
-          right-side panel on desktop needs no toggle at all (forced
-          visible below via `lg:flex`/`lg:block`), so this control is
-          hidden entirely at `lg:` and above when acting as a sidebar. */}
+          right-side panel at the approved >=1200px workspace needs no
+          toggle at all (forced visible below via `min-[1200px]:flex`),
+          so this control is hidden entirely at that width and above
+          when acting as a sidebar. */}
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-indigo-900 ${
-          props.sidebar ? "lg:hidden" : ""
+        className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-gray-900 ${
+          props.sidebar ? "min-[1200px]:hidden" : ""
         }`}
       >
         <span>Tether Brainstorm{remainingSummary ? ` · ${remainingSummary}` : ""}</span>
-        <span className="text-xs font-normal text-indigo-700">{expanded ? "Hide" : "Show"}</span>
+        <span className="text-xs font-normal text-gray-500">{expanded ? "Hide" : "Show"}</span>
       </button>
 
-      <div className={`min-h-0 flex-col border-t border-indigo-200 px-3 py-3 ${bodyVisibilityClass} ${props.sidebar ? "lg:flex-1" : ""}`}>
+      <div className={`min-h-0 flex-col border-t border-gray-200 px-3 py-3 ${bodyVisibilityClass} ${props.sidebar ? "min-[1200px]:flex-1" : ""}`}>
         <div className="shrink-0">
-          <h3 className="text-sm font-semibold text-indigo-900">Tether Brainstorm</h3>
-          <p className="text-xs text-indigo-700">
+          <h3 className="text-sm font-semibold text-gray-900">Tether Brainstorm</h3>
+          <p className="text-xs text-gray-500">
             Question {props.questionNumber} of {props.totalQuestions}
           </p>
-          <p className="mt-0.5 truncate text-xs text-indigo-600" title={props.questionText}>
+          <p className="mt-0.5 truncate text-xs text-gray-500" title={props.questionText}>
             Discussing: {discussingPreview(props.questionText)}
           </p>
 
-          <p className="mt-2 text-xs text-indigo-900">
-            <span className="font-medium">AI brainstorming is allowed</span> · Guidance only · interactions are recorded
-          </p>
-          <details className="mt-1 text-xs text-indigo-700">
-            <summary className="cursor-pointer select-none">About AI assistance</summary>
-            <p className="mt-1 text-indigo-800">
+          <div className="mt-2">
+            <p className="text-xs font-medium text-gray-900">AI brainstorming is allowed</p>
+            <p className="text-xs text-gray-500">Guidance only · Interactions are recorded</p>
+          </div>
+          <details className="mt-1 text-xs">
+            <summary className="cursor-pointer select-none text-gray-500 underline underline-offset-2 hover:text-gray-700">
+              About AI assistance
+            </summary>
+            <p className="mt-1 text-gray-600">
               Use this assistant for guidance, planning and reasoning support during this assessment. It is
               restricted from providing final answers. Your prompts and the responses shown to you are
               recorded as part of this assessment.
             </p>
           </details>
 
-          <div className="mt-2 rounded border border-indigo-100 bg-white p-2 text-xs">
-            <p className="font-medium text-indigo-900">Prompts remaining</p>
-            <div className="mt-1 flex items-center justify-between text-indigo-800">
+          <div className="mt-2 rounded border border-gray-200 bg-white p-2 text-xs">
+            <p className="font-medium text-gray-900">Prompts remaining</p>
+            <div className="mt-1 flex items-center justify-between text-gray-700">
               <span>This question</span>
               <span className="font-mono tabular-nums">
                 {promptsRemainingForQuestion ?? "–"} / {maxPromptsPerQuestion ?? "–"}
               </span>
             </div>
-            <div className="flex items-center justify-between text-indigo-800">
+            <div className="flex items-center justify-between text-gray-700">
               <span>This exam</span>
               <span className="font-mono tabular-nums">
                 {promptsRemainingForAttempt ?? "–"} / {maxPromptsPerAttempt ?? "–"}
@@ -280,26 +301,29 @@ export function AiBrainstormPanel(props: {
           )}
         </div>
 
-        <div className={`mt-3 min-h-0 space-y-2 ${props.sidebar ? "lg:flex-1 lg:overflow-y-auto" : ""}`}>
-          {historyLoading && <p className="text-xs text-indigo-600">Loading brainstorming...</p>}
+        <div className={`mt-3 min-h-0 space-y-2 ${props.sidebar ? "min-[1200px]:flex-1 min-[1200px]:overflow-y-auto" : ""}`}>
+          {historyLoading && <p className="text-xs text-gray-500">Loading brainstorming...</p>}
           {!historyLoading && transcript.length === 0 && (
-            <p className="text-xs text-indigo-600">No brainstorming yet for this question.</p>
+            <div>
+              <p className="text-xs text-gray-500">No brainstorming yet for this question.</p>
+              <p className="text-xs text-gray-500">Try one of the suggestions below or ask your own.</p>
+            </div>
           )}
           {!historyLoading &&
             transcript.map((entry) => {
               const isGuardrail = GUARDRAIL_STATUSES.has(entry.status);
               const isFailure = FAILURE_STATUSES.has(entry.status);
               return (
-                <div key={entry.id} className="space-y-1 rounded border border-indigo-100 bg-white p-2 text-xs">
+                <div key={entry.id} className="space-y-1 rounded border border-gray-200 bg-white p-2 text-xs">
                   <p>
                     <span className="font-medium text-gray-700">You</span>
                     <span className="ml-1 text-gray-800">{entry.prompt}</span>
                   </p>
                   <div className="border-t border-gray-100 pt-1">
                     <p className="flex items-center gap-1.5">
-                      <span className="font-medium text-indigo-700">Tether</span>
+                      <span className="font-medium text-gray-900">Tether</span>
                       {isGuardrail && (
-                        <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">
+                        <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-600">
                           Guidance only
                         </span>
                       )}
@@ -324,7 +348,7 @@ export function AiBrainstormPanel(props: {
                 disabled={disabled}
                 aria-describedby={atQuestionLimit || atAttemptLimit ? exhaustedReasonId : undefined}
                 onClick={() => sendPrompt(action.prompt)}
-                className="rounded border border-indigo-300 bg-white px-2 py-1 text-xs text-indigo-800 disabled:opacity-50"
+                className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
               >
                 {action.label}
               </button>
@@ -340,7 +364,7 @@ export function AiBrainstormPanel(props: {
               type="text"
               value={customPrompt}
               onChange={(e) => setCustomPrompt(e.target.value)}
-              placeholder="Or ask your own question..."
+              placeholder="Ask your own question..."
               maxLength={1000}
               disabled={disabled}
               aria-describedby={atQuestionLimit || atAttemptLimit ? exhaustedReasonId : undefined}
@@ -350,7 +374,7 @@ export function AiBrainstormPanel(props: {
               type="button"
               disabled={disabled || !customPrompt.trim()}
               onClick={() => sendPrompt(customPrompt)}
-              className="rounded border border-indigo-400 bg-indigo-600 px-3 py-1 text-xs text-white disabled:opacity-50"
+              className="rounded border border-gray-900 bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-800 disabled:opacity-50"
             >
               {sending ? "Thinking..." : "Ask"}
             </button>

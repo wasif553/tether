@@ -637,13 +637,17 @@ function QuestionNavigatorPanel({
 }) {
   return (
     <div className="mb-4 rounded border border-gray-200">
+      {/* Approved student exam + Brainstorm layout v1 — the small
+          "QUESTIONS" eyebrow label from the approved design, above the
+          existing "Question N of M" toggle line. */}
+      <p className="px-3 pt-2 text-[10px] font-semibold tracking-wide text-gray-400">QUESTIONS</p>
       {/* Mobile/tablet: collapsible section (Part 9). Desktop keeps it
           expanded by default via the sm:block override below, without
           needing separate markup. */}
       <button
         type="button"
         onClick={onToggleOpen}
-        className="flex w-full items-center justify-between px-3 py-2 text-sm font-medium sm:cursor-default"
+        className="flex w-full items-center justify-between px-3 py-1.5 text-sm font-medium sm:cursor-default"
         aria-expanded={open}
       >
         <span>
@@ -2093,25 +2097,47 @@ export default function TakeExamPage({
   // the JSX's own doc comment where this is consumed.
   const showQuestionNavigatorPanel = secureSettings?.showQuestionNavigator === true;
 
-  // Question-scoped brainstorm sidebar v1 — desktop three-column
-  // workspace (question navigator | current question | Tether
-  // Brainstorm). Only applies in one-question-at-a-time mode, where
-  // there is a single "current question" concept to have a sidebar be
-  // about — see the JSX below. Full-paper mode already renders one
-  // AiBrainstormPanel per question inline (each already scoped to that
-  // one question), so it is intentionally left as-is.
+  // Question-scoped brainstorm sidebar v1 / Approved student exam +
+  // Brainstorm layout v1 — desktop three-column workspace (question
+  // navigator | current question | Tether Brainstorm + camera). Only
+  // applies in one-question-at-a-time mode, where there is a single
+  // "current question" concept to have a sidebar be about — see the JSX
+  // below. Full-paper mode already renders one AiBrainstormPanel per
+  // question inline (each already scoped to that one question), so it
+  // is intentionally left as-is.
+  //
+  // The full 3-column layout (220px | minmax(560px,1fr) | 360px) only
+  // activates at >=1200px (a `min-[1200px]:` arbitrary variant, not the
+  // default 1024px `lg:` breakpoint) — 220+360+gaps leaves too little
+  // room for the question column below ~1200px. Below that, when a
+  // navigator is also present, the grid still goes 2-column
+  // (navigator | question) at the existing `lg:` breakpoint — a clean
+  // "medium" tier, never a 3-column squeeze — and the AI sidebar cell
+  // (aiSidebarCellSpanClass below) spans the full row as an extra
+  // implicit row instead of being squeezed into the first explicit
+  // column. AiBrainstormPanel's own `sidebar` prop mirrors this same
+  // >=1200px threshold for its sticky/always-expanded treatment (see
+  // that component) — below it, Brainstorm is the same collapsible
+  // section/drawer at every narrower tier (medium and small alike).
   const showAiSidebar = secureSettings?.aiAssistanceMode === "BRAINSTORM_ONLY";
   const oneQuestionGridColsClass =
     showQuestionNavigatorPanel && showAiSidebar
-      ? "lg:grid-cols-[260px_minmax(0,1fr)_380px]"
+      ? "lg:grid-cols-[220px_minmax(560px,1fr)] min-[1200px]:grid-cols-[220px_minmax(560px,1fr)_360px]"
       : showQuestionNavigatorPanel
-        ? "lg:grid-cols-[260px_minmax(0,1fr)]"
+        ? "lg:grid-cols-[220px_minmax(560px,1fr)]"
         : showAiSidebar
-          ? "lg:grid-cols-[minmax(0,1fr)_380px]"
+          ? "lg:grid-cols-[minmax(560px,1fr)_360px]"
           : "";
   const oneQuestionGridWrapperClass = oneQuestionGridColsClass
-    ? `mt-6 lg:grid ${oneQuestionGridColsClass} lg:items-start lg:gap-6`
+    ? `mt-6 lg:grid ${oneQuestionGridColsClass} lg:items-start lg:gap-5`
     : "mt-6";
+  // Only the nav+AI combination has a "medium" tier where the grid is
+  // active (lg:) but the AI sidebar isn't yet a real explicit column
+  // (that only starts at min-[1200px]) — there, the AI cell must span
+  // the full row instead of falling into the navigator's 220px column.
+  // The AI-only (no navigator) case is already a clean, uncrowded
+  // 2-column grid from `lg:` onward, so it needs no special spanning.
+  const aiSidebarCellSpanClass = showQuestionNavigatorPanel ? "col-span-full min-[1200px]:col-auto" : "";
 
   // Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
   // Called unconditionally on every render (Rules of Hooks) — this
@@ -4396,10 +4422,83 @@ export default function TakeExamPage({
   const minutes = remainingSecs != null ? Math.floor(remainingSecs / 60) : null;
   const seconds = remainingSecs != null ? remainingSecs % 60 : null;
 
+  // Approved student exam + Brainstorm layout v1 — true only when the
+  // real 3-column grid (question navigator | question | Brainstorm) can
+  // actually render, i.e. one-question-at-a-time delivery AND AI
+  // enabled. Used only to decide where the camera preview renders
+  // (see cameraPreviewInner below) — deliberately NOT the same as the
+  // grid's own `showAiSidebar` alone, which says nothing about delivery
+  // mode and would otherwise make the fixed-corner camera preview
+  // vanish with nothing to replace it in full-paper mode.
+  const showDesktopAiSidebarLayout = oneQuestionAtATime && showAiSidebar;
+
+  // Approved student exam + Brainstorm layout v1 — the camera preview's
+  // inner content (minimized pill vs. expanded card), computed once so
+  // it can be placed in exactly ONE of two locations depending on
+  // showDesktopAiSidebarLayout: the existing fixed bottom-right corner
+  // (every other case — full-paper mode, or AI disabled) or in-flow
+  // below Brainstorm inside the right sidebar column (see the sidebar
+  // cell above). Never both at once — this is the SAME <video
+  // ref={examVideoRef}> element either way; rendering it in two places
+  // simultaneously would mean only one of them ever actually receives
+  // the live stream (a React ref can only ever point at the most
+  // recently rendered instance), so the two render sites below must
+  // stay mutually exclusive on showDesktopAiSidebarLayout.
+  const cameraPreviewInner =
+    requireCamera && cameraStatus === "granted" && secureSettings?.showCameraPreview ? (
+      cameraPreviewMinimized ? (
+        <button
+          onClick={toggleCameraPreviewMinimized}
+          className="flex items-center gap-2 rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs shadow"
+          aria-label="Expand camera preview"
+        >
+          <span className="h-2 w-2 rounded-full bg-green-500" />
+          Camera active
+          <span aria-hidden>▸</span>
+        </button>
+      ) : (
+        <div className="rounded border border-gray-300 bg-white p-2 shadow">
+          <div className="mb-1 flex items-center justify-between gap-3">
+            <span className="text-xs text-gray-500">Your camera — only you can see this</span>
+            <button
+              onClick={toggleCameraPreviewMinimized}
+              className="rounded border border-gray-300 px-1.5 py-0.5 text-xs"
+              aria-label="Minimize camera preview"
+            >
+              <span aria-hidden>▾</span>
+            </button>
+          </div>
+          <video ref={examVideoRef} autoPlay muted playsInline className="w-40 rounded border border-gray-200" />
+          {/* Camera Startup Lifecycle v2 — a calm, non-alarming status
+              message during startup, never the violation overlay. See
+              docs/on-device-ai-integrity-detection-v1.md. */}
+          {enableAiCameraIntegrityChecks && cameraLifecycleState !== "READY" && cameraLifecycleState !== "FAILED" && (
+            <p className="mt-1 text-xs text-gray-500">{cameraLifecycleStatusMessage(cameraLifecycleState)}</p>
+          )}
+          {enableAiCameraIntegrityChecks && cameraLifecycleState === "READY" && !detectionArmed && !detectionSamplingError && (
+            <p className="mt-1 text-xs text-gray-500">Starting camera integrity checks…</p>
+          )}
+          {enableAiCameraIntegrityChecks && cameraLifecycleState === "FAILED" && (
+            <p className="mt-1 text-xs text-amber-700">Camera could not start. Check browser permission and try again.</p>
+          )}
+          {enableAiCameraIntegrityChecks && detectionSamplingError && (
+            <p className="mt-1 text-xs text-amber-700">{detectionSamplingError}</p>
+          )}
+        </div>
+      )
+    ) : null;
+
   return (
-    <div className="mx-auto max-w-2xl">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">{data.exam.title}</h1>
+    <div className="mx-auto max-w-[min(1500px,calc(100vw-32px))]">
+      {/* Approved student exam + Brainstorm layout v1 — the large
+          central exam-title heading was removed here: the exam's
+          identity is already established by the surrounding page/nav
+          context, so it no longer needs its own prominent row. The
+          timer is unaffected — justify-end keeps it pinned to the
+          upper-right of the workspace now that it's the row's only
+          child (a bare justify-between with one child would otherwise
+          collapse to the row's START instead). */}
+      <div className="flex items-center justify-end">
         {remainingSecs != null && (
           <span className="rounded bg-gray-100 px-3 py-1 font-mono text-sm">
             {String(minutes).padStart(2, "0")}:{String(seconds).padStart(2, "0")}
@@ -4619,58 +4718,16 @@ export default function TakeExamPage({
       {/* Persistent Camera Preview v1 — live-only, never recorded or
           uploaded (see docs/known-limitations.md). Minimize/restore is
           local UI state only: it never creates an IntegrityEvent and
-          never pauses the stream or heartbeat above. */}
-      {requireCamera && cameraStatus === "granted" && secureSettings?.showCameraPreview && (
-        <div className="fixed bottom-4 right-4 z-50">
-          {cameraPreviewMinimized ? (
-            <button
-              onClick={toggleCameraPreviewMinimized}
-              className="flex items-center gap-2 rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs shadow"
-              aria-label="Expand camera preview"
-            >
-              <span className="h-2 w-2 rounded-full bg-green-500" />
-              Camera active
-              <span aria-hidden>▸</span>
-            </button>
-          ) : (
-            <div className="rounded border border-gray-300 bg-white p-2 shadow">
-              <div className="mb-1 flex items-center justify-between gap-3">
-                <span className="text-xs text-gray-500">Your camera — only you can see this</span>
-                <button
-                  onClick={toggleCameraPreviewMinimized}
-                  className="rounded border border-gray-300 px-1.5 py-0.5 text-xs"
-                  aria-label="Minimize camera preview"
-                >
-                  <span aria-hidden>▾</span>
-                </button>
-              </div>
-              <video
-                ref={examVideoRef}
-                autoPlay
-                muted
-                playsInline
-                className="w-40 rounded border border-gray-200"
-              />
-              {/* Camera Startup Lifecycle v2 — a calm, non-alarming status
-                  message during startup, never the violation overlay. See
-                  docs/on-device-ai-integrity-detection-v1.md. */}
-              {enableAiCameraIntegrityChecks && cameraLifecycleState !== "READY" && cameraLifecycleState !== "FAILED" && (
-                <p className="mt-1 text-xs text-gray-500">{cameraLifecycleStatusMessage(cameraLifecycleState)}</p>
-              )}
-              {enableAiCameraIntegrityChecks && cameraLifecycleState === "READY" && !detectionArmed && !detectionSamplingError && (
-                <p className="mt-1 text-xs text-gray-500">Starting camera integrity checks…</p>
-              )}
-              {enableAiCameraIntegrityChecks && cameraLifecycleState === "FAILED" && (
-                <p className="mt-1 text-xs text-amber-700">
-                  Camera could not start. Check browser permission and try again.
-                </p>
-              )}
-              {enableAiCameraIntegrityChecks && detectionSamplingError && (
-                <p className="mt-1 text-xs text-amber-700">{detectionSamplingError}</p>
-              )}
-            </div>
-          )}
-        </div>
+          never pauses the stream or heartbeat above.
+          Approved student exam + Brainstorm layout v1 — this
+          fixed-corner instance is suppressed exactly when the desktop
+          3-column layout renders it in-flow below Brainstorm instead
+          (see cameraPreviewInner's doc comment above) — every other
+          case (full-paper mode, AI disabled, or any viewport narrower
+          than the sidebar breakpoint) keeps this exact original
+          behaviour unchanged. */}
+      {!showDesktopAiSidebarLayout && cameraPreviewInner && (
+        <div className="fixed bottom-4 right-4 z-50">{cameraPreviewInner}</div>
       )}
 
       {/* On-Device AI Camera Integrity Detection v1 — hidden, always-
@@ -4800,11 +4857,11 @@ export default function TakeExamPage({
                 // Next/Previous. min-h only raises the floor for shorter
                 // content — genuinely long question text/options still grow
                 // past it exactly as before.
-                <div className="min-h-[280px] rounded border border-gray-200 p-4">
+                <div className="min-h-[280px] rounded border border-gray-200 bg-white p-4">
                   <div className="flex items-center justify-between">
                     <p className="text-sm text-gray-500">
                       Question {oneQuestion.payload.currentIndex + 1} of {oneQuestion.payload.totalQuestions}{" "}
-                      · {oneQuestion.payload.question.points} pt(s)
+                      · {oneQuestion.payload.question.points} pts
                     </p>
                     {secureSettings?.allowFlagForReview && (
                       <button
@@ -4887,7 +4944,7 @@ export default function TakeExamPage({
                         disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
                         className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
                       >
-                        Previous
+                        ← Previous
                       </button>
                     )}
                     {oneQuestion.payload.canGoNext && (
@@ -4897,7 +4954,7 @@ export default function TakeExamPage({
                         disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
                         className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
                       >
-                        Next
+                        Next →
                       </button>
                     )}
                   </div>
@@ -4913,7 +4970,13 @@ export default function TakeExamPage({
                 // above, not nested inside it, so it never competes for
                 // the question card's own width/height. min-w-0 for the
                 // same wrapping reason as the question column's own.
-                <div className="min-w-0">
+                // Approved layout v1 — the camera preview renders here,
+                // below Brainstorm, ONLY for this desktop sidebar case;
+                // see cameraPreviewInner's own doc comment for why the
+                // fixed-corner instance below is suppressed exactly when
+                // this one is shown (a single shared video element, never
+                // two at once).
+                <div className={`min-w-0 ${aiSidebarCellSpanClass}`}>
                   <AiBrainstormPanel
                     submissionId={id}
                     questionId={oneQuestion.payload.question.id}
@@ -4923,6 +4986,7 @@ export default function TakeExamPage({
                     questionText={oneQuestion.payload.question.text}
                     sidebar
                   />
+                  {cameraPreviewInner && <div className="mt-3">{cameraPreviewInner}</div>}
                 </div>
               )}
             </div>
