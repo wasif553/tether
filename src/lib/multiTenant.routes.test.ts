@@ -39,6 +39,7 @@ let platformAdmin: { id: string };
 let examA: { id: string };
 let examB: { id: string };
 let submissionForExamA: { id: string };
+let courseA: { id: string };
 
 beforeAll(async () => {
   instA = await getOrCreateTestInstitution("mt-routes-inst-a");
@@ -66,12 +67,21 @@ beforeAll(async () => {
     data: { title: "Institution B Exam", durationMins: 30, published: true, createdById: lecturerB.id, institutionId: instB.id },
   });
   submissionForExamA = await prisma.submission.create({ data: { examId: examA.id, studentId: studentA.id } });
+
+  // Course, Exam-per-Course v1 — see docs/exam-course-required-v1.md.
+  // POST /api/exams now requires a courseId; this fixture backs test 10
+  // below (previously created an exam with no course, which the route
+  // no longer accepts).
+  courseA = await prisma.course.create({ data: { institutionId: instA.id, name: "MT Course A", code: `MT-A-${stamp}` } });
+  await prisma.courseEnrollment.create({ data: { courseId: courseA.id, userId: lecturerA.id, role: "LECTURER" } });
 });
 
 afterAll(async () => {
   const userIds = [lecturerA.id, lecturerB.id, studentA.id, platformAdmin.id];
   await prisma.submission.deleteMany({ where: { studentId: { in: userIds } } });
   await prisma.exam.deleteMany({ where: { id: { in: [examA.id, examB.id] } } });
+  await prisma.courseEnrollment.deleteMany({ where: { courseId: courseA.id } });
+  await prisma.course.deleteMany({ where: { id: courseA.id } });
   await prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await prisma.$disconnect();
 });
@@ -103,7 +113,7 @@ describe("9. GET /api/exams (lecturer list) — scoped to own institution and ow
 describe("10. POST /api/exams — stamps the creator's institutionId", () => {
   it("a newly created exam gets the lecturer's institutionId", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA.id));
-    const res = await examsRoute.POST(jsonRequest("POST", { title: "Stamped Exam", durationMins: 20 }));
+    const res = await examsRoute.POST(jsonRequest("POST", { title: "Stamped Exam", durationMins: 20, courseId: courseA.id }));
     expect(res.status).toBe(201);
     const exam = await res.json();
     expect(exam.institutionId).toBe(instA.id);

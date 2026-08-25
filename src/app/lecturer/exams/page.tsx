@@ -51,6 +51,9 @@ export default function LecturerExamsIndexPage() {
   const [archivedExams, setArchivedExams] = useState<ExamSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterValue>("all");
+  // Course, Exam-per-Course v1 — "All courses" plus a course-id filter,
+  // options derived from the exams already loaded (no extra fetch).
+  const [courseFilter, setCourseFilter] = useState<string>("all");
 
   function loadCurrent() {
     fetch("/api/exams?all=true")
@@ -77,13 +80,30 @@ export default function LecturerExamsIndexPage() {
 
   const isArchivedView = filter === "Archived";
 
+  // Course, Exam-per-Course v1 — sorted code-then-name, same ordering
+  // convention as the Dashboard's create-exam course selector.
+  const courseOptions = useMemo(() => {
+    const byId = new Map<string, { id: string; name: string; code: string }>();
+    for (const exam of [...(exams ?? []), ...(archivedExams ?? [])]) {
+      if (exam.course) byId.set(exam.course.id, exam.course);
+    }
+    return [...byId.values()].sort((a, b) => a.code.localeCompare(b.code) || a.name.localeCompare(b.name));
+  }, [exams, archivedExams]);
+
   const filtered = useMemo(() => {
-    if (isArchivedView) return archivedExams ?? [];
-    if (!exams) return [];
-    if (filter === "all") return exams;
-    if (filter === "NeedsReview") return exams.filter((exam) => exam.needsReviewCount > 0);
-    return exams.filter((exam) => lecturerAvailabilityStatus(exam) === filter);
-  }, [exams, archivedExams, filter, isArchivedView]);
+    const byStatus = isArchivedView
+      ? (archivedExams ?? [])
+      : !exams
+        ? []
+        : filter === "all"
+          ? exams
+          : filter === "NeedsReview"
+            ? exams.filter((exam) => exam.needsReviewCount > 0)
+            : exams.filter((exam) => lecturerAvailabilityStatus(exam) === filter);
+    if (courseFilter === "all") return byStatus;
+    if (courseFilter === "none") return byStatus.filter((exam) => !exam.course);
+    return byStatus.filter((exam) => exam.course?.id === courseFilter);
+  }, [exams, archivedExams, filter, isArchivedView, courseFilter]);
 
   const loading = isArchivedView ? archivedExams === null && !error : exams === null && !error;
 
@@ -97,19 +117,39 @@ export default function LecturerExamsIndexPage() {
       />
 
       {exams && exams.length > 0 && (
-        <div className="mt-5 flex flex-wrap gap-1.5">
-          {FILTERS.map((f) => (
-            <button
-              key={f.value}
-              type="button"
-              onClick={() => setFilter(f.value)}
-              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent ${
-                filter === f.value ? "bg-lecturer-accent text-white" : "bg-lecturer-surface text-lecturer-text-secondary hover:bg-lecturer-border-subtle"
-              } border border-lecturer-border`}
-            >
-              {f.label}
-            </button>
-          ))}
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap gap-1.5">
+            {FILTERS.map((f) => (
+              <button
+                key={f.value}
+                type="button"
+                onClick={() => setFilter(f.value)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent ${
+                  filter === f.value ? "bg-lecturer-accent text-white" : "bg-lecturer-surface text-lecturer-text-secondary hover:bg-lecturer-border-subtle"
+                } border border-lecturer-border`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          {courseOptions.length > 0 && (
+            <label className="ml-auto flex items-center gap-1.5 text-xs font-medium text-lecturer-text-secondary">
+              Course
+              <select
+                value={courseFilter}
+                onChange={(e) => setCourseFilter(e.target.value)}
+                className="rounded-lg border border-lecturer-border bg-lecturer-surface px-2 py-1 text-xs text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+              >
+                <option value="all">All courses</option>
+                {courseOptions.map((course) => (
+                  <option key={course.id} value={course.id}>
+                    {course.code} — {course.name}
+                  </option>
+                ))}
+                <option value="none">No course assigned</option>
+              </select>
+            </label>
+          )}
         </div>
       )}
 

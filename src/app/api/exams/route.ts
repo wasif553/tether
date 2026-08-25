@@ -8,15 +8,19 @@ import { isLecturerClosedHistoryItem } from "@/lib/lecturerDashboardGrouping";
 
 const createExamSchema = z
   .object({
-    title: z.string().min(1),
+    title: z.string({ error: "Enter an exam title." }).min(1, "Enter an exam title."),
     description: z.string().optional(),
-    durationMins: z.number().int().positive(),
+    durationMins: z.number({ error: "Enter a valid exam duration." }).int().positive("Enter a valid exam duration."),
     startsAt: z.string().datetime().optional(),
     endsAt: z.string().datetime().optional(),
-    // Course, Enrolment, Exam Assignment, Scheduling v1 — see
-    // docs/course-enrolment-and-exam-assignment.md. courseId omitted or
-    // null means this is a legacy institution-wide exam.
-    courseId: z.string().min(1).optional(),
+    // Course, Exam-per-Course v1 — see docs/exam-course-required-v1.md.
+    // Required for every lecturer-created exam (this route is the ONLY
+    // exam-creation pathway in the app — confirmed no other caller of
+    // prisma.exam.create exists). A NULL Exam.courseId remains fully
+    // supported at the schema/read level for the pre-existing legacy
+    // exams created before this requirement — this only tightens what a
+    // NEW exam may be created with, it does not touch any existing row.
+    courseId: z.string({ error: "Select a course." }).min(1, "Select a course."),
     assignmentMode: z.enum(["COURSE", "SELECTED_STUDENTS"]).optional(),
     selectedStudentIds: z.array(z.string().min(1)).optional(),
     availableFrom: z.string().datetime().optional(),
@@ -246,11 +250,27 @@ export async function POST(req: Request) {
   } = parsed.data;
 
   try {
-    if (courseId) {
+    // Course, Exam-per-Course v1 — courseId is now required by
+    // createExamSchema above, so this always runs (never conditional on
+    // a client omitting it) — the only server-side gate is whether this
+    // lecturer may actually assign an exam to the supplied course.
+    // Reuses the existing institution/lecturer ownership check
+    // unchanged; only the message surfaced to the client is normalized
+    // here to the lecturer-friendly wording this feature calls for —
+    // assertStudentsInCourse's own (differently-scoped) error below is
+    // left exactly as-is, since collapsing it into the same generic
+    // message would lose real information about an invalid student
+    // selection.
+    try {
       await assertCanAssignExamToCourse(session, courseId);
-      if (assignmentMode === "SELECTED_STUDENTS" && selectedStudentIds?.length) {
-        await assertStudentsInCourse(courseId, selectedStudentIds);
+    } catch (err) {
+      if (err instanceof CourseAssignmentError) {
+        return NextResponse.json({ error: "You do not have access to this course." }, { status: 403 });
       }
+      throw err;
+    }
+    if (assignmentMode === "SELECTED_STUDENTS" && selectedStudentIds?.length) {
+      await assertStudentsInCourse(courseId, selectedStudentIds);
     }
 
     const exam = await prisma.exam.create({
@@ -262,11 +282,11 @@ export async function POST(req: Request) {
         endsAt: endsAt ? new Date(endsAt) : undefined,
         createdById: session.user.id,
         institutionId: requireInstitutionId(session),
-        courseId: courseId ?? undefined,
+        courseId,
         assignmentMode: assignmentMode ?? undefined,
         availableFrom: availableFrom ? new Date(availableFrom) : undefined,
         availableUntil: availableUntil ? new Date(availableUntil) : undefined,
-        ...(courseId && assignmentMode === "SELECTED_STUDENTS" && selectedStudentIds?.length
+        ...(assignmentMode === "SELECTED_STUDENTS" && selectedStudentIds?.length
           ? { assignments: { create: selectedStudentIds.map((studentId) => ({ studentId })) } }
           : {}),
       },

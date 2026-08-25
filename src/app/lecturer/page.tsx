@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   lecturerAvailabilityStatus,
   lecturerDashboardGroup,
@@ -25,6 +26,23 @@ type ExamSummary = {
   _count: { questions: number; submissions: number };
   needsReviewCount: number;
 };
+
+// Course, Exam-per-Course v1 — see docs/exam-course-required-v1.md.
+type CourseOption = { id: string; name: string; code: string };
+
+/** Extracts a lecturer-friendly message from either response shape POST /api/exams can return: a plain `{ error: "..." }` string (auth/course-access failures) or `{ error: <zod .flatten() object> }` (schema validation failures, e.g. missing courseId/title/durationMins). */
+function friendlyCreateExamError(body: unknown): string {
+  if (body && typeof body === "object" && "error" in body) {
+    const err = (body as { error: unknown }).error;
+    if (typeof err === "string") return err;
+    if (err && typeof err === "object" && "fieldErrors" in err) {
+      const fieldErrors = (err as { fieldErrors: Record<string, string[] | undefined> }).fieldErrors;
+      const firstMessage = Object.values(fieldErrors).find((messages) => messages && messages.length > 0)?.[0];
+      if (firstMessage) return firstMessage;
+    }
+  }
+  return "Failed to create exam";
+}
 
 // Pilot UI release readiness v1 — see
 // docs/tether-v1.7.2-pilot-release-readiness.md. Draft/Scheduled/Open/
@@ -55,7 +73,20 @@ function countLabel(count: number, singular: string, plural: string = `${singula
   return `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
 }
 
+// Course, Exam-per-Course v1 — useSearchParams requires a Suspense
+// boundary; the actual dashboard logic lives in LecturerDashboardInner
+// below, matching this repo's existing pattern (see
+// src/app/(auth)/login/page.tsx).
 export default function LecturerDashboard() {
+  return (
+    <Suspense fallback={<LoadingState label="Loading…" />}>
+      <LecturerDashboardInner />
+    </Suspense>
+  );
+}
+
+function LecturerDashboardInner() {
+  const searchParams = useSearchParams();
   const [exams, setExams] = useState<ExamSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -66,6 +97,16 @@ export default function LecturerDashboard() {
   const [showAllClosed, setShowAllClosed] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [showCreatePanel, setShowCreatePanel] = useState(false);
+  // Course, Exam-per-Course v1 — courses this lecturer can create an
+  // exam in. Fetched once on mount (not lazily on panel-open) so the
+  // "Create exam" button and "no courses yet" guidance can react
+  // immediately without a loading flash the first time the panel opens.
+  const [courses, setCourses] = useState<CourseOption[] | null>(null);
+  const [courseId, setCourseId] = useState("");
+  // Course, Exam-per-Course v1 — set when arriving via a course page's
+  // "New exam →" link (?courseId=...); locks the course selector so the
+  // lecturer isn't asked to re-pick a course they're already inside.
+  const [courseLocked, setCourseLocked] = useState(false);
 
   async function loadExams(all = false) {
     setLoading(true);
@@ -94,6 +135,31 @@ export default function LecturerDashboard() {
     loadExams();
   }, []);
 
+  // Course, Exam-per-Course v1 — loaded once; GET /api/courses already
+  // scopes to "courses this lecturer teaches" server-side (see that
+  // route), so no extra filtering is needed client-side. The API orders
+  // by createdAt desc, so sort by code then name here to satisfy the
+  // "course code, then course name" ordering the course selector wants.
+  useEffect(() => {
+    fetch("/api/courses")
+      .then((res) => (res.ok ? res.json() : []))
+      .then((rows: CourseOption[]) =>
+        setCourses([...rows].sort((a, b) => a.code.localeCompare(b.code) || a.name.localeCompare(b.name))),
+      )
+      .catch(() => setCourses([]));
+  }, []);
+
+  useEffect(() => {
+    const preselectedCourseId = searchParams.get("courseId");
+    if (preselectedCourseId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCourseId(preselectedCourseId);
+      setCourseLocked(true);
+      setShowCreatePanel(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function loadFullHistory() {
     setLoadingHistory(true);
     loadExams(true).finally(() => {
@@ -110,29 +176,35 @@ export default function LecturerDashboard() {
     const res = await fetch("/api/exams", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, durationMins }),
+      body: JSON.stringify({ title, durationMins, courseId }),
     });
 
     setCreating(false);
 
     if (!res.ok) {
-      setError("Failed to create exam");
+      setError(friendlyCreateExamError(await res.json().catch(() => null)));
       return;
     }
 
     setTitle("");
     setDurationMins(60);
+    setCourseId("");
+    setCourseLocked(false);
     setShowCreatePanel(false);
     await loadExams(showAllClosed);
   }
 
   function openCreatePanel() {
     setError(null);
+    setCourseId("");
+    setCourseLocked(false);
     setShowCreatePanel(true);
   }
 
   function closeCreatePanel() {
     setError(null);
+    setCourseId("");
+    setCourseLocked(false);
     setShowCreatePanel(false);
   }
 
@@ -193,10 +265,14 @@ export default function LecturerDashboard() {
 
       {showCreatePanel && (
         <CreateExamPanel
+          courses={courses}
+          courseId={courseId}
+          courseLocked={courseLocked}
           title={title}
           durationMins={durationMins}
           creating={creating}
           error={error}
+          onCourseIdChange={setCourseId}
           onTitleChange={setTitle}
           onDurationChange={setDurationMins}
           onSubmit={handleCreate}
@@ -311,69 +387,139 @@ export default function LecturerDashboard() {
   );
 }
 
+// Course, Exam-per-Course v1 — every new exam must belong to a course
+// (see docs/exam-course-required-v1.md). `courses === null` means still
+// loading (renders the same form, since the select simply shows no
+// options yet); `courses.length === 0` means the lecturer teaches no
+// course at all, which is a distinct, guided empty state rather than a
+// dropdown that can only ever fail to submit.
 function CreateExamPanel({
+  courses,
+  courseId,
+  courseLocked,
   title,
   durationMins,
   creating,
   error,
+  onCourseIdChange,
   onTitleChange,
   onDurationChange,
   onSubmit,
   onCancel,
 }: {
+  courses: CourseOption[] | null;
+  courseId: string;
+  courseLocked: boolean;
   title: string;
   durationMins: number;
   creating: boolean;
   error: string | null;
+  onCourseIdChange: (value: string) => void;
   onTitleChange: (value: string) => void;
   onDurationChange: (value: number) => void;
   onSubmit: (e: React.FormEvent) => void;
   onCancel: () => void;
 }) {
+  const noCourses = !courseLocked && courses !== null && courses.length === 0;
+  const lockedCourse = courses?.find((course) => course.id === courseId);
+
   return (
     <SectionCard className="mt-4" padded={false}>
       <div id="create-exam-panel" className="p-4 sm:p-5">
-        <form onSubmit={onSubmit} className="flex flex-col gap-4 sm:flex-row sm:items-end">
-          <div className="flex-1">
-            <label htmlFor="create-exam-title" className="block text-sm font-medium text-lecturer-text-primary">
-              Exam title
-            </label>
-            <input
-              id="create-exam-title"
-              required
-              className="mt-1 w-full rounded-lg border border-lecturer-border px-3 py-2 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
-              value={title}
-              onChange={(e) => onTitleChange(e.target.value)}
-            />
+        {noCourses ? (
+          <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-lecturer-text-primary">Create a course first</p>
+              <p className="mt-0.5 text-sm text-lecturer-text-secondary">
+                Exams belong to a course. Create your first course before creating an exam.
+              </p>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <SecondaryLinkButton href="/lecturer/courses">Create course</SecondaryLinkButton>
+              <button
+                type="button"
+                onClick={onCancel}
+                className="rounded-lg border border-lecturer-border px-4 py-2 text-sm font-medium text-lecturer-text-secondary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
-          <div className="w-full sm:w-36">
-            <label htmlFor="create-exam-duration" className="block text-sm font-medium text-lecturer-text-primary">
-              Duration (min)
-            </label>
-            <input
-              id="create-exam-duration"
-              required
-              type="number"
-              min={1}
-              className="mt-1 w-full rounded-lg border border-lecturer-border px-3 py-2 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
-              value={durationMins}
-              onChange={(e) => onDurationChange(Number(e.target.value))}
-            />
-          </div>
-          <div className="flex gap-2">
-            <PrimaryButton type="submit" disabled={creating}>
-              {creating ? "Creating…" : "Create"}
-            </PrimaryButton>
-            <button
-              type="button"
-              onClick={onCancel}
-              className="rounded-lg border border-lecturer-border px-4 py-2 text-sm font-medium text-lecturer-text-secondary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
-        {error && <p className="mt-3 text-sm text-[#B42318]">{error}</p>}
+        ) : (
+          <>
+            <form onSubmit={onSubmit} className="flex flex-col gap-4 sm:flex-row sm:items-end">
+              <div className="flex-1 sm:min-w-[220px]">
+                <label htmlFor="create-exam-course" className="block text-sm font-medium text-lecturer-text-primary">
+                  Course
+                </label>
+                {courseLocked ? (
+                  <div
+                    id="create-exam-course"
+                    className="mt-1 w-full truncate rounded-lg border border-lecturer-border bg-lecturer-border-subtle/60 px-3 py-2 text-sm font-medium text-lecturer-text-primary"
+                  >
+                    {lockedCourse ? `${lockedCourse.code} — ${lockedCourse.name}` : "Loading course…"}
+                  </div>
+                ) : (
+                  <select
+                    id="create-exam-course"
+                    required
+                    className="mt-1 w-full rounded-lg border border-lecturer-border bg-lecturer-surface px-3 py-2 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+                    value={courseId}
+                    onChange={(e) => onCourseIdChange(e.target.value)}
+                  >
+                    <option value="" disabled>
+                      Select a course
+                    </option>
+                    {courses?.map((course) => (
+                      <option key={course.id} value={course.id}>
+                        {course.code} — {course.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+              <div className="flex-1">
+                <label htmlFor="create-exam-title" className="block text-sm font-medium text-lecturer-text-primary">
+                  Exam title
+                </label>
+                <input
+                  id="create-exam-title"
+                  required
+                  className="mt-1 w-full rounded-lg border border-lecturer-border px-3 py-2 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+                  value={title}
+                  onChange={(e) => onTitleChange(e.target.value)}
+                />
+              </div>
+              <div className="w-full sm:w-36">
+                <label htmlFor="create-exam-duration" className="block text-sm font-medium text-lecturer-text-primary">
+                  Duration (min)
+                </label>
+                <input
+                  id="create-exam-duration"
+                  required
+                  type="number"
+                  min={1}
+                  className="mt-1 w-full rounded-lg border border-lecturer-border px-3 py-2 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+                  value={durationMins}
+                  onChange={(e) => onDurationChange(Number(e.target.value))}
+                />
+              </div>
+              <div className="flex gap-2">
+                <PrimaryButton type="submit" disabled={creating || !courseId}>
+                  {creating ? "Creating…" : "Create exam"}
+                </PrimaryButton>
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  className="rounded-lg border border-lecturer-border px-4 py-2 text-sm font-medium text-lecturer-text-secondary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+            {error && <p className="mt-3 text-sm text-[#B42318]">{error}</p>}
+          </>
+        )}
       </div>
     </SectionCard>
   );

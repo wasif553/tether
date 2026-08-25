@@ -324,7 +324,10 @@ export default function CourseDetailPage({
             <Link href="/lecturer/exams" className="text-sm font-medium text-lecturer-text-secondary hover:text-lecturer-text-primary">
               View archived
             </Link>
-            <Link href="/lecturer" className="text-sm font-medium text-lecturer-accent hover:text-lecturer-accent-hover">
+            {/* Course, Exam-per-Course v1 — carries this course into the
+                Dashboard's create-exam panel so the lecturer never has to
+                re-select a course they're already inside. */}
+            <Link href={`/lecturer?courseId=${id}`} className="text-sm font-medium text-lecturer-accent hover:text-lecturer-accent-hover">
               New exam →
             </Link>
           </>

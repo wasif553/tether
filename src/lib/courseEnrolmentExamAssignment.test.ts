@@ -308,7 +308,14 @@ describe("Course assignment validation (lecturer exam create/update)", () => {
       body: JSON.stringify({ title: "Should fail", durationMins: 30, courseId: course.id }),
     });
     const res = await POST(req);
-    expect(res.status).toBe(400);
+    // Course, Exam-per-Course v1 — POST /api/exams now normalizes this
+    // specific denial to a 403 with the lecturer-facing "You do not have
+    // access to this course." message (see docs/exam-course-required-v1.md
+    // and src/app/api/exams/route.ts), rather than the generic 400 this
+    // used to fall through as.
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe("You do not have access to this course.");
   });
 
   it("14. selected students must belong to the same course", async () => {
