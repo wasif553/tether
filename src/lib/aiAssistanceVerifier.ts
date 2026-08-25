@@ -13,7 +13,7 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import type { BrainstormQuestionType } from "@/lib/aiAssistanceGenerator";
+import { getAnthropicBrainstormModel, type BrainstormQuestionType } from "@/lib/aiAssistanceGenerator";
 import { boundedHiddenReference } from "@/lib/aiAssistancePolicy";
 
 export const RISK_CODES = [
@@ -135,7 +135,7 @@ export async function verifyBrainstormResponse(input: BrainstormVerifierInput): 
   let response;
   try {
     response = await client.messages.create({
-      model: "claude-sonnet-4-6",
+      model: getAnthropicBrainstormModel(),
       max_tokens: 512,
       temperature: 0,
       system: buildSystemPrompt(),

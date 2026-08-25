@@ -498,6 +498,22 @@ provider credentials, or the rejected candidate text (there is none to
 show). A banner states this is a record of an allowed resource, never an
 integrity signal.
 
+## Model configuration
+
+The Claude model used by the generator (`src/lib/aiAssistanceGenerator.ts`)
+and verifier (`src/lib/aiAssistanceVerifier.ts`) is resolved once, by
+`getAnthropicBrainstormModel()` (exported from `aiAssistanceGenerator.ts`),
+from the optional `ANTHROPIC_BRAINSTORM_MODEL` environment variable,
+falling back to `ANTHROPIC_BRAINSTORM_MODEL_DEFAULT` (`claude-sonnet-4-6`)
+when unset or blank. Both modules, and the `providerModel` value
+`src/lib/aiAssistanceRunner.ts` stores on every `AiAssistanceInteraction`
+row, all call this same function — the model actually invoked and the
+model recorded as evidence can never drift apart. This is deliberately
+separate from the model choice used by the repo's other, unrelated
+Anthropic-backed features (AI question generation, AI draft essay
+marking) — changing `ANTHROPIC_BRAINSTORM_MODEL` affects only this
+brainstorming assistant.
+
 ## Known limitations
 
 - **No ML-based request classifier.** The classifier

@@ -51,6 +51,7 @@ import {
 import {
   generateBrainstormResponse,
   isAnthropicConfigured,
+  getAnthropicBrainstormModel,
   type BrainstormGeneratorInput,
   type BrainstormQuestionType,
 } from "@/lib/aiAssistanceGenerator";
@@ -554,7 +555,7 @@ export async function runAiAssistanceRequest(params: {
       riskScore: outcome.riskScore,
       cumulativeRiskScore: newCumulative,
       specificityLevel: generatorInput.hintLadderLevel,
-      providerModel: "anthropic:claude-sonnet-4-6",
+      providerModel: `anthropic:${getAnthropicBrainstormModel()}`,
       latencyMs,
       wasRegenerated: regenerated,
     });
@@ -603,7 +604,7 @@ export async function runAiAssistanceRequest(params: {
     riskScore: outcome.riskScore,
     cumulativeRiskScore: cumulativeSoFar,
     specificityLevel: generatorInput.hintLadderLevel,
-    providerModel: "anthropic:claude-sonnet-4-6",
+    providerModel: `anthropic:${getAnthropicBrainstormModel()}`,
     latencyMs,
     wasRegenerated: regenerated,
   });

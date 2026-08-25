@@ -124,6 +124,23 @@ export function isAnthropicConfigured(): boolean {
   return Boolean(process.env.ANTHROPIC_API_KEY);
 }
 
+/**
+ * Single source of truth for which Claude model this feature calls —
+ * both this module and aiAssistanceVerifier.ts import it, and
+ * aiAssistanceRunner.ts derives the `providerModel` it stores on every
+ * AiAssistanceInteraction from the same function, so the recorded
+ * evidence can never drift from what was actually called. Deliberately
+ * NOT shared with the other, unrelated Anthropic-backed features in this
+ * repo (src/lib/ai/questionGenerator.ts, src/lib/ai/essayMarker.ts) —
+ * each keeps its own model choice, and ANTHROPIC_BRAINSTORM_MODEL only
+ * ever affects this student-facing brainstorming assistant.
+ */
+export const ANTHROPIC_BRAINSTORM_MODEL_DEFAULT = "claude-sonnet-4-6";
+
+export function getAnthropicBrainstormModel(): string {
+  return process.env.ANTHROPIC_BRAINSTORM_MODEL?.trim() || ANTHROPIC_BRAINSTORM_MODEL_DEFAULT;
+}
+
 function getClient(): Anthropic {
   if (cachedClient) return cachedClient;
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -159,7 +176,7 @@ export async function generateBrainstormResponse(input: BrainstormGeneratorInput
   let response;
   try {
     response = await client.messages.create({
-      model: "claude-sonnet-4-6",
+      model: getAnthropicBrainstormModel(),
       max_tokens: 400,
       temperature: input.stricter ? 0 : 0.4,
       system,
