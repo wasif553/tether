@@ -19,7 +19,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/auth";
-import { AiAssistanceError, runAiAssistanceRequest } from "@/lib/aiAssistanceRunner";
+import { AiAssistanceError, runAiAssistanceRequest, loadInteractionHistory } from "@/lib/aiAssistanceRunner";
 import { MAX_STUDENT_PROMPT_CHARACTERS } from "@/lib/aiAssistancePolicy";
 import { renewTetherContentAccessLeaseIfValid } from "@/lib/secureClient/requireTetherContentAccess";
 
@@ -81,6 +81,47 @@ export async function POST(
       { error: "The brainstorming assistant is temporarily unavailable. Please try again shortly." },
       { status: 502 },
     );
+  }
+}
+
+/**
+ * GET /api/submissions/[id]/questions/[questionId]/ai-assistance
+ *
+ * Question-scoped brainstorm sidebar v1 — read-only counterpart to POST,
+ * added so the student's own panel can restore its transcript for this
+ * submission+question from the authoritative stored interactions
+ * (src/lib/aiAssistanceRunner.ts's loadInteractionHistory) on mount/
+ * question-switch/reload, instead of only ever showing interactions
+ * created in the current component-mount session. Same auth/ownership/
+ * activation/AI-mode-enabled gates as POST — reuses loadValidatedContext
+ * unchanged. Never calls Anthropic.
+ */
+export async function GET(
+  req: Request,
+  { params }: { params: Promise<{ id: string; questionId: string }> },
+) {
+  const session = await auth();
+  if (!session || session.user.role !== "STUDENT") {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { id: submissionId, questionId } = await params;
+
+  try {
+    const result = await loadInteractionHistory({
+      submissionId,
+      studentId: session.user.id,
+      questionId,
+      req,
+    });
+    const response = NextResponse.json(result);
+    await renewTetherContentAccessLeaseIfValid(req, response, { submissionId, studentId: session.user.id });
+    return response;
+  } catch (err) {
+    if (err instanceof AiAssistanceError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    throw err;
   }
 }
 

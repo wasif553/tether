@@ -156,6 +156,13 @@ export type AiAssistanceRunResult = {
   studentMessage: string | null;
   promptsRemainingForQuestion: number;
   promptsRemainingForAttempt: number;
+  // Question-scoped brainstorm sidebar v1 — the client previously only
+  // ever saw ever-decreasing "remaining" counts with no allowance to
+  // compare them against. Both values come straight from the same
+  // immutable per-attempt policy snapshot already used to compute
+  // `promptsRemainingFor*` above, so they can never disagree.
+  maxPromptsPerQuestion: number;
+  maxPromptsPerAttempt: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -394,6 +401,95 @@ async function resultFromExistingInteraction(
     studentMessage,
     promptsRemainingForQuestion: Math.max(0, policy.maxPromptsPerQuestion - promptsForQuestion),
     promptsRemainingForAttempt: Math.max(0, policy.maxPromptsPerAttempt - promptsForAttempt),
+    maxPromptsPerQuestion: policy.maxPromptsPerQuestion,
+    maxPromptsPerAttempt: policy.maxPromptsPerAttempt,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Question-scoped history (read-only) — Question-scoped brainstorm sidebar v1
+// ---------------------------------------------------------------------------
+
+export type AiAssistanceHistoryEntry = {
+  id: string;
+  studentPrompt: string;
+  response: string | null;
+  studentMessage: string | null;
+  status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED";
+  createdAt: string;
+};
+
+export type AiAssistanceHistoryResult = {
+  interactions: AiAssistanceHistoryEntry[];
+  promptsRemainingForQuestion: number;
+  promptsRemainingForAttempt: number;
+  maxPromptsPerQuestion: number;
+  maxPromptsPerAttempt: number;
+};
+
+/**
+ * Read-only counterpart to runAiAssistanceRequest — lets the student's own
+ * panel restore its transcript for a submission+question from the
+ * authoritative stored AiAssistanceInteraction rows (see
+ * @@index([submissionId, questionId]) on that model) instead of relying on
+ * client-only state that resets on remount/navigation/reload. Reuses
+ * loadValidatedContext unchanged, so this exposes nothing a POST to the
+ * same submission+question couldn't already reveal: same ownership,
+ * activation, and AI-mode-enabled gates. Never calls Anthropic.
+ *
+ * A still-in-flight RESERVED row (another tab's request mid-flight) is
+ * excluded — its own tab already reflects it via the POST response. A
+ * STALE RESERVED row (Part 4: an interaction whose original request
+ * crashed/timed out before finalizing) is normalized to FAILED for
+ * display here, matching the lecturer review's own normalization — but,
+ * being a read path, this never writes that self-heal to the row itself;
+ * the next real POST to this submission does that.
+ */
+export async function loadInteractionHistory(params: {
+  submissionId: string;
+  studentId: string;
+  questionId: string;
+  req: Request;
+}): Promise<AiAssistanceHistoryResult> {
+  const { policy } = await loadValidatedContext(params.submissionId, params.studentId, params.questionId, params.req);
+
+  const [rows, promptsForQuestion, promptsForAttempt] = await Promise.all([
+    prisma.aiAssistanceInteraction.findMany({
+      where: { submissionId: params.submissionId, questionId: params.questionId },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.aiAssistanceInteraction.count({ where: { submissionId: params.submissionId, questionId: params.questionId } }),
+    prisma.aiAssistanceInteraction.count({ where: { submissionId: params.submissionId } }),
+  ]);
+
+  const interactions: AiAssistanceHistoryEntry[] = rows.flatMap((row) => {
+    const rawStatus = row.status as AiAssistanceInteractionStatus;
+    if (rawStatus === "RESERVED" && !isStaleReservation(row.createdAt)) return [];
+    const status: AiAssistanceHistoryEntry["status"] = rawStatus === "RESERVED" ? "FAILED" : rawStatus;
+    const studentMessage =
+      status === "BLOCKED"
+        ? blockedRequestStudentMessage(((row.riskCodesJson as string[] | null) ?? []) as RequestBlockReasonCode[])
+        : status === "FAILED"
+          ? AI_ASSISTANCE_UNAVAILABLE_MESSAGE
+          : null;
+    return [
+      {
+        id: row.id,
+        studentPrompt: row.studentPrompt,
+        response: row.approvedResponse,
+        studentMessage,
+        status,
+        createdAt: row.createdAt.toISOString(),
+      },
+    ];
+  });
+
+  return {
+    interactions,
+    promptsRemainingForQuestion: Math.max(0, policy.maxPromptsPerQuestion - promptsForQuestion),
+    promptsRemainingForAttempt: Math.max(0, policy.maxPromptsPerAttempt - promptsForAttempt),
+    maxPromptsPerQuestion: policy.maxPromptsPerQuestion,
+    maxPromptsPerAttempt: policy.maxPromptsPerAttempt,
   };
 }
 
@@ -462,6 +558,8 @@ export async function runAiAssistanceRequest(params: {
           : "You've used all the assistance prompts available for this question.",
       promptsRemainingForQuestion: Math.max(0, policy.maxPromptsPerQuestion - reservation.promptsForQuestion),
       promptsRemainingForAttempt: Math.max(0, policy.maxPromptsPerAttempt - reservation.promptsForAttempt),
+      maxPromptsPerQuestion: policy.maxPromptsPerQuestion,
+      maxPromptsPerAttempt: policy.maxPromptsPerAttempt,
     };
   }
   if (reservation.kind === "replay") {
@@ -489,6 +587,8 @@ export async function runAiAssistanceRequest(params: {
       studentMessage: blockedRequestStudentMessage(classification.blockReasonCodes),
       promptsRemainingForQuestion: Math.max(0, policy.maxPromptsPerQuestion - promptNumberForQuestion),
       promptsRemainingForAttempt: Math.max(0, policy.maxPromptsPerAttempt - promptNumberForAttempt),
+      maxPromptsPerQuestion: policy.maxPromptsPerQuestion,
+      maxPromptsPerAttempt: policy.maxPromptsPerAttempt,
     };
   }
 
@@ -565,6 +665,8 @@ export async function runAiAssistanceRequest(params: {
       studentMessage: null,
       promptsRemainingForQuestion: Math.max(0, policy.maxPromptsPerQuestion - promptNumberForQuestion),
       promptsRemainingForAttempt: Math.max(0, policy.maxPromptsPerAttempt - promptNumberForAttempt),
+      maxPromptsPerQuestion: policy.maxPromptsPerQuestion,
+      maxPromptsPerAttempt: policy.maxPromptsPerAttempt,
     };
   }
 
@@ -589,6 +691,8 @@ export async function runAiAssistanceRequest(params: {
       studentMessage: AI_ASSISTANCE_UNAVAILABLE_MESSAGE,
       promptsRemainingForQuestion: Math.max(0, policy.maxPromptsPerQuestion - promptNumberForQuestion),
       promptsRemainingForAttempt: Math.max(0, policy.maxPromptsPerAttempt - promptNumberForAttempt),
+      maxPromptsPerQuestion: policy.maxPromptsPerQuestion,
+      maxPromptsPerAttempt: policy.maxPromptsPerAttempt,
     };
   }
 
@@ -614,6 +718,8 @@ export async function runAiAssistanceRequest(params: {
     studentMessage: null,
     promptsRemainingForQuestion: Math.max(0, policy.maxPromptsPerQuestion - promptNumberForQuestion),
     promptsRemainingForAttempt: Math.max(0, policy.maxPromptsPerAttempt - promptNumberForAttempt),
+    maxPromptsPerQuestion: policy.maxPromptsPerQuestion,
+    maxPromptsPerAttempt: policy.maxPromptsPerAttempt,
   };
 }
 

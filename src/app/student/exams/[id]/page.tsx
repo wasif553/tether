@@ -2093,6 +2093,26 @@ export default function TakeExamPage({
   // the JSX's own doc comment where this is consumed.
   const showQuestionNavigatorPanel = secureSettings?.showQuestionNavigator === true;
 
+  // Question-scoped brainstorm sidebar v1 — desktop three-column
+  // workspace (question navigator | current question | Tether
+  // Brainstorm). Only applies in one-question-at-a-time mode, where
+  // there is a single "current question" concept to have a sidebar be
+  // about — see the JSX below. Full-paper mode already renders one
+  // AiBrainstormPanel per question inline (each already scoped to that
+  // one question), so it is intentionally left as-is.
+  const showAiSidebar = secureSettings?.aiAssistanceMode === "BRAINSTORM_ONLY";
+  const oneQuestionGridColsClass =
+    showQuestionNavigatorPanel && showAiSidebar
+      ? "lg:grid-cols-[260px_minmax(0,1fr)_380px]"
+      : showQuestionNavigatorPanel
+        ? "lg:grid-cols-[260px_minmax(0,1fr)]"
+        : showAiSidebar
+          ? "lg:grid-cols-[minmax(0,1fr)_380px]"
+          : "";
+  const oneQuestionGridWrapperClass = oneQuestionGridColsClass
+    ? `mt-6 lg:grid ${oneQuestionGridColsClass} lg:items-start lg:gap-6`
+    : "mt-6";
+
   // Screen-share Evidence Mode v1 — see docs/screen-share-evidence-v1.md.
   // Called unconditionally on every render (Rules of Hooks) — this
   // component has no early return before this point. `enabled` gates all
@@ -4725,13 +4745,7 @@ export default function TakeExamPage({
             // itself must always exist (or never exist) independent of
             // whether its data has arrived; only its CONTENT is
             // conditional on questionNav.
-            <div
-              className={
-                showQuestionNavigatorPanel
-                  ? "mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start lg:gap-6"
-                  : "mt-6"
-              }
-            >
+            <div className={oneQuestionGridWrapperClass}>
               {/* Question Navigator v1 — see docs/question-navigator-v1.md.
                   An aria-live region so screen-reader users hear
                   confirmation after a successful navigation or
@@ -4853,14 +4867,6 @@ export default function TakeExamPage({
                     />
                   )}
 
-                  {secureSettings?.aiAssistanceMode === "BRAINSTORM_ONLY" && (
-                    <AiBrainstormPanel
-                      submissionId={id}
-                      questionId={oneQuestion.payload.question.id}
-                      currentResponseText={responses[oneQuestion.payload.question.id] ?? null}
-                    />
-                  )}
-
                   {answerProvenanceMode !== "OFF" && (
                     <AnswerDevelopmentPanel
                       submissionId={id}
@@ -4902,6 +4908,23 @@ export default function TakeExamPage({
                 <p className="text-red-600">{oneQuestion.error}</p>
               )}
               </div>
+              {showAiSidebar && !oneQuestion.loading && oneQuestion.payload && (
+                // Right sidebar cell — a sibling of the question column
+                // above, not nested inside it, so it never competes for
+                // the question card's own width/height. min-w-0 for the
+                // same wrapping reason as the question column's own.
+                <div className="min-w-0">
+                  <AiBrainstormPanel
+                    submissionId={id}
+                    questionId={oneQuestion.payload.question.id}
+                    currentResponseText={responses[oneQuestion.payload.question.id] ?? null}
+                    questionNumber={oneQuestion.payload.currentIndex + 1}
+                    totalQuestions={oneQuestion.payload.totalQuestions}
+                    questionText={oneQuestion.payload.question.text}
+                    sidebar
+                  />
+                </div>
+              )}
             </div>
           ) : (
             <div className="mt-6 space-y-4">
@@ -4968,6 +4991,9 @@ export default function TakeExamPage({
                       submissionId={id}
                       questionId={q.id}
                       currentResponseText={responses[q.id] ?? null}
+                      questionNumber={i + 1}
+                      totalQuestions={data.exam.questions.length}
+                      questionText={q.text}
                     />
                   )}
 

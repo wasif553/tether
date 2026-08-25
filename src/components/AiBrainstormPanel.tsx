@@ -2,21 +2,47 @@
 
 /**
  * Controlled AI Brainstorming Assistance v1 — student panel. See
- * docs/controlled-ai-brainstorming-assistance-v1.md.
+ * docs/controlled-ai-brainstorming-assistance-v1.md and
+ * docs/question-scoped-brainstorm-sidebar-v1.md.
  *
  * Only ever rendered by the parent when aiAssistanceMode is
  * BRAINSTORM_ONLY for this exam (see src/app/student/exams/[id]/page.tsx)
  * — this component does not re-check that itself, since it has no access
  * to the exam's settings beyond what's passed in.
+ *
+ * Question-scoped brainstorm sidebar v1 — every prior interaction for
+ * THIS submission+question is loaded from the authoritative server
+ * history (GET .../ai-assistance) on mount and whenever submissionId or
+ * questionId changes, keyed by a request token so a fast Next/Previous
+ * click can never let a stale response overwrite the now-current
+ * question's transcript with the wrong one. Nothing here changes the
+ * server-side guardrails, limits, or evidence semantics — this is a
+ * pure read of what the server already enforces and already stored.
  */
-import { useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+
+type TranscriptStatus = "APPROVED" | "FALLBACK" | "BLOCKED" | "FAILED" | "ERROR";
 
 type TranscriptEntry = {
   id: string;
   prompt: string;
   response: string | null;
   studentMessage: string | null;
-  status: "APPROVED" | "FALLBACK" | "BLOCKED" | "FAILED" | "ERROR";
+  status: TranscriptStatus;
+};
+
+type HistoryResponse = {
+  interactions: Array<{
+    id: string;
+    studentPrompt: string;
+    response: string | null;
+    studentMessage: string | null;
+    status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED";
+  }>;
+  promptsRemainingForQuestion: number;
+  promptsRemainingForAttempt: number;
+  maxPromptsPerQuestion: number;
+  maxPromptsPerAttempt: number;
 };
 
 const STARTER_ACTIONS = [
@@ -28,26 +54,91 @@ const STARTER_ACTIONS = [
   { label: "Suggest what I should check", prompt: "What should I check or verify before I finalise my answer?" },
 ];
 
+// A guardrail redirect (the assistant declining to hand over a final
+// answer) is expected, correct behaviour — never styled like an error.
+// Only ERROR (a local fetch failure) and FAILED (a genuine provider
+// error) represent something actually going wrong.
+const GUARDRAIL_STATUSES = new Set<TranscriptStatus>(["BLOCKED", "FALLBACK"]);
+const FAILURE_STATUSES = new Set<TranscriptStatus>(["ERROR", "FAILED"]);
+
+export function discussingPreview(questionText: string): string {
+  const collapsed = questionText.replace(/\s+/g, " ").trim();
+  return collapsed.length > 70 ? `${collapsed.slice(0, 70)}…` : collapsed;
+}
+
 export function AiBrainstormPanel(props: {
   submissionId: string;
   questionId: string;
   currentResponseText: string | null;
+  questionNumber: number;
+  totalQuestions: number;
+  questionText: string;
+  /** True only for the desktop-sidebar call site (one-question-at-a-time mode) — see src/app/student/exams/[id]/page.tsx. Full-paper mode's inline-per-question panels leave this false and keep today's simple always-collapsible behaviour. */
+  sidebar?: boolean;
 }) {
+  const inputId = useId();
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [customPrompt, setCustomPrompt] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [sending, setSending] = useState(false);
   const [promptsRemainingForQuestion, setPromptsRemainingForQuestion] = useState<number | null>(null);
   const [promptsRemainingForAttempt, setPromptsRemainingForAttempt] = useState<number | null>(null);
+  const [maxPromptsPerQuestion, setMaxPromptsPerQuestion] = useState<number | null>(null);
+  const [maxPromptsPerAttempt, setMaxPromptsPerAttempt] = useState<number | null>(null);
   const [rateLimited, setRateLimited] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
+  // Race-condition guard (Part 12 — "Avoid race conditions"): only the
+  // MOST RECENT history fetch is ever allowed to write state. A fast
+  // Next/Previous can start a second fetch before the first resolves;
+  // without this, the slower/first response could land after the
+  // second and silently repaint the wrong question's transcript.
+  const requestTokenRef = useRef(0);
+
+  useEffect(() => {
+    const myToken = ++requestTokenRef.current;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setHistoryLoading(true);
+    setTranscript([]);
+    setCustomPrompt("");
+    setRateLimited(false);
+
+    fetch(`/api/submissions/${props.submissionId}/questions/${props.questionId}/ai-assistance`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(res)))
+      .then((body: HistoryResponse) => {
+        if (requestTokenRef.current !== myToken) return;
+        setTranscript(
+          body.interactions.map((entry) => ({
+            id: entry.id,
+            prompt: entry.studentPrompt,
+            response: entry.response,
+            studentMessage: entry.studentMessage,
+            status: entry.status,
+          })),
+        );
+        setPromptsRemainingForQuestion(body.promptsRemainingForQuestion);
+        setPromptsRemainingForAttempt(body.promptsRemainingForAttempt);
+        setMaxPromptsPerQuestion(body.maxPromptsPerQuestion);
+        setMaxPromptsPerAttempt(body.maxPromptsPerAttempt);
+      })
+      .catch(() => {
+        // Non-fatal — the panel still works for NEW prompts; prior
+        // history for this question just can't be shown until reload.
+      })
+      .finally(() => {
+        if (requestTokenRef.current !== myToken) return;
+        setHistoryLoading(false);
+      });
+  }, [props.submissionId, props.questionId]);
+
   const atQuestionLimit = promptsRemainingForQuestion === 0;
   const atAttemptLimit = promptsRemainingForAttempt === 0;
-  const disabled = loading || atQuestionLimit || atAttemptLimit;
+  const disabled = sending || historyLoading || atQuestionLimit || atAttemptLimit;
+  const exhaustedReasonId = `${inputId}-exhausted`;
 
   async function sendPrompt(prompt: string) {
     const trimmed = prompt.trim();
-    // `disabled` (which includes `loading`) is the primary double-click
+    // `disabled` (which includes `sending`) is the primary double-click
     // guard, but a client-generated idempotency key (Part 2 hardening)
     // is still sent with every request — it protects against a browser-
     // level retry of an already-sent request (e.g. a dropped connection)
@@ -56,7 +147,7 @@ export function AiBrainstormPanel(props: {
     // interaction.
     if (!trimmed || disabled) return;
     const clientRequestId = crypto.randomUUID();
-    setLoading(true);
+    setSending(true);
     setRateLimited(false);
     try {
       const res = await fetch(
@@ -93,6 +184,8 @@ export function AiBrainstormPanel(props: {
 
       setPromptsRemainingForQuestion(body.promptsRemainingForQuestion ?? null);
       setPromptsRemainingForAttempt(body.promptsRemainingForAttempt ?? null);
+      setMaxPromptsPerQuestion(body.maxPromptsPerQuestion ?? null);
+      setMaxPromptsPerAttempt(body.maxPromptsPerAttempt ?? null);
       setTranscript((prev) => [
         ...prev,
         {
@@ -105,75 +198,131 @@ export function AiBrainstormPanel(props: {
       ]);
       setCustomPrompt("");
     } finally {
-      setLoading(false);
+      setSending(false);
     }
   }
 
+  const remainingSummary =
+    promptsRemainingForQuestion != null ? `${promptsRemainingForQuestion} prompt(s) remaining` : "";
+
+  const bodyVisibilityClass = props.sidebar ? `${expanded ? "flex" : "hidden"} lg:flex` : expanded ? "block" : "hidden";
+  const containerClass = props.sidebar
+    ? "rounded border border-indigo-200 bg-indigo-50/50 lg:sticky lg:top-4 lg:flex lg:max-h-[calc(100vh-2rem)] lg:flex-col"
+    : "mt-3 rounded border border-indigo-200 bg-indigo-50/50";
+
   return (
-    <div className="mt-3 rounded border border-indigo-200 bg-indigo-50/50">
+    <section aria-label={`Tether Brainstorm, question ${props.questionNumber} of ${props.totalQuestions}`} className={containerClass}>
+      {/* Mobile/narrow-screen compact toggle (Part 15) — a dedicated
+          right-side panel on desktop needs no toggle at all (forced
+          visible below via `lg:flex`/`lg:block`), so this control is
+          hidden entirely at `lg:` and above when acting as a sidebar. */}
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-indigo-900"
+        aria-expanded={expanded}
+        className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-indigo-900 ${
+          props.sidebar ? "lg:hidden" : ""
+        }`}
       >
-        <span>Tether Controlled AI</span>
+        <span>Tether Brainstorm{remainingSummary ? ` · ${remainingSummary}` : ""}</span>
         <span className="text-xs font-normal text-indigo-700">{expanded ? "Hide" : "Show"}</span>
       </button>
 
-      {expanded && (
-        <div className="border-t border-indigo-200 px-3 py-3">
-          <p className="text-xs text-indigo-900">
-            Use this assistant for guidance, planning and reasoning support during this assessment.
-            It is restricted from providing final answers. Your prompts and the responses shown to
-            you are recorded as part of this assessment.
+      <div className={`min-h-0 flex-col border-t border-indigo-200 px-3 py-3 ${bodyVisibilityClass} ${props.sidebar ? "lg:flex-1" : ""}`}>
+        <div className="shrink-0">
+          <h3 className="text-sm font-semibold text-indigo-900">Tether Brainstorm</h3>
+          <p className="text-xs text-indigo-700">
+            Question {props.questionNumber} of {props.totalQuestions}
+          </p>
+          <p className="mt-0.5 truncate text-xs text-indigo-600" title={props.questionText}>
+            Discussing: {discussingPreview(props.questionText)}
           </p>
 
-          <div className="mt-2 flex flex-wrap gap-2 text-xs text-indigo-800">
-            {promptsRemainingForQuestion != null && (
-              <span className="rounded bg-white px-2 py-0.5">
-                {promptsRemainingForQuestion} prompt(s) left for this question
+          <p className="mt-2 text-xs text-indigo-900">
+            <span className="font-medium">AI brainstorming is allowed</span> · Guidance only · interactions are recorded
+          </p>
+          <details className="mt-1 text-xs text-indigo-700">
+            <summary className="cursor-pointer select-none">About AI assistance</summary>
+            <p className="mt-1 text-indigo-800">
+              Use this assistant for guidance, planning and reasoning support during this assessment. It is
+              restricted from providing final answers. Your prompts and the responses shown to you are
+              recorded as part of this assessment.
+            </p>
+          </details>
+
+          <div className="mt-2 rounded border border-indigo-100 bg-white p-2 text-xs">
+            <p className="font-medium text-indigo-900">Prompts remaining</p>
+            <div className="mt-1 flex items-center justify-between text-indigo-800">
+              <span>This question</span>
+              <span className="font-mono tabular-nums">
+                {promptsRemainingForQuestion ?? "–"} / {maxPromptsPerQuestion ?? "–"}
               </span>
-            )}
-            {promptsRemainingForAttempt != null && (
-              <span className="rounded bg-white px-2 py-0.5">
-                {promptsRemainingForAttempt} prompt(s) left for this attempt
+            </div>
+            <div className="flex items-center justify-between text-indigo-800">
+              <span>This exam</span>
+              <span className="font-mono tabular-nums">
+                {promptsRemainingForAttempt ?? "–"} / {maxPromptsPerAttempt ?? "–"}
               </span>
-            )}
+            </div>
           </div>
 
           {(atQuestionLimit || atAttemptLimit) && (
-            <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
-              You&apos;ve used all the assistance prompts available{" "}
-              {atAttemptLimit ? "for this attempt" : "for this question"}.
+            <p id={exhaustedReasonId} role="status" className="mt-2 rounded border border-gray-200 bg-gray-50 p-2 text-xs text-gray-700">
+              {atAttemptLimit ? "No AI prompts remaining for this exam" : "No prompts remaining for this question"}
+              <br />
+              You can continue answering normally.
             </p>
           )}
           {rateLimited && (
-            <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+            <p role="status" className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
               You&apos;re sending requests too quickly. Please wait a moment and try again.
             </p>
           )}
+        </div>
 
-          <div className="mt-3 space-y-2">
-            {transcript.map((entry) => (
-              <div key={entry.id} className="rounded bg-white p-2 text-xs">
-                <p className="font-medium text-gray-700">You: {entry.prompt}</p>
-                {entry.response && <p className="mt-1 text-gray-800">Tether: {entry.response}</p>}
-                {entry.status === "BLOCKED" && entry.studentMessage && (
-                  <p className="mt-1 text-amber-700">{entry.studentMessage}</p>
-                )}
-                {(entry.status === "ERROR" || entry.status === "FAILED") && entry.studentMessage && (
-                  <p className="mt-1 text-red-600">{entry.studentMessage}</p>
-                )}
-              </div>
-            ))}
-          </div>
+        <div className={`mt-3 min-h-0 space-y-2 ${props.sidebar ? "lg:flex-1 lg:overflow-y-auto" : ""}`}>
+          {historyLoading && <p className="text-xs text-indigo-600">Loading brainstorming...</p>}
+          {!historyLoading && transcript.length === 0 && (
+            <p className="text-xs text-indigo-600">No brainstorming yet for this question.</p>
+          )}
+          {!historyLoading &&
+            transcript.map((entry) => {
+              const isGuardrail = GUARDRAIL_STATUSES.has(entry.status);
+              const isFailure = FAILURE_STATUSES.has(entry.status);
+              return (
+                <div key={entry.id} className="space-y-1 rounded border border-indigo-100 bg-white p-2 text-xs">
+                  <p>
+                    <span className="font-medium text-gray-700">You</span>
+                    <span className="ml-1 text-gray-800">{entry.prompt}</span>
+                  </p>
+                  <div className="border-t border-gray-100 pt-1">
+                    <p className="flex items-center gap-1.5">
+                      <span className="font-medium text-indigo-700">Tether</span>
+                      {isGuardrail && (
+                        <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">
+                          Guidance only
+                        </span>
+                      )}
+                    </p>
+                    {entry.response && <p className="mt-0.5 text-gray-800">{entry.response}</p>}
+                    {isGuardrail && !entry.response && entry.studentMessage && (
+                      <p className="mt-0.5 text-gray-800">{entry.studentMessage}</p>
+                    )}
+                    {isFailure && entry.studentMessage && <p className="mt-0.5 text-red-600">{entry.studentMessage}</p>}
+                  </div>
+                </div>
+              );
+            })}
+        </div>
 
-          <div className="mt-3 flex flex-wrap gap-1.5">
+        <div className="mt-3 shrink-0">
+          <div className="flex flex-wrap gap-1.5">
             {STARTER_ACTIONS.map((action) => (
               <button
                 key={action.label}
                 type="button"
                 disabled={disabled}
+                aria-describedby={atQuestionLimit || atAttemptLimit ? exhaustedReasonId : undefined}
                 onClick={() => sendPrompt(action.prompt)}
                 className="rounded border border-indigo-300 bg-white px-2 py-1 text-xs text-indigo-800 disabled:opacity-50"
               >
@@ -183,13 +332,18 @@ export function AiBrainstormPanel(props: {
           </div>
 
           <div className="mt-2 flex gap-2">
+            <label htmlFor={inputId} className="sr-only">
+              Ask Tether Brainstorm a question
+            </label>
             <input
+              id={inputId}
               type="text"
               value={customPrompt}
               onChange={(e) => setCustomPrompt(e.target.value)}
               placeholder="Or ask your own question..."
               maxLength={1000}
               disabled={disabled}
+              aria-describedby={atQuestionLimit || atAttemptLimit ? exhaustedReasonId : undefined}
               className="flex-1 rounded border border-gray-300 px-2 py-1 text-xs disabled:opacity-50"
             />
             <button
@@ -198,11 +352,11 @@ export function AiBrainstormPanel(props: {
               onClick={() => sendPrompt(customPrompt)}
               className="rounded border border-indigo-400 bg-indigo-600 px-3 py-1 text-xs text-white disabled:opacity-50"
             >
-              {loading ? "Thinking..." : "Ask"}
+              {sending ? "Thinking..." : "Ask"}
             </button>
           </div>
         </div>
-      )}
-    </div>
+      </div>
+    </section>
   );
 }

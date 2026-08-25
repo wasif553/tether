@@ -738,11 +738,17 @@ describe("Exam layout stability — RecoveryStatusBanner call site never re-gate
 // See the JSX's own doc comments for the CSS-grid mechanics.
 describe("Exam workspace — desktop left-navigator two-column layout", () => {
   it("the one-question-mode workspace wrapper uses a bounded-navigator/flexible-question grid at lg: and above, with items-start to prevent column-height stretching", () => {
-    const wrapperIdx = source.indexOf('mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)]');
-    expect(wrapperIdx).toBeGreaterThan(-1);
-    const line = source.slice(wrapperIdx, wrapperIdx + 120);
-    expect(line).toContain("lg:items-start");
-    expect(line).toContain("lg:gap-6");
+    // Question-scoped brainstorm sidebar v1 — this grid class is now
+    // COMPUTED (oneQuestionGridColsClass/oneQuestionGridWrapperClass,
+    // declared alongside showQuestionNavigatorPanel), since a third
+    // (AI sidebar) column can also apply — no longer one static inline
+    // ternary literal. The navigator-only branch still resolves to the
+    // exact same class string at runtime; assert against the source of
+    // that computation instead of the old single literal.
+    const colsIdx = source.indexOf('"lg:grid-cols-[260px_minmax(0,1fr)]"');
+    expect(colsIdx).toBeGreaterThan(-1);
+    const wrapperTemplateIdx = source.indexOf("lg:items-start lg:gap-6");
+    expect(wrapperTemplateIdx).toBeGreaterThan(-1);
   });
 
   it("the navigator slot appears BEFORE the question column in the DOM (so CSS grid auto-placement puts it in the first/left column) and is wrapped separately from the question content", () => {
@@ -768,12 +774,14 @@ describe("Exam workspace — desktop left-navigator two-column layout", () => {
     expect(source).toContain('min-h-[280px] rounded border border-gray-200 p-4"');
   });
 
-  it("the no-navigator branch of the workspace wrapper's className ternary is exactly \"mt-6\" — no grid/column classes leak into the single-column case", () => {
-    const trueBranchIdx = source.indexOf('"mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start lg:gap-6"');
-    expect(trueBranchIdx).toBeGreaterThan(-1);
-    const between = source.slice(trueBranchIdx, trueBranchIdx + 200);
-    // The ternary's false branch, reachable shortly after the true branch,
-    // is the literal string "mt-6" and nothing else.
+  it("the no-navigator/no-AI-sidebar branch of the workspace wrapper's className is exactly \"mt-6\" — no grid/column classes leak into the single-column case", () => {
+    // Question-scoped brainstorm sidebar v1 — oneQuestionGridWrapperClass
+    // falls back to exactly "mt-6" whenever oneQuestionGridColsClass is
+    // empty (neither the navigator nor the AI sidebar applies), the same
+    // invariant the old two-way ternary's false branch protected.
+    const declIdx = source.indexOf("const oneQuestionGridWrapperClass = oneQuestionGridColsClass");
+    expect(declIdx).toBeGreaterThan(-1);
+    const between = source.slice(declIdx, declIdx + 200);
     expect(between).toMatch(/:\s*"mt-6"/);
     expect(between).not.toMatch(/:\s*"mt-6[^"]/); // not "mt-6 " + something extra
   });
@@ -928,8 +936,9 @@ describe("Remove routine save UI — left-nav slot from e9727a827706576c0d3c7956
     expect(source).toContain("{showQuestionNavigatorPanel && (");
   });
 
-  it("the two-column grid classes and the sticky navigator wrapper are still present, unmodified", () => {
-    expect(source).toContain("mt-6 lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start lg:gap-6");
+  it("the two-column grid classes and the sticky navigator wrapper are still present (now computed, for the added AI-sidebar column — see Question-scoped brainstorm sidebar v1) and unmodified respectively", () => {
+    expect(source).toContain('"lg:grid-cols-[260px_minmax(0,1fr)]"');
+    expect(source).toContain("lg:items-start lg:gap-6");
     expect(source).toContain('className="mb-4 lg:sticky lg:top-4 lg:mb-0"');
   });
 });
