@@ -22,8 +22,10 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: MockAnthropic };
 });
 
-const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
-const { ANTHROPIC_BRAINSTORM_MODEL_DEFAULT } = await import("./aiAssistanceGenerator");
+const {
+  verifyBrainstormResponse,
+  ANTHROPIC_BRAINSTORM_VERIFIER_MODEL_DEFAULT,
+} = await import("./aiAssistanceVerifier");
 
 function textResponse(text: string) {
   return { content: [{ type: "text", text }] };
@@ -54,25 +56,29 @@ beforeAll(() => {
 
 afterEach(() => {
   mockCreate.mockReset();
-  delete process.env.ANTHROPIC_BRAINSTORM_MODEL;
+  delete process.env.ANTHROPIC_BRAINSTORM_VERIFIER_MODEL;
 });
 
 describe("model configuration", () => {
-  it("calls the SDK with the same brainstorm model default the generator uses", async () => {
+  it("uses the dedicated low-latency verifier model by default", async () => {
     mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
 
     await verifyBrainstormResponse(baseInput);
 
-    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ model: ANTHROPIC_BRAINSTORM_MODEL_DEFAULT }));
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ model: ANTHROPIC_BRAINSTORM_VERIFIER_MODEL_DEFAULT }),
+    );
   });
 
-  it("respects ANTHROPIC_BRAINSTORM_MODEL — never a second, independently hard-coded literal", async () => {
-    process.env.ANTHROPIC_BRAINSTORM_MODEL = "claude-brainstorm-custom-1";
+  it("respects ANTHROPIC_BRAINSTORM_VERIFIER_MODEL", async () => {
+    process.env.ANTHROPIC_BRAINSTORM_VERIFIER_MODEL = "claude-verifier-custom-1";
     mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
 
     await verifyBrainstormResponse(baseInput);
 
-    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ model: "claude-brainstorm-custom-1" }));
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "claude-verifier-custom-1" }),
+    );
   });
 });
 

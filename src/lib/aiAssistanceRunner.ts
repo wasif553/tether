@@ -592,16 +592,19 @@ export async function runAiAssistanceRequest(params: {
     };
   }
 
-  const approvedCountForQuestion = await prisma.aiAssistanceInteraction.count({
-    where: { submissionId: submission.id, questionId: question.id, status: "APPROVED" },
-  });
-  const cumulativeSoFar = await currentCumulativeRiskScore(submission.id, question.id);
-  const priorApproved = await prisma.aiAssistanceInteraction.findMany({
-    where: { submissionId: submission.id, questionId: question.id, status: "APPROVED" },
-    orderBy: { createdAt: "asc" },
-    take: 5,
-    select: { studentPrompt: true, approvedResponse: true },
-  });
+  // Independent reads: run concurrently to reduce pre-generation DB latency.
+  const [approvedCountForQuestion, cumulativeSoFar, priorApproved] = await Promise.all([
+    prisma.aiAssistanceInteraction.count({
+      where: { submissionId: submission.id, questionId: question.id, status: "APPROVED" },
+    }),
+    currentCumulativeRiskScore(submission.id, question.id),
+    prisma.aiAssistanceInteraction.findMany({
+      where: { submissionId: submission.id, questionId: question.id, status: "APPROVED" },
+      orderBy: { createdAt: "asc" },
+      take: 5,
+      select: { studentPrompt: true, approvedResponse: true },
+    }),
+  ]);
 
   const questionType = question.type as BrainstormQuestionType;
   const generatorInput: BrainstormGeneratorInput = {

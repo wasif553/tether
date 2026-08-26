@@ -177,7 +177,7 @@ export async function generateBrainstormResponse(input: BrainstormGeneratorInput
   try {
     response = await client.messages.create({
       model: getAnthropicBrainstormModel(),
-      max_tokens: 400,
+      max_tokens: 240,
       temperature: input.stricter ? 0 : 0.4,
       system,
       messages: [{ role: "user", content: userPrompt }],

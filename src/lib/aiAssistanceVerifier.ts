@@ -13,7 +13,7 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { getAnthropicBrainstormModel, type BrainstormQuestionType } from "@/lib/aiAssistanceGenerator";
+import type { BrainstormQuestionType } from "@/lib/aiAssistanceGenerator";
 import { boundedHiddenReference } from "@/lib/aiAssistancePolicy";
 
 export const RISK_CODES = [
@@ -52,6 +52,118 @@ export type BrainstormVerifierResult = {
 };
 
 export class AiAssistanceVerificationError extends Error {}
+
+export type FastVerifierDecision =
+  | { kind: "REJECT"; result: BrainstormVerifierResult }
+  | { kind: "DEFER" };
+
+const DIRECT_ANSWER_PATTERNS = [
+  /\b(?:the|your|correct|final)\s+answer\s+(?:is|would be|should be)\b/i,
+  /\b(?:therefore|thus|hence)\s+(?:the\s+)?(?:answer|result)\s+(?:is|=)\b/i,
+  /\b(?:the\s+)?correct\s+(?:option|choice)\s+(?:is|would be)\b/i,
+  /\byou\s+should\s+(?:choose|select|answer)\b/i,
+];
+
+const OPTION_DISCLOSURE_PATTERNS = [
+  /\b(?:option|choice)\s*[A-Z0-9]\s+(?:is|looks|seems|would be)\s+(?:correct|right|best)\b/i,
+  /\b(?:eliminate|rule out)\s+(?:option|choice)\s*[A-Z0-9]\b/i,
+];
+
+const CODE_DISCLOSURE_PATTERNS = [
+  /```[\s\S]*```/,
+  /(?:^|\n)\s*(?:def|function|class)\s+\w+/i,
+  /(?:^|\n)\s*(?:return|console\.log|print)\s*\(/i,
+];
+
+
+function normaliseForComparison(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}.+-]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function leaksHiddenReference(candidate: string, hiddenReference?: string | null): boolean {
+  if (!hiddenReference) return false;
+
+  const candidateNormalised = normaliseForComparison(candidate);
+  const hiddenNormalised = normaliseForComparison(hiddenReference);
+
+  if (hiddenNormalised.length >= 4 && candidateNormalised.includes(hiddenNormalised)) {
+    return true;
+  }
+
+  const hiddenNumbers = hiddenNormalised.match(/[-+]?\d+(?:\.\d+)?/g) ?? [];
+  return (
+    hiddenNumbers.length > 0 &&
+    /\b(?:answer|result|equals?|gives?|therefore|thus|hence)\b/i.test(candidate) &&
+    hiddenNumbers.some((value) => candidateNormalised.includes(value))
+  );
+}
+
+/**
+ * Fast deterministic first stage for the independent verifier.
+ *
+ * It is deliberately asymmetric:
+ * - obvious leakage is rejected immediately;
+ * - only a narrow class of short, question-led Socratic hints is approved locally;
+ * - everything else defers to the existing independent Anthropic verifier.
+ *
+ * This removes the second remote model call from clearly-safe first/second hints
+ * without making uncertain semantic cases fail open.
+ */
+export function fastVerifyBrainstormResponse(input: BrainstormVerifierInput): FastVerifierDecision {
+  const candidate = input.candidateResponse.trim();
+
+  if (
+    DIRECT_ANSWER_PATTERNS.some((pattern) => pattern.test(candidate)) ||
+    leaksHiddenReference(candidate, input.hiddenModelAnswer)
+  ) {
+    return {
+      kind: "REJECT",
+      result: {
+        allowed: false,
+        riskScore: 0.95,
+        riskCodes: ["DIRECT_ANSWER"],
+        reason: "Deterministic guard detected direct-answer or hidden-answer disclosure.",
+      },
+    };
+  }
+
+  if (
+    input.questionType === "MULTIPLE_CHOICE" &&
+    OPTION_DISCLOSURE_PATTERNS.some((pattern) => pattern.test(candidate))
+  ) {
+    return {
+      kind: "REJECT",
+      result: {
+        allowed: false,
+        riskScore: 0.95,
+        riskCodes: ["CORRECT_OPTION_DISCLOSED"],
+        reason: "Deterministic guard detected option-specific guidance.",
+      },
+    };
+  }
+
+  if (CODE_DISCLOSURE_PATTERNS.some((pattern) => pattern.test(candidate))) {
+    return {
+      kind: "REJECT",
+      result: {
+        allowed: false,
+        riskScore: 0.9,
+        riskCodes: ["COMPLETE_CODE"],
+        reason: "Deterministic guard detected code-like answer content.",
+      },
+    };
+  }
+
+  // Deterministic checks are fail-closed only: they may reject obvious
+  // leakage immediately, but they NEVER approve a response for display.
+  // Every candidate that is not rejected here still goes through the
+  // independent semantic verifier below.
+  return { kind: "DEFER" };
+}
 
 const verifierResultSchema = z.object({
   allowed: z.boolean(),
@@ -119,6 +231,19 @@ let cachedClient: Anthropic | undefined;
 export const ANTHROPIC_TIMEOUT_MS = 20_000;
 export const ANTHROPIC_MAX_RETRIES = 1;
 
+/**
+ * Independent verifier model. The generator can use Sonnet while the
+ * safety-screening call uses the lower-latency Haiku model.
+ */
+export const ANTHROPIC_BRAINSTORM_VERIFIER_MODEL_DEFAULT = "claude-haiku-4-5-20251001";
+
+export function getAnthropicBrainstormVerifierModel(): string {
+  return (
+    process.env.ANTHROPIC_BRAINSTORM_VERIFIER_MODEL?.trim() ||
+    ANTHROPIC_BRAINSTORM_VERIFIER_MODEL_DEFAULT
+  );
+}
+
 function getClient(): Anthropic {
   if (cachedClient) return cachedClient;
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -130,13 +255,18 @@ function getClient(): Anthropic {
 }
 
 export async function verifyBrainstormResponse(input: BrainstormVerifierInput): Promise<BrainstormVerifierResult> {
+  const fastDecision = fastVerifyBrainstormResponse(input);
+  if (fastDecision.kind === "REJECT") {
+    return fastDecision.result;
+  }
+
   const client = getClient();
 
   let response;
   try {
     response = await client.messages.create({
-      model: getAnthropicBrainstormModel(),
-      max_tokens: 512,
+      model: getAnthropicBrainstormVerifierModel(),
+      max_tokens: 220,
       temperature: 0,
       system: buildSystemPrompt(),
       messages: [{ role: "user", content: buildUserPrompt(input) }],
