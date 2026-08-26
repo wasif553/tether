@@ -49,14 +49,14 @@ export function ExamWatermark({ student, submissionId, refreshIntervalMs = 45_00
           <div key={i} className="flex items-center justify-center" style={{ transform: "rotate(-28deg)" }}>
             <p
               className="whitespace-pre-line text-center text-[10px] font-medium leading-tight text-gray-900"
-              // Approved student exam + Brainstorm layout v1 — lightened
-              // from 0.1 for question/answer legibility, purely a visual
-              // adjustment (see this component's own doc comment: opacity
-              // is never read as a signal anywhere). 0.06 sits toward the
-              // lighter end of the requested 0.05–0.08 range — lighter
-              // than the range's midpoint, while staying comfortably above
-              // the floor rather than right at the edge of illegibility.
-              style={{ opacity: 0.06 }}
+              // Final minor UX refinements v1 — restored to the
+              // original 0.1 (a prior pass had lightened this to 0.06
+              // for legibility; that was reverted — the watermark must
+              // remain clearly, darkly visible as an exam-integrity
+              // deterrent). Purely a visual adjustment (see this
+              // component's own doc comment: opacity is never read as
+              // a signal anywhere).
+              style={{ opacity: 0.1 }}
             >
               {text}
             </p>

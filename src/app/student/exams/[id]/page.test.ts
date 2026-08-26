@@ -979,3 +979,93 @@ describe("Remove routine save UI — left-nav slot from e9727a827706576c0d3c7956
     expect(source).toContain('className="mb-4 lg:sticky lg:top-4 lg:mb-0"');
   });
 });
+
+describe("Final minor UX refinements v1 — camera preview default location and drag behaviour", () => {
+  it("the draggable camera preview is rendered inside the question-navigator column, after the navigator/placeholder — never inside Brainstorm or the left-nav slot's own conditional guard", () => {
+    const navigatorSlotIdx = source.indexOf("{showQuestionNavigatorPanel && (");
+    expect(navigatorSlotIdx).toBeGreaterThan(-1);
+    const draggableIdx = source.indexOf("<DraggableCameraPreview", navigatorSlotIdx);
+    expect(draggableIdx).toBeGreaterThan(navigatorSlotIdx);
+    // The navigator slot's own closing `)}` must come AFTER the
+    // DraggableCameraPreview usage — i.e. it is nested inside that same
+    // conditional block (the left column), not hoisted out of it.
+    const slotCloseIdx = source.indexOf("\n              )}", draggableIdx);
+    expect(slotCloseIdx).toBeGreaterThan(draggableIdx);
+  });
+
+  it("the camera preview is gated on showCameraInNavigatorColumn (one-question-at-a-time AND a navigator present) — the fixed-corner fallback stays for every other case", () => {
+    const idx = source.indexOf("const showCameraInNavigatorColumn = oneQuestionAtATime && showQuestionNavigatorPanel;");
+    expect(idx).toBeGreaterThan(-1);
+    expect(source).toContain("{showCameraInNavigatorColumn && cameraStatusContent && (");
+    expect(source).toContain("{!showCameraInNavigatorColumn && cameraStatusContent && (");
+  });
+
+  it("the collapse/expand toggle (cameraPreviewMinimized/toggleCameraPreviewMinimized) is still wired through to the draggable panel — collapse remains functional", () => {
+    const draggableIdx = source.indexOf("<DraggableCameraPreview");
+    expect(draggableIdx).toBeGreaterThan(-1);
+    const propsBlock = source.slice(draggableIdx, source.indexOf("</DraggableCameraPreview>", draggableIdx));
+    expect(propsBlock).toContain("minimized={cameraPreviewMinimized}");
+    expect(propsBlock).toContain("onToggleMinimized={toggleCameraPreviewMinimized}");
+  });
+
+  it("the draggable camera preview is not remounted when the question changes — it has no key derived from the current question, so switching Next/Previous can never reset a dragged position", () => {
+    const draggableIdx = source.indexOf("<DraggableCameraPreview");
+    const closeIdx = source.indexOf("</DraggableCameraPreview>", draggableIdx);
+    const block = source.slice(draggableIdx, closeIdx);
+    // storageKey is keyed to the submission (stable for the whole
+    // attempt), never to the current question.
+    expect(block).toContain("storageKey={`tether-camera-position-${id}`}");
+    expect(block).not.toContain("key={");
+    expect(block).not.toMatch(/questionId/);
+  });
+
+  it("only ONE real <video ref={examVideoRef}> element exists in source — the draggable and fixed-corner render sites share cameraStatusContent rather than each declaring their own <video>", () => {
+    // Matches only the actual JSX tag (followed shortly by its own
+    // autoPlay attribute), not the doc comment a few lines above it
+    // that also mentions `<video ref={examVideoRef}>` in prose.
+    const matches = source.match(/<video ref=\{examVideoRef\} autoPlay/g) ?? [];
+    expect(matches).toHaveLength(1);
+  });
+});
+
+describe("Final minor UX refinements v1 — Submit exam moved into the centre question workspace", () => {
+  it("Submit exam is defined exactly once (submitExamButton) and referenced from two mutually-exclusive render sites, never duplicated", () => {
+    const definitionMatches = source.match(/\{submitting \? "Submitting\.\.\." : "Submit exam"\}/g) ?? [];
+    expect(definitionMatches).toHaveLength(1);
+    // Inside the centre question card, submitExamButton is rendered
+    // unconditionally — the guard is already implicit from being inside
+    // the oneQuestionAtATime branch of the outer ternary, so it needs
+    // no redundant `oneQuestionAtATime &&` of its own. The original
+    // end-of-page location (full-paper mode) DOES carry an explicit
+    // guard, since it's a sibling of that same ternary, not nested
+    // inside either branch.
+    expect(source).toContain('<div className="mt-4 border-t border-gray-200 pt-4">{submitExamButton}</div>');
+    expect(source).toContain("{!oneQuestionAtATime && submitExamButton}");
+  });
+
+  it("submitExamButton renders inside the centre question card, after the Previous/Next row", () => {
+    const nextButtonIdx = source.indexOf("Next →");
+    expect(nextButtonIdx).toBeGreaterThan(-1);
+    const oneQuestionSubmitIdx = source.indexOf(
+      '<div className="mt-4 border-t border-gray-200 pt-4">{submitExamButton}</div>',
+      nextButtonIdx,
+    );
+    expect(oneQuestionSubmitIdx).toBeGreaterThan(nextButtonIdx);
+    // And it's still inside the SAME question card — no closing of the
+    // card's own wrapping div in between (the card only closes once,
+    // right after this line, at the `)}` matching `oneQuestion.payload &&`).
+    const between = source.slice(nextButtonIdx, oneQuestionSubmitIdx);
+    expect(between).not.toContain("{!oneQuestion.loading && !oneQuestion.payload");
+  });
+
+  it("the submission handler's confirm/review-modal/autosubmit logic is byte-for-byte unchanged from before this pass", () => {
+    const idx = source.indexOf("const submitExamButton = (");
+    expect(idx).toBeGreaterThan(-1);
+    const block = source.slice(idx, idx + 1200);
+    expect(block).toContain("if (remainingSecs === 0 && data.exam.secureSettings.autoSubmitOnTimerEnd) {");
+    expect(block).toContain("handleSubmit({ systemAutoSubmit: true });");
+    expect(block).toContain("if (oneQuestionAtATime && secureSettings?.showQuestionNavigator && questionNav) {");
+    expect(block).toContain("setShowReviewModal(true);");
+    expect(block).toContain("disabled={submitting || autoSubmitLocked || timerStopped}");
+  });
+});

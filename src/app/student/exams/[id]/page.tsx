@@ -109,6 +109,7 @@ import {
 } from "@/lib/aiCameraEvidenceFrame";
 import { ExamWatermark } from "@/components/ExamWatermark";
 import { AiBrainstormPanel } from "@/components/AiBrainstormPanel";
+import { DraggableCameraPreview } from "@/components/DraggableCameraPreview";
 import { getTimerUrgency, timerAccessibleLabel, timerUrgencyClasses } from "@/lib/examTimerUrgency";
 import { AnswerDevelopmentPanel } from "@/components/AnswerDevelopmentPanel";
 import { useScreenShareLifecycle } from "@/hooks/useScreenShareLifecycle";
@@ -4423,71 +4424,83 @@ export default function TakeExamPage({
   const minutes = remainingSecs != null ? Math.floor(remainingSecs / 60) : null;
   const seconds = remainingSecs != null ? remainingSecs % 60 : null;
 
-  // Approved student exam + Brainstorm layout v1 — true only when the
-  // real 3-column grid (question navigator | question | Brainstorm) can
-  // actually render, i.e. one-question-at-a-time delivery AND AI
-  // enabled. Used only to decide where the camera preview renders
-  // (see cameraPreviewInner below) — deliberately NOT the same as the
-  // grid's own `showAiSidebar` alone, which says nothing about delivery
-  // mode and would otherwise make the fixed-corner camera preview
-  // vanish with nothing to replace it in full-paper mode.
-  const showDesktopAiSidebarLayout = oneQuestionAtATime && showAiSidebar;
+  // Final minor UX refinements v1 — true only when there's an actual
+  // left navigator column for the camera to default under, i.e.
+  // one-question-at-a-time delivery AND the question navigator is
+  // enabled for this exam. Deliberately NOT the same as `showAiSidebar`
+  // alone (that says nothing about the navigator, and would leave the
+  // camera with nowhere to default to when there's no navigator
+  // column at all) — used only to decide where the camera preview
+  // renders (see cameraStatusContent below).
+  const showCameraInNavigatorColumn = oneQuestionAtATime && showQuestionNavigatorPanel;
 
-  // Approved student exam + Brainstorm layout v1 — the camera preview's
-  // inner content (minimized pill vs. expanded card), computed once so
-  // it can be placed in exactly ONE of two locations depending on
-  // showDesktopAiSidebarLayout: the existing fixed bottom-right corner
-  // (every other case — full-paper mode, or AI disabled) or in-flow
-  // below Brainstorm inside the right sidebar column (see the sidebar
-  // cell above). Never both at once — this is the SAME <video
-  // ref={examVideoRef}> element either way; rendering it in two places
-  // simultaneously would mean only one of them ever actually receives
-  // the live stream (a React ref can only ever point at the most
-  // recently rendered instance), so the two render sites below must
-  // stay mutually exclusive on showDesktopAiSidebarLayout.
-  const cameraPreviewInner =
+  // Final minor UX refinements v1 — the camera preview's video +
+  // status-message content ONLY (no header, no collapse toggle) —
+  // computed once so it can be placed in exactly ONE of two locations
+  // depending on showCameraInNavigatorColumn: the existing
+  // fixed-bottom-right corner (full-paper mode, or one-question mode
+  // without a navigator — unchanged, non-draggable, keeps its own
+  // header) or wrapped by DraggableCameraPreview under the question
+  // navigator (which owns the header/drag-handle/collapse toggle
+  // itself — see that component). Never both at once — this is the
+  // SAME <video ref={examVideoRef}> element either way; a React ref
+  // can only ever point at the most recently rendered instance, so the
+  // two render sites below must stay mutually exclusive.
+  const cameraStatusContent =
     requireCamera && cameraStatus === "granted" && secureSettings?.showCameraPreview ? (
-      cameraPreviewMinimized ? (
-        <button
-          onClick={toggleCameraPreviewMinimized}
-          className="flex items-center gap-2 rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs shadow"
-          aria-label="Expand camera preview"
-        >
-          <span className="h-2 w-2 rounded-full bg-green-500" />
-          Camera active
-          <span aria-hidden>▸</span>
-        </button>
-      ) : (
-        <div className="rounded border border-gray-300 bg-white p-2 shadow">
-          <div className="mb-1 flex items-center justify-between gap-3">
-            <span className="text-xs text-gray-500">Your camera — only you can see this</span>
-            <button
-              onClick={toggleCameraPreviewMinimized}
-              className="rounded border border-gray-300 px-1.5 py-0.5 text-xs"
-              aria-label="Minimize camera preview"
-            >
-              <span aria-hidden>▾</span>
-            </button>
-          </div>
-          <video ref={examVideoRef} autoPlay muted playsInline className="w-40 rounded border border-gray-200" />
-          {/* Camera Startup Lifecycle v2 — a calm, non-alarming status
-              message during startup, never the violation overlay. See
-              docs/on-device-ai-integrity-detection-v1.md. */}
-          {enableAiCameraIntegrityChecks && cameraLifecycleState !== "READY" && cameraLifecycleState !== "FAILED" && (
-            <p className="mt-1 text-xs text-gray-500">{cameraLifecycleStatusMessage(cameraLifecycleState)}</p>
-          )}
-          {enableAiCameraIntegrityChecks && cameraLifecycleState === "READY" && !detectionArmed && !detectionSamplingError && (
-            <p className="mt-1 text-xs text-gray-500">Starting camera integrity checks…</p>
-          )}
-          {enableAiCameraIntegrityChecks && cameraLifecycleState === "FAILED" && (
-            <p className="mt-1 text-xs text-amber-700">Camera could not start. Check browser permission and try again.</p>
-          )}
-          {enableAiCameraIntegrityChecks && detectionSamplingError && (
-            <p className="mt-1 text-xs text-amber-700">{detectionSamplingError}</p>
-          )}
-        </div>
-      )
+      <>
+        <video ref={examVideoRef} autoPlay muted playsInline className="w-40 rounded border border-gray-200" />
+        {/* Camera Startup Lifecycle v2 — a calm, non-alarming status
+            message during startup, never the violation overlay. See
+            docs/on-device-ai-integrity-detection-v1.md. */}
+        {enableAiCameraIntegrityChecks && cameraLifecycleState !== "READY" && cameraLifecycleState !== "FAILED" && (
+          <p className="mt-1 text-xs text-gray-500">{cameraLifecycleStatusMessage(cameraLifecycleState)}</p>
+        )}
+        {enableAiCameraIntegrityChecks && cameraLifecycleState === "READY" && !detectionArmed && !detectionSamplingError && (
+          <p className="mt-1 text-xs text-gray-500">Starting camera integrity checks…</p>
+        )}
+        {enableAiCameraIntegrityChecks && cameraLifecycleState === "FAILED" && (
+          <p className="mt-1 text-xs text-amber-700">Camera could not start. Check browser permission and try again.</p>
+        )}
+        {enableAiCameraIntegrityChecks && detectionSamplingError && (
+          <p className="mt-1 text-xs text-amber-700">{detectionSamplingError}</p>
+        )}
+      </>
     ) : null;
+
+  // Final minor UX refinements v1 — computed once so it can be placed
+  // in exactly ONE of two locations depending on delivery mode: inside
+  // the centre question card, below Previous/Next (one-question-at-a-
+  // time — see the approved layout), or at its original end-of-page
+  // location (full-paper mode — unchanged; that mode has no distinct
+  // "centre column" for this to move into). The onClick logic, confirm/
+  // review-modal behaviour, and disabled conditions are byte-for-byte
+  // identical to before this pass — only WHERE this renders changed.
+  const submitExamButton = (
+    <>
+      <button
+        onClick={() => {
+          if (remainingSecs === 0 && data.exam.secureSettings.autoSubmitOnTimerEnd) {
+            handleSubmit({ systemAutoSubmit: true });
+            return;
+          }
+          // Question Navigator v1 — Part 13: show the review panel
+          // only when the navigator is actually active for this
+          // exam; otherwise submission behaves exactly as before.
+          if (oneQuestionAtATime && secureSettings?.showQuestionNavigator && questionNav) {
+            setShowReviewModal(true);
+            return;
+          }
+          handleSubmit();
+        }}
+        disabled={submitting || autoSubmitLocked || timerStopped}
+        className="mt-6 rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+      >
+        {submitting ? "Submitting..." : "Submit exam"}
+      </button>
+      {submitMessage && <p className="mt-2 text-sm text-red-600">{submitMessage}</p>}
+    </>
+  );
 
   // Approved student exam workspace v2 — restores the exam-title row a
   // prior pass removed entirely; that was not the final requirement.
@@ -4727,15 +4740,40 @@ export default function TakeExamPage({
           uploaded (see docs/known-limitations.md). Minimize/restore is
           local UI state only: it never creates an IntegrityEvent and
           never pauses the stream or heartbeat above.
-          Approved student exam + Brainstorm layout v1 — this
-          fixed-corner instance is suppressed exactly when the desktop
-          3-column layout renders it in-flow below Brainstorm instead
-          (see cameraPreviewInner's doc comment above) — every other
-          case (full-paper mode, AI disabled, or any viewport narrower
-          than the sidebar breakpoint) keeps this exact original
-          behaviour unchanged. */}
-      {!showDesktopAiSidebarLayout && cameraPreviewInner && (
-        <div className="fixed bottom-4 right-4 z-50">{cameraPreviewInner}</div>
+          Final minor UX refinements v1 — this fixed-corner, non-
+          draggable instance is suppressed exactly when
+          showCameraInNavigatorColumn instead renders the draggable
+          version under the question navigator — every other case
+          (full-paper mode, or one-question mode without a navigator)
+          keeps this exact original behaviour unchanged. */}
+      {!showCameraInNavigatorColumn && cameraStatusContent && (
+        <div className="fixed bottom-4 right-4 z-50">
+          {cameraPreviewMinimized ? (
+            <button
+              onClick={toggleCameraPreviewMinimized}
+              className="flex items-center gap-2 rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs shadow"
+              aria-label="Expand camera preview"
+            >
+              <span className="h-2 w-2 rounded-full bg-green-500" />
+              Camera active
+              <span aria-hidden>▸</span>
+            </button>
+          ) : (
+            <div className="rounded border border-gray-300 bg-white p-2 shadow">
+              <div className="mb-1 flex items-center justify-between gap-3">
+                <span className="text-xs text-gray-500">Your camera — only you can see this</span>
+                <button
+                  onClick={toggleCameraPreviewMinimized}
+                  className="rounded border border-gray-300 px-1.5 py-0.5 text-xs"
+                  aria-label="Minimize camera preview"
+                >
+                  <span aria-hidden>▾</span>
+                </button>
+              </div>
+              {cameraStatusContent}
+            </div>
+          )}
+        </div>
       )}
 
       {/* On-Device AI Camera Integrity Detection v1 — hidden, always-
@@ -4857,6 +4895,22 @@ export default function TakeExamPage({
                     // already provided by the parent wrapper above, so
                     // this only needs its own height.
                     <div className="h-10 rounded border border-gray-100" aria-hidden="true" />
+                  )}
+                  {/* Final minor UX refinements v1 — default camera
+                      location: left column, under the Questions
+                      navigator, in normal flow. Becomes a floating
+                      picture-in-picture panel once the student drags
+                      its header; see DraggableCameraPreview. */}
+                  {showCameraInNavigatorColumn && cameraStatusContent && (
+                    <div className="mt-3">
+                      <DraggableCameraPreview
+                        storageKey={`tether-camera-position-${id}`}
+                        minimized={cameraPreviewMinimized}
+                        onToggleMinimized={toggleCameraPreviewMinimized}
+                      >
+                        {cameraStatusContent}
+                      </DraggableCameraPreview>
+                    </div>
                   )}
                 </div>
               )}
@@ -4982,6 +5036,11 @@ export default function TakeExamPage({
                     )}
                   </div>
                   {oneQuestion.error && <p className="mt-2 text-sm text-red-600">{oneQuestion.error}</p>}
+                  {/* Final minor UX refinements v1 — Submit exam now
+                      lives in the centre question workspace, clearly
+                      separated from Previous/Next by its own border,
+                      rather than at the far lower-left of the page. */}
+                  <div className="mt-4 border-t border-gray-200 pt-4">{submitExamButton}</div>
                 </div>
               )}
               {!oneQuestion.loading && !oneQuestion.payload && oneQuestion.error && (
@@ -4993,12 +5052,11 @@ export default function TakeExamPage({
                 // above, not nested inside it, so it never competes for
                 // the question card's own width/height. min-w-0 for the
                 // same wrapping reason as the question column's own.
-                // Approved layout v1 — the camera preview renders here,
-                // below Brainstorm, ONLY for this desktop sidebar case;
-                // see cameraPreviewInner's own doc comment for why the
-                // fixed-corner instance below is suppressed exactly when
-                // this one is shown (a single shared video element, never
-                // two at once).
+                // Final minor UX refinements v1 — the camera preview no
+                // longer defaults here; it now defaults under the
+                // question navigator in the left column (see
+                // showCameraInNavigatorColumn above), draggable
+                // elsewhere by the student.
                 <div className={`min-w-0 ${aiSidebarCellSpanClass}`}>
                   <AiBrainstormPanel
                     submissionId={id}
@@ -5009,7 +5067,6 @@ export default function TakeExamPage({
                     questionText={oneQuestion.payload.question.text}
                     sidebar
                   />
-                  {cameraPreviewInner && <div className="mt-3">{cameraPreviewInner}</div>}
                 </div>
               )}
             </div>
@@ -5101,27 +5158,13 @@ export default function TakeExamPage({
             </div>
           )}
 
-          <button
-            onClick={() => {
-              if (remainingSecs === 0 && data.exam.secureSettings.autoSubmitOnTimerEnd) {
-                handleSubmit({ systemAutoSubmit: true });
-                return;
-              }
-              // Question Navigator v1 — Part 13: show the review panel
-              // only when the navigator is actually active for this
-              // exam; otherwise submission behaves exactly as before.
-              if (oneQuestionAtATime && secureSettings?.showQuestionNavigator && questionNav) {
-                setShowReviewModal(true);
-                return;
-              }
-              handleSubmit();
-            }}
-            disabled={submitting || autoSubmitLocked || timerStopped}
-            className="mt-6 rounded bg-black px-4 py-2 text-white disabled:opacity-50"
-          >
-            {submitting ? "Submitting..." : "Submit exam"}
-          </button>
-          {submitMessage && <p className="mt-2 text-sm text-red-600">{submitMessage}</p>}
+          {/* Final minor UX refinements v1 — full-paper mode has no
+              distinct centre column for Submit exam to move into (every
+              question already renders in one linear list), so this
+              stays exactly where it was. One-question-at-a-time mode's
+              Submit exam now lives inside the centre question card
+              instead (see submitExamButton's other render site above). */}
+          {!oneQuestionAtATime && submitExamButton}
         </div>
 
         {/* Question Navigator v1 — Part 13 review-before-submit workflow.
