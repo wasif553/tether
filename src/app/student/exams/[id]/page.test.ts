@@ -736,20 +736,42 @@ describe("Exam layout stability — RecoveryStatusBanner call site never re-gate
 // Exam workspace stability pass — desktop two-column layout: navigator
 // LEFT (stable, bounded width), active question RIGHT (flexible width).
 // See the JSX's own doc comments for the CSS-grid mechanics.
+describe("Approved student exam workspace v2 — grid direct children are exactly the 3 approved siblings, in order", () => {
+  it("the aria-live navigator-announcement region is a SIBLING of the grid wrapper, not its first child — as a first grid child it silently shifted the navigator/question/Brainstorm sidebar over by one column, so the navigator rendered in the question's column, the question card was squeezed into Brainstorm's 360px column, and Brainstorm itself wrapped to a new row under the navigator", () => {
+    const srOnlyIdx = source.indexOf('<div aria-live="polite" className="sr-only">');
+    expect(srOnlyIdx).toBeGreaterThan(-1);
+    const gridWrapperIdx = source.indexOf("<div className={oneQuestionGridWrapperClass}>");
+    expect(gridWrapperIdx).toBeGreaterThan(-1);
+    const srOnlyCloseIdx = source.indexOf("</div>", srOnlyIdx);
+    expect(srOnlyCloseIdx).toBeGreaterThan(srOnlyIdx);
+    // The sr-only region must fully close BEFORE the grid wrapper opens
+    // — i.e. it is a preceding sibling, never nested inside the grid.
+    expect(srOnlyCloseIdx).toBeLessThan(gridWrapperIdx);
+  });
+
+  it("the grid wrapper's first real child is the question-navigator conditional — never the sr-only region", () => {
+    const gridWrapperIdx = source.indexOf("<div className={oneQuestionGridWrapperClass}>");
+    expect(gridWrapperIdx).toBeGreaterThan(-1);
+    const immediatelyAfterOpen = source.slice(gridWrapperIdx, gridWrapperIdx + 200);
+    expect(immediatelyAfterOpen).not.toContain("sr-only");
+    expect(immediatelyAfterOpen).toContain("showQuestionNavigatorPanel &&");
+  });
+});
+
 describe("Exam workspace — desktop left-navigator two-column layout", () => {
-  it("the one-question-mode workspace wrapper uses a bounded-navigator/flexible-question grid at lg: and above, with items-start to prevent column-height stretching", () => {
+  it("the one-question-mode workspace wrapper uses a bounded-navigator/flexible-question grid at min-[900px]: and above, with items-start to prevent column-height stretching", () => {
     // Question-scoped brainstorm sidebar v1 / Approved student exam +
-    // Brainstorm layout v1 — this grid class is now COMPUTED
+    // Brainstorm layout v2 — this grid class is now COMPUTED
     // (oneQuestionGridColsClass/oneQuestionGridWrapperClass, declared
     // alongside showQuestionNavigatorPanel), since a third (AI sidebar)
     // column can also apply, at its own min-[1200px]: breakpoint — no
     // longer one static inline ternary literal. The navigator-only
-    // branch still resolves to the exact same 2-column class string at
-    // `lg:`; assert against the source of that computation instead of
-    // the old single literal.
-    const colsIdx = source.indexOf("lg:grid-cols-[220px_minmax(560px,1fr)]");
+    // branch resolves to the 2-column class string at the approved
+    // "medium" tier's own min-[900px]: breakpoint; assert against the
+    // source of that computation instead of the old single literal.
+    const colsIdx = source.indexOf("min-[900px]:grid-cols-[220px_minmax(560px,1fr)]");
     expect(colsIdx).toBeGreaterThan(-1);
-    const wrapperTemplateIdx = source.indexOf("lg:items-start lg:gap-5");
+    const wrapperTemplateIdx = source.indexOf("min-[900px]:items-start min-[900px]:gap-5");
     expect(wrapperTemplateIdx).toBeGreaterThan(-1);
   });
 
@@ -884,12 +906,21 @@ describe("Remove routine save UI — no visible 'Saving...' text anywhere in the
     expect(source).toContain("disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}");
   });
 
-  it("the Previous/Next button row no longer renders any trailing status span after the Next button — the row ends with the Next button's closing conditional", () => {
-    const rowIdx = source.indexOf('<div className="mt-4 flex items-center gap-2">');
+  it("the Previous/Next button row renders no 'Saving...' status text — only the Previous/Next controls themselves", () => {
+    // Approved student exam workspace v2 — this row's wrapper is now
+    // `justify-between` (Previous pinned left, Next pinned right per
+    // the approved design) and Previous is wrapped in its own <span>
+    // purely so `justify-between` still has two flex children when
+    // canGoPrevious is false — that span is a layout wrapper, not a
+    // status indicator, so this test now asserts the absence of the
+    // removed "Saving..." text specifically, not the absence of any
+    // <span> at all.
+    const rowIdx = source.indexOf('<div className="mt-4 flex items-center justify-between gap-2">');
     expect(rowIdx).toBeGreaterThan(-1);
-    const rowEndIdx = source.indexOf("</div>", rowIdx);
-    const row = source.slice(rowIdx, rowEndIdx);
-    expect(row).not.toContain("<span");
+    const nextButtonIdx = source.indexOf("Next →", rowIdx);
+    expect(nextButtonIdx).toBeGreaterThan(rowIdx);
+    const row = source.slice(rowIdx, nextButtonIdx);
+    expect(row).not.toContain("Saving");
     expect(row).not.toMatch(/text-xs text-gray-500/);
   });
 });
@@ -938,9 +969,13 @@ describe("Remove routine save UI — left-nav slot from e9727a827706576c0d3c7956
     expect(source).toContain("{showQuestionNavigatorPanel && (");
   });
 
-  it("the two-column grid classes and the sticky navigator wrapper are still present (now computed, for the added AI-sidebar column — see Question-scoped brainstorm sidebar v1) and unmodified respectively", () => {
-    expect(source).toContain("lg:grid-cols-[220px_minmax(560px,1fr)]");
-    expect(source).toContain("lg:items-start lg:gap-5");
+  it("the two-column grid classes are still present (now computed, at the approved 900px medium-tier breakpoint — see Approved student exam workspace v2) and the sticky navigator wrapper's own className is unmodified", () => {
+    expect(source).toContain("min-[900px]:grid-cols-[220px_minmax(560px,1fr)]");
+    expect(source).toContain("min-[900px]:items-start min-[900px]:gap-5");
+    // The navigator's own sticky wrapper deliberately stays at the
+    // original lg: (1024px) breakpoint — untouched by the 900px medium-
+    // tier grid change above; sticky positioning is a minor progressive
+    // enhancement, not required to match the grid's own breakpoint.
     expect(source).toContain('className="mb-4 lg:sticky lg:top-4 lg:mb-0"');
   });
 });

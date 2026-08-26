@@ -109,6 +109,7 @@ import {
 } from "@/lib/aiCameraEvidenceFrame";
 import { ExamWatermark } from "@/components/ExamWatermark";
 import { AiBrainstormPanel } from "@/components/AiBrainstormPanel";
+import { getTimerUrgency, timerAccessibleLabel, timerUrgencyClasses } from "@/lib/examTimerUrgency";
 import { AnswerDevelopmentPanel } from "@/components/AnswerDevelopmentPanel";
 import { useScreenShareLifecycle } from "@/hooks/useScreenShareLifecycle";
 import { useAnswerDevelopmentCapture } from "@/hooks/useAnswerDevelopmentCapture";
@@ -566,7 +567,7 @@ function isBlockableShortcut(e: KeyboardEvent): boolean {
 // tile never bypasses server policy, it only ever requests a move the
 // server may still reject.
 const NAVIGATOR_STATE_STYLES: Record<NavigatorQuestionState, string> = {
-  CURRENT: "border-2 border-black bg-white text-black",
+  CURRENT: "border-2 border-slate-900 bg-white text-slate-900",
   ANSWERED: "border border-green-300 bg-green-50 text-green-800",
   SKIPPED: "border border-amber-300 bg-amber-50 text-amber-800",
   NOT_VISITED: "border border-gray-200 bg-gray-50 text-gray-500",
@@ -2107,29 +2108,29 @@ export default function TakeExamPage({
   // is intentionally left as-is.
   //
   // The full 3-column layout (220px | minmax(560px,1fr) | 360px) only
-  // activates at >=1200px (a `min-[1200px]:` arbitrary variant, not the
-  // default 1024px `lg:` breakpoint) — 220+360+gaps leaves too little
-  // room for the question column below ~1200px. Below that, when a
+  // activates at >=1200px (a `min-[1200px]:` arbitrary variant) —
+  // 220+360+gaps leaves too little room for the question column below
+  // ~1200px. Below that (the approved 900–1199px "medium" tier), when a
   // navigator is also present, the grid still goes 2-column
-  // (navigator | question) at the existing `lg:` breakpoint — a clean
-  // "medium" tier, never a 3-column squeeze — and the AI sidebar cell
+  // (navigator | question) at `min-[900px]:` — a clean 2-column layout,
+  // never a 3-column squeeze — and the AI sidebar cell
   // (aiSidebarCellSpanClass below) spans the full row as an extra
   // implicit row instead of being squeezed into the first explicit
-  // column. AiBrainstormPanel's own `sidebar` prop mirrors this same
+  // column. AiBrainstormPanel's own `sidebar` prop mirrors the same
   // >=1200px threshold for its sticky/always-expanded treatment (see
   // that component) — below it, Brainstorm is the same collapsible
   // section/drawer at every narrower tier (medium and small alike).
   const showAiSidebar = secureSettings?.aiAssistanceMode === "BRAINSTORM_ONLY";
   const oneQuestionGridColsClass =
     showQuestionNavigatorPanel && showAiSidebar
-      ? "lg:grid-cols-[220px_minmax(560px,1fr)] min-[1200px]:grid-cols-[220px_minmax(560px,1fr)_360px]"
+      ? "min-[900px]:grid-cols-[220px_minmax(560px,1fr)] min-[1200px]:grid-cols-[220px_minmax(560px,1fr)_360px]"
       : showQuestionNavigatorPanel
-        ? "lg:grid-cols-[220px_minmax(560px,1fr)]"
+        ? "min-[900px]:grid-cols-[220px_minmax(560px,1fr)]"
         : showAiSidebar
-          ? "lg:grid-cols-[minmax(560px,1fr)_360px]"
+          ? "min-[900px]:grid-cols-[minmax(560px,1fr)_360px]"
           : "";
   const oneQuestionGridWrapperClass = oneQuestionGridColsClass
-    ? `mt-6 lg:grid ${oneQuestionGridColsClass} lg:items-start lg:gap-5`
+    ? `mt-6 min-[900px]:grid ${oneQuestionGridColsClass} min-[900px]:items-start min-[900px]:gap-5`
     : "mt-6";
   // Only the nav+AI combination has a "medium" tier where the grid is
   // active (lg:) but the AI sidebar isn't yet a real explicit column
@@ -4488,20 +4489,27 @@ export default function TakeExamPage({
       )
     ) : null;
 
+  // Approved student exam workspace v2 — restores the exam-title row a
+  // prior pass removed entirely; that was not the final requirement.
+  // Presentation only — remainingSecs remains the same single
+  // authoritative countdown value this page already derives elsewhere
+  // (autosubmit, timer stop, etc.); this never introduces a second
+  // countdown mechanism.
+  const timerUrgency = getTimerUrgency(remainingSecs);
+  const timerLabel = timerAccessibleLabel(remainingSecs, timerUrgency);
+
   return (
     <div className="mx-auto max-w-[min(1500px,calc(100vw-32px))]">
-      {/* Approved student exam + Brainstorm layout v1 — the large
-          central exam-title heading was removed here: the exam's
-          identity is already established by the surrounding page/nav
-          context, so it no longer needs its own prominent row. The
-          timer is unaffected — justify-end keeps it pinned to the
-          upper-right of the workspace now that it's the row's only
-          child (a bare justify-between with one child would otherwise
-          collapse to the row's START instead). */}
-      <div className="flex items-center justify-end">
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="truncate text-2xl font-bold text-slate-900">{data.exam.title}</h1>
         {remainingSecs != null && (
-          <span className="rounded bg-gray-100 px-3 py-1 font-mono text-sm">
-            {String(minutes).padStart(2, "0")}:{String(seconds).padStart(2, "0")}
+          <span
+            role="timer"
+            aria-label={timerLabel}
+            title={timerLabel}
+            className={`shrink-0 rounded-lg border px-4 py-1.5 font-mono text-xl tabular-nums ${timerUrgencyClasses(timerUrgency)}`}
+          >
+            🕒 {String(minutes).padStart(2, "0")}:{String(seconds).padStart(2, "0")}
           </span>
         )}
       </div>
@@ -4802,14 +4810,27 @@ export default function TakeExamPage({
             // itself must always exist (or never exist) independent of
             // whether its data has arrived; only its CONTENT is
             // conditional on questionNav.
-            <div className={oneQuestionGridWrapperClass}>
+            <>
               {/* Question Navigator v1 — see docs/question-navigator-v1.md.
                   An aria-live region so screen-reader users hear
                   confirmation after a successful navigation or
-                  flag/unflag, without needing to find focus themselves. */}
+                  flag/unflag, without needing to find focus themselves.
+                  Approved layout v2 — moved OUTSIDE the grid: this was
+                  previously the grid's own FIRST child, always present
+                  regardless of showQuestionNavigatorPanel/showAiSidebar —
+                  CSS Grid counts it as a real (if zero-size) grid item,
+                  which shifted every subsequent item over by one column:
+                  the navigator landed in the question's column, the
+                  question card got squeezed into Brainstorm's 360px
+                  column, and Brainstorm itself wrapped to a new row under
+                  the navigator. sr-only has no visual footprint either
+                  way, so pulling it out of the grid changes nothing for
+                  sighted or screen-reader users — only fixes the column
+                  assignment of the three real siblings below. */}
               <div aria-live="polite" className="sr-only">
                 {navigatorAnnouncement}
               </div>
+              <div className={oneQuestionGridWrapperClass}>
               {showQuestionNavigatorPanel && (
                 // Sticky only at lg: and above — keeps the navigator
                 // reachable while a long essay question scrolls, without
@@ -4936,23 +4957,25 @@ export default function TakeExamPage({
                     />
                   )}
 
-                  <div className="mt-4 flex items-center gap-2">
-                    {oneQuestion.payload.canGoPrevious && (
-                      <button
-                        type="button"
-                        onClick={() => navigateQuestion(oneQuestion.payload!.currentIndex - 1)}
-                        disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
-                        className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
-                      >
-                        ← Previous
-                      </button>
-                    )}
+                  <div className="mt-4 flex items-center justify-between gap-2">
+                    <span>
+                      {oneQuestion.payload.canGoPrevious && (
+                        <button
+                          type="button"
+                          onClick={() => navigateQuestion(oneQuestion.payload!.currentIndex - 1)}
+                          disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
+                          className="rounded border border-gray-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          ← Previous
+                        </button>
+                      )}
+                    </span>
                     {oneQuestion.payload.canGoNext && (
                       <button
                         type="button"
                         onClick={() => navigateQuestion(oneQuestion.payload!.currentIndex + 1)}
                         disabled={submitting || autoSubmitLocked || timerStopped || navigatingQuestion}
-                        className="rounded border border-gray-300 px-3 py-1.5 text-sm disabled:opacity-50"
+                        className="rounded border border-teal-700 bg-teal-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-50"
                       >
                         Next →
                       </button>
@@ -4990,6 +5013,7 @@ export default function TakeExamPage({
                 </div>
               )}
             </div>
+            </>
           ) : (
             <div className="mt-6 space-y-4">
               {data.exam.questions.map((q, i) => (
