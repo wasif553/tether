@@ -8,29 +8,38 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { parseSecureClientPolicy, describeDisplayRequirement } from "@/lib/secureClientPolicy";
+import { createTimingCollector, timeSpan, attachServerTimingHeader, logBoundedNavigationTiming } from "@/lib/serverTiming";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const requestStartedAtMs = performance.now();
+  const timing = createTimingCollector();
+  const authStartMs = performance.now();
   const session = await auth();
+  timing.record("authMs", performance.now() - authStartMs);
   if (!session || session.user.role !== "STUDENT") {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const { id } = await params;
 
-  const submission = await prisma.submission.findUnique({
-    where: { id },
-    select: { studentId: true, secureClientPolicySnapshotJson: true, activatedAt: true, examId: true },
-  });
+  const submission = await timeSpan(timing, "submissionLookupMs", () =>
+    prisma.submission.findUnique({
+      where: { id },
+      select: { studentId: true, secureClientPolicySnapshotJson: true, activatedAt: true, examId: true },
+    }),
+  );
   if (!submission || submission.studentId !== session.user.id) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
   const policy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
-  const current = await prisma.secureClientSession.findFirst({
-    where: { submissionId: id, status: { in: ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] } },
-    orderBy: { createdAt: "desc" },
-  });
+  const current = await timeSpan(timing, "sessionLookupMs", () =>
+    prisma.secureClientSession.findFirst({
+      where: { submissionId: id, status: { in: ["CREATED", "PREFLIGHT", "ACTIVE", "INTERRUPTED", "RECOVERY_REQUIRED"] } },
+      orderBy: { createdAt: "desc" },
+    }),
+  );
 
-  return NextResponse.json({
+  const response = NextResponse.json({
     // v1.7.5 P0 follow-up — the exam CONTENT page needs to build the
     // tether-launch redirect URL (/student/exams/[examId]/tether-launch)
     // BEFORE it is ever safe to fetch GET /api/submissions/[id] (which
@@ -71,6 +80,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         }
       : null,
   });
+  timing.record("totalMs", performance.now() - requestStartedAtMs);
+  attachServerTimingHeader(response, timing, process.env.TETHER_TIMING_HEADERS_ENABLED);
+  logBoundedNavigationTiming("secure-client-status", timing, process.env.TETHER_TIMING_HEADERS_ENABLED);
+  return response;
 }
 
 export const dynamic = "force-dynamic";

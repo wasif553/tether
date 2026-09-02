@@ -126,6 +126,15 @@ import {
 } from "@/lib/lockdownClient";
 import { resolveNativeLockdownConfirmation, shouldBlockExamContentRendering, type ContentGateState } from "@/lib/secureExamNativeLockdown";
 import { buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
+import { fetchWithTimeoutAndRetry } from "@/lib/fetchWithTimeout";
+
+// Exam-load latency follow-up (physical acceptance review) — bounds how
+// long the exam-open critical-path fetches below (secure-client status,
+// the submission itself, the current question) will wait before failing
+// closed into their existing catch/error handling, instead of hanging
+// indefinitely on a stalled connection. One retry only — this is for the
+// latency-sensitive opening sequence, not a background sync queue.
+const EXAM_LOAD_FETCH_TIMEOUT_MS = 12_000;
 
 /**
  * Strengthened phone detection (Part 3/4) — converts raw detector output
@@ -1019,7 +1028,13 @@ export default function TakeExamPage({
 
   const loadSubmission = useCallback(async () => {
     try {
-      const res = await fetch(`/api/submissions/${id}`);
+      const submissionFetchStartedAtMs = performance.now();
+      const res = await fetchWithTimeoutAndRetry(`/api/submissions/${id}`, {}, EXAM_LOAD_FETCH_TIMEOUT_MS);
+      logClientTetherDiagnostic("EXAM_LOAD_TIMING", {
+        stage: "submissionLoad",
+        durationMs: Math.round(performance.now() - submissionFetchStartedAtMs),
+        status: res.status,
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         // Tether launch/install flow v1 — see secureClientStartGate.ts.
@@ -1138,11 +1153,20 @@ export default function TakeExamPage({
         examId?: unknown;
       };
       let statusBody: PreLoadStatusResponse | null = null;
+      const statusFetchStartedAtMs = performance.now();
       try {
-        const res = await fetch(`/api/submissions/${id}/secure-client/status`);
+        const res = await fetchWithTimeoutAndRetry(`/api/submissions/${id}/secure-client/status`, {}, EXAM_LOAD_FETCH_TIMEOUT_MS);
         if (res.ok) statusBody = await res.json().catch(() => null);
       } catch {
+        // Fails closed exactly as before — a timeout is treated the same
+        // as any other network error, never a bypass. See
+        // fetchWithTimeout.ts's own doc comment.
         statusBody = null;
+      } finally {
+        logClientTetherDiagnostic("EXAM_LOAD_TIMING", {
+          stage: "secureClientStatus",
+          durationMs: Math.round(performance.now() - statusFetchStartedAtMs),
+        });
       }
       if (cancelled) return;
 
@@ -1399,9 +1423,14 @@ export default function TakeExamPage({
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setOneQuestion((prev) => ({ ...prev, loading: true, error: null }));
-    fetch(`/api/submissions/${id}/question`)
+    const questionFetchStartedAtMs = performance.now();
+    fetchWithTimeoutAndRetry(`/api/submissions/${id}/question`, {}, EXAM_LOAD_FETCH_TIMEOUT_MS)
       .then((res) => (res.ok ? (res.json() as Promise<OneQuestionPayload>) : Promise.reject(res)))
       .then((payload) => {
+        logClientTetherDiagnostic("EXAM_LOAD_TIMING", {
+          stage: "firstQuestionVisible",
+          durationMs: Math.round(performance.now() - questionFetchStartedAtMs),
+        });
         if (cancelled) return;
         setOneQuestion({ loading: false, error: null, payload });
         if (payload.existingResponse != null) {
@@ -4955,7 +4984,7 @@ export default function TakeExamPage({
                     )}
                   </div>
                   <p
-                    className="mt-1"
+                    className="mt-1 text-lg leading-[1.55]"
                     style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
                   >
                     {oneQuestion.payload.question.text}
@@ -4965,7 +4994,7 @@ export default function TakeExamPage({
                     oneQuestion.payload.question.options && (
                       <div className="mt-2 space-y-1">
                         {oneQuestion.payload.question.options.map((opt) => (
-                          <label key={opt} className="flex items-center gap-2 text-sm">
+                          <label key={opt} className="flex items-center gap-2 text-base">
                             <input
                               type="radio"
                               name={oneQuestion.payload!.question.id}
@@ -5082,7 +5111,7 @@ export default function TakeExamPage({
                     Q{i + 1} · {q.points} pt(s)
                   </p>
                   <p
-                    className="mt-1"
+                    className="mt-1 text-lg leading-[1.55]"
                     style={secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined}
                   >
                     {q.text}
@@ -5093,7 +5122,7 @@ export default function TakeExamPage({
                       {q.options.map((opt) => (
                         <label
                           key={opt}
-                          className="flex items-center gap-2 text-sm"
+                          className="flex items-center gap-2 text-base"
                           style={
                             secureSettings?.disableQuestionTextSelection ? { userSelect: "none" } : undefined
                           }

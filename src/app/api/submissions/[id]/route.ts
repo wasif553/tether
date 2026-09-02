@@ -20,24 +20,43 @@ import {
   TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
   type ContentAccessDecision,
 } from "@/lib/secureClient/requireTetherContentAccess";
+import { createTimingCollector, timeSpan, attachServerTimingHeader, logBoundedNavigationTiming } from "@/lib/serverTiming";
 
 export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const requestStartedAtMs = performance.now();
+  const timing = createTimingCollector();
+  const authStartMs = performance.now();
   const session = await auth();
+  timing.record("authMs", performance.now() - authStartMs);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const { id } = await params;
-  const submission = await prisma.submission.findUnique({
-    where: { id },
-    include: {
-      exam: { include: { questions: { orderBy: { order: "asc" } }, institution: { select: { slug: true } } } },
-      answers: true,
-      gradePassback: true,
-      student: { select: { id: true, name: true, email: true, institutionStudentId: true } },
-    },
-  });
+  // Exam-load latency follow-up (physical acceptance review) — this used
+  // to eagerly `include: { exam: { include: { questions: {...} } } } }`
+  // unconditionally, fetching every question's full text/options/
+  // correctAnswer from the database on EVERY call, even though One-
+  // Question-At-A-Time delivery (the mode every Tether-gated exam uses)
+  // immediately discards all of it below (`questions: []`) — see
+  // `deliverOneQuestionAtATime`. Split into a lean base lookup (this
+  // query, no questions relation at all) plus the id-only/full-content
+  // question lookups below, once we know whether one-question delivery
+  // applies — so the common, latency-sensitive case only ever transfers
+  // `{ id }` per question instead of every question's full content.
+  // Response shape/values are unchanged either way.
+  const submission = await timeSpan(timing, "submissionLookupMs", () =>
+    prisma.submission.findUnique({
+      where: { id },
+      include: {
+        exam: { include: { institution: { select: { slug: true } } } },
+        answers: true,
+        gradePassback: true,
+        student: { select: { id: true, name: true, email: true, institutionStudentId: true } },
+      },
+    }),
+  );
 
   if (!submission) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
@@ -71,6 +90,7 @@ export async function GET(
   // non-TETHER_CLIENT_REQUIRED submissions) — the renewal call at the
   // bottom is a no-op in that case, exactly like before.
   let leaseDecisionForRenewal: ContentAccessDecision | null = null;
+  const tetherContentGateStartMs = performance.now();
 
   if (isOwner && !isExamOwner && submission.status === "IN_PROGRESS") {
     const policy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
@@ -169,6 +189,7 @@ export async function GET(
       }
     }
   }
+  timing.record("tetherContentGateMs", performance.now() - tetherContentGateStartMs);
 
   const settings = parseSecureSettings(submission.exam.secureSettings);
   // Freeze timing policy for active exam attempts — the deadline shown
@@ -210,28 +231,50 @@ export async function GET(
   // attempt should see exactly the questions that student was actually
   // given, not the full pool/question bank (which remains visible
   // elsewhere, in the exam editor).
+  // Exam-load latency follow-up (physical acceptance review) — this used
+  // to eagerly fetch every question's full text/options/correctAnswer via
+  // `include: { exam: { include: { questions: {...} } } } }`, unconditionally,
+  // even though one-question-at-a-time delivery (every Tether-gated exam)
+  // immediately discards it below (`questions: []`). This lean, id-only
+  // lookup is all that's needed to resolve the pool/order subset and
+  // total count; full question content (below) is only ever fetched for
+  // the classic full-paper view, and only for the actually-effective
+  // (pool-selected) subset rather than the whole exam question bank.
+  const examQuestionIds = (
+    await timeSpan(timing, "examQuestionIdsLookupMs", () =>
+      prisma.question.findMany({
+        where: { examId: submission.examId },
+        orderBy: { order: "asc" },
+        select: { id: true },
+      }),
+    )
+  ).map((q) => q.id);
   const effectiveQuestionIds = resolveEffectiveQuestionIds({
-    examQuestionIds: submission.exam.questions.map((q) => q.id),
+    examQuestionIds,
     stored: submission.questionOrderJson,
     questionPoolsActive: questionPoolsActive(settings),
   });
   const effectiveQuestionIdSet = new Set(effectiveQuestionIds);
-  const effectiveOrderIndex = new Map(effectiveQuestionIds.map((qid, i) => [qid, i]));
-  const effectiveQuestions = submission.exam.questions
-    .filter((q) => effectiveQuestionIdSet.has(q.id))
-    .sort((a, b) => effectiveOrderIndex.get(a.id)! - effectiveOrderIndex.get(b.id)!);
 
   const questions = deliverOneQuestionAtATime
     ? []
-    : effectiveQuestions.map((q) => ({
-        id: q.id,
-        type: q.type,
-        text: q.text,
-        options: q.options,
-        points: canViewQuestionPoints ? q.points : undefined,
-        order: q.order,
-        correctAnswer: isExamOwner ? q.correctAnswer : undefined,
-      }));
+    : await (async () => {
+        const effectiveOrderIndex = new Map(effectiveQuestionIds.map((qid, i) => [qid, i]));
+        const fullQuestions = await timeSpan(timing, "examQuestionsFullLookupMs", () =>
+          prisma.question.findMany({ where: { id: { in: Array.from(effectiveQuestionIdSet) } } }),
+        );
+        return fullQuestions
+          .sort((a, b) => effectiveOrderIndex.get(a.id)! - effectiveOrderIndex.get(b.id)!)
+          .map((q) => ({
+            id: q.id,
+            type: q.type,
+            text: q.text,
+            options: q.options,
+            points: canViewQuestionPoints ? q.points : undefined,
+            order: q.order,
+            correctAnswer: isExamOwner ? q.correctAnswer : undefined,
+          }));
+      })();
 
   const canvasPassback =
     isExamOwner && submission.gradePassback
@@ -300,6 +343,9 @@ export async function GET(
   if (leaseDecisionForRenewal) {
     renewContentAccessLeaseFromValidatedDecision(response, leaseDecisionForRenewal, { submissionId: submission.id, studentId: submission.studentId });
   }
+  timing.record("totalMs", performance.now() - requestStartedAtMs);
+  attachServerTimingHeader(response, timing, process.env.TETHER_TIMING_HEADERS_ENABLED);
+  logBoundedNavigationTiming("submission-load", timing, process.env.TETHER_TIMING_HEADERS_ENABLED);
   return response;
 }
 

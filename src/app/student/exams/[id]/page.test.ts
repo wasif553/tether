@@ -122,7 +122,13 @@ describe("REQUIRED TEST 4: policy compatibility — requireSingleDisplay is deri
 
 describe("the fetch ordering: /secure-client/status (no question content) resolves BEFORE getSecureClientEnforcementState is queried, which resolves BEFORE loadSubmission can ever be called", () => {
   it("the status fetch, the native-state query, and the confirmation branches appear in that exact textual order inside one linear async function", () => {
-    const statusFetchIdx = preFetchGateEffect.indexOf("fetch(`/api/submissions/${id}/secure-client/status`)");
+    // Exam-load latency follow-up — the bare fetch() was replaced with
+    // fetchWithTimeoutAndRetry() (bounded timeout + one retry, fails
+    // closed exactly like the network-error catch it replaces — see
+    // fetchWithTimeout.ts) but the call site is still the very first
+    // thing this effect awaits, so the ordering guarantee this test
+    // exists to prove is unchanged.
+    const statusFetchIdx = preFetchGateEffect.indexOf("fetchWithTimeoutAndRetry(`/api/submissions/${id}/secure-client/status`");
     const nativeQueryIdx = preFetchGateEffect.indexOf("getSecureClientEnforcementState!()");
     const confirmedIdx = preFetchGateEffect.indexOf('confirmation === "CONFIRMED"');
     expect(statusFetchIdx).toBeGreaterThan(-1);

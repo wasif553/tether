@@ -31,7 +31,14 @@
  */
 import { useEffect, useId, useRef, useState } from "react";
 
-type TranscriptStatus = "APPROVED" | "FALLBACK" | "BLOCKED" | "FAILED" | "ERROR";
+// RATE_LIMITED and NETWORK_ERROR are client-local only — never a status
+// the server returns or persists. They exist so a 429 (rate limit) or a
+// request that never reached the server (offline, DNS, connection reset)
+// gets its OWN accurate, visibly-attached transcript entry, distinct from
+// both a genuine provider failure (FAILED) and a guardrail redirect
+// (BLOCKED/FALLBACK) — see the Brainstorm starter-action reliability
+// follow-up below.
+type TranscriptStatus = "APPROVED" | "FALLBACK" | "BLOCKED" | "FAILED" | "ERROR" | "RATE_LIMITED" | "NETWORK_ERROR";
 
 type TranscriptEntry = {
   id: string;
@@ -55,7 +62,10 @@ type HistoryResponse = {
   maxPromptsPerAttempt: number;
 };
 
-const STARTER_ACTIONS = [
+// Exported so tests can exercise the exact strings production sends
+// (rather than a hand-copied, driftable duplicate) — see
+// aiAssistanceClassifier.test.ts and aiAssistance.routes.test.ts.
+export const STARTER_ACTIONS = [
   { label: "Help me understand the question", prompt: "Can you help me understand what this question is asking?" },
   { label: "Give me a starting point", prompt: "Can you give me a broad starting point for approaching this?" },
   { label: "Ask me a guiding question", prompt: "Can you ask me a guiding question to help me think this through?" },
@@ -66,10 +76,15 @@ const STARTER_ACTIONS = [
 
 // A guardrail redirect (the assistant declining to hand over a final
 // answer) is expected, correct behaviour — never styled like an error.
-// Only ERROR (a local fetch failure) and FAILED (a genuine provider
-// error) represent something actually going wrong.
+// Being rate-limited is ALSO expected, correct behaviour (never a
+// provider/API failure) — pacing, not guidance, so it gets its own badge
+// label below, but the same non-alarming (non-red) treatment. Only ERROR
+// (a local fetch failure with a server-supplied message), FAILED (a
+// genuine provider error), and NETWORK_ERROR (the request never reached
+// the server at all) represent something actually going wrong.
 const GUARDRAIL_STATUSES = new Set<TranscriptStatus>(["BLOCKED", "FALLBACK"]);
-const FAILURE_STATUSES = new Set<TranscriptStatus>(["ERROR", "FAILED"]);
+const PACING_STATUSES = new Set<TranscriptStatus>(["RATE_LIMITED"]);
+const FAILURE_STATUSES = new Set<TranscriptStatus>(["ERROR", "FAILED", "NETWORK_ERROR"]);
 
 export function discussingPreview(questionText: string): string {
   const collapsed = questionText.replace(/\s+/g, " ").trim();
@@ -160,6 +175,15 @@ export function AiBrainstormPanel(props: {
     setSending(true);
     setRateLimited(false);
     try {
+      // Brainstorm starter-action reliability follow-up — this whole
+      // block used to have NO catch around the fetch/body-parsing itself:
+      // a genuine network failure (offline, DNS, connection reset) threw
+      // an unhandled rejection that never reached the transcript, so the
+      // click appeared to do nothing at all — easy to misread as "the
+      // button/API isn't working" (see aiAssistance.routes.test.ts and
+      // aiAssistanceClassifier.test.ts for confirmation that the SAME
+      // pipeline, same body shape, is used for every starter action and
+      // for a typed prompt — the wording was never the cause).
       const res = await fetch(
         `/api/submissions/${props.submissionId}/questions/${props.questionId}/ai-assistance`,
         {
@@ -175,7 +199,26 @@ export function AiBrainstormPanel(props: {
       const body = await res.json().catch(() => null);
 
       if (res.status === 429) {
+        // Rate limiting (submission-wide, content-independent — see
+        // AI_ASSISTANCE_RATE_LIMIT_MAX_REQUESTS in aiAssistancePolicy.ts)
+        // is expected, correct behaviour, never a provider/API failure.
+        // Clicking through several starter buttons in quick succession —
+        // a natural way to test "does each button work" — is the most
+        // common way to hit this. Previously this only set a page-level
+        // banner with NO per-click transcript entry, so the click looked
+        // like it did nothing; now the student sees exactly what
+        // happened, attached to the message they just sent.
         setRateLimited(true);
+        setTranscript((prev) => [
+          ...prev,
+          {
+            id: clientRequestId,
+            prompt: trimmed,
+            response: null,
+            studentMessage: body?.error ?? "You're sending requests too quickly. Please wait a moment and try again.",
+            status: "RATE_LIMITED",
+          },
+        ]);
         return;
       }
       if (!res.ok) {
@@ -191,6 +234,7 @@ export function AiBrainstormPanel(props: {
         ]);
         return;
       }
+      if (!body) throw new Error("Empty or malformed response body");
 
       setPromptsRemainingForQuestion(body.promptsRemainingForQuestion ?? null);
       setPromptsRemainingForAttempt(body.promptsRemainingForAttempt ?? null);
@@ -207,6 +251,23 @@ export function AiBrainstormPanel(props: {
         },
       ]);
       setCustomPrompt("");
+    } catch {
+      // The request never reached the server at all (offline, DNS,
+      // connection reset) or its response couldn't be understood —
+      // distinct from FAILED (a genuine provider/verifier error the
+      // SERVER reported) and from ERROR (a server-supplied error
+      // message). Never silently swallowed — see the doc comment above
+      // this try block.
+      setTranscript((prev) => [
+        ...prev,
+        {
+          id: clientRequestId,
+          prompt: trimmed,
+          response: null,
+          studentMessage: "Could not reach the brainstorming assistant. Check your connection and try again.",
+          status: "NETWORK_ERROR",
+        },
+      ]);
     } finally {
       setSending(false);
     }
@@ -240,7 +301,7 @@ export function AiBrainstormPanel(props: {
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-slate-900 ${
+        className={`flex w-full items-center justify-between px-3 py-2 text-left text-base font-medium text-slate-900 ${
           props.sidebar ? "min-[1200px]:hidden" : ""
         }`}
       >
@@ -250,11 +311,11 @@ export function AiBrainstormPanel(props: {
 
       <div className={`min-h-0 flex-col border-t border-gray-200 px-3 py-3 ${bodyVisibilityClass} ${props.sidebar ? "min-[1200px]:flex-1" : ""}`}>
         <div className="shrink-0">
-          <h3 className="text-sm font-semibold text-slate-900">✳ Tether Brainstorm</h3>
-          <p className="text-xs text-teal-700">
+          <h3 className="text-base font-semibold text-slate-900">✳ Tether Brainstorm</h3>
+          <p className="text-sm text-teal-700">
             Question {props.questionNumber} of {props.totalQuestions}
           </p>
-          <p className="mt-0.5 truncate text-xs text-slate-500" title={props.questionText}>
+          <p className="mt-0.5 truncate text-sm text-slate-500" title={props.questionText}>
             Discussing: {discussingPreview(props.questionText)}
           </p>
 
@@ -314,9 +375,10 @@ export function AiBrainstormPanel(props: {
           {!historyLoading &&
             transcript.map((entry) => {
               const isGuardrail = GUARDRAIL_STATUSES.has(entry.status);
+              const isPacing = PACING_STATUSES.has(entry.status);
               const isFailure = FAILURE_STATUSES.has(entry.status);
               return (
-                <div key={entry.id} className="space-y-1 rounded border border-gray-200 bg-white p-2 text-xs">
+                <div key={entry.id} className="space-y-1 rounded border border-gray-200 bg-white p-2 text-sm leading-[1.5]">
                   <p>
                     <span className="font-medium text-slate-700">You</span>
                     <span className="ml-1 text-slate-800">{entry.prompt}</span>
@@ -329,9 +391,14 @@ export function AiBrainstormPanel(props: {
                           Guidance only
                         </span>
                       )}
+                      {isPacing && (
+                        <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                          Please wait
+                        </span>
+                      )}
                     </p>
                     {entry.response && <p className="mt-0.5 text-slate-800">{entry.response}</p>}
-                    {isGuardrail && !entry.response && entry.studentMessage && (
+                    {(isGuardrail || isPacing) && !entry.response && entry.studentMessage && (
                       <p className="mt-0.5 text-slate-800">{entry.studentMessage}</p>
                     )}
                     {isFailure && entry.studentMessage && <p className="mt-0.5 text-red-600">{entry.studentMessage}</p>}
@@ -350,7 +417,7 @@ export function AiBrainstormPanel(props: {
                 disabled={disabled}
                 aria-describedby={atQuestionLimit || atAttemptLimit ? exhaustedReasonId : undefined}
                 onClick={() => sendPrompt(action.prompt)}
-                className="rounded border border-gray-300 bg-white px-2 py-1 text-left text-xs text-slate-700 hover:border-teal-300 hover:bg-teal-50/50 disabled:opacity-50"
+                className="rounded border border-gray-300 bg-white px-2 py-1 text-left text-[13px] text-slate-700 hover:border-teal-300 hover:bg-teal-50/50 disabled:opacity-50"
               >
                 {action.label}
               </button>
@@ -370,13 +437,13 @@ export function AiBrainstormPanel(props: {
               maxLength={1000}
               disabled={disabled}
               aria-describedby={atQuestionLimit || atAttemptLimit ? exhaustedReasonId : undefined}
-              className="flex-1 rounded border border-gray-300 px-2 py-1 text-xs disabled:opacity-50"
+              className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm disabled:opacity-50"
             />
             <button
               type="button"
               disabled={disabled || !customPrompt.trim()}
               onClick={() => sendPrompt(customPrompt)}
-              className="rounded border border-teal-700 bg-teal-700 px-3 py-1 text-xs font-medium text-white hover:bg-teal-800 disabled:opacity-50"
+              className="rounded border border-teal-700 bg-teal-700 px-3 py-1 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-50"
             >
               {sending ? "Thinking..." : "Ask"}
             </button>

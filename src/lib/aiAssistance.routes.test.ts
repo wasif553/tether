@@ -43,6 +43,11 @@ const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
 const assistanceRoute = await import("../app/api/submissions/[id]/questions/[questionId]/ai-assistance/route");
 const reviewRoute = await import("../app/api/lecturer/submissions/[id]/ai-assistance/route");
+// Brainstorm starter-action reliability follow-up — the EXACT fixed
+// strings AiBrainstormPanel's six starter buttons send, imported rather
+// than hand-copied so these tests can never silently drift from what
+// production actually sends.
+const { STARTER_ACTIONS } = await import("../components/AiBrainstormPanel");
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT" | "PLATFORM_ADMIN", institutionId: string) {
   return {
@@ -521,5 +526,111 @@ describe("provider configuration — the optional Anthropic provider being genui
       where: { submissionId: submission.id, questionId: question.id },
     });
     expect(rows).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Brainstorm starter-action reliability follow-up — production report:
+// some predefined starter buttons "sometimes result in a message implying
+// that Brainstorm/API is not working", while a manually typed prompt
+// always works. AiBrainstormPanel routes BOTH through the exact same
+// sendPrompt()/POST body shape — the tests below confirm the pipeline
+// itself treats every starter prompt identically to a typed one (ruling
+// out "particular starter wording"), and pin down the real, confirmed,
+// content-independent cause: AI_ASSISTANCE_RATE_LIMIT_MAX_REQUESTS (3
+// requests / 20s, scoped to the whole submission — see
+// aiAssistancePolicy.ts) is the first limit a tester clicking through
+// several starter buttons in a row (a natural way to check "does each one
+// work") will hit, well before any per-question/per-attempt allowance.
+// ---------------------------------------------------------------------------
+
+describe("Brainstorm starter actions use the exact same pipeline as a manually typed prompt", () => {
+  it.each(STARTER_ACTIONS)("$label succeeds via the same POST body shape and returns APPROVED", async ({ prompt }) => {
+    // A fresh submission per starter action isolates each case from the
+    // submission-scoped rate limiter below — this block is only about
+    // confirming every starter prompt is treated identically by the
+    // classify -> generate -> verify pipeline, not about pacing.
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: prompt }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("APPROVED");
+    expect(typeof body.response).toBe("string");
+  });
+});
+
+describe("rate limiting — content-independent, applies identically regardless of which starter/typed prompt is used", () => {
+  it("the first three starter actions in a row succeed; the fourth (a DIFFERENT starter prompt) is rate-limited, not blocked/failed", async () => {
+    // Generous per-question/per-attempt allowances so ONLY the rate
+    // limiter (3 requests / 20s) can possibly trigger here — isolates it
+    // from AI_ASSISTANCE limit checks, which are tested separately above.
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 10, maxPromptsPerAttempt: 10 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    const statuses: number[] = [];
+    for (const action of STARTER_ACTIONS.slice(0, 4)) {
+      const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: action.prompt }), {
+        params: Promise.resolve({ id: submission.id, questionId: question.id }),
+      });
+      statuses.push(res.status);
+    }
+
+    expect(statuses.slice(0, 3)).toEqual([200, 200, 200]);
+    expect(statuses[3]).toBe(429);
+  });
+
+  it("a manually typed prompt is rate-limited identically once the window is exhausted by starter clicks — never shown as a provider/API failure", async () => {
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 10, maxPromptsPerAttempt: 10 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    for (const action of STARTER_ACTIONS.slice(0, 3)) {
+      const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: action.prompt }), {
+        params: Promise.resolve({ id: submission.id, questionId: question.id }),
+      });
+      expect(res.status).toBe(200);
+    }
+    const typedRes = await assistanceRoute.POST(
+      jsonRequest({ studentPrompt: "What am I missing in my current draft?" }),
+      { params: Promise.resolve({ id: submission.id, questionId: question.id }) },
+    );
+    expect(typedRes.status).toBe(429);
+    const body = await typedRes.json();
+    // Accurate, non-misleading wording — never "not configured"/"not
+    // connected" for a rate-limit outcome.
+    expect(body.error).toMatch(/too quickly/i);
+    expect(body.error).not.toMatch(/not configured|not connected/i);
+
+    // Never silently consumes a prompt slot — the reservation transaction
+    // returns rate_limited BEFORE creating any interaction row.
+    const rows = await prisma.aiAssistanceInteraction.findMany({ where: { submissionId: submission.id } });
+    expect(rows).toHaveLength(3);
+  });
+});
+
+describe("FALLBACK status on a starter prompt — a guardrail redirect is expected behaviour, never a failure", () => {
+  it("both verify attempts rejecting resolves to FALLBACK with the deterministic safe response, never FAILED", async () => {
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mocked = vi.mocked(verifyBrainstormResponse);
+    mocked
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.7, riskCodes: ["EXCESSIVE_SPECIFICITY"], reason: "too specific" })
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.7, riskCodes: ["EXCESSIVE_SPECIFICITY"], reason: "still too specific" });
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: STARTER_ACTIONS[1].prompt }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("FALLBACK");
+    expect(typeof body.response).toBe("string");
+
+    const row = await prisma.aiAssistanceInteraction.findFirst({ where: { submissionId: submission.id } });
+    expect(row?.status).toBe("FALLBACK");
+
+    mocked.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" }); // restore default
   });
 });
