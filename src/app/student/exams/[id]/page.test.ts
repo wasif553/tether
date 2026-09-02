@@ -143,6 +143,146 @@ describe("the fetch ordering: /secure-client/status (no question content) resolv
   });
 });
 
+// Physical hang investigation follow-up — a 20-question secure exam,
+// physically tested in Tether Secure Browser, hung for over 3 minutes on
+// "Loading...", well past every fetchWithTimeoutAndRetry bound already in
+// place. Root cause: window.sesLockdown.getSecureClientEnforcementState()
+// is a plain Electron IPC Promise, not a fetch() — fetchWithTimeout's
+// AbortController-based bound cannot touch it, and a stuck main-process
+// handler left it (and therefore contentGateState === "PENDING") settled
+// never. These tests prove both call sites of that bridge query are now
+// bounded, and that a timeout is treated identically to the pre-existing
+// catch (nativeState stays null, resolveNativeLockdownConfirmation's own
+// existing REACTIVATION_REQUIRED fallback applies) — never a new bypass.
+describe("physical hang investigation follow-up — the native lockdown bridge query is now bounded, not just the fetches around it", () => {
+  it("withTimeout is imported from the generic (non-fetch-specific) promise-timeout helper", () => {
+    expect(source).toContain('import { withTimeout, PromiseTimeoutError } from "@/lib/promiseTimeout";');
+  });
+
+  it("NATIVE_BRIDGE_TIMEOUT_MS is bounded and, combined with the worst-case double-timeout secure-client/status fetch, still keeps the pre-load gate's own worst case comfortably under EXAM_OPEN_WATCHDOG_MS", () => {
+    const bridgeMatch = source.match(/const NATIVE_BRIDGE_TIMEOUT_MS = (\d+)_(\d+);/);
+    const watchdogMatch = source.match(/const EXAM_OPEN_WATCHDOG_MS = (\d+)_(\d+);/);
+    expect(bridgeMatch).not.toBeNull();
+    expect(watchdogMatch).not.toBeNull();
+    const bridgeMs = Number(bridgeMatch![1] + bridgeMatch![2]);
+    const watchdogMs = Number(watchdogMatch![1] + watchdogMatch![2]);
+    expect(bridgeMs).toBeGreaterThan(0);
+    expect(bridgeMs).toBeLessThanOrEqual(15_000);
+    expect(watchdogMs).toBeLessThanOrEqual(30_000);
+  });
+
+  it("the pre-load gate's bridge query is wrapped in withTimeout(...), not a bare `await window.sesLockdown!.getSecureClientEnforcementState!()`", () => {
+    expect(preFetchGateEffect).toContain(
+      "nativeState = (await withTimeout(window.sesLockdown!.getSecureClientEnforcementState!(), NATIVE_BRIDGE_TIMEOUT_MS)) ?? null;",
+    );
+    expect(preFetchGateEffect).not.toMatch(/nativeState = \(await window\.sesLockdown!\.getSecureClientEnforcementState!\(\)\) \?\? null;/);
+  });
+
+  it("a timed-out pre-load bridge query is caught by the SAME catch block as any other bridge failure (nativeState = null) — no separate, weaker branch was introduced", () => {
+    const queryIdx = preFetchGateEffect.indexOf("nativeBridgeQueryCountRef.current += 1;");
+    expect(queryIdx).toBeGreaterThan(-1);
+    const block = preFetchGateEffect.slice(queryIdx, queryIdx + 1600);
+    const catchIdx = block.indexOf("} catch (err) {");
+    expect(catchIdx).toBeGreaterThan(-1);
+    expect(block.slice(catchIdx)).toContain("nativeState = null;");
+    // Exactly one nativeState assignment inside this try, one inside this
+    // catch — never a branch that sets it to anything but null on failure.
+    expect((block.match(/nativeState = /g) ?? []).length).toBe(2);
+  });
+
+  it("the second (post-load, display-enforcement reconciliation) bridge query is ALSO wrapped in withTimeout — the display-enforcement effect, not just the pre-load gate", () => {
+    const secondCallIdx = source.indexOf("getSecureClientEnforcementState!()", preFetchGateEffect.length + source.indexOf("async function resolveAndMaybeLoad() {"));
+    expect(secondCallIdx).toBeGreaterThan(-1);
+    expect(source.slice(secondCallIdx - 60, secondCallIdx + 10)).toContain("withTimeout(window.sesLockdown!");
+    // Exactly two call sites total in the whole file — the pre-load gate
+    // and the post-load reconciliation effect — both now bounded.
+    expect((source.match(/getSecureClientEnforcementState!\(\)/g) ?? []).length).toBe(2);
+    expect((source.match(/withTimeout\(window\.sesLockdown!\.getSecureClientEnforcementState!\(\), NATIVE_BRIDGE_TIMEOUT_MS\)/g) ?? []).length).toBe(2);
+  });
+
+  it("a bridge-query timeout is logged distinctly from an ordinary bridge rejection, via PromiseTimeoutError, for correlating a physical hang with client diagnostics", () => {
+    expect(source).toContain("logClientTetherDiagnostic(\"native_bridge_query_failed\", {");
+    expect(source).toMatch(/timedOut: err instanceof PromiseTimeoutError,/);
+  });
+});
+
+// Physical hang investigation follow-up, Part 4/8 — bounded attempt
+// counters for every fetch/bridge-query call site on the exam-open
+// critical path, and a proof that none of the effects that fire them can
+// loop: each counter is a ref (never state — incrementing it can never
+// itself trigger a re-render or re-run an effect), and the gating
+// effect's own dependency array is unchanged from before this pass, so a
+// re-render can never cause it to re-fire and increment the counters
+// again.
+describe("physical hang investigation follow-up — bounded attempt counts, no infinite effect loop", () => {
+  it("each of the four exam-open counters is a ref, incremented exactly once at its own call site — never inside a loop or a retry branch", () => {
+    for (const name of ["secureStatusFetchCountRef", "loadSubmissionFetchCountRef", "questionFetchCountRef", "nativeBridgeQueryCountRef"]) {
+      expect(source).toContain(`const ${name} = useRef(0);`);
+      const incrementCount = (source.match(new RegExp(`${name}\\.current \\+= 1;`, "g")) ?? []).length;
+      expect(incrementCount).toBe(name === "nativeBridgeQueryCountRef" ? 2 : 1);
+    }
+  });
+
+  it("the pre-fetch gate effect's dependency array is unchanged — [id, loadSubmission, router] — so re-renders alone can never cause it to re-fire and re-increment the fetch/bridge counters", () => {
+    expect(source).toContain("  }, [id, loadSubmission, router]);");
+  });
+
+  it("the watchdog effect registers exactly once per mount (empty dependency array), reading the LATEST gate state via a ref rather than depending on contentGateState itself (which would re-register the timer on every state change)", () => {
+    const watchdogIdx = source.indexOf("const [examOpenStalled, setExamOpenStalled] = useState(false);");
+    expect(watchdogIdx).toBeGreaterThan(-1);
+    const watchdogBlock = source.slice(watchdogIdx, watchdogIdx + 1000);
+    expect(watchdogBlock).toContain("contentGateStateRef.current");
+    expect(watchdogBlock).toMatch(/}, \[\]\);/);
+  });
+});
+
+// Physical hang investigation follow-up, Part 7 — no secure exam should
+// ever display an indefinite spinner. A required stage (native lockdown
+// determination) exceeding EXAM_OPEN_WATCHDOG_MS now surfaces a
+// deterministic retry screen instead — see the earlier
+// "the render gate runs BEFORE the generic !data loading fallback" describe
+// block for the exact-copy assertion on that screen's text.
+describe("physical hang investigation follow-up, Part 3 — Preview/dev-only diagnostics never leak into Production and never expose internal identifiers", () => {
+  it("SHOW_EXAM_LOAD_DIAGNOSTICS is an allowlist of known-safe environments — never a `!== \"production\"` denylist, which would default to SHOWING diagnostics on any unrecognised/misconfigured environment, including Production", () => {
+    const gateMatch = source.match(/const SHOW_EXAM_LOAD_DIAGNOSTICS =[\s\S]*?;/);
+    expect(gateMatch).not.toBeNull();
+    const gate = gateMatch![0];
+    expect(gate).toContain('process.env.NODE_ENV === "development"');
+    expect(gate).toContain('process.env.NEXT_PUBLIC_VERCEL_ENV === "preview"');
+    expect(gate).not.toMatch(/!==\s*"production"/);
+  });
+
+  it("renderExamOpenDiagnostics returns null immediately, before building any JSX, when SHOW_EXAM_LOAD_DIAGNOSTICS is false", () => {
+    const fnIdx = source.indexOf("function renderExamOpenDiagnostics() {");
+    expect(fnIdx).toBeGreaterThan(-1);
+    const fn = source.slice(fnIdx, fnIdx + 200);
+    expect(fn).toContain("if (!SHOW_EXAM_LOAD_DIAGNOSTICS) return null;");
+  });
+
+  it("the diagnostic panel never interpolates a submission id, exam id, or any other identifier — only the fixed stage labels and the elapsed-second counter", () => {
+    const fnIdx = source.indexOf("function renderExamOpenDiagnostics() {");
+    const braceStart = source.indexOf("{", fnIdx);
+    let depth = 0;
+    let end = braceStart;
+    for (let i = braceStart; i < source.length; i++) {
+      if (source[i] === "{") depth++;
+      if (source[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+    const fn = source.slice(fnIdx, end);
+    expect(fn).not.toMatch(/\bid\b/);
+    expect(fn).not.toContain("submissionId");
+    expect(fn).not.toContain("examId");
+    expect(fn).not.toContain("token");
+    expect(fn).toContain("elapsedLoadSeconds");
+  });
+});
+
 describe("REQUIRED TESTS 8/9: no eager question-bearing useEffect fires independently of loadSubmission's own gated trigger", () => {
   it("the one-question-at-a-time fetch effect is gated on data?.status === IN_PROGRESS, which can only become true once loadSubmission has already (safely) populated `data`", () => {
     const effectMarker = "if (!oneQuestionAtATime || !gateAcknowledged || data?.status !== \"IN_PROGRESS\") return;";
@@ -171,9 +311,14 @@ describe("REQUIRED TEST 7: STANDARD_WEB / non-Tether-required access is unchange
 
 describe("the render gate runs BEFORE the generic !data loading fallback — data can now legitimately stay null indefinitely on the REACTIVATION_REQUIRED/STATUS_UNAVAILABLE/UNSUPPORTED_BUILD paths", () => {
   it("shouldBlockExamContentRendering is checked before both `if (!data && loadError)` and `if (!data) return Loading`", () => {
-    const gateCallIdx = source.indexOf("shouldBlockExamContentRendering(inLockdownBrowser, contentGateState)");
+    // Physical hang investigation follow-up — the bare expression
+    // "shouldBlockExamContentRendering(inLockdownBrowser, contentGateState)"
+    // now also appears earlier in the loadStage derivation (a plain const,
+    // not the actual render gate); anchoring on the full `if (...) {`
+    // statement keeps this test pointed at the real gate.
+    const gateCallIdx = source.indexOf("if (shouldBlockExamContentRendering(inLockdownBrowser, contentGateState)) {");
     const dataErrorIdx = source.indexOf("if (!data && loadError) {");
-    const notDataIdx = source.indexOf('if (!data) return <p className="text-gray-500">Loading...</p>;');
+    const notDataIdx = source.indexOf("if (!data) {");
     const inProgressCheckIdx = source.indexOf('if (data.status !== "IN_PROGRESS")');
     expect(gateCallIdx).toBeGreaterThan(-1);
     expect(dataErrorIdx).toBeGreaterThan(gateCallIdx);
@@ -182,7 +327,7 @@ describe("the render gate runs BEFORE the generic !data loading fallback — dat
   });
 
   it("REQUIRED TEST 3/5: the STATUS_UNAVAILABLE/UNSUPPORTED_BUILD branches offer their own specific messages, never masked by the generic Loading fallback", () => {
-    const gateIdx = source.indexOf("shouldBlockExamContentRendering(inLockdownBrowser, contentGateState)");
+    const gateIdx = source.indexOf("if (shouldBlockExamContentRendering(inLockdownBrowser, contentGateState)) {");
     const gateBlock = source.slice(gateIdx, gateIdx + 2000);
     expect(gateBlock).toContain("Update required");
     expect(gateBlock).toContain("Tether could not verify this examination");
@@ -190,10 +335,23 @@ describe("the render gate runs BEFORE the generic !data loading fallback — dat
   });
 
   it("the PENDING/REACTIVATION_REQUIRED fallback is a plain Loading message — never question content, never a native overlay", () => {
-    const gateIdx = source.indexOf("shouldBlockExamContentRendering(inLockdownBrowser, contentGateState)");
-    const gateBlock = source.slice(gateIdx, gateIdx + 2500);
+    const gateIdx = source.indexOf("if (shouldBlockExamContentRendering(inLockdownBrowser, contentGateState)) {");
+    const gateBlock = source.slice(gateIdx, gateIdx + 3500);
     expect(gateBlock).toContain("Loading...");
     expect(gateBlock).not.toContain("oneQuestion.payload.question.text");
+  });
+
+  it("physical hang investigation follow-up — a stalled PENDING gate (examOpenStalled) shows a deterministic 'could not open' retry screen, distinct from the ordinary brief Loading state", () => {
+    const gateIdx = source.indexOf("if (shouldBlockExamContentRendering(inLockdownBrowser, contentGateState)) {");
+    const gateBlock = source.slice(gateIdx, gateIdx + 3000);
+    const stalledIdx = gateBlock.indexOf("if (examOpenStalled) {");
+    const loadingIdx = gateBlock.indexOf('<p className="text-gray-500">Loading...</p>', stalledIdx);
+    expect(stalledIdx).toBeGreaterThan(-1);
+    expect(loadingIdx).toBeGreaterThan(stalledIdx);
+    const stalledBranch = gateBlock.slice(stalledIdx, loadingIdx);
+    expect(stalledBranch).toContain("Tether could not open this exam session.");
+    expect(stalledBranch).toContain("Try again, or contact support if the problem continues.");
+    expect(stalledBranch).toContain('onClick={() => window.location.reload()}');
   });
 });
 
@@ -667,7 +825,7 @@ describe("Exam layout stability — question card min-height floor", () => {
     // Immediately preceded by the loading-placeholder line, which uniquely
     // anchors this to the one-question-mode card (this exact border/padding
     // combination appears elsewhere in the file for unrelated cards).
-    const anchor = source.indexOf('{oneQuestion.loading && <p className="text-gray-500">Loading question...</p>}');
+    const anchor = source.indexOf("{oneQuestion.loading && (");
     expect(anchor).toBeGreaterThan(-1);
     const cardIdx = source.indexOf('rounded border border-gray-200 bg-white p-4"', anchor);
     expect(cardIdx).toBeGreaterThan(-1);
@@ -677,7 +835,7 @@ describe("Exam layout stability — question card min-height floor", () => {
   });
 
   it("the min-height floor is on the loaded-question branch only, not the separate loading placeholder — a min-height on the placeholder would itself reserve mismatched space before content exists", () => {
-    const loadingIdx = source.indexOf('{oneQuestion.loading && <p className="text-gray-500">Loading question...</p>}');
+    const loadingIdx = source.indexOf("{oneQuestion.loading && (");
     expect(loadingIdx).toBeGreaterThan(-1);
     const loadedIdx = source.indexOf('!oneQuestion.loading && oneQuestion.payload', loadingIdx);
     expect(loadedIdx).toBeGreaterThan(loadingIdx);
