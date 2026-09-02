@@ -634,3 +634,61 @@ describe("FALLBACK status on a starter prompt — a guardrail redirect is expect
     mocked.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" }); // restore default
   });
 });
+
+// Intermittent-failure follow-up (section 5) — the verifier itself
+// throwing (a transient provider failure, exhausted retries) is
+// deliberately distinct from the verifier successfully judging a
+// candidate unsafe (tested just above): both now resolve to the SAME
+// FALLBACK outcome — a candidate WAS produced, so showing the
+// deterministic, always-safe fallback guidance is strictly better than
+// an unnecessarily alarming "unavailable" message, and the verifier is
+// never bypassed (the unverified candidate text is still discarded).
+describe("intermittent-failure follow-up — a verifier that cannot complete its check (throws) also resolves to FALLBACK, not FAILED", () => {
+  it("both verify attempts throwing (not rejecting) resolves to FALLBACK, never FAILED — the generator's candidate is still discarded", async () => {
+    const { verifyBrainstormResponse, AiAssistanceVerificationError } = await import("./aiAssistanceVerifier");
+    const mocked = vi.mocked(verifyBrainstormResponse);
+    mocked
+      .mockRejectedValueOnce(new AiAssistanceVerificationError("Anthropic API request failed", "OVERLOADED"))
+      .mockRejectedValueOnce(new AiAssistanceVerificationError("Anthropic API request failed", "OVERLOADED"));
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Can you help me understand this question?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("FALLBACK");
+    expect(typeof body.response).toBe("string");
+    expect(body.response).not.toContain("What concept do you think this question is testing?"); // the mocked generator output — never shown unverified
+
+    const row = await prisma.aiAssistanceInteraction.findFirst({ where: { submissionId: submission.id } });
+    expect(row?.status).toBe("FALLBACK");
+    expect(row?.approvedResponse).not.toContain("What concept do you think this question is testing?");
+
+    mocked.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" }); // restore default
+  });
+
+  it("a genuine GENERATOR failure (no candidate ever produced) still resolves to FAILED, distinct from a verifier failure", async () => {
+    const { generateBrainstormResponse, AiAssistanceGenerationError } = await import("./aiAssistanceGenerator");
+    const mocked = vi.mocked(generateBrainstormResponse);
+    mocked
+      .mockRejectedValueOnce(new AiAssistanceGenerationError("Anthropic API request failed", "OVERLOADED"))
+      .mockRejectedValueOnce(new AiAssistanceGenerationError("Anthropic API request failed", "OVERLOADED"));
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Can you help me understand this question?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("FAILED");
+    expect(body.response).toBeNull();
+    expect(body.studentMessage).toMatch(/temporarily unavailable/i);
+
+    mocked.mockResolvedValue("What concept do you think this question is testing?"); // restore default
+  });
+});

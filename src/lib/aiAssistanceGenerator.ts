@@ -22,6 +22,12 @@
  * back, or a prior-interaction transcript entry).
  */
 import Anthropic from "@anthropic-ai/sdk";
+import {
+  callWithTransientRetry,
+  classifyProviderError,
+  type AiProviderErrorCategory,
+  type ProviderCallAttemptLog,
+} from "@/lib/aiAssistanceProviderError";
 
 export type BrainstormQuestionType = "MULTIPLE_CHOICE" | "SHORT_ANSWER" | "ESSAY";
 
@@ -50,7 +56,14 @@ export type BrainstormGeneratorInput = {
   stricter?: boolean;
 };
 
-export class AiAssistanceGenerationError extends Error {}
+/** `category` defaults to "UNKNOWN" only for the handful of call sites that construct this error directly in tests — every real throw site below always supplies a real classification. */
+export class AiAssistanceGenerationError extends Error {
+  readonly category: AiProviderErrorCategory;
+  constructor(message: string, category: AiProviderErrorCategory = "UNKNOWN") {
+    super(message);
+    this.category = category;
+  }
+}
 
 /**
  * Bounded request timeout and retry count (Part 10 hardening) — never the
@@ -60,7 +73,26 @@ export class AiAssistanceGenerationError extends Error {}
  * request this module makes is bounded the same way.
  */
 export const ANTHROPIC_TIMEOUT_MS = 20_000;
-export const ANTHROPIC_MAX_RETRIES = 1;
+
+/**
+ * Intermittent-failure follow-up — the SDK's own opaque internal retry is
+ * now OFF (0): src/lib/aiAssistanceProviderError.ts's callWithTransientRetry
+ * is the one place retry/backoff/classification policy lives for this
+ * call, and it needs one real HTTP attempt per loop iteration to classify
+ * and log accurately — the SDK's own retry, left on, would silently
+ * multiply attempts underneath it with no visibility.
+ */
+export const ANTHROPIC_MAX_RETRIES = 0;
+
+/**
+ * Intermittent-failure follow-up — the initial attempt plus up to 2
+ * additional retries (3 total), matching the bounded "small number of
+ * retries" this follow-up specifically asked for. Only ever consulted for
+ * a TRANSIENT failure (see isTransientProviderErrorCategory) — a
+ * configuration/authorization error or a malformed response is never
+ * retried regardless of this constant.
+ */
+export const AI_ASSISTANCE_GENERATOR_MAX_ATTEMPTS = 3;
 
 function buildSystemPrompt(policy: BrainstormPolicyCapabilities, stricter: boolean): string {
   const capabilities: string[] = [];
@@ -145,7 +177,7 @@ function getClient(): Anthropic {
   if (cachedClient) return cachedClient;
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    throw new AiAssistanceGenerationError("Missing required environment variable: ANTHROPIC_API_KEY");
+    throw new AiAssistanceGenerationError("Missing required environment variable: ANTHROPIC_API_KEY", "CONFIG_MISSING");
   }
   cachedClient = new Anthropic({ apiKey, timeout: ANTHROPIC_TIMEOUT_MS, maxRetries: ANTHROPIC_MAX_RETRIES });
   return cachedClient;
@@ -168,34 +200,51 @@ export function assertPromptExcludesSecrets(prompt: string, secrets: (string | n
   }
 }
 
-export async function generateBrainstormResponse(input: BrainstormGeneratorInput): Promise<string> {
+/**
+ * Optional diagnostics hook (intermittent-failure follow-up) — reports
+ * one structured, safe-to-log record per physical Anthropic call attempt
+ * (never request/response content). `onAttempt` is called synchronously
+ * as each attempt settles, in order; the caller (src/lib/aiAssistanceRunner.ts)
+ * uses this to build a single per-interaction diagnostic log line.
+ */
+export type GenerateBrainstormDiagnostics = { onAttempt?: (log: ProviderCallAttemptLog) => void };
+
+export async function generateBrainstormResponse(
+  input: BrainstormGeneratorInput,
+  diagnostics?: GenerateBrainstormDiagnostics,
+): Promise<string> {
   const client = getClient();
   const system = buildSystemPrompt(input.policy, input.stricter === true);
   const userPrompt = buildUserPrompt(input);
 
   let response;
   try {
-    response = await client.messages.create({
-      model: getAnthropicBrainstormModel(),
-      max_tokens: 240,
-      temperature: input.stricter ? 0 : 0.4,
-      system,
-      messages: [{ role: "user", content: userPrompt }],
-    });
-  } catch {
+    response = await callWithTransientRetry(
+      () =>
+        client.messages.create({
+          model: getAnthropicBrainstormModel(),
+          max_tokens: 240,
+          temperature: input.stricter ? 0 : 0.4,
+          system,
+          messages: [{ role: "user", content: userPrompt }],
+        }),
+      { maxAttempts: AI_ASSISTANCE_GENERATOR_MAX_ATTEMPTS, onAttempt: diagnostics?.onAttempt },
+    );
+  } catch (err) {
     // Never include the caught error's own message (Part 1) — an
     // Anthropic SDK error's `.message` can include the raw HTTP response
     // body (rate-limit details, request-id, etc.), which must never
     // reach a log line this module doesn't otherwise emit, let alone the
     // student. A fixed, generic message is enough for the caller
     // (src/lib/aiAssistanceRunner.ts) to treat this as a provider
-    // failure and follow the fail-closed path.
-    throw new AiAssistanceGenerationError("Anthropic API request failed");
+    // failure and follow the fail-closed path — the classification
+    // category alone (never the message) is safe to log/persist.
+    throw new AiAssistanceGenerationError("Anthropic API request failed", classifyProviderError(err));
   }
 
   const textBlock = response.content.find((block) => block.type === "text");
   if (!textBlock || textBlock.type !== "text") {
-    throw new AiAssistanceGenerationError("Anthropic response did not contain a text block");
+    throw new AiAssistanceGenerationError("Anthropic response did not contain a text block", "PARSE_ERROR");
   }
 
   const text = textBlock.text.trim();
@@ -204,7 +253,7 @@ export async function generateBrainstormResponse(input: BrainstormGeneratorInput
     // empty or malformed output") is treated as a hard generation
     // failure, not a candidate to verify — an empty string would
     // otherwise sail through the verifier with nothing to actually flag.
-    throw new AiAssistanceGenerationError("Anthropic returned an empty response");
+    throw new AiAssistanceGenerationError("Anthropic returned an empty response", "EMPTY_RESPONSE");
   }
 
   return text;

@@ -52,10 +52,17 @@ import {
   generateBrainstormResponse,
   isAnthropicConfigured,
   getAnthropicBrainstormModel,
+  AiAssistanceGenerationError,
   type BrainstormGeneratorInput,
   type BrainstormQuestionType,
 } from "@/lib/aiAssistanceGenerator";
-import { verifyBrainstormResponse, type RiskCode } from "@/lib/aiAssistanceVerifier";
+import {
+  verifyBrainstormResponse,
+  getAnthropicBrainstormVerifierModel,
+  AiAssistanceVerificationError,
+  type RiskCode,
+} from "@/lib/aiAssistanceVerifier";
+import type { AiProviderErrorCategory, ProviderCallAttemptLog } from "@/lib/aiAssistanceProviderError";
 import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
 import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 import {
@@ -63,6 +70,7 @@ import {
   readContentAccessLeaseCookieFromRequest,
   TETHER_CONTENT_ACCESS_REQUIRED_MESSAGE,
 } from "@/lib/secureClient/requireTetherContentAccess";
+import { isServerTimingHeaderEnabled } from "@/lib/serverTiming";
 
 export class AiAssistanceError extends Error {
   status: number;
@@ -494,6 +502,56 @@ export async function loadInteractionHistory(params: {
 }
 
 /**
+ * Intermittent-failure follow-up — one structured, single-line JSON
+ * diagnostic record per interaction (never the student prompt, the
+ * candidate/verified response text, or any raw provider error message —
+ * only bounded stage/attempt/timing/classification data, all of which
+ * already comes from GenerateVerifyDiagnostics' own bounded shape). Gated
+ * behind the SAME TETHER_TIMING_HEADERS_ENABLED flag serverTiming.ts's
+ * navigation-timing diagnostics already use (see that module's own doc
+ * comment: off by default in every environment including Production,
+ * deliberately set for a bounded controlled-test window) rather than a
+ * second flag — one switch now covers both the exam-open and the
+ * Brainstorm critical paths for a physical test session.
+ */
+function summarizeOutcome(outcome: GenerateVerifyOutcome): Record<string, unknown> {
+  const base = {
+    generatorMs: Math.round(outcome.diagnostics.generator.ranMs),
+    generatorAttempts: outcome.diagnostics.generator.attempts,
+    verifierMs: Math.round(outcome.diagnostics.verifier.ranMs),
+    verifierAttempts: outcome.diagnostics.verifier.attempts,
+  };
+  if (outcome.kind === "error") {
+    return { ...base, outcome: "error", errorStage: outcome.stage, errorCategory: outcome.category };
+  }
+  return { ...base, outcome: outcome.kind };
+}
+
+function logAiAssistanceDiagnostics(params: {
+  interactionId: string;
+  initialOutcome: GenerateVerifyOutcome;
+  finalOutcome: GenerateVerifyOutcome;
+  wasRegenerated: boolean;
+  totalAiMs: number;
+}): void {
+  if (!isServerTimingHeaderEnabled(process.env.TETHER_TIMING_HEADERS_ENABLED)) return;
+  const passes = [summarizeOutcome(params.initialOutcome)];
+  if (params.wasRegenerated) passes.push(summarizeOutcome(params.finalOutcome));
+  // eslint-disable-next-line no-console
+  console.log(
+    JSON.stringify({
+      event: "AI_ASSISTANCE_DIAGNOSTICS",
+      interactionId: params.interactionId,
+      wasRegenerated: params.wasRegenerated,
+      totalAiMs: Math.round(params.totalAiMs),
+      generatorModel: `anthropic:${getAnthropicBrainstormModel()}`,
+      verifierModel: `anthropic:${getAnthropicBrainstormVerifierModel()}`,
+      passes,
+    }),
+  );
+}
+
+/**
  * The single entry point: validates, checks provider configuration,
  * atomically reserves a prompt slot, classifies, and — only for an
  * allowed request — runs generate -> verify -> (regenerate once ->
@@ -627,7 +685,7 @@ export async function runAiAssistanceRequest(params: {
   };
 
   const startedAt = Date.now();
-  let outcome = await attemptGenerateAndVerify({
+  const initialOutcome = await attemptGenerateAndVerify({
     generatorInput,
     question,
     policy,
@@ -635,6 +693,7 @@ export async function runAiAssistanceRequest(params: {
     approvedCountForQuestion,
     cumulativeSoFar,
   });
+  let outcome = initialOutcome;
   let regenerated = false;
   if (outcome.kind !== "approved") {
     outcome = await attemptGenerateAndVerify({
@@ -648,6 +707,14 @@ export async function runAiAssistanceRequest(params: {
     regenerated = true;
   }
   const latencyMs = Date.now() - startedAt;
+
+  logAiAssistanceDiagnostics({
+    interactionId,
+    initialOutcome,
+    finalOutcome: outcome,
+    wasRegenerated: regenerated,
+    totalAiMs: latencyMs,
+  });
 
   if (outcome.kind === "approved") {
     const newCumulative = nextCumulativeRiskScore(cumulativeSoFar, outcome.riskScore);
@@ -673,10 +740,20 @@ export async function runAiAssistanceRequest(params: {
     };
   }
 
-  if (outcome.kind === "error") {
-    // A genuine provider/parsing failure on the (stricter) final attempt
-    // — never shown the fallback text, since that would misleadingly
-    // imply the pipeline worked and simply had nothing safe to say.
+  // Intermittent-failure follow-up — a genuine GENERATOR failure on the
+  // (stricter) final attempt is still shown as FAILED, never the
+  // fallback text: no candidate was ever produced at all, so showing
+  // fallback guidance would misleadingly imply the pipeline worked and
+  // simply had nothing safe to say. A VERIFIER failure is different: the
+  // generator DID produce a candidate (proving the provider is generally
+  // reachable) and only the independent safety check itself could not be
+  // completed — the safest useful thing to do is exactly what an
+  // ordinary content REJECTION already does: show the deterministic,
+  // pre-approved, always-safe fallback guidance rather than an
+  // unnecessarily alarming "unavailable" message. The verifier is never
+  // bypassed here — the unverified candidate is still discarded either
+  // way, on every path.
+  if (outcome.kind === "error" && outcome.stage === "generator") {
     await finalizeInteraction(interactionId, submission, settings, {
       status: "FAILED",
       approvedResponse: null,
@@ -699,16 +776,20 @@ export async function runAiAssistanceRequest(params: {
     };
   }
 
-  // outcome.kind === "rejected" — both attempts completed cleanly (no
-  // provider error) but no candidate ever passed verification (or one
-  // did but failed the length/cumulative gate). Deterministic safe
-  // fallback — the rejected candidate text itself is discarded here and
-  // NEVER persisted or returned, on either attempt.
+  // outcome.kind === "rejected", OR outcome.kind === "error" with
+  // stage === "verifier" — both attempts either completed cleanly with no
+  // candidate ever passing verification (or one did but failed the
+  // length/cumulative gate), or the verifier itself could not complete
+  // its check on the final attempt. Either way: deterministic safe
+  // fallback. The (rejected or never-verified) candidate text itself is
+  // discarded here and NEVER persisted or returned, on any path.
+  const riskCodes = outcome.kind === "rejected" ? outcome.riskCodes : [];
+  const riskScore = outcome.kind === "rejected" ? outcome.riskScore : 0;
   await finalizeInteraction(interactionId, submission, settings, {
     status: "FALLBACK",
     approvedResponse: AI_ASSISTANCE_FALLBACK_RESPONSE,
-    riskCodes: outcome.riskCodes,
-    riskScore: outcome.riskScore,
+    riskCodes,
+    riskScore,
     cumulativeRiskScore: cumulativeSoFar,
     specificityLevel: generatorInput.hintLadderLevel,
     providerModel: `anthropic:${getAnthropicBrainstormModel()}`,
@@ -726,10 +807,18 @@ export async function runAiAssistanceRequest(params: {
   };
 }
 
+/** One stage's diagnostics — every call attempt made for it, and the stage's own total wall time (attempts + backoff, never the request/response content). `attempts` is empty and `ranMs` is 0 for the verifier when the generator itself failed (the verifier never ran at all). */
+export type GenerateVerifyStageDiagnostics = { attempts: ProviderCallAttemptLog[]; ranMs: number };
+
+export type GenerateVerifyDiagnostics = {
+  generator: GenerateVerifyStageDiagnostics;
+  verifier: GenerateVerifyStageDiagnostics;
+};
+
 export type GenerateVerifyOutcome =
-  | { kind: "approved"; response: string; riskScore: number; riskCodes: RiskCode[] }
-  | { kind: "rejected"; riskScore: number; riskCodes: RiskCode[] }
-  | { kind: "error" };
+  | { kind: "approved"; response: string; riskScore: number; riskCodes: RiskCode[]; diagnostics: GenerateVerifyDiagnostics }
+  | { kind: "rejected"; riskScore: number; riskCodes: RiskCode[]; diagnostics: GenerateVerifyDiagnostics }
+  | { kind: "error"; stage: "generator" | "verifier"; category: AiProviderErrorCategory; diagnostics: GenerateVerifyDiagnostics };
 
 /**
  * Exported for direct unit testing (mocked generator/verifier, no
@@ -740,9 +829,15 @@ export type GenerateVerifyOutcome =
  * generator/verifier error (missing config, timeout, malformed JSON,
  * unknown risk code, empty output) is caught HERE, not left to escape to
  * the caller, so the caller never needs its own try/catch around a
- * provider call. A verified-but-too-long response is treated as
- * `"rejected"` (Part 9 — never truncated, always re-attempted or
- * replaced by the fallback instead).
+ * provider call. `stage` records WHICH service failed (intermittent-
+ * failure follow-up) — src/lib/aiAssistanceRunner.ts's runAiAssistanceRequest
+ * uses this to distinguish "the generator never even produced a
+ * candidate" (stays FAILED) from "a candidate was produced but the
+ * safety check itself couldn't complete" (falls back to the deterministic
+ * safe guidance instead — see that function's own doc comment). A
+ * verified-but-too-long response is treated as `"rejected"` (Part 9 —
+ * never truncated, always re-attempted or replaced by the fallback
+ * instead).
  */
 export async function attemptGenerateAndVerify(params: {
   generatorInput: BrainstormGeneratorInput;
@@ -752,30 +847,50 @@ export async function attemptGenerateAndVerify(params: {
   approvedCountForQuestion: number;
   cumulativeSoFar: number;
 }): Promise<GenerateVerifyOutcome> {
+  const generatorAttempts: ProviderCallAttemptLog[] = [];
+  const verifierAttempts: ProviderCallAttemptLog[] = [];
+  const verifierDiagnostics: GenerateVerifyStageDiagnostics = { attempts: verifierAttempts, ranMs: 0 };
+
   let candidate: string;
+  const generatorStartedAtMs = Date.now();
   try {
-    candidate = await generateBrainstormResponse(params.generatorInput);
-  } catch {
-    return { kind: "error" };
+    candidate = await generateBrainstormResponse(params.generatorInput, { onAttempt: (log) => generatorAttempts.push(log) });
+  } catch (err) {
+    const category = err instanceof AiAssistanceGenerationError ? err.category : "UNKNOWN";
+    return {
+      kind: "error",
+      stage: "generator",
+      category,
+      diagnostics: { generator: { attempts: generatorAttempts, ranMs: Date.now() - generatorStartedAtMs }, verifier: verifierDiagnostics },
+    };
   }
+  const generatorDiagnostics: GenerateVerifyStageDiagnostics = { attempts: generatorAttempts, ranMs: Date.now() - generatorStartedAtMs };
 
   let verifierResult;
+  const verifierStartedAtMs = Date.now();
   try {
-    verifierResult = await verifyBrainstormResponse({
-      questionText: params.question.text,
-      questionType: params.generatorInput.questionType,
-      candidateResponse: candidate,
-      studentRequest: params.studentPrompt,
-      // The verifier alone may see hidden reference material; the
-      // generator (params.generatorInput above) never received it.
-      hiddenModelAnswer: boundedHiddenReference(params.question.correctAnswer),
-      hiddenRubricSummary: null,
-      priorApprovedHintCount: params.approvedCountForQuestion,
-      cumulativeRiskScoreSoFar: params.cumulativeSoFar,
-    });
-  } catch {
-    return { kind: "error" };
+    verifierResult = await verifyBrainstormResponse(
+      {
+        questionText: params.question.text,
+        questionType: params.generatorInput.questionType,
+        candidateResponse: candidate,
+        studentRequest: params.studentPrompt,
+        // The verifier alone may see hidden reference material; the
+        // generator (params.generatorInput above) never received it.
+        hiddenModelAnswer: boundedHiddenReference(params.question.correctAnswer),
+        hiddenRubricSummary: null,
+        priorApprovedHintCount: params.approvedCountForQuestion,
+        cumulativeRiskScoreSoFar: params.cumulativeSoFar,
+      },
+      { onAttempt: (log) => verifierAttempts.push(log) },
+    );
+  } catch (err) {
+    const category = err instanceof AiAssistanceVerificationError ? err.category : "UNKNOWN";
+    verifierDiagnostics.ranMs = Date.now() - verifierStartedAtMs;
+    return { kind: "error", stage: "verifier", category, diagnostics: { generator: generatorDiagnostics, verifier: verifierDiagnostics } };
   }
+  verifierDiagnostics.ranMs = Date.now() - verifierStartedAtMs;
+  const diagnostics: GenerateVerifyDiagnostics = { generator: generatorDiagnostics, verifier: verifierDiagnostics };
 
   const projectedCumulative = nextCumulativeRiskScore(params.cumulativeSoFar, verifierResult.riskScore);
   const cumulativeOverride = isCumulativeHintLeakageRisk(projectedCumulative);
@@ -785,7 +900,7 @@ export async function attemptGenerateAndVerify(params: {
     : verifierResult.riskCodes;
 
   if (verifierResult.allowed && !cumulativeOverride && lengthValid) {
-    return { kind: "approved", response: candidate, riskScore: verifierResult.riskScore, riskCodes };
+    return { kind: "approved", response: candidate, riskScore: verifierResult.riskScore, riskCodes, diagnostics };
   }
-  return { kind: "rejected", riskScore: verifierResult.riskScore, riskCodes };
+  return { kind: "rejected", riskScore: verifierResult.riskScore, riskCodes, diagnostics };
 }

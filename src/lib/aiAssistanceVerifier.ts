@@ -15,6 +15,12 @@ import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import type { BrainstormQuestionType } from "@/lib/aiAssistanceGenerator";
 import { boundedHiddenReference } from "@/lib/aiAssistancePolicy";
+import {
+  callWithTransientRetry,
+  classifyProviderError,
+  type AiProviderErrorCategory,
+  type ProviderCallAttemptLog,
+} from "@/lib/aiAssistanceProviderError";
 
 export const RISK_CODES = [
   "DIRECT_ANSWER",
@@ -51,7 +57,14 @@ export type BrainstormVerifierResult = {
   reason: string;
 };
 
-export class AiAssistanceVerificationError extends Error {}
+/** `category` defaults to "UNKNOWN" only for the handful of call sites that construct this error directly in tests — every real throw site below always supplies a real classification. */
+export class AiAssistanceVerificationError extends Error {
+  readonly category: AiProviderErrorCategory;
+  constructor(message: string, category: AiProviderErrorCategory = "UNKNOWN") {
+    super(message);
+    this.category = category;
+  }
+}
 
 export type FastVerifierDecision =
   | { kind: "REJECT"; result: BrainstormVerifierResult }
@@ -229,7 +242,10 @@ let cachedClient: Anthropic | undefined;
 
 /** Bounded request timeout and retry count (Part 10 hardening) — see the matching constants in aiAssistanceGenerator.ts. */
 export const ANTHROPIC_TIMEOUT_MS = 20_000;
-export const ANTHROPIC_MAX_RETRIES = 1;
+/** Intermittent-failure follow-up — see the identical note on aiAssistanceGenerator.ts's own ANTHROPIC_MAX_RETRIES. */
+export const ANTHROPIC_MAX_RETRIES = 0;
+/** Intermittent-failure follow-up — see the identical note on aiAssistanceGenerator.ts's own AI_ASSISTANCE_GENERATOR_MAX_ATTEMPTS. */
+export const AI_ASSISTANCE_VERIFIER_MAX_ATTEMPTS = 3;
 
 /**
  * Independent verifier model. The generator can use Sonnet while the
@@ -248,13 +264,22 @@ function getClient(): Anthropic {
   if (cachedClient) return cachedClient;
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    throw new AiAssistanceVerificationError("Missing required environment variable: ANTHROPIC_API_KEY");
+    throw new AiAssistanceVerificationError("Missing required environment variable: ANTHROPIC_API_KEY", "CONFIG_MISSING");
   }
   cachedClient = new Anthropic({ apiKey, timeout: ANTHROPIC_TIMEOUT_MS, maxRetries: ANTHROPIC_MAX_RETRIES });
   return cachedClient;
 }
 
-export async function verifyBrainstormResponse(input: BrainstormVerifierInput): Promise<BrainstormVerifierResult> {
+/**
+ * Optional diagnostics hook (intermittent-failure follow-up) — see the
+ * identical GenerateBrainstormDiagnostics in aiAssistanceGenerator.ts.
+ */
+export type VerifyBrainstormDiagnostics = { onAttempt?: (log: ProviderCallAttemptLog) => void };
+
+export async function verifyBrainstormResponse(
+  input: BrainstormVerifierInput,
+  diagnostics?: VerifyBrainstormDiagnostics,
+): Promise<BrainstormVerifierResult> {
   const fastDecision = fastVerifyBrainstormResponse(input);
   if (fastDecision.kind === "REJECT") {
     return fastDecision.result;
@@ -264,24 +289,29 @@ export async function verifyBrainstormResponse(input: BrainstormVerifierInput): 
 
   let response;
   try {
-    response = await client.messages.create({
-      model: getAnthropicBrainstormVerifierModel(),
-      max_tokens: 220,
-      temperature: 0,
-      system: buildSystemPrompt(),
-      messages: [{ role: "user", content: buildUserPrompt(input) }],
-    });
-  } catch {
+    response = await callWithTransientRetry(
+      () =>
+        client.messages.create({
+          model: getAnthropicBrainstormVerifierModel(),
+          max_tokens: 220,
+          temperature: 0,
+          system: buildSystemPrompt(),
+          messages: [{ role: "user", content: buildUserPrompt(input) }],
+        }),
+      { maxAttempts: AI_ASSISTANCE_VERIFIER_MAX_ATTEMPTS, onAttempt: diagnostics?.onAttempt },
+    );
+  } catch (err) {
     // Never include the caught error's own message — see the identical
     // note in aiAssistanceGenerator.ts. A verifier failure is at least
     // as sensitive to sanitise as a generator one, since the SDK error
-    // could in principle echo back request content.
-    throw new AiAssistanceVerificationError("Anthropic API request failed");
+    // could in principle echo back request content — the classification
+    // category alone (never the message) is safe to log/persist.
+    throw new AiAssistanceVerificationError("Anthropic API request failed", classifyProviderError(err));
   }
 
   const textBlock = response.content.find((block) => block.type === "text");
   if (!textBlock || textBlock.type !== "text") {
-    throw new AiAssistanceVerificationError("Anthropic response did not contain a text block");
+    throw new AiAssistanceVerificationError("Anthropic response did not contain a text block", "PARSE_ERROR");
   }
 
   const cleaned = stripMarkdownFences(textBlock.text);
@@ -293,7 +323,7 @@ export async function verifyBrainstormResponse(input: BrainstormVerifierInput): 
     // Do not include the raw model text or the parser's own message —
     // both could contain a snippet of the (potentially unsafe) candidate
     // content the verifier was judging.
-    throw new AiAssistanceVerificationError("Failed to parse verifier output as JSON");
+    throw new AiAssistanceVerificationError("Failed to parse verifier output as JSON", "PARSE_ERROR");
   }
 
   // Also structurally rejects an unknown/invented risk code (Part 1 —
@@ -304,7 +334,7 @@ export async function verifyBrainstormResponse(input: BrainstormVerifierInput): 
   // accepted or crashing later.
   const validated = verifierResultSchema.safeParse(parsedJson);
   if (!validated.success) {
-    throw new AiAssistanceVerificationError("Verifier output did not match the expected schema");
+    throw new AiAssistanceVerificationError("Verifier output did not match the expected schema", "SCHEMA_ERROR");
   }
 
   return validated.data;

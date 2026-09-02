@@ -8,20 +8,30 @@
  * the actual model/message shape sent to the SDK, and that the model is
  * resolved from ANTHROPIC_BRAINSTORM_MODEL rather than hard-coded.
  */
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockCreate } = vi.hoisted(() => ({ mockCreate: vi.fn() }));
 
-vi.mock("@anthropic-ai/sdk", () => {
+// Intermittent-failure follow-up — importOriginal keeps the SDK's real
+// error classes (RateLimitError, InternalServerError, ...) available for
+// constructing realistic thrown errors below, while still replacing only
+// the `default` client class with the mock (never a real network call).
+vi.mock("@anthropic-ai/sdk", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@anthropic-ai/sdk")>();
   class MockAnthropic {
     messages = { create: mockCreate };
   }
-  return { default: MockAnthropic };
+  return { ...actual, default: MockAnthropic };
 });
 
-const { generateBrainstormResponse, ANTHROPIC_BRAINSTORM_MODEL_DEFAULT, getAnthropicBrainstormModel } = await import(
-  "./aiAssistanceGenerator"
-);
+const {
+  generateBrainstormResponse,
+  ANTHROPIC_BRAINSTORM_MODEL_DEFAULT,
+  getAnthropicBrainstormModel,
+  AiAssistanceGenerationError,
+  AI_ASSISTANCE_GENERATOR_MAX_ATTEMPTS,
+} = await import("./aiAssistanceGenerator");
+const { InternalServerError, RateLimitError, AuthenticationError } = await import("@anthropic-ai/sdk");
 
 function textResponse(text: string) {
   return { content: [{ type: "text", text }] };
@@ -109,5 +119,86 @@ describe("message shape sent to Anthropic", () => {
     const result = await generateBrainstormResponse(baseInput);
 
     expect(result).toBe("Consider what causes evaporation.");
+  });
+});
+
+// Intermittent-failure follow-up — physical Preview testing showed
+// Brainstorm intermittently failing with "temporarily unavailable" while
+// typed prompts sometimes worked. Root cause: a transient provider
+// failure (429/529/timeout) on either the generator or the verifier had
+// no application-level retry with backoff — see
+// src/lib/aiAssistanceProviderError.ts's own tests for the retry
+// primitive itself; these tests confirm the generator is actually wired
+// to it correctly.
+describe("intermittent-failure follow-up — transient-error retry with backoff", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("retries a transient 529 overloaded error and succeeds on the second attempt, reporting both attempts via onAttempt", async () => {
+    const overloaded = new InternalServerError(529, {}, "529 Overloaded", new Headers(), "overloaded_error");
+    mockCreate.mockRejectedValueOnce(overloaded).mockResolvedValueOnce(textResponse("Consider the water cycle."));
+    const attempts: unknown[] = [];
+
+    const promise = generateBrainstormResponse(baseInput, { onAttempt: (log) => attempts.push(log) });
+    await vi.runAllTimersAsync();
+
+    await expect(promise).resolves.toBe("Consider the water cycle.");
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(attempts).toEqual([
+      { attempt: 1, outcome: "OVERLOADED", durationMs: expect.any(Number) },
+      { attempt: 2, outcome: "SUCCESS", durationMs: expect.any(Number) },
+    ]);
+  });
+
+  it("retries a rate-limit (429) error, honouring its retry-after guidance", async () => {
+    const rateLimited = new RateLimitError(429, {}, "429", new Headers({ "retry-after-ms": "500" }), "rate_limit_error");
+    mockCreate.mockRejectedValueOnce(rateLimited).mockResolvedValueOnce(textResponse("A guiding question."));
+
+    const promise = generateBrainstormResponse(baseInput);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockCreate).toHaveBeenCalledTimes(1); // waiting on retry-after-ms
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+
+    await expect(promise).resolves.toBe("A guiding question.");
+  });
+
+  it("stops retrying after AI_ASSISTANCE_GENERATOR_MAX_ATTEMPTS and throws AiAssistanceGenerationError with the last attempt's category — a persistent provider outage still fails, but does not hang", async () => {
+    const overloaded = new InternalServerError(529, {}, "529", new Headers(), "overloaded_error");
+    mockCreate.mockRejectedValue(overloaded);
+
+    const promise = generateBrainstormResponse(baseInput);
+    const typeAssertion = expect(promise).rejects.toBeInstanceOf(AiAssistanceGenerationError);
+    const categoryAssertion = expect(promise).rejects.toMatchObject({ category: "OVERLOADED" });
+    await vi.runAllTimersAsync();
+    await typeAssertion;
+    await categoryAssertion;
+
+    expect(mockCreate).toHaveBeenCalledTimes(AI_ASSISTANCE_GENERATOR_MAX_ATTEMPTS);
+  });
+
+  it("never retries a non-transient error (invalid/missing API key) — fails on the very first attempt, with category CONFIG_MISSING", async () => {
+    const authErr = new AuthenticationError(401, {}, "401", new Headers(), "authentication_error");
+    mockCreate.mockRejectedValue(authErr);
+
+    const promise = generateBrainstormResponse(baseInput);
+    await expect(promise).rejects.toBeInstanceOf(AiAssistanceGenerationError);
+    await expect(promise).rejects.toMatchObject({ category: "CONFIG_MISSING" });
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("classifies a malformed (no text block) response as PARSE_ERROR, and an empty completion as EMPTY_RESPONSE — neither is retried, since a repeat call cannot fix either", async () => {
+    mockCreate.mockResolvedValueOnce({ content: [{ type: "image" }] });
+    await expect(generateBrainstormResponse(baseInput)).rejects.toMatchObject({ category: "PARSE_ERROR" });
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+
+    mockCreate.mockReset();
+    mockCreate.mockResolvedValueOnce(textResponse("   "));
+    await expect(generateBrainstormResponse(baseInput)).rejects.toMatchObject({ category: "EMPTY_RESPONSE" });
+    expect(mockCreate).toHaveBeenCalledTimes(1);
   });
 });

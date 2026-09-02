@@ -16,11 +16,27 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 vi.mock("./aiAssistanceGenerator", () => ({
   generateBrainstormResponse: vi.fn(),
-  AiAssistanceGenerationError: class AiAssistanceGenerationError extends Error {},
+  // Intermittent-failure follow-up — mirrors the real class's `category`
+  // field (see aiAssistanceGenerator.ts) so attemptGenerateAndVerify's
+  // stage-aware classification can be tested here without needing the
+  // real Anthropic-SDK-backed module.
+  AiAssistanceGenerationError: class AiAssistanceGenerationError extends Error {
+    category: string;
+    constructor(message: string, category = "UNKNOWN") {
+      super(message);
+      this.category = category;
+    }
+  },
 }));
 vi.mock("./aiAssistanceVerifier", () => ({
   verifyBrainstormResponse: vi.fn(),
-  AiAssistanceVerificationError: class AiAssistanceVerificationError extends Error {},
+  AiAssistanceVerificationError: class AiAssistanceVerificationError extends Error {
+    category: string;
+    constructor(message: string, category = "UNKNOWN") {
+      super(message);
+      this.category = category;
+    }
+  },
 }));
 
 import { generateBrainstormResponse, AiAssistanceGenerationError } from "./aiAssistanceGenerator";
@@ -97,7 +113,7 @@ describe("10. generator output is never treated as safe without verification", (
 
 describe("1/4/5/6/7/8. fail-closed: every provider/parsing failure resolves to 'error', never an exception", () => {
   it("4/5. generator throwing (missing API key, timeout, transport failure) resolves to 'error'", async () => {
-    mockedGenerate.mockRejectedValue(new AiAssistanceGenerationError("Anthropic API request failed"));
+    mockedGenerate.mockRejectedValue(new AiAssistanceGenerationError("Anthropic API request failed", "SERVER_ERROR"));
 
     const result = await attemptGenerateAndVerify({
       generatorInput: baseGeneratorInput,
@@ -110,6 +126,14 @@ describe("1/4/5/6/7/8. fail-closed: every provider/parsing failure resolves to '
 
     expect(result.kind).toBe("error");
     expect(mockedVerify).not.toHaveBeenCalled();
+    // Intermittent-failure follow-up — a generator failure is tagged
+    // stage "generator" with the classified category preserved, so
+    // runAiAssistanceRequest can tell it apart from a verifier failure
+    // (see the "stage-aware" describe block below).
+    if (result.kind === "error") {
+      expect(result.stage).toBe("generator");
+      expect(result.category).toBe("SERVER_ERROR");
+    }
   });
 
   it("6. malformed/empty generator output (surfaced as a thrown error by the generator itself) resolves to 'error'", async () => {
@@ -129,7 +153,7 @@ describe("1/4/5/6/7/8. fail-closed: every provider/parsing failure resolves to '
 
   it("7/8. verifier throwing (malformed JSON, unknown risk code, schema mismatch) resolves to 'error', not a crash", async () => {
     mockedGenerate.mockResolvedValue("A candidate response.");
-    mockedVerify.mockRejectedValue(new AiAssistanceVerificationError("Verifier output did not match the expected schema"));
+    mockedVerify.mockRejectedValue(new AiAssistanceVerificationError("Verifier output did not match the expected schema", "SCHEMA_ERROR"));
 
     const result = await attemptGenerateAndVerify({
       generatorInput: baseGeneratorInput,
@@ -141,6 +165,12 @@ describe("1/4/5/6/7/8. fail-closed: every provider/parsing failure resolves to '
     });
 
     expect(result.kind).toBe("error");
+    // Intermittent-failure follow-up — distinct from a generator failure:
+    // the candidate WAS produced, only the safety check itself failed.
+    if (result.kind === "error") {
+      expect(result.stage).toBe("verifier");
+      expect(result.category).toBe("SCHEMA_ERROR");
+    }
   });
 
   it("a thrown error never contains the raw candidate text (nothing to leak — the result carries no text field at all)", async () => {
@@ -157,6 +187,67 @@ describe("1/4/5/6/7/8. fail-closed: every provider/parsing failure resolves to '
     });
 
     expect(JSON.stringify(result)).not.toContain("some candidate text");
+    // Intermittent-failure follow-up — a plain (unclassified) thrown
+    // error is never mistaken for a specific category; it degrades to
+    // UNKNOWN rather than a guessed/incorrect classification.
+    if (result.kind === "error") expect(result.category).toBe("UNKNOWN");
+  });
+});
+
+// Intermittent-failure follow-up — proves attemptGenerateAndVerify itself
+// (not just the underlying generator/verifier modules, covered by their
+// own *.sdk.test.ts files) correctly threads the diagnostics callback
+// through to both calls and reports per-stage timing, regardless of
+// outcome. src/lib/aiAssistanceRunner.ts's runAiAssistanceRequest uses
+// exactly this diagnostics shape to build its one-line-per-interaction
+// log (see logAiAssistanceDiagnostics), gated off in production.
+describe("intermittent-failure follow-up — diagnostics threading", () => {
+  it("an approved outcome carries generator+verifier diagnostics with non-negative timings", async () => {
+    mockedGenerate.mockImplementation(async (_input, diagnostics) => {
+      diagnostics?.onAttempt?.({ attempt: 1, outcome: "SUCCESS", durationMs: 5 });
+      return "A safe hint.";
+    });
+    mockedVerify.mockImplementation(async (_input, diagnostics) => {
+      diagnostics?.onAttempt?.({ attempt: 1, outcome: "SUCCESS", durationMs: 3 });
+      return { allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" };
+    });
+
+    const result = await attemptGenerateAndVerify({
+      generatorInput: baseGeneratorInput,
+      question: baseQuestion,
+      policy: basePolicy,
+      studentPrompt: "help",
+      approvedCountForQuestion: 0,
+      cumulativeSoFar: 0,
+    });
+
+    expect(result.kind).toBe("approved");
+    expect(result.diagnostics.generator.attempts).toEqual([{ attempt: 1, outcome: "SUCCESS", durationMs: 5 }]);
+    expect(result.diagnostics.verifier.attempts).toEqual([{ attempt: 1, outcome: "SUCCESS", durationMs: 3 }]);
+    expect(result.diagnostics.generator.ranMs).toBeGreaterThanOrEqual(0);
+    expect(result.diagnostics.verifier.ranMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("a generator failure carries generator attempts but an EMPTY verifier stage — the verifier never ran at all", async () => {
+    mockedGenerate.mockImplementation(async (_input, diagnostics) => {
+      diagnostics?.onAttempt?.({ attempt: 1, outcome: "OVERLOADED", durationMs: 10 });
+      diagnostics?.onAttempt?.({ attempt: 2, outcome: "OVERLOADED", durationMs: 12 });
+      throw new AiAssistanceGenerationError("Anthropic API request failed", "OVERLOADED");
+    });
+
+    const result = await attemptGenerateAndVerify({
+      generatorInput: baseGeneratorInput,
+      question: baseQuestion,
+      policy: basePolicy,
+      studentPrompt: "help",
+      approvedCountForQuestion: 0,
+      cumulativeSoFar: 0,
+    });
+
+    expect(result.kind).toBe("error");
+    expect(result.diagnostics.generator.attempts).toHaveLength(2);
+    expect(result.diagnostics.verifier.attempts).toEqual([]);
+    expect(mockedVerify).not.toHaveBeenCalled();
   });
 });
 
@@ -248,11 +339,15 @@ describe("15/16. verifier receives hidden reference material the generator never
       cumulativeSoFar: 0,
     });
 
-    expect(mockedVerify).toHaveBeenCalledWith(expect.objectContaining({ hiddenModelAnswer: "Paris" }));
+    // Intermittent-failure follow-up — both calls now also receive an
+    // optional second `{ onAttempt }` diagnostics argument (see
+    // aiAssistanceGenerator.ts/aiAssistanceVerifier.ts); matched loosely
+    // here since this test is about the FIRST (input) argument only.
+    expect(mockedVerify).toHaveBeenCalledWith(expect.objectContaining({ hiddenModelAnswer: "Paris" }), expect.anything());
     // ...and the generator call never received it — generateBrainstormResponse's
     // own type signature has no field for it, enforced structurally (see
     // aiAssistanceGenerator.test.ts).
-    expect(mockedGenerate).toHaveBeenCalledWith(expect.not.objectContaining({ correctAnswer: expect.anything() }));
+    expect(mockedGenerate).toHaveBeenCalledWith(expect.not.objectContaining({ correctAnswer: expect.anything() }), expect.anything());
   });
 
   it("caps an over-length hidden model answer before sending it to the verifier (Part 9 payload bound)", async () => {
