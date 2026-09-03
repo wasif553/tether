@@ -75,6 +75,7 @@ describe("mapBankQuestionToQuestionData", () => {
   it("copies text, type, correctAnswer, and points onto the Question shape", () => {
     const data = mapBankQuestionToQuestionData(
       {
+        id: "bank-q-1",
         type: "SHORT_ANSWER",
         text: "Name the powerhouse of the cell.",
         optionsJson: null,
@@ -93,12 +94,15 @@ describe("mapBankQuestionToQuestionData", () => {
       correctAnswer: "Mitochondria",
       points: 3,
       order: 0,
+      source: "QUESTION_BANK",
+      sourceBankQuestionId: "bank-q-1",
     });
   });
 
   it("parses optionsJson into an array matching Question.options' shape", () => {
     const data = mapBankQuestionToQuestionData(
       {
+        id: "bank-q-2",
         type: "MULTIPLE_CHOICE",
         text: "2+2=?",
         optionsJson: JSON.stringify(["3", "4", "5"]),
@@ -111,5 +115,28 @@ describe("mapBankQuestionToQuestionData", () => {
 
     expect(data.options).toEqual(["3", "4", "5"]);
     expect(data.order).toBe(1);
+  });
+
+  it("Question Bank / Exam Pools redesign v1 — always stamps source QUESTION_BANK and the exact bank question id copied from, never a live reference to any of the bank question's OTHER (mutable) fields", () => {
+    const data = mapBankQuestionToQuestionData(
+      {
+        id: "bank-q-3",
+        type: "ESSAY",
+        text: "Discuss photosynthesis.",
+        optionsJson: null,
+        correctAnswer: null,
+        points: 5,
+      },
+      "exam-2",
+      2,
+    );
+
+    expect(data.source).toBe("QUESTION_BANK");
+    expect(data.sourceBankQuestionId).toBe("bank-q-3");
+    // Everything else is copied BY VALUE — no nested relation object, no
+    // reference the caller could accidentally mutate to affect the
+    // BankQuestion row itself.
+    expect(data.text).toBe("Discuss photosynthesis.");
+    expect(data.correctAnswer).toBeUndefined();
   });
 });

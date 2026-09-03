@@ -10,6 +10,7 @@ import {
   type ManualQuestionDraft,
   type NormalizedQuestion,
 } from "@/lib/manualQuestionDraft";
+import type { QuestionSource } from "@/lib/questionSource";
 
 const manualDraftSchema = z.object({
   type: z.enum(["MULTIPLE_CHOICE", "SHORT_ANSWER", "ESSAY"]),
@@ -62,6 +63,11 @@ export async function POST(
     }
 
     let questions: NormalizedQuestion[];
+    // Question Bank / Exam Pools redesign v1 — the two request shapes
+    // this route accepts ARE the reliable, server-observed distinction
+    // between "pasted structured text" and "filled-in draft cards", so
+    // source is set from which branch actually ran, never guessed.
+    let source: QuestionSource;
 
     if (parsed.data.text) {
       const { rows, invalidCount } = parseBulkQuestionsText(parsed.data.text);
@@ -81,6 +87,7 @@ export async function POST(
         correctAnswer: row.correctAnswer,
         points: row.points!,
       }));
+      source = "BULK_IMPORT";
     } else {
       const drafts = parsed.data.questions as ManualQuestionDraft[];
       const rows = drafts.map((draft, i) => ({ index: i, errors: validateManualDraft(draft) }));
@@ -92,6 +99,7 @@ export async function POST(
         );
       }
       questions = drafts.map(normalizeManualDraft);
+      source = "MANUAL";
     }
 
     let bank: { id: string; lecturerId: string } | null = null;
@@ -127,6 +135,7 @@ export async function POST(
             correctAnswer: q.correctAnswer ?? undefined,
             points: q.points,
             order: nextOrder++,
+            source,
           },
         });
         count++;

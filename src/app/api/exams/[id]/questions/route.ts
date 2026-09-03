@@ -61,6 +61,9 @@ export async function POST(
         points,
         order: (lastQuestion?.order ?? -1) + 1,
         questionPoolId: questionPoolId ?? undefined,
+        // Question Bank / Exam Pools redesign v1 — this route is only
+        // ever reached by manual, single-question creation.
+        source: "MANUAL",
       },
     });
 

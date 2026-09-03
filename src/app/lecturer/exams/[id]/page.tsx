@@ -26,6 +26,7 @@ import {
   type ExamMode,
 } from "@/lib/examPolicy";
 import { buildStudentJoinLink } from "@/lib/examShareLink";
+import { QUESTION_SOURCE_LABELS } from "@/lib/questionSource";
 import {
   resolveDisplayRequirementUiState,
   resolveDeliveryModeForSingleDisplayRequired,
@@ -60,6 +61,11 @@ type Question = {
   order: number;
   // Question Pools v1 — see docs/question-pools-v1.md. Null means "no pool."
   questionPoolId?: string | null;
+  // Question Bank / Exam Pools redesign v1 — see
+  // docs/question-bank-exam-pools-v1.md. Null for every question created
+  // before this feature — never guessed, only ever shown when present.
+  source?: "MANUAL" | "AI_GENERATED" | "BULK_IMPORT" | "QUESTION_BANK" | null;
+  sourceBankQuestionId?: string | null;
 };
 
 // Question Pools v1 — see docs/question-pools-v1.md.
@@ -247,6 +253,12 @@ const QUESTION_TYPE_LABELS: Record<GeneratedQuestion["type"], string> = {
   ESSAY: "Essay",
 };
 
+const QUESTION_TYPE_LABELS_SHORT: Record<Question["type"], string> = {
+  MULTIPLE_CHOICE: "Multiple choice",
+  SHORT_ANSWER: "Short answer",
+  ESSAY: "Essay",
+};
+
 type LtiExamLink = {
   id: string;
   resourceLinkId: string;
@@ -346,6 +358,10 @@ export default function LecturerExamPage({
   const [newPoolName, setNewPoolName] = useState("");
   const [newPoolDrawCount, setNewPoolDrawCount] = useState("");
   const [poolsMessage, setPoolsMessage] = useState<string | null>(null);
+  // Part 11 — post-create prompt for a freshly-created pool.
+  const [justCreatedPool, setJustCreatedPool] = useState<{ id: string; name: string } | null>(null);
+  const [addFromExamToPoolOpen, setAddFromExamToPoolOpen] = useState(false);
+  const [addFromExamToPoolSelectedIds, setAddFromExamToPoolSelectedIds] = useState<Set<string>>(new Set());
 
   // Course, Enrolment, Exam Assignment, Scheduling v1 — see
   // docs/course-enrolment-and-exam-assignment.md.
@@ -413,8 +429,17 @@ export default function LecturerExamPage({
     }
   }
 
+  // Question Bank / Exam Pools redesign v1 — see
+  // docs/question-bank-exam-pools-v1.md. Which single "Add questions"
+  // panel is currently expanded — never more than one at once, keeping
+  // the page compact (Part 19) instead of showing all four add-flows
+  // permanently open. The bank flow is a separate modal, not one of
+  // these panels — see the bank-modal state further below.
+  const [activeAddMethod, setActiveAddMethod] = useState<"manual" | "bulk" | "ai" | null>(null);
+
   const [manualDrafts, setManualDrafts] = useState<ManualQuestionDraft[]>([createEmptyManualDraft()]);
   const [manualErrors, setManualErrors] = useState<Record<number, string[]>>({});
+  const [manualSaveToBankId, setManualSaveToBankId] = useState("");
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const [addSuccess, setAddSuccess] = useState<string | null>(null);
@@ -422,12 +447,60 @@ export default function LecturerExamPage({
   const [bulkText, setBulkText] = useState("");
   const [bulkPreview, setBulkPreview] = useState<BulkParseResult | null>(null);
   const [bulkSaveToBankId, setBulkSaveToBankId] = useState("");
-  const [bulkBanks, setBulkBanks] = useState<{ id: string; title: string }[]>([]);
+  // Shared "my question banks" list — lazily loaded once and reused by
+  // the manual/bulk-paste save-to-bank selects, the AI review's
+  // save-to-bank select, and the Add-from-Question-Bank modal, rather
+  // than each flow independently re-fetching the same list.
+  const [myBanks, setMyBanks] = useState<{ id: string; title: string }[]>([]);
   const [bulkImporting, setBulkImporting] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
   const [bulkResult, setBulkResult] = useState<{ created: number; bankSaved: number; warning?: string } | null>(
     null,
   );
+
+  async function ensureMyBanksLoaded() {
+    if (myBanks.length > 0) return;
+    try {
+      const res = await fetch("/api/lecturer/question-banks");
+      const banks = res.ok ? await res.json() : [];
+      setMyBanks(Array.isArray(banks) ? banks : []);
+    } catch {
+      // Best-effort — the save-to-bank option simply stays empty/unavailable.
+    }
+  }
+
+  // Question Bank / Exam Pools redesign v1 — "Add from Question Bank"
+  // modal state. See docs/question-bank-exam-pools-v1.md.
+  type BankModalDelivery =
+    | { kind: "REQUIRED" }
+    | { kind: "EXISTING_POOL"; poolId: string }
+    | { kind: "NEW_POOL"; name: string; drawCount: string };
+  type BankModalQuestion = {
+    id: string;
+    type: "MULTIPLE_CHOICE" | "SHORT_ANSWER" | "ESSAY";
+    text: string;
+    points: number;
+    difficulty: "easy" | "medium" | "hard" | null;
+    topic: string | null;
+  };
+  const [bankModalOpen, setBankModalOpen] = useState(false);
+  const [bankModalBankId, setBankModalBankId] = useState<string>("");
+  const [bankModalQuestions, setBankModalQuestions] = useState<BankModalQuestion[]>([]);
+  const [bankModalAlreadyCopiedIds, setBankModalAlreadyCopiedIds] = useState<Set<string>>(new Set());
+  const [bankModalSelectedIds, setBankModalSelectedIds] = useState<Set<string>>(new Set());
+  const [bankModalSearch, setBankModalSearch] = useState("");
+  const [bankModalTypeFilter, setBankModalTypeFilter] = useState<"" | "MULTIPLE_CHOICE" | "SHORT_ANSWER" | "ESSAY">("");
+  const [bankModalLoading, setBankModalLoading] = useState(false);
+  const [bankModalDelivery, setBankModalDelivery] = useState<BankModalDelivery>({ kind: "REQUIRED" });
+  const [bankModalSubmitting, setBankModalSubmitting] = useState(false);
+  const [bankModalError, setBankModalError] = useState<string | null>(null);
+
+  // Question Bank / Exam Pools redesign v1 (Part 3) — per-row "Save copy
+  // to Question Bank" for an already-existing exam question.
+  const [saveToBankRowId, setSaveToBankRowId] = useState<string | null>(null);
+  const [saveToBankTargetId, setSaveToBankTargetId] = useState("");
+  const [savingQuestionToBank, setSavingQuestionToBank] = useState(false);
+  const [saveToBankMessage, setSaveToBankMessage] = useState<string | null>(null);
 
   const [sourceMaterial, setSourceMaterial] = useState("");
   const [subject, setSubject] = useState("");
@@ -449,6 +522,7 @@ export default function LecturerExamPage({
   const [generateWarning, setGenerateWarning] = useState<string | null>(null);
   const [generated, setGenerated] = useState<GeneratedQuestion[]>([]);
   const [included, setIncluded] = useState<boolean[]>([]);
+  const [aiSaveToBankId, setAiSaveToBankId] = useState("");
   const [expandedExplanation, setExpandedExplanation] = useState<number | null>(null);
   const [importing, setImporting] = useState(false);
 
@@ -554,13 +628,26 @@ export default function LecturerExamPage({
       }),
     });
     if (res.ok) {
+      const created = await res.json();
       setNewPoolName("");
       setNewPoolDrawCount("");
+      // Part 11 — immediately offer to populate the new pool from either
+      // source, rather than leaving the lecturer to hunt for how.
+      setJustCreatedPool({ id: created.id, name: created.name });
+      setAddFromExamToPoolSelectedIds(new Set());
       loadPools();
     } else {
       const body = await res.json().catch(() => null);
       setPoolsMessage(typeof body?.error === "string" ? body.error : "Could not create pool.");
     }
+  }
+
+  async function handleAddSelectedExamQuestionsToPool(poolId: string) {
+    const ids = Array.from(addFromExamToPoolSelectedIds);
+    for (const questionId of ids) {
+      await handleAssignQuestionPool(questionId, poolId);
+    }
+    setAddFromExamToPoolSelectedIds(new Set());
   }
 
   async function handleUpdatePoolDrawCount(poolId: string, drawCount: number | null) {
@@ -586,6 +673,130 @@ export default function LecturerExamPage({
     });
     loadExam({ preserveSecureForm: true });
     loadPools();
+  }
+
+  // Question Bank / Exam Pools redesign v1 (Part 3) — "Save copy to
+  // Question Bank" for an already-existing exam question. Creates an
+  // independent BankQuestion snapshot; never links back to this Question.
+  async function handleSaveQuestionToBank(questionId: string) {
+    if (!saveToBankTargetId) return;
+    setSavingQuestionToBank(true);
+    setSaveToBankMessage(null);
+    try {
+      const res = await fetch(
+        `/api/lecturer/exams/${id}/questions/${questionId}/save-to-bank`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ bankId: saveToBankTargetId }),
+        },
+      );
+      if (res.ok) {
+        setSaveToBankMessage("Saved a copy to the question bank.");
+        setSaveToBankRowId(null);
+        setSaveToBankTargetId("");
+      } else {
+        setSaveToBankMessage("Could not save a copy to the question bank.");
+      }
+    } finally {
+      setSavingQuestionToBank(false);
+    }
+  }
+
+  // Question Bank / Exam Pools redesign v1 — "Add from Question Bank"
+  // modal. See docs/question-bank-exam-pools-v1.md.
+  async function openBankModal(initialDelivery?: BankModalDelivery) {
+    setBankModalOpen(true);
+    setBankModalError(null);
+    setBankModalSelectedIds(new Set());
+    setBankModalSearch("");
+    setBankModalTypeFilter("");
+    setBankModalDelivery(initialDelivery ?? { kind: "REQUIRED" });
+    await ensureMyBanksLoaded();
+  }
+
+  function closeBankModal() {
+    setBankModalOpen(false);
+  }
+
+  async function loadBankModalQuestions(bankId: string) {
+    setBankModalBankId(bankId);
+    setBankModalSelectedIds(new Set());
+    setBankModalQuestions([]);
+    setBankModalAlreadyCopiedIds(new Set());
+    if (!bankId) return;
+    setBankModalLoading(true);
+    try {
+      const res = await fetch(`/api/lecturer/question-banks/${bankId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setBankModalQuestions(Array.isArray(data.questions) ? data.questions : []);
+      }
+    } finally {
+      setBankModalLoading(false);
+    }
+    // Part 16 — duplicate protection. Cross-reference against this
+    // exam's already-copied bank questions (Question.sourceBankQuestionId)
+    // so an already-added question can be disabled in the selector,
+    // rather than only discovered after submitting.
+    const alreadyCopied = new Set(
+      (exam?.questions ?? []).map((q) => q.sourceBankQuestionId).filter((v): v is string => Boolean(v)),
+    );
+    setBankModalAlreadyCopiedIds(alreadyCopied);
+  }
+
+  function toggleBankModalQuestion(questionId: string) {
+    if (bankModalAlreadyCopiedIds.has(questionId)) return;
+    setBankModalSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(questionId)) next.delete(questionId);
+      else next.add(questionId);
+      return next;
+    });
+  }
+
+  async function handleSubmitBankModal(overrideDelivery?: BankModalDelivery) {
+    const effectiveDelivery = overrideDelivery ?? bankModalDelivery;
+    if (bankModalSelectedIds.size === 0 || !bankModalBankId) return;
+    if (effectiveDelivery.kind === "NEW_POOL" && !effectiveDelivery.name.trim()) return;
+    setBankModalSubmitting(true);
+    setBankModalError(null);
+
+    const delivery =
+      effectiveDelivery.kind === "NEW_POOL"
+        ? {
+            kind: "NEW_POOL" as const,
+            name: effectiveDelivery.name,
+            drawCount: effectiveDelivery.drawCount ? Number(effectiveDelivery.drawCount) : null,
+          }
+        : effectiveDelivery;
+
+    const res = await fetch(`/api/lecturer/exams/${id}/questions/from-bank`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        bankId: bankModalBankId,
+        bankQuestionIds: Array.from(bankModalSelectedIds),
+        delivery,
+      }),
+    });
+
+    setBankModalSubmitting(false);
+    const data = await res.json().catch(() => null);
+
+    if (!res.ok) {
+      setBankModalError(typeof data?.error === "string" ? data.error : "Failed to add questions from the bank.");
+      return;
+    }
+
+    setBankModalOpen(false);
+    setPoolsMessage(
+      data.skippedAsDuplicate?.length > 0
+        ? `${data.created} question(s) added. ${data.skippedAsDuplicate.length} were already in this exam and were skipped.`
+        : null,
+    );
+    await loadExam({ preserveSecureForm: true });
+    await loadPools();
   }
 
   async function loadCourseStudents(selectedCourseId: string) {
@@ -929,7 +1140,12 @@ export default function LecturerExamPage({
     const res = await fetch(`/api/lecturer/exams/${id}/bulk-questions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ questions: manualDrafts }),
+      body: JSON.stringify({
+        questions: manualDrafts,
+        // Question Bank / Exam Pools redesign v1 (Part 7) — never forces
+        // a save; only sent when the lecturer explicitly picked a bank.
+        saveToBankId: manualSaveToBankId || undefined,
+      }),
     });
     setAdding(false);
 
@@ -940,9 +1156,13 @@ export default function LecturerExamPage({
     }
 
     const body = await res.json();
-    setAddSuccess(`${body.created} question${body.created === 1 ? "" : "s"} added.`);
+    setAddSuccess(
+      `${body.created} question${body.created === 1 ? "" : "s"} added` +
+        (body.bankSaved > 0 ? ` and saved to the question bank.` : "."),
+    );
     setManualDrafts([createEmptyManualDraft()]);
     setManualErrors({});
+    setManualSaveToBankId("");
     await loadExam({ preserveSecureForm: true });
   }
 
@@ -950,12 +1170,7 @@ export default function LecturerExamPage({
     setBulkResult(null);
     setBulkError(null);
     setBulkPreview(parseBulkQuestionsText(bulkText));
-    if (bulkBanks.length === 0) {
-      fetch("/api/lecturer/question-banks")
-        .then((res) => (res.ok ? res.json() : []))
-        .then((banks) => setBulkBanks(Array.isArray(banks) ? banks : []))
-        .catch(() => {});
-    }
+    void ensureMyBanksLoaded();
   }
 
   async function handleImportBulkQuestions() {
@@ -1203,7 +1418,7 @@ export default function LecturerExamPage({
     setGenerateWarning(typeof data.warning === "string" ? data.warning : null);
   }
 
-  async function handleAddSelected() {
+  async function handleAddSelected(saveToBankId?: string) {
     const selected = generated.filter((_, i) => included[i]);
     if (selected.length === 0) return;
 
@@ -1212,18 +1427,26 @@ export default function LecturerExamPage({
     const res = await fetch(`/api/lecturer/exams/${id}/questions/bulk-import`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ questions: selected }),
+      // Question Bank / Exam Pools redesign v1 (Part 8) — never saves to
+      // a bank unless the lecturer explicitly chose one after review;
+      // never auto-saved before that.
+      body: JSON.stringify({ questions: selected, saveToBankId: saveToBankId || undefined }),
     });
 
     setImporting(false);
 
+    const data = await res.json().catch(() => null);
     if (!res.ok) {
       setGenerateError("Failed to add selected questions to the exam");
       return;
     }
 
+    setGenerateWarning(
+      data?.bankSaved > 0 ? `${data.bankSaved} question(s) were also saved to the question bank.` : null,
+    );
     setGenerated([]);
     setIncluded([]);
+    setAiSaveToBankId("");
     await loadExam({ preserveSecureForm: true });
   }
 
@@ -3768,12 +3991,179 @@ export default function LecturerExamPage({
         hidden={activeTab !== "questions"}
         className="mt-6"
       >
+      {(() => {
+        const requiredCount = exam.questions.filter((q) => !q.questionPoolId).length;
+        const pooledCount = exam.questions.length - requiredCount;
+        const estimatedDelivered =
+          requiredCount +
+          pools.reduce((sum, pool) => sum + Math.min(pool.drawCount ?? pool.questionCount, pool.questionCount), 0);
+        return (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-lecturer-border bg-lecturer-surface p-3 text-sm">
+            <span className="rounded-full bg-lecturer-border-subtle px-3 py-1 font-medium">
+              {exam.questions.length} question{exam.questions.length === 1 ? "" : "s"}
+            </span>
+            <span className="rounded-full bg-lecturer-border-subtle px-3 py-1">{requiredCount} required</span>
+            {secureForm?.enableQuestionPools && (
+              <>
+                <span className="rounded-full bg-lecturer-border-subtle px-3 py-1">{pooledCount} pooled</span>
+                <span className="rounded-full bg-lecturer-border-subtle px-3 py-1">
+                  ~{estimatedDelivered} delivered/student
+                </span>
+              </>
+            )}
+          </div>
+        );
+      })()}
+
+      <h2 className="mt-6 text-lg font-semibold text-lecturer-text-primary">Add questions</h2>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button
+          onClick={() => setActiveAddMethod(activeAddMethod === "manual" ? null : "manual")}
+          className={
+            activeAddMethod === "manual"
+              ? "rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-medium text-white"
+              : "rounded-lg border border-lecturer-border px-4 py-2 text-sm font-medium hover:bg-lecturer-border-subtle"
+          }
+        >
+          + Create question
+        </button>
+        <button
+          onClick={() => setActiveAddMethod(activeAddMethod === "ai" ? null : "ai")}
+          className={
+            activeAddMethod === "ai"
+              ? "rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-medium text-white"
+              : "rounded-lg border border-lecturer-border px-4 py-2 text-sm font-medium hover:bg-lecturer-border-subtle"
+          }
+        >
+          ✨ Generate with AI
+        </button>
+        <button
+          onClick={() => void openBankModal()}
+          className="rounded-lg border border-lecturer-border px-4 py-2 text-sm font-medium hover:bg-lecturer-border-subtle"
+        >
+          📚 Add from Question Bank
+        </button>
+        <button
+          onClick={() => setActiveAddMethod(activeAddMethod === "bulk" ? null : "bulk")}
+          className={
+            activeAddMethod === "bulk"
+              ? "rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-medium text-white"
+              : "rounded-lg border border-lecturer-border px-4 py-2 text-sm font-medium hover:bg-lecturer-border-subtle"
+          }
+        >
+          Bulk import
+        </button>
+      </div>
+
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Exam questions</h2>
+      {exam.questions.length === 0 ? (
+        <p className="mt-3 text-lecturer-text-secondary">No questions yet — use one of the options above to add some.</p>
+      ) : (
+        <div className="mt-3 overflow-x-auto rounded-lg border border-lecturer-border">
+          <table className="w-full text-sm">
+            <thead className="bg-lecturer-border-subtle/60 text-left text-xs uppercase tracking-wide text-lecturer-text-secondary">
+              <tr>
+                <th className="px-3 py-2">#</th>
+                <th className="px-3 py-2">Question</th>
+                <th className="px-3 py-2">Type</th>
+                <th className="px-3 py-2">Points</th>
+                <th className="px-3 py-2">Source</th>
+                <th className="px-3 py-2">Delivery</th>
+                <th className="px-3 py-2">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {exam.questions.map((q, i) => (
+                <tr key={q.id} className="border-t border-lecturer-border align-top">
+                  <td className="px-3 py-2 text-lecturer-text-secondary">{i + 1}</td>
+                  <td className="max-w-sm px-3 py-2">
+                    <p className="truncate" title={q.text}>{q.text}</p>
+                  </td>
+                  <td className="px-3 py-2 text-lecturer-text-secondary">{QUESTION_TYPE_LABELS_SHORT[q.type]}</td>
+                  <td className="px-3 py-2 text-lecturer-text-secondary">{q.points}</td>
+                  <td className="px-3 py-2 text-lecturer-text-secondary">
+                    {/* Never invented — a question created before this feature has no
+                        recorded provenance, so nothing is shown rather than guessed. */}
+                    {q.source ? QUESTION_SOURCE_LABELS[q.source] : "—"}
+                  </td>
+                  <td className="px-3 py-2">
+                    {q.questionPoolId ? (
+                      <span className="rounded bg-lecturer-border-subtle px-2 py-0.5 text-xs">
+                        Pool: {pools.find((p) => p.id === q.questionPoolId)?.name ?? "—"}
+                      </span>
+                    ) : (
+                      <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">Required</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {secureForm?.enableQuestionPools && (
+                        <select
+                          className="rounded border border-lecturer-border px-1.5 py-1 text-xs"
+                          value={q.questionPoolId ?? ""}
+                          onChange={(e) => handleAssignQuestionPool(q.id, e.target.value || null)}
+                          title={q.questionPoolId ? "Move to pool / make required" : "Add to pool"}
+                        >
+                          <option value="">Required</option>
+                          {pools.map((pool) => (
+                            <option key={pool.id} value={pool.id}>
+                              Pool: {pool.name}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      <button
+                        onClick={() => setSaveToBankRowId(saveToBankRowId === q.id ? null : q.id)}
+                        className="text-xs underline"
+                      >
+                        Save to bank
+                      </button>
+                      <button
+                        onClick={() => handleDeleteQuestion(q.id)}
+                        className="text-xs text-[#B42318] underline"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                    {saveToBankRowId === q.id && (
+                      <div className="mt-2 flex items-center gap-2">
+                        <select
+                          className="rounded border border-lecturer-border px-1.5 py-1 text-xs"
+                          value={saveToBankTargetId}
+                          onFocus={() => void ensureMyBanksLoaded()}
+                          onChange={(e) => setSaveToBankTargetId(e.target.value)}
+                        >
+                          <option value="">Choose a bank...</option>
+                          {myBanks.map((b) => (
+                            <option key={b.id} value={b.id}>
+                              {b.title}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => void handleSaveQuestionToBank(q.id)}
+                          disabled={!saveToBankTargetId || savingQuestionToBank}
+                          className="rounded border border-lecturer-border px-2 py-1 text-xs disabled:opacity-50"
+                        >
+                          {savingQuestionToBank ? "Saving..." : "Save"}
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {saveToBankMessage && <p className="mt-2 text-sm text-green-700">{saveToBankMessage}</p>}
+
       {secureForm?.enableQuestionPools && (
         <>
           <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Question pools</h2>
           <p className="mt-1 text-sm text-lecturer-text-secondary">
             Create a larger set of questions and draw a smaller random selection for each student
-            attempt.
+            attempt. Required questions above are unaffected by pools.
           </p>
           <div className="mt-3 space-y-2">
             {pools.length === 0 && <p className="text-lecturer-text-secondary">No pools yet.</p>}
@@ -3782,7 +4172,10 @@ export default function LecturerExamPage({
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <p className="text-sm font-medium">{pool.name}</p>
-                    <p className="text-xs text-lecturer-text-secondary">{pool.questionCount} question(s) in pool</p>
+                    <p className="text-xs text-lecturer-text-secondary">
+                      {pool.questionCount} question{pool.questionCount === 1 ? "" : "s"} →{" "}
+                      Draw {pool.drawCount ?? "all"}
+                    </p>
                   </div>
                   <div className="flex items-center gap-2">
                     <label className="text-xs text-lecturer-text-secondary">Draw this many questions from this pool</label>
@@ -3800,6 +4193,16 @@ export default function LecturerExamPage({
                       }
                     />
                     <button
+                      onClick={() => {
+                        setJustCreatedPool({ id: pool.id, name: pool.name });
+                        setAddFromExamToPoolOpen(false);
+                        setAddFromExamToPoolSelectedIds(new Set());
+                      }}
+                      className="text-sm underline"
+                    >
+                      Edit questions
+                    </button>
+                    <button
                       onClick={() => handleDeletePool(pool.id)}
                       className="text-sm text-[#B42318] underline"
                     >
@@ -3809,8 +4212,9 @@ export default function LecturerExamPage({
                 </div>
                 {pool.drawCount != null && pool.drawCount > pool.questionCount && (
                   <p className="mt-2 text-xs text-[#B54708]">
-                    This pool has fewer questions than the draw count. Students will receive all
-                    available questions from this pool.
+                    Draw {pool.drawCount}, but this pool contains only {pool.questionCount} question
+                    {pool.questionCount === 1 ? "" : "s"}. Students will receive all available questions
+                    from this pool.
                   </p>
                 )}
               </div>
@@ -3842,68 +4246,91 @@ export default function LecturerExamPage({
               disabled={!newPoolName.trim()}
               className="rounded border border-lecturer-border px-3 py-1.5 text-sm disabled:opacity-50"
             >
-              Add pool
+              + Create question pool
             </button>
           </div>
           {poolsMessage && <p className="mt-2 text-sm text-[#B42318]">{poolsMessage}</p>}
+
+          {justCreatedPool && (
+            <div className="mt-3 rounded border border-lecturer-accent bg-lecturer-accent/5 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm">
+                  Add questions to <strong>{justCreatedPool.name}</strong>
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setAddFromExamToPoolOpen((v) => !v)}
+                    className="rounded border border-lecturer-border px-3 py-1.5 text-sm"
+                  >
+                    Add questions from exam
+                  </button>
+                  <button
+                    onClick={() =>
+                      void openBankModal({ kind: "EXISTING_POOL", poolId: justCreatedPool.id })
+                    }
+                    className="rounded border border-lecturer-border px-3 py-1.5 text-sm"
+                  >
+                    Add questions from Question Bank
+                  </button>
+                  <button
+                    onClick={() => {
+                      setJustCreatedPool(null);
+                      setAddFromExamToPoolOpen(false);
+                    }}
+                    className="text-sm text-lecturer-text-secondary underline"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+
+              {addFromExamToPoolOpen && (
+                <div className="mt-3 space-y-2">
+                  {exam.questions.filter((q) => !q.questionPoolId).length === 0 ? (
+                    <p className="text-sm text-lecturer-text-secondary">
+                      No required (unpooled) exam questions available to move into this pool.
+                    </p>
+                  ) : (
+                    <>
+                      {exam.questions
+                        .filter((q) => !q.questionPoolId)
+                        .map((q) => (
+                          <label key={q.id} className="flex items-start gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              className="mt-1"
+                              checked={addFromExamToPoolSelectedIds.has(q.id)}
+                              onChange={() =>
+                                setAddFromExamToPoolSelectedIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(q.id)) next.delete(q.id);
+                                  else next.add(q.id);
+                                  return next;
+                                })
+                              }
+                            />
+                            <span>{q.text}</span>
+                          </label>
+                        ))}
+                      <button
+                        onClick={() => void handleAddSelectedExamQuestionsToPool(justCreatedPool.id)}
+                        disabled={addFromExamToPoolSelectedIds.size === 0}
+                        className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                      >
+                        Add {addFromExamToPoolSelectedIds.size} question(s) to pool
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
 
-      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Questions</h2>
-      <div className="mt-3 space-y-3">
-        {exam.questions.length === 0 && (
-          <p className="text-lecturer-text-secondary">No questions yet.</p>
-        )}
-        {exam.questions.map((q, i) => (
-          <div key={q.id} className="rounded border border-lecturer-border bg-lecturer-surface p-3">
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm text-lecturer-text-secondary">
-                  Q{i + 1} · {q.type} · {q.points} pt(s)
-                </p>
-                <p className="mt-1">{q.text}</p>
-                {q.options && (
-                  <ul className="mt-1 list-disc pl-5 text-sm text-lecturer-text-secondary">
-                    {q.options.map((o) => (
-                      <li key={o}>{o}</li>
-                    ))}
-                  </ul>
-                )}
-                {q.correctAnswer && (
-                  <p className="mt-1 text-sm text-green-700">
-                    Correct: {q.correctAnswer}
-                  </p>
-                )}
-                {secureForm?.enableQuestionPools && pools.length > 0 && (
-                  <div className="mt-2">
-                    <label className="text-xs text-lecturer-text-secondary">Question pool</label>
-                    <select
-                      className="ml-2 rounded border border-lecturer-border px-2 py-1 text-xs"
-                      value={q.questionPoolId ?? ""}
-                      onChange={(e) => handleAssignQuestionPool(q.id, e.target.value || null)}
-                    >
-                      <option value="">No pool</option>
-                      {pools.map((pool) => (
-                        <option key={pool.id} value={pool.id}>
-                          {pool.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-              </div>
-              <button
-                onClick={() => handleDeleteQuestion(q.id)}
-                className="text-sm text-[#B42318] underline"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Add multiple questions</h2>
+      {activeAddMethod === "bulk" && (
+      <>
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Bulk import</h2>
       <div className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
         <p className="text-sm text-lecturer-text-secondary">
           Paste one or more questions in the format below, then preview before importing. Nothing
@@ -3968,7 +4395,7 @@ export default function LecturerExamPage({
               </div>
             ))}
 
-            {bulkBanks.length > 0 && (
+            {myBanks.length > 0 && (
               <div>
                 <label className="block text-sm font-medium">
                   Also save to question bank (optional)
@@ -3979,7 +4406,7 @@ export default function LecturerExamPage({
                   onChange={(e) => setBulkSaveToBankId(e.target.value)}
                 >
                   <option value="">Don&apos;t save to a bank</option>
-                  {bulkBanks.map((b) => (
+                  {myBanks.map((b) => (
                     <option key={b.id} value={b.id}>
                       {b.title}
                     </option>
@@ -4009,7 +4436,11 @@ export default function LecturerExamPage({
           </div>
         )}
       </div>
+      </>
+      )}
 
+      {activeAddMethod === "ai" && (
+      <>
       <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Generate questions with AI</h2>
       <div className="mt-3 space-y-3 rounded border border-lecturer-border bg-lecturer-surface p-4">
         <div>
@@ -4204,18 +4635,47 @@ export default function LecturerExamPage({
                 </div>
               </div>
             ))}
-            <button
-              onClick={handleAddSelected}
-              disabled={importing || included.every((v) => !v)}
-              className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-white disabled:opacity-50"
-            >
-              {importing ? "Adding..." : "Add selected to exam"}
-            </button>
+            {/* AI question-generation Part 8 — "exam + Question Bank" is
+                always a distinct, explicit lecturer choice; AI output is
+                never auto-saved to a bank before this. */}
+            <div className="flex flex-wrap items-end gap-2">
+              <button
+                onClick={() => handleAddSelected()}
+                disabled={importing || included.every((v) => !v)}
+                className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-white disabled:opacity-50"
+              >
+                {importing ? "Adding..." : "Add selected to exam"}
+              </button>
+              <select
+                className="rounded border border-lecturer-border px-2 py-2 text-sm"
+                value={aiSaveToBankId}
+                onFocus={() => void ensureMyBanksLoaded()}
+                onChange={(e) => setAiSaveToBankId(e.target.value)}
+              >
+                <option value="">Also save to a bank...</option>
+                {myBanks.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.title}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => handleAddSelected(aiSaveToBankId)}
+                disabled={importing || included.every((v) => !v) || !aiSaveToBankId}
+                className="rounded border border-lecturer-border px-4 py-2 text-sm disabled:opacity-50"
+              >
+                Add selected to exam + Question Bank
+              </button>
+            </div>
           </div>
         )}
       </div>
+      </>
+      )}
 
-      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Add questions</h2>
+      {activeAddMethod === "manual" && (
+      <>
+      <h2 className="mt-8 text-lg font-semibold text-lecturer-text-primary">Create question</h2>
       <div className="mt-3 space-y-3">
         {manualDrafts.map((draft, index) => (
           <div key={index} className="rounded border border-lecturer-border bg-lecturer-surface p-4">
@@ -4314,6 +4774,23 @@ export default function LecturerExamPage({
           + Add another question
         </button>
 
+        <div>
+          <label className="block text-sm font-medium">☐ Save a copy to Question Bank (optional)</label>
+          <select
+            className="mt-1 rounded border border-lecturer-border px-2 py-1.5 text-sm"
+            value={manualSaveToBankId}
+            onFocus={() => void ensureMyBanksLoaded()}
+            onChange={(e) => setManualSaveToBankId(e.target.value)}
+          >
+            <option value="">Don&apos;t save to a bank</option>
+            {myBanks.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.title}
+              </option>
+            ))}
+          </select>
+        </div>
+
         <div className="pt-2">
           <button
             onClick={handleSaveManualQuestions}
@@ -4327,6 +4804,183 @@ export default function LecturerExamPage({
         {addError && <p className="text-sm text-[#B42318]">{addError}</p>}
         {addSuccess && <p className="text-sm text-green-700">{addSuccess}</p>}
       </div>
+      </>
+      )}
+
+      {bankModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-lg bg-lecturer-surface shadow-lg">
+            <div className="flex items-center justify-between border-b border-lecturer-border p-4">
+              <h3 className="text-lg font-semibold text-lecturer-text-primary">Add from Question Bank</h3>
+              <button onClick={closeBankModal} className="text-lecturer-text-secondary">
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4">
+              <label className="block text-sm font-medium">Question bank</label>
+              <select
+                className="mt-1 w-full rounded border border-lecturer-border px-3 py-2 text-sm"
+                value={bankModalBankId}
+                onChange={(e) => void loadBankModalQuestions(e.target.value)}
+              >
+                <option value="">Choose a bank...</option>
+                {myBanks.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.title}
+                  </option>
+                ))}
+              </select>
+
+              {bankModalBankId && (
+                <>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <input
+                      value={bankModalSearch}
+                      onChange={(e) => setBankModalSearch(e.target.value)}
+                      placeholder="Search questions..."
+                      className="flex-1 rounded border border-lecturer-border px-3 py-1.5 text-sm"
+                    />
+                    <select
+                      className="rounded border border-lecturer-border px-2 py-1.5 text-sm"
+                      value={bankModalTypeFilter}
+                      onChange={(e) =>
+                        setBankModalTypeFilter(e.target.value as typeof bankModalTypeFilter)
+                      }
+                    >
+                      <option value="">All types</option>
+                      <option value="MULTIPLE_CHOICE">Multiple choice</option>
+                      <option value="SHORT_ANSWER">Short answer</option>
+                      <option value="ESSAY">Essay</option>
+                    </select>
+                  </div>
+
+                  {bankModalLoading ? (
+                    <p className="mt-3 text-sm text-lecturer-text-secondary">Loading...</p>
+                  ) : (
+                    <div className="mt-3 space-y-2">
+                      {bankModalQuestions
+                        .filter(
+                          (q) =>
+                            (!bankModalTypeFilter || q.type === bankModalTypeFilter) &&
+                            (!bankModalSearch ||
+                              q.text.toLowerCase().includes(bankModalSearch.toLowerCase())),
+                        )
+                        .map((q) => {
+                          const alreadyCopied = bankModalAlreadyCopiedIds.has(q.id);
+                          return (
+                            <label
+                              key={q.id}
+                              className={`flex items-start gap-2 rounded border border-lecturer-border p-2 text-sm ${
+                                alreadyCopied ? "opacity-50" : "cursor-pointer hover:bg-lecturer-border-subtle"
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                className="mt-1"
+                                checked={bankModalSelectedIds.has(q.id)}
+                                disabled={alreadyCopied}
+                                onChange={() => toggleBankModalQuestion(q.id)}
+                              />
+                              <span>
+                                <span className="block">{q.text}</span>
+                                <span className="text-xs text-lecturer-text-secondary">
+                                  {QUESTION_TYPE_LABELS_SHORT[q.type]} · {q.points} pt(s)
+                                  {alreadyCopied ? " · Already added to this exam" : ""}
+                                </span>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      {bankModalQuestions.length === 0 && (
+                        <p className="text-sm text-lecturer-text-secondary">This bank has no questions yet.</p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+              {bankModalError && <p className="mt-3 text-sm text-[#B42318]">{bankModalError}</p>}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 border-t border-lecturer-border p-4">
+              <span className="text-sm text-lecturer-text-secondary">
+                {bankModalSelectedIds.size} selected
+              </span>
+              <button onClick={closeBankModal} className="rounded border border-lecturer-border px-3 py-1.5 text-sm">
+                Cancel
+              </button>
+              <button
+                onClick={() => void handleSubmitBankModal({ kind: "REQUIRED" })}
+                disabled={bankModalSelectedIds.size === 0 || bankModalSubmitting}
+                className="rounded border border-lecturer-border px-3 py-1.5 text-sm disabled:opacity-50"
+              >
+                {bankModalSubmitting ? "Adding..." : "Add as required questions"}
+              </button>
+              {secureForm?.enableQuestionPools && (
+                <select
+                  className="rounded border border-lecturer-border px-2 py-1.5 text-sm"
+                  disabled={bankModalSelectedIds.size === 0 || bankModalSubmitting}
+                  value={
+                    bankModalDelivery.kind === "EXISTING_POOL"
+                      ? bankModalDelivery.poolId
+                      : bankModalDelivery.kind === "NEW_POOL"
+                        ? "__new__"
+                        : ""
+                  }
+                  onChange={(e) => {
+                    if (e.target.value === "__new__") {
+                      setBankModalDelivery({ kind: "NEW_POOL", name: "", drawCount: "" });
+                    } else if (e.target.value) {
+                      const delivery = { kind: "EXISTING_POOL" as const, poolId: e.target.value };
+                      setBankModalDelivery(delivery);
+                      void handleSubmitBankModal(delivery);
+                    } else {
+                      setBankModalDelivery({ kind: "REQUIRED" });
+                    }
+                  }}
+                >
+                  <option value="">Add to pool ▾</option>
+                  {pools.map((pool) => (
+                    <option key={pool.id} value={pool.id}>
+                      Pool: {pool.name}
+                    </option>
+                  ))}
+                  <option value="__new__">+ Create new pool...</option>
+                </select>
+              )}
+              {bankModalDelivery.kind === "NEW_POOL" && (
+                <>
+                  <input
+                    value={bankModalDelivery.name}
+                    onChange={(e) =>
+                      setBankModalDelivery({ ...bankModalDelivery, name: e.target.value })
+                    }
+                    placeholder="New pool name"
+                    className="rounded border border-lecturer-border px-2 py-1.5 text-sm"
+                  />
+                  <input
+                    type="number"
+                    min={0}
+                    value={bankModalDelivery.drawCount}
+                    onChange={(e) =>
+                      setBankModalDelivery({ ...bankModalDelivery, drawCount: e.target.value })
+                    }
+                    placeholder="Draw count"
+                    className="w-24 rounded border border-lecturer-border px-2 py-1.5 text-sm"
+                  />
+                  <button
+                    onClick={() => void handleSubmitBankModal()}
+                    disabled={bankModalSelectedIds.size === 0 || bankModalSubmitting || !bankModalDelivery.name.trim()}
+                    className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                  >
+                    {bankModalSubmitting ? "Adding..." : "Create pool & add"}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       </div>
 
       <div

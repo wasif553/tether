@@ -43,10 +43,19 @@ export type BankQuestionInput = z.infer<typeof bankQuestionInputSchema>;
 
 /**
  * Maps a stored BankQuestion row onto Prisma's Question.create() input,
- * producing a fully independent copy (no reference back to the bank row).
+ * producing a fully independent copy — the returned data has no live
+ * reference back to the bank row's mutable fields (type/text/options/
+ * correctAnswer/points are copied by VALUE). `sourceBankQuestionId`
+ * (Question Bank / Exam Pools redesign v1 — see
+ * docs/question-bank-exam-pools-v1.md) is the one exception: it records
+ * WHICH bank question this copy came from, for provenance display and
+ * duplicate-add detection ONLY — editing or deleting the BankQuestion
+ * later never alters this Question (SetNull on delete; nothing ever
+ * reads this column to propagate an edit).
  */
 export function mapBankQuestionToQuestionData(
   bankQuestion: {
+    id: string;
     type: string;
     text: string;
     optionsJson: string | null;
@@ -74,5 +83,7 @@ export function mapBankQuestionToQuestionData(
     correctAnswer: bankQuestion.correctAnswer ?? undefined,
     points: bankQuestion.points,
     order,
+    source: "QUESTION_BANK" as const,
+    sourceBankQuestionId: bankQuestion.id,
   };
 }
