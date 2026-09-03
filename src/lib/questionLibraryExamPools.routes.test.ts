@@ -601,6 +601,33 @@ describe("auto-from-bank: pool composition (Part 6/8)", () => {
     expect((await second.json()).shortfalls).toEqual([{ difficulty: "easy", requested: 1, available: 0 }]);
   });
 
+  it("never counts or selects a BankQuestion with no difficulty assigned, even under a generous quota", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    const { bank } = await makeGradedBank(lecturerA.id, { easy: 2, medium: 0, hard: 0 });
+    // Three more questions in the SAME bank, deliberately left without a
+    // difficulty — Simplify automatic question pool workflow's core
+    // guarantee is that these are never silently treated as Easy.
+    await Promise.all(
+      Array.from({ length: 3 }, (_, i) =>
+        prisma.bankQuestion.create({ data: { bankId: bank.id, type: "ESSAY", text: `Unclassified ${i}`, points: 1 } }),
+      ),
+    );
+
+    // Request more Easy than truly exist as Easy (2) but well within
+    // the bank's total row count (5) — if unclassified rows were ever
+    // silently treated as Easy this would wrongly succeed with 5.
+    const res = await autoFromBankRoute.POST(
+      jsonRequest("POST", { bankId: bank.id, quotas: { easy: 3, medium: 0, hard: 0 }, delivery: { kind: "NEW_POOL", name: "Unclassified guard" } }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).shortfalls).toEqual([{ difficulty: "easy", requested: 3, available: 2 }]);
+
+    const created = await prisma.question.count({ where: { examId: exam.id } });
+    expect(created).toBe(0);
+  });
+
   it("blocks a student from calling auto-from-bank (401)", async () => {
     mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
     const exam = await makeExam(lecturerA.id);

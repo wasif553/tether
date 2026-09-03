@@ -29,6 +29,13 @@ import { buildStudentJoinLink } from "@/lib/examShareLink";
 import { QUESTION_SOURCE_LABELS } from "@/lib/questionSource";
 import { QUESTION_DIFFICULTY_LABELS } from "@/lib/questionDifficulty";
 import {
+  planAutomaticPoolSelection,
+  computeResultingComposition,
+  findOverQuotaBands,
+  findOverDrawBands,
+  totalOf,
+} from "@/lib/automaticPoolPlanning";
+import {
   resolveDisplayRequirementUiState,
   resolveDeliveryModeForSingleDisplayRequired,
   isDisplayPolicySaveBlocked,
@@ -517,6 +524,10 @@ export default function LecturerExamPage({
   // inside the same Add-from-Question-Bank modal.
   const [bankModalMode, setBankModalMode] = useState<"manual" | "automatic">("manual");
   type AutoPoolTarget = { kind: "NEW_POOL"; name: string } | { kind: "EXISTING_POOL"; poolId: string };
+  // Simplify automatic question pool workflow — filters are collapsed by
+  // default ("More filters") so the default view is just bank -> pool
+  // size -> student draw, with no jargon up front.
+  const [autoFiltersOpen, setAutoFiltersOpen] = useState(false);
   const [autoFilterType, setAutoFilterType] = useState<"" | "MULTIPLE_CHOICE" | "SHORT_ANSWER" | "ESSAY">("");
   const [autoFilterTopic, setAutoFilterTopic] = useState("");
   const [autoQuotaEasy, setAutoQuotaEasy] = useState("");
@@ -788,6 +799,7 @@ export default function LecturerExamPage({
     setBankModalSearch("");
     setBankModalTypeFilter("");
     setBankModalDelivery(initialDelivery ?? { kind: "REQUIRED" });
+    setAutoFiltersOpen(false);
     setAutoFilterType("");
     setAutoFilterTopic("");
     setAutoQuotaEasy("");
@@ -872,6 +884,14 @@ export default function LecturerExamPage({
     setBankModalSelectedIds(new Set());
     setBankModalQuestions([]);
     setBankModalAlreadyCopiedIds(new Set());
+    // Simplify automatic question pool workflow — switching banks clears
+    // any stale type/topic filter rather than carrying it over (a topic
+    // that matched the previous bank is almost never meaningful for a
+    // different one, and silently carrying it over is exactly what
+    // produced a confusing "0 eligible" reading).
+    setAutoFilterType("");
+    setAutoFilterTopic("");
+    setAutoFiltersOpen(false);
     if (!bankId) return;
     setBankModalLoading(true);
     try {
@@ -5231,104 +5251,241 @@ export default function LecturerExamPage({
               )}
 
               {bankModalMode === "automatic" && bankModalBankId && (() => {
-                const eligible = bankModalQuestions.filter(
-                  (q) =>
-                    !bankModalAlreadyCopiedIds.has(q.id) &&
-                    (q.difficulty === "easy" || q.difficulty === "medium" || q.difficulty === "hard") &&
-                    (!autoFilterType || q.type === autoFilterType) &&
-                    (!autoFilterTopic.trim() || (q.topic ?? "").toLowerCase().includes(autoFilterTopic.trim().toLowerCase())),
-                );
-                const available = {
-                  easy: eligible.filter((q) => q.difficulty === "easy").length,
-                  medium: eligible.filter((q) => q.difficulty === "medium").length,
-                  hard: eligible.filter((q) => q.difficulty === "hard").length,
-                };
+                const hasAnyFilters = autoFilterType !== "" || autoFilterTopic.trim() !== "";
+                const plan = planAutomaticPoolSelection({
+                  bankQuestions: bankModalQuestions,
+                  alreadyCopiedIds: bankModalAlreadyCopiedIds,
+                  filterType: autoFilterType,
+                  filterTopic: autoFilterTopic,
+                });
+                const { available, unclassifiedCount } = plan;
+
+                function clearAutoFilters() {
+                  setAutoFilterType("");
+                  setAutoFilterTopic("");
+                }
+
+                // Empty states — most specific / most severe first, per
+                // "the lecturer must always be able to understand why the
+                // available counts changed."
+                if (plan.emptyState === "bank-empty") {
+                  return <p className="mt-3 text-sm text-lecturer-text-secondary">This Question Bank has no questions yet.</p>;
+                }
+                if (plan.emptyState === "no-filter-matches") {
+                  return (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-sm text-lecturer-text-secondary">No questions match the current filters.</p>
+                      <button onClick={clearAutoFilters} className="text-sm underline">
+                        Clear filters
+                      </button>
+                    </div>
+                  );
+                }
+                if (plan.emptyState === "all-already-copied") {
+                  return (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-sm text-lecturer-text-secondary">
+                        All matching questions from this bank have already been added to this exam.
+                      </p>
+                      {hasAnyFilters && (
+                        <button onClick={clearAutoFilters} className="text-sm underline">
+                          Clear filters
+                        </button>
+                      )}
+                    </div>
+                  );
+                }
+                if (plan.emptyState === "none-classified") {
+                  return (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-sm text-lecturer-text-secondary">
+                        Questions exist in this bank, but none have Easy/Medium/Hard difficulty assigned yet.
+                      </p>
+                      <Link href={`/lecturer/question-banks/${bankModalBankId}?difficulty=unclassified`} target="_blank" className="text-sm underline">
+                        Review unclassified questions
+                      </Link>
+                    </div>
+                  );
+                }
+
                 const quotas = {
                   easy: Number(autoQuotaEasy) || 0,
                   medium: Number(autoQuotaMedium) || 0,
                   hard: Number(autoQuotaHard) || 0,
                 };
-                const totalSelected = quotas.easy + quotas.medium + quotas.hard;
+                const totalSelected = totalOf(quotas);
                 const draws = {
                   easy: Number(autoDrawEasy) || 0,
                   medium: Number(autoDrawMedium) || 0,
                   hard: Number(autoDrawHard) || 0,
                 };
                 const studentDrawEntered = autoDrawEasy.trim() || autoDrawMedium.trim() || autoDrawHard.trim();
-                const targetPoolName =
-                  autoPoolTarget.kind === "NEW_POOL"
-                    ? autoPoolTarget.name.trim() || "(new pool — name it below)"
-                    : pools.find((p) => p.id === autoPoolTarget.poolId)?.name ?? "";
-                const overQuota = (["easy", "medium", "hard"] as const).some((d) => quotas[d] > available[d]);
+                const existingPoolComposition =
+                  autoPoolTarget.kind === "EXISTING_POOL"
+                    ? pools.find((p) => p.id === autoPoolTarget.poolId)?.composition ?? { easy: 0, medium: 0, hard: 0 }
+                    : { easy: 0, medium: 0, hard: 0 };
+                // What the pool will actually contain once this call's
+                // quotas are copied in — the number student-draw quotas
+                // are checked against (Part 8).
+                const resultingComposition = computeResultingComposition(existingPoolComposition, quotas);
+                const overQuotaBands = findOverQuotaBands(quotas, available);
+                const overDrawBands = findOverDrawBands(draws, resultingComposition);
+                const overQuota = overQuotaBands.length > 0;
+                const overDraw = overDrawBands.length > 0;
+                const newPoolNameMissing = autoPoolTarget.kind === "NEW_POOL" && !autoPoolTarget.name.trim();
 
                 return (
                   <div className="mt-3 space-y-4">
-                    <p className="text-sm text-lecturer-text-secondary">
-                      Automatically select a set of questions from this bank by difficulty, copy them into a
-                      pool, and (optionally) set how many of each difficulty a student receives.
-                    </p>
-
-                    <div>
-                      <p className="text-xs font-medium uppercase tracking-wide text-lecturer-text-secondary">Optional filters</p>
-                      <div className="mt-1 flex flex-wrap gap-2">
-                        <select
-                          className="rounded border border-lecturer-border px-2 py-1.5 text-sm"
-                          value={autoFilterType}
-                          onChange={(e) => setAutoFilterType(e.target.value as typeof autoFilterType)}
-                        >
-                          <option value="">All types</option>
-                          <option value="MULTIPLE_CHOICE">Multiple choice</option>
-                          <option value="SHORT_ANSWER">Short answer</option>
-                          <option value="ESSAY">Essay</option>
-                        </select>
-                        <input
-                          value={autoFilterTopic}
-                          onChange={(e) => setAutoFilterTopic(e.target.value)}
-                          placeholder="Subject/topic contains..."
-                          className="flex-1 rounded border border-lecturer-border px-3 py-1.5 text-sm"
-                        />
-                      </div>
-                      <p className="mt-1 text-xs text-lecturer-text-secondary">Total eligible questions: {eligible.length}</p>
+                    <div className="rounded border border-lecturer-border bg-lecturer-border-subtle/30 p-3">
+                      <p className="text-sm font-medium">Available in this bank</p>
+                      <dl className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5 text-sm sm:grid-cols-4">
+                        <div className="flex justify-between gap-2 sm:block">
+                          <dt className="text-lecturer-text-secondary">Easy</dt>
+                          <dd className="tabular-nums">{available.easy}</dd>
+                        </div>
+                        <div className="flex justify-between gap-2 sm:block">
+                          <dt className="text-lecturer-text-secondary">Medium</dt>
+                          <dd className="tabular-nums">{available.medium}</dd>
+                        </div>
+                        <div className="flex justify-between gap-2 sm:block">
+                          <dt className="text-lecturer-text-secondary">Hard</dt>
+                          <dd className="tabular-nums">{available.hard}</dd>
+                        </div>
+                        {unclassifiedCount > 0 && (
+                          <div className="flex justify-between gap-2 sm:block">
+                            <dt className="text-lecturer-text-secondary">Unclassified</dt>
+                            <dd className="tabular-nums">{unclassifiedCount}</dd>
+                          </div>
+                        )}
+                      </dl>
+                      {unclassifiedCount > 0 && (
+                        <p className="mt-2 text-xs text-lecturer-text-secondary">
+                          {unclassifiedCount} question{unclassifiedCount === 1 ? "" : "s"} in this bank do
+                          {unclassifiedCount === 1 ? "es" : ""} not have a difficulty assigned, so{" "}
+                          {unclassifiedCount === 1 ? "it isn't" : "they aren't"} counted above.{" "}
+                          <Link href={`/lecturer/question-banks/${bankModalBankId}?difficulty=unclassified`} target="_blank" className="underline">
+                            Review unclassified questions
+                          </Link>
+                        </p>
+                      )}
                     </div>
 
                     <div>
-                      <p className="text-xs font-medium uppercase tracking-wide text-lecturer-text-secondary">
-                        Select from bank — pool composition
+                      <button onClick={() => setAutoFiltersOpen((v) => !v)} className="text-sm underline" aria-expanded={autoFiltersOpen}>
+                        {autoFiltersOpen ? "Hide filters" : "More filters"}
+                      </button>
+                      {hasAnyFilters && (
+                        <span className="ml-2 text-xs text-lecturer-text-secondary">
+                          Filters active: {[autoFilterType && QUESTION_TYPE_LABELS_SHORT[autoFilterType], autoFilterTopic.trim()].filter(Boolean).join(" · ")}
+                          {" — "}
+                          <button onClick={clearAutoFilters} className="underline">
+                            Clear filters
+                          </button>
+                        </span>
+                      )}
+                      {autoFiltersOpen && (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <select
+                            className="rounded border border-lecturer-border px-2 py-1.5 text-sm"
+                            value={autoFilterType}
+                            onChange={(e) => setAutoFilterType(e.target.value as typeof autoFilterType)}
+                          >
+                            <option value="">All types</option>
+                            <option value="MULTIPLE_CHOICE">Multiple choice</option>
+                            <option value="SHORT_ANSWER">Short answer</option>
+                            <option value="ESSAY">Essay</option>
+                          </select>
+                          <input
+                            value={autoFilterTopic}
+                            onChange={(e) => setAutoFilterTopic(e.target.value)}
+                            placeholder="Subject/topic contains..."
+                            autoComplete="off"
+                            className="flex-1 rounded border border-lecturer-border px-3 py-1.5 text-sm"
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <p className="text-sm font-medium">Build question pool</p>
+                      <p className="mt-0.5 text-xs text-lecturer-text-secondary">
+                        Choose how many questions Tether should copy from the Question Bank into this exam pool.
                       </p>
-                      <div className="mt-1 grid grid-cols-3 gap-2">
+                      <div className="mt-2 grid grid-cols-3 gap-2">
                         {(
                           [
                             ["Easy", autoQuotaEasy, setAutoQuotaEasy, available.easy],
                             ["Medium", autoQuotaMedium, setAutoQuotaMedium, available.medium],
                             ["Hard", autoQuotaHard, setAutoQuotaHard, available.hard],
                           ] as const
-                        ).map(([label, value, setValue, avail]) => (
-                          <div key={label}>
-                            <label className="block text-xs text-lecturer-text-secondary">
-                              {label} ({avail} available)
-                            </label>
-                            <input
-                              type="number"
-                              min={0}
-                              max={avail}
-                              value={value}
-                              onChange={(e) => setValue(e.target.value)}
-                              className="w-full rounded border border-lecturer-border px-2 py-1 text-sm"
-                              placeholder="0"
-                            />
-                          </div>
-                        ))}
+                        ).map(([label, value, setValue, avail]) => {
+                          const requested = Number(value) || 0;
+                          return (
+                            <div key={label}>
+                              <label className="block text-xs text-lecturer-text-secondary">{label}</label>
+                              <input
+                                type="number"
+                                min={0}
+                                value={value}
+                                onChange={(e) => setValue(e.target.value)}
+                                className="w-full rounded border border-lecturer-border px-2 py-1 text-sm"
+                                placeholder="0"
+                              />
+                              {requested > avail && (
+                                <p className="mt-0.5 text-xs text-[#B42318]">Only {avail} available.</p>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
-                      <p className="mt-1 text-xs text-lecturer-text-secondary">Total selected: {totalSelected}</p>
-                      {overQuota && (
-                        <p className="mt-1 text-xs text-[#B42318]">
-                          A requested quota exceeds what&apos;s eligible — reduce it before creating the pool.
+                      <p className="mt-1 text-sm">Pool contains: {totalSelected} question{totalSelected === 1 ? "" : "s"}</p>
+                    </div>
+
+                    <div>
+                      <p className="text-sm font-medium">Questions each student receives</p>
+                      <p className="mt-0.5 text-xs text-lecturer-text-secondary">
+                        Tether will randomly draw this many questions from the pool for each student. Optional —
+                        leave blank if you only want to build the pool now.
+                      </p>
+                      <div className="mt-2 grid grid-cols-3 gap-2">
+                        {(
+                          [
+                            ["Easy", autoDrawEasy, setAutoDrawEasy, resultingComposition.easy],
+                            ["Medium", autoDrawMedium, setAutoDrawMedium, resultingComposition.medium],
+                            ["Hard", autoDrawHard, setAutoDrawHard, resultingComposition.hard],
+                          ] as const
+                        ).map(([label, value, setValue, poolWillContain]) => {
+                          const requested = Number(value) || 0;
+                          return (
+                            <div key={label}>
+                              <label className="block text-xs text-lecturer-text-secondary">{label}</label>
+                              <input
+                                type="number"
+                                min={0}
+                                value={value}
+                                onChange={(e) => setValue(e.target.value)}
+                                className="w-full rounded border border-lecturer-border px-2 py-1 text-sm"
+                                placeholder=""
+                              />
+                              {requested > poolWillContain && (
+                                <p className="mt-0.5 text-xs text-[#B42318]">
+                                  Students cannot receive {requested} {label.toLowerCase()} question{requested === 1 ? "" : "s"} because this pool
+                                  contains only {poolWillContain}.
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {studentDrawEntered && !overDraw && (
+                        <p className="mt-1 text-sm">
+                          Each student receives: {draws.easy + draws.medium + draws.hard} question{draws.easy + draws.medium + draws.hard === 1 ? "" : "s"}
                         </p>
                       )}
                     </div>
 
                     <div>
-                      <p className="text-xs font-medium uppercase tracking-wide text-lecturer-text-secondary">Pool</p>
+                      <p className="text-sm font-medium">Pool</p>
                       <div className="mt-1 flex flex-wrap gap-2">
                         <select
                           className="rounded border border-lecturer-border px-2 py-1.5 text-sm"
@@ -5359,70 +5516,28 @@ export default function LecturerExamPage({
                       </div>
                     </div>
 
-                    <div>
-                      <p className="text-xs font-medium uppercase tracking-wide text-lecturer-text-secondary">
-                        Student draw from this pool (optional)
-                      </p>
-                      <div className="mt-1 grid grid-cols-3 gap-2">
-                        <div>
-                          <label className="block text-xs text-lecturer-text-secondary">Easy</label>
-                          <input
-                            type="number"
-                            min={0}
-                            value={autoDrawEasy}
-                            onChange={(e) => setAutoDrawEasy(e.target.value)}
-                            className="w-full rounded border border-lecturer-border px-2 py-1 text-sm"
-                            placeholder="0"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs text-lecturer-text-secondary">Medium</label>
-                          <input
-                            type="number"
-                            min={0}
-                            value={autoDrawMedium}
-                            onChange={(e) => setAutoDrawMedium(e.target.value)}
-                            className="w-full rounded border border-lecturer-border px-2 py-1 text-sm"
-                            placeholder="0"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs text-lecturer-text-secondary">Hard</label>
-                          <input
-                            type="number"
-                            min={0}
-                            value={autoDrawHard}
-                            onChange={(e) => setAutoDrawHard(e.target.value)}
-                            className="w-full rounded border border-lecturer-border px-2 py-1 text-sm"
-                            placeholder="0"
-                          />
-                        </div>
-                      </div>
-                      <p className="mt-1 text-xs text-lecturer-text-secondary">
-                        Leave all three blank to leave this pool&apos;s per-student draw unconfigured for now.
-                      </p>
-                    </div>
-
                     <div className="rounded border border-lecturer-border bg-lecturer-border-subtle/30 p-3 text-sm">
                       <p className="text-xs font-medium uppercase tracking-wide text-lecturer-text-secondary">Summary</p>
-                      <p className="mt-1">
-                        Bank: <strong>{eligible.length} eligible questions</strong>
-                      </p>
-                      <p>
-                        Tether will copy <strong>{totalSelected} question{totalSelected === 1 ? "" : "s"}</strong> into{" "}
-                        <strong>&ldquo;{targetPoolName}&rdquo;</strong>
-                      </p>
-                      <p className="text-lecturer-text-secondary">
-                        Pool composition: {quotas.easy} Easy · {quotas.medium} Medium · {quotas.hard} Hard
-                      </p>
-                      {studentDrawEntered && (
+                      {totalSelected === 0 ? (
+                        <p className="mt-1 text-lecturer-text-secondary">Complete the pool settings above.</p>
+                      ) : (
                         <>
                           <p className="mt-1">
-                            Each student will receive <strong>{draws.easy + draws.medium + draws.hard} question{draws.easy + draws.medium + draws.hard === 1 ? "" : "s"}</strong>
+                            Pool: <strong>{totalSelected} question{totalSelected === 1 ? "" : "s"}</strong>
                           </p>
                           <p className="text-lecturer-text-secondary">
-                            {draws.easy} Easy · {draws.medium} Medium · {draws.hard} Hard
+                            {quotas.easy} Easy · {quotas.medium} Medium · {quotas.hard} Hard
                           </p>
+                          {studentDrawEntered && (
+                            <>
+                              <p className="mt-1">
+                                Each student: <strong>{draws.easy + draws.medium + draws.hard} question{draws.easy + draws.medium + draws.hard === 1 ? "" : "s"}</strong>
+                              </p>
+                              <p className="text-lecturer-text-secondary">
+                                {draws.easy} Easy · {draws.medium} Medium · {draws.hard} Hard
+                              </p>
+                            </>
+                          )}
                         </>
                       )}
                     </div>
@@ -5431,7 +5546,7 @@ export default function LecturerExamPage({
 
                     <button
                       onClick={() => void handleSubmitAutoFromBank()}
-                      disabled={autoSubmitting || totalSelected === 0 || overQuota}
+                      disabled={autoSubmitting || totalSelected === 0 || overQuota || overDraw || newPoolNameMissing}
                       className="rounded bg-lecturer-accent hover:bg-lecturer-accent-hover px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
                     >
                       {autoSubmitting ? "Creating..." : "Create pool"}
