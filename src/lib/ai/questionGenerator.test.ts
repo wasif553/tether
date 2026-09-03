@@ -110,6 +110,46 @@ describe("model configuration", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Live Preview follow-up — Anthropic returned a 400 ("`temperature` is
+// deprecated for this model") for every question-generation request on
+// Sonnet 5. `temperature` must never be sent by either Anthropic call
+// this feature makes — the initial generation call or the one bounded
+// repair call — and every other property of those requests (model,
+// structured-output config) must otherwise be unchanged.
+// ---------------------------------------------------------------------------
+
+describe("live Preview follow-up — no `temperature` parameter on either Anthropic call", () => {
+  it("the initial generation request does not contain temperature, still uses the configured Sonnet 5 model, and still requests structured output", async () => {
+    mockCreate.mockResolvedValue(wrapped([validMcq, validShortAnswer, validEssay]));
+
+    const result = await generateQuestions(baseInput);
+
+    expect(result.producedCount).toBe(3);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    const call = mockCreate.mock.calls[0][0];
+    expect(call).not.toHaveProperty("temperature");
+    expect(call.model).toBe(ANTHROPIC_QUESTION_GENERATOR_MODEL_DEFAULT);
+    expect(call.output_config?.format?.type).toBe("json_schema");
+  });
+
+  it("the repair request ALSO does not contain temperature — fixing only the first call and leaving the repair call broken is the exact regression this guards against", async () => {
+    mockCreate
+      .mockResolvedValueOnce(wrapped([{ ...validMcq, correctAnswer: "the correct choice" }])) // needs repair
+      .mockResolvedValueOnce(wrapped([validMcq])); // repair call
+
+    const result = await generateQuestions({ ...baseInput, totalCount: 1, types: ["MCQ"] });
+
+    expect(result.producedCount).toBe(1); // repair succeeded
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    for (const [call] of mockCreate.mock.calls) {
+      expect(call).not.toHaveProperty("temperature");
+      expect(call.model).toBe(ANTHROPIC_QUESTION_GENERATOR_MODEL_DEFAULT);
+      expect(call.output_config?.format?.type).toBe("json_schema");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Difficulty allocation (Part 10) — deterministic rounding
 // ---------------------------------------------------------------------------
 

@@ -365,7 +365,13 @@ async function callModelForQuestions(system: string, userPrompt: string): Promis
     response = await client.messages.create({
       model: getAnthropicQuestionGeneratorModel(),
       max_tokens: 4096,
-      temperature: 0,
+      // Live Preview follow-up — Anthropic rejects `temperature` for this
+      // model with a 400 ("`temperature` is deprecated for this model").
+      // Used by BOTH the initial generation call and the one bounded
+      // repair call (generateQuestions() routes both through this one
+      // function) — never pass it here, and never reintroduce it as a
+      // per-call override on either. Rely on the model's own default; no
+      // other sampling parameter is documented as required in its place.
       system,
       messages: [{ role: "user", content: userPrompt }],
       // Structured output (Part 4) — see QUESTION_GENERATION_OUTPUT_SCHEMA's
