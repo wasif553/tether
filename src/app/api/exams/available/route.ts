@@ -67,6 +67,11 @@ const examIncludeForStudent = (studentId: string) => ({
   },
   _count: { select: { questions: true } },
   course: { select: { id: true, name: true, code: true } },
+  // Fix student completed-submission results flow — the dashboard's
+  // completed-exam card shows a score preview once marks are released
+  // (see computeStudentExamView below); this is the cheapest way to get
+  // "points possible" without a stored aggregate on Exam.
+  questions: { select: { points: true } },
 });
 
 /**
@@ -215,6 +220,13 @@ function computeStudentExamView(exams: StudentExamRow[], now: Date) {
       });
       const activeSubmission = inProgressSubmission ?? latestSubmission;
       const canStartAttempt = !inProgressSubmission && remainingAttempts > 0;
+      // Fix student completed-submission results flow — the authoritative
+      // release gate is Exam.marksReleasedAt, never Submission.status
+      // alone (see src/lib/assessmentLifecycle.ts's canStudentViewMarks,
+      // which this mirrors). totalScore is withheld from the response
+      // entirely until release, not just hidden client-side.
+      const marksReleased = exam.marksReleasedAt != null;
+      const totalPoints = exam.questions.reduce((sum, q) => sum + q.points, 0);
 
       return {
         id: exam.id,
@@ -232,12 +244,15 @@ function computeStudentExamView(exams: StudentExamRow[], now: Date) {
         maxAttempts: settings.maxAttempts,
         remainingAttempts,
         canStartAttempt,
+        marksReleased,
+        totalPoints,
         submission: activeSubmission
           ? {
               id: activeSubmission.id,
               status: activeSubmission.status,
               attemptNumber: activeSubmission.attemptNumber,
               submittedAt: activeSubmission.submittedAt,
+              totalScore: marksReleased ? activeSubmission.totalScore : null,
             }
           : null,
       };

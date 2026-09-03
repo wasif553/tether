@@ -5,6 +5,7 @@ import { isRunningInLockdownBrowser } from "@/lib/lockdownDetection";
 import { logClientTetherDiagnostic } from "@/lib/tetherDiagnosticLog";
 import { buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
 import { studentDashboardGroup, type StudentDashboardGroup } from "@/lib/studentDashboardGrouping";
+import { resolveStudentSubmissionState } from "@/lib/studentSubmissionState";
 
 type AvailableExam = {
   id: string;
@@ -20,11 +21,14 @@ type AvailableExam = {
   maxAttempts: number;
   remainingAttempts: number;
   canStartAttempt: boolean;
+  marksReleased: boolean;
+  totalPoints: number;
   submission: {
     id: string;
     status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
     attemptNumber: number;
     submittedAt: string | null;
+    totalScore: number | null;
   } | null;
 };
 
@@ -133,9 +137,32 @@ export default function StudentDashboard() {
     };
   }, [exams]);
 
+  // Fix student completed-submission results flow — the single resolver
+  // (src/lib/studentSubmissionState.ts) both this status line and the
+  // "View submission"/"View results" link below are derived from, so
+  // they can never show a label inconsistent with what the link actually
+  // points to.
   function completedStatusLine(exam: AvailableExam): string {
-    const label = exam.submission?.status === "GRADED" ? "Graded" : exam.submission?.status === "SUBMITTED" ? "Submitted" : "Closed";
+    const state = resolveStudentSubmissionState(exam);
+    const label =
+      state === "RESULTS_RELEASED"
+        ? "Results released"
+        : state === "GRADED_NOT_RELEASED"
+          ? "Graded"
+          : state === "SUBMITTED_RESULTS_PENDING"
+            ? "Submitted"
+            : "Closed";
     const when = exam.submission?.submittedAt ? new Date(exam.submission.submittedAt).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : null;
+    if (state === "RESULTS_RELEASED" && exam.submission?.totalScore != null) {
+      const score = `${exam.submission.totalScore}${exam.totalPoints > 0 ? ` / ${exam.totalPoints}` : ""}`;
+      return when ? `${label} · ${when} · ${score}` : `${label} · ${score}`;
+    }
+    if (state === "GRADED_NOT_RELEASED") {
+      return when ? `${label} · ${when} · Results not yet released` : `${label} · Results not yet released`;
+    }
+    if (state === "SUBMITTED_RESULTS_PENDING") {
+      return when ? `${label} · ${when} · Results pending` : `${label} · Results pending`;
+    }
     return when ? `${label} · ${when}` : label;
   }
 
@@ -220,19 +247,26 @@ export default function StudentDashboard() {
 
           {recentlyCompleted.length > 0 && (
             <ExamSection title="Recently completed" exams={recentlyCompleted} secondary>
-              {(exam) => (
-                <ExamCard exam={exam} secondary>
-                  <div className="space-y-1 text-sm text-gray-500">
-                    <p>{completedStatusLine(exam)}</p>
-                    {exam.submission?.status === "GRADED" && (
-                      <a href={`/student/exams/${exam.submission.id}`} className="underline">
-                        View submission
-                      </a>
-                    )}
-                    {exam.remainingAttempts > 0 && <p>You have {exam.remainingAttempts} attempt(s) remaining.</p>}
-                  </div>
-                </ExamCard>
-              )}
+              {(exam) => {
+                const state = resolveStudentSubmissionState(exam);
+                return (
+                  <ExamCard exam={exam} secondary>
+                    <div className="space-y-1 text-sm text-gray-500">
+                      <p>{completedStatusLine(exam)}</p>
+                      {/* Fix student completed-submission results flow — this MUST
+                          point at the read-only results route, never at
+                          /student/exams/[id] (the exam-taking page) — see
+                          docs/student-released-results-flow-v1.md. */}
+                      {exam.submission && (state === "SUBMITTED_RESULTS_PENDING" || state === "GRADED_NOT_RELEASED" || state === "RESULTS_RELEASED") && (
+                        <a href={`/student/submissions/${exam.submission.id}`} className="underline">
+                          {state === "RESULTS_RELEASED" ? "View results" : "View submission"}
+                        </a>
+                      )}
+                      {exam.remainingAttempts > 0 && <p>You have {exam.remainingAttempts} attempt(s) remaining.</p>}
+                    </div>
+                  </ExamCard>
+                );
+              }}
             </ExamSection>
           )}
 
@@ -250,11 +284,21 @@ export default function StudentDashboard() {
               ) : (
                 history.length > 0 && (
                   <ExamSection title="Exam history" exams={history} secondary>
-                    {(exam) => (
-                      <ExamCard exam={exam} secondary>
-                        <p className="text-sm text-gray-500">{completedStatusLine(exam)}</p>
-                      </ExamCard>
-                    )}
+                    {(exam) => {
+                      const state = resolveStudentSubmissionState(exam);
+                      return (
+                        <ExamCard exam={exam} secondary>
+                          <div className="space-y-1 text-sm text-gray-500">
+                            <p>{completedStatusLine(exam)}</p>
+                            {exam.submission && (state === "SUBMITTED_RESULTS_PENDING" || state === "GRADED_NOT_RELEASED" || state === "RESULTS_RELEASED") && (
+                              <a href={`/student/submissions/${exam.submission.id}`} className="underline">
+                                {state === "RESULTS_RELEASED" ? "View results" : "View submission"}
+                              </a>
+                            )}
+                          </div>
+                        </ExamCard>
+                      );
+                    }}
                   </ExamSection>
                 )
               )}
