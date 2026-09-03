@@ -29,6 +29,8 @@ const saveToBankRoute = await import(
 const questionRoute = await import("../app/api/exams/[id]/questions/[questionId]/route");
 const poolsRoute = await import("../app/api/exams/[id]/question-pools/route");
 const poolRoute = await import("../app/api/exams/[id]/question-pools/[poolId]/route");
+const autoFromBankRoute = await import("../app/api/lecturer/exams/[examId]/questions/auto-from-bank/route");
+const previewSampleRoute = await import("../app/api/lecturer/exams/[examId]/preview-sample/route");
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT", institutionId: string) {
   return {
@@ -464,5 +466,340 @@ describe("authorization (Part 21)", () => {
       params: Promise.resolve({ examId: examA.id, questionId: question.id }),
     });
     expect([403, 404]).toContain(res.status);
+  });
+});
+
+// Pool Selection Refinement v1 — see docs/pool-selection-refinement-v1.md.
+async function makeGradedBank(lecturerId: string, counts: { easy: number; medium: number; hard: number }, opts?: { type?: string; topic?: string }) {
+  const bank = await makeBank(lecturerId);
+  const created: Awaited<ReturnType<typeof prisma.bankQuestion.create>>[] = [];
+  for (const difficulty of ["easy", "medium", "hard"] as const) {
+    for (let i = 0; i < counts[difficulty]; i++) {
+      created.push(
+        await prisma.bankQuestion.create({
+          data: {
+            bankId: bank.id,
+            type: opts?.type ?? "ESSAY",
+            text: `${difficulty} Q${i} (${bank.id})`,
+            points: 1,
+            difficulty,
+            topic: opts?.topic,
+          },
+        }),
+      );
+    }
+  }
+  return { bank, questions: created };
+}
+
+describe("auto-from-bank: pool composition (Part 6/8)", () => {
+  it("selects exact easy/medium/hard quotas, stamps difficulty/source/provenance, and copies are independent", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    const { bank } = await makeGradedBank(lecturerA.id, { easy: 10, medium: 5, hard: 5 });
+
+    const res = await autoFromBankRoute.POST(
+      jsonRequest("POST", {
+        bankId: bank.id,
+        quotas: { easy: 10, medium: 5, hard: 5 },
+        delivery: { kind: "NEW_POOL", name: "Python Random" },
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.created).toBe(20);
+    expect(body.composition).toEqual({ easy: 10, medium: 5, hard: 5 });
+
+    const copies = await prisma.question.findMany({ where: { examId: exam.id, questionPoolId: body.poolId } });
+    expect(copies).toHaveLength(20);
+    expect(copies.filter((q) => q.difficulty === "easy")).toHaveLength(10);
+    expect(copies.filter((q) => q.difficulty === "medium")).toHaveLength(5);
+    expect(copies.filter((q) => q.difficulty === "hard")).toHaveLength(5);
+    for (const copy of copies) {
+      expect(copy.source).toBe("QUESTION_BANK");
+      expect(copy.sourceBankQuestionId).not.toBeNull();
+    }
+
+    // Independence: editing the source BankQuestion afterward never touches the copy.
+    const oneCopy = copies[0];
+    await prisma.bankQuestion.update({ where: { id: oneCopy.sourceBankQuestionId! }, data: { text: "Edited after copy" } });
+    const unchanged = await prisma.question.findUnique({ where: { id: oneCopy.id } });
+    expect(unchanged?.text).toBe(oneCopy.text);
+  });
+
+  it("blocks creation and creates nothing when a band has fewer eligible questions than requested", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    const { bank } = await makeGradedBank(lecturerA.id, { easy: 7, medium: 5, hard: 5 });
+
+    const res = await autoFromBankRoute.POST(
+      jsonRequest("POST", {
+        bankId: bank.id,
+        quotas: { easy: 10, medium: 5, hard: 5 },
+        delivery: { kind: "NEW_POOL", name: "Should not exist" },
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.shortfalls).toEqual([{ difficulty: "easy", requested: 10, available: 7 }]);
+    expect(body.message).toContain("Only 7 easy question");
+
+    const created = await prisma.question.count({ where: { examId: exam.id } });
+    expect(created).toBe(0);
+    const poolCreated = await prisma.questionPool.findFirst({ where: { examId: exam.id, name: "Should not exist" } });
+    expect(poolCreated).toBeNull();
+  });
+
+  it("respects the type and topic filters", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    const { bank, questions } = await makeGradedBank(lecturerA.id, { easy: 2, medium: 0, hard: 0 }, { type: "SHORT_ANSWER", topic: "python" });
+    // Distractors in the SAME bank, deliberately not matching the filter below.
+    await Promise.all(
+      Array.from({ length: 3 }, (_, i) =>
+        prisma.bankQuestion.create({ data: { bankId: bank.id, type: "ESSAY", text: `java Q${i}`, points: 1, difficulty: "easy", topic: "java" } }),
+      ),
+    );
+
+    const res = await autoFromBankRoute.POST(
+      jsonRequest("POST", {
+        bankId: bank.id,
+        filters: { type: "SHORT_ANSWER", topic: "python" },
+        quotas: { easy: 2, medium: 0, hard: 0 },
+        delivery: { kind: "NEW_POOL", name: "Filtered pool" },
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.created).toBe(2);
+    const copies = await prisma.question.findMany({ where: { examId: exam.id, questionPoolId: body.poolId } });
+    expect(copies.map((c) => c.sourceBankQuestionId).sort()).toEqual(questions.map((q) => q.id).sort());
+  });
+
+  it("excludes bank questions already copied into this exam", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    const { bank } = await makeGradedBank(lecturerA.id, { easy: 1, medium: 0, hard: 0 });
+
+    const first = await autoFromBankRoute.POST(
+      jsonRequest("POST", { bankId: bank.id, quotas: { easy: 1, medium: 0, hard: 0 }, delivery: { kind: "NEW_POOL", name: "First" } }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(first.status).toBe(200);
+
+    // The bank's only easy question is now already copied — a second
+    // request for 1 more easy question must fail (0 remain eligible),
+    // never silently re-copy the same BankQuestion.
+    const second = await autoFromBankRoute.POST(
+      jsonRequest("POST", { bankId: bank.id, quotas: { easy: 1, medium: 0, hard: 0 }, delivery: { kind: "NEW_POOL", name: "Second" } }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(second.status).toBe(400);
+    expect((await second.json()).shortfalls).toEqual([{ difficulty: "easy", requested: 1, available: 0 }]);
+  });
+
+  it("blocks a student from calling auto-from-bank (401)", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    const { bank } = await makeGradedBank(lecturerA.id, { easy: 1, medium: 0, hard: 0 });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instA));
+    const res = await autoFromBankRoute.POST(
+      jsonRequest("POST", { bankId: bank.id, quotas: { easy: 1, medium: 0, hard: 0 }, delivery: { kind: "NEW_POOL", name: "x" } }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects auto-from-bank when the exam belongs to another lecturer (404)", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const examA = await makeExam(lecturerA.id);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerB.id, "LECTURER", instB));
+    const { bank } = await makeGradedBank(lecturerB.id, { easy: 1, medium: 0, hard: 0 });
+    const res = await autoFromBankRoute.POST(
+      jsonRequest("POST", { bankId: bank.id, quotas: { easy: 1, medium: 0, hard: 0 }, delivery: { kind: "NEW_POOL", name: "x" } }),
+      { params: Promise.resolve({ examId: examA.id }) },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("rejects auto-from-bank when the bank belongs to another lecturer (404)", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerB.id, "LECTURER", instB));
+    const examB = await makeExam(lecturerB.id);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const { bank } = await makeGradedBank(lecturerA.id, { easy: 1, medium: 0, hard: 0 });
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerB.id, "LECTURER", instB));
+    const res = await autoFromBankRoute.POST(
+      jsonRequest("POST", { bankId: bank.id, quotas: { easy: 1, medium: 0, hard: 0 }, delivery: { kind: "NEW_POOL", name: "x" } }),
+      { params: Promise.resolve({ examId: examB.id }) },
+    );
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("auto-from-bank: student draw quota (Part 9/11)", () => {
+  it("sets the pool's per-difficulty draw quota when studentDraw is provided", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    const { bank } = await makeGradedBank(lecturerA.id, { easy: 10, medium: 5, hard: 5 });
+
+    const res = await autoFromBankRoute.POST(
+      jsonRequest("POST", {
+        bankId: bank.id,
+        quotas: { easy: 10, medium: 5, hard: 5 },
+        delivery: { kind: "NEW_POOL", name: "Python Random" },
+        studentDraw: { easy: 4, medium: 3, hard: 3 },
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.studentDraw).toEqual({ easy: 4, medium: 3, hard: 3 });
+
+    const pool = await prisma.questionPool.findUnique({ where: { id: body.poolId } });
+    expect(pool?.drawCountEasy).toBe(4);
+    expect(pool?.drawCountMedium).toBe(3);
+    expect(pool?.drawCountHard).toBe(3);
+  });
+
+  it("blocks (creates nothing) when studentDraw exceeds what the resulting pool will contain", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    const { bank } = await makeGradedBank(lecturerA.id, { easy: 2, medium: 5, hard: 5 });
+
+    const res = await autoFromBankRoute.POST(
+      jsonRequest("POST", {
+        bankId: bank.id,
+        quotas: { easy: 2, medium: 5, hard: 5 },
+        delivery: { kind: "NEW_POOL", name: "Over-drawn" },
+        studentDraw: { easy: 5, medium: 3, hard: 3 },
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).shortfalls).toEqual([{ difficulty: "easy", requested: 5, available: 2 }]);
+
+    const created = await prisma.question.count({ where: { examId: exam.id } });
+    expect(created).toBe(0);
+    const poolCreated = await prisma.questionPool.findFirst({ where: { examId: exam.id, name: "Over-drawn" } });
+    expect(poolCreated).toBeNull();
+  });
+});
+
+describe("preview-sample: non-mutating exam preview (Part 2/3)", () => {
+  it("never creates a Submission or IntegrityEvent", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    await prisma.question.create({
+      data: { examId: exam.id, type: "ESSAY", text: "Preview me", points: 1, order: 0, source: "MANUAL" },
+    });
+
+    const submissionsBefore = await prisma.submission.count();
+    const eventsBefore = await prisma.integrityEvent.count();
+
+    const res = await previewSampleRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.totalDelivered).toBe(1);
+    expect(body.isSample).toBe(false);
+
+    expect(await prisma.submission.count()).toBe(submissionsBefore);
+    expect(await prisma.integrityEvent.count()).toBe(eventsBefore);
+  });
+
+  it("respects pool draw quotas and reports isSample=true when pools are active", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    await prisma.exam.update({
+      where: { id: exam.id },
+      data: { secureSettings: { enableQuestionPools: true, questionPoolSelectionMode: "DRAW_FROM_POOLS" } },
+    });
+    const { bank } = await makeGradedBank(lecturerA.id, { easy: 10, medium: 5, hard: 5 });
+    const created = await autoFromBankRoute.POST(
+      jsonRequest("POST", {
+        bankId: bank.id,
+        quotas: { easy: 10, medium: 5, hard: 5 },
+        delivery: { kind: "NEW_POOL", name: "Sampled pool" },
+        studentDraw: { easy: 4, medium: 3, hard: 3 },
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    const poolId = (await created.json()).poolId;
+
+    const res = await previewSampleRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.isSample).toBe(true);
+    expect(body.totalDelivered).toBe(10);
+    const summary = body.poolSummary.find((p: { id: string }) => p.id === poolId);
+    expect(summary.composition).toEqual({ easy: 10, medium: 5, hard: 5 });
+    expect(summary.deliveredFromThisPool).toBe(10);
+  });
+
+  it("blocks a student from calling preview-sample (401)", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instA));
+    const res = await previewSampleRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects preview-sample when the exam belongs to another lecturer (404)", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const examA = await makeExam(lecturerA.id);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerB.id, "LECTURER", instB));
+    const res = await previewSampleRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: examA.id }) });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("pool quota PATCH/GET (backward compatibility, Part 10)", () => {
+  it("PATCH sets per-difficulty draw quotas and GET reports live composition", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    const poolRes = await poolsRoute.POST(jsonRequest("POST", { name: "Quota pool" }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    const pool = await poolRes.json();
+    await prisma.question.create({
+      data: { examId: exam.id, type: "ESSAY", text: "Easy in pool", points: 1, order: 0, questionPoolId: pool.id, difficulty: "easy" },
+    });
+
+    const patchRes = await poolRoute.PATCH(jsonRequest("PATCH", { drawCountEasy: 1, drawCountMedium: 0, drawCountHard: 0 }), {
+      params: Promise.resolve({ id: exam.id, poolId: pool.id }),
+    });
+    expect(patchRes.status).toBe(200);
+    expect((await patchRes.json()).drawCountEasy).toBe(1);
+
+    const listRes = await poolsRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    const list = await listRes.json();
+    const found = list.find((p: { id: string }) => p.id === pool.id);
+    expect(found.composition).toEqual({ easy: 1, medium: 0, hard: 0 });
+    expect(found.drawCountEasy).toBe(1);
+  });
+
+  it("a legacy pool (no quota fields set) keeps its plain drawCount behavior unchanged", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturerA.id, "LECTURER", instA));
+    const exam = await makeExam(lecturerA.id);
+    const poolRes = await poolsRoute.POST(jsonRequest("POST", { name: "Legacy pool", drawCount: 5 }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    const pool = await poolRes.json();
+    expect(pool.drawCountEasy).toBeNull();
+    expect(pool.drawCountMedium).toBeNull();
+    expect(pool.drawCountHard).toBeNull();
+
+    const listRes = await poolsRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    const found = (await listRes.json()).find((p: { id: string }) => p.id === pool.id);
+    expect(found.drawCount).toBe(5);
+    expect(found.composition).toEqual({ easy: 0, medium: 0, hard: 0 });
   });
 });

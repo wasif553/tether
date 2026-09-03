@@ -12,10 +12,18 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 
+// Pool Selection Refinement v1 — see docs/pool-selection-refinement-v1.md.
+// A per-difficulty quota is >= 0 (unlike drawCount, 0 is a meaningful
+// value here — "none from this band," not "unlimited").
+const drawQuotaField = z.number().int().min(0).nullable().optional();
+
 const createPoolSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   drawCount: z.number().int().positive().nullable().optional(),
+  drawCountEasy: drawQuotaField,
+  drawCountMedium: drawQuotaField,
+  drawCountHard: drawQuotaField,
 });
 
 async function getOwnedExam(examId: string, lecturerId: string, session: Parameters<typeof institutionWhere>[0]) {
@@ -41,7 +49,7 @@ export async function GET(
     const pools = await prisma.questionPool.findMany({
       where: { examId: id },
       orderBy: { order: "asc" },
-      include: { questions: { select: { id: true } } },
+      include: { questions: { select: { difficulty: true } } },
     });
     return NextResponse.json(
       pools.map((p) => ({
@@ -49,8 +57,20 @@ export async function GET(
         name: p.name,
         description: p.description,
         drawCount: p.drawCount,
+        drawCountEasy: p.drawCountEasy,
+        drawCountMedium: p.drawCountMedium,
+        drawCountHard: p.drawCountHard,
         order: p.order,
         questionCount: p.questions.length,
+        // Pool Selection Refinement v1 — the pool's LIVE composition,
+        // counted from the exam's own Question rows (never from
+        // BankQuestion) — always accurate even after questions are
+        // added/removed/edited, unlike a stored snapshot.
+        composition: {
+          easy: p.questions.filter((q) => q.difficulty === "easy").length,
+          medium: p.questions.filter((q) => q.difficulty === "medium").length,
+          hard: p.questions.filter((q) => q.difficulty === "hard").length,
+        },
       })),
     );
   } catch (err) {
@@ -79,7 +99,7 @@ export async function POST(
     if (!parsed.success) {
       return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
     }
-    const { name, description, drawCount } = parsed.data;
+    const { name, description, drawCount, drawCountEasy, drawCountMedium, drawCountHard } = parsed.data;
 
     const lastPool = await prisma.questionPool.findFirst({
       where: { examId: id },
@@ -92,12 +112,25 @@ export async function POST(
         name,
         description,
         drawCount: drawCount ?? null,
+        drawCountEasy: drawCountEasy ?? null,
+        drawCountMedium: drawCountMedium ?? null,
+        drawCountHard: drawCountHard ?? null,
         order: (lastPool?.order ?? -1) + 1,
       },
     });
 
     return NextResponse.json(
-      { id: pool.id, name: pool.name, description: pool.description, drawCount: pool.drawCount, order: pool.order, questionCount: 0 },
+      {
+        id: pool.id,
+        name: pool.name,
+        description: pool.description,
+        drawCount: pool.drawCount,
+        drawCountEasy: pool.drawCountEasy,
+        drawCountMedium: pool.drawCountMedium,
+        drawCountHard: pool.drawCountHard,
+        order: pool.order,
+        questionCount: 0,
+      },
       { status: 201 },
     );
   } catch (err) {

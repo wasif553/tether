@@ -473,21 +473,37 @@ model Exam {
 // (Question.questionPoolId null) are always included for every student —
 // see docs/question-pools-v1.md, "Unpooled questions."
 model QuestionPool {
-  id          String     @id @default(cuid())
-  examId      String
-  exam        Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
-  name        String
-  description String?
+  id              String     @id @default(cuid())
+  examId          String
+  exam            Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
+  name            String
+  description     String?
   // Number of questions to draw from this pool per attempt. Null (or <= 0)
   // means "include every question in this pool" — see
   // docs/question-pools-v1.md. If greater than the number of questions
   // actually in the pool, every available question is included instead
   // of erroring.
-  drawCount   Int?
-  order       Int        @default(0)
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
-  questions   Question[]
+  drawCount       Int?
+  // Pool Selection Refinement v1 (additive, nullable) — see
+  // docs/pool-selection-refinement-v1.md. Optional PER-DIFFICULTY draw
+  // quotas, layered on top of `drawCount` above without replacing it.
+  // All three null (the default, and every pool that predates this
+  // feature) means "quota-unconfigured" — `drawCount` alone still
+  // governs the draw exactly as before, zero behavior change. Once a
+  // lecturer sets ANY of the three, the pool becomes "quota-configured"
+  // and buildSelectedQuestionIds() (src/lib/questionDelivery.ts) draws
+  // drawCountEasy/Medium/Hard questions from each difficulty band
+  // instead of drawCount questions from the pool as a whole — see that
+  // function's own doc comment for the exact fallback rule. A null
+  // individual quota (e.g. drawCountHard set, drawCountEasy/Medium not)
+  // is treated as 0 for that band, never as "all of that band."
+  drawCountEasy   Int?
+  drawCountMedium Int?
+  drawCountHard   Int?
+  order           Int        @default(0)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  questions       Question[]
 
   @@index([examId])
 }
@@ -523,6 +539,20 @@ model Question {
   // Question row; it only loses the "copied from" trail.
   sourceBankQuestionId     String?
   sourceBankQuestion       BankQuestion?               @relation(fields: [sourceBankQuestionId], references: [id], onDelete: SetNull)
+  // Pool Selection Refinement v1 (additive, nullable) — see
+  // docs/pool-selection-refinement-v1.md. A plain validated String
+  // ("easy"/"medium"/"hard"), not a Prisma enum, matching this schema's
+  // established convention (see `source` above). Deliberately an
+  // independent snapshot, NEVER read from sourceBankQuestion after copy
+  // — stamped once, at creation time, from the source BankQuestion's own
+  // difficulty (Bank->Exam copy) or the AI generator's own per-question
+  // difficulty (AI generation); left null for manual/bulk-paste
+  // questions, which have no difficulty signal to record. Existing rows
+  // predating this feature are null — their difficulty is genuinely
+  // unrecorded, never guessed/backfilled. This is the field
+  // difficulty-quota pool delivery (QuestionPool.drawCountEasy/Medium/
+  // Hard below) reads at draw time — never the BankQuestion relation.
+  difficulty               String?
   // Question Pools v1 (additive, opt-in, nullable) — see
   // docs/question-pools-v1.md. Null means "not in any pool" — always
   // included for every student regardless of pool settings.

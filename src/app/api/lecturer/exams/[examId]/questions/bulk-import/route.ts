@@ -96,6 +96,11 @@ export async function POST(
         // Question Bank / Exam Pools redesign v1 — every question this
         // route creates came from the AI question-generation pipeline.
         source: "AI_GENERATED",
+        // Pool Selection Refinement v1 — the AI generator already assigns
+        // a difficulty per question (used above for points); stamp it
+        // onto the Question snapshot too, so AI-generated questions are
+        // eligible for automatic difficulty-quota pool selection.
+        difficulty: q.difficulty,
       };
     });
 
@@ -115,6 +120,7 @@ export async function POST(
               optionsJson: q.options && q.options.length > 0 ? JSON.stringify(q.options) : undefined,
               correctAnswer: q.correctAnswer ?? undefined,
               points: q.points,
+              difficulty: q.difficulty ?? undefined,
               topic: exam.course?.code ?? undefined,
             },
           });

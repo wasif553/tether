@@ -288,6 +288,82 @@ describe("buildSelectedQuestionIds", () => {
   });
 });
 
+// Pool Selection Refinement v1 — see docs/pool-selection-refinement-v1.md.
+describe("buildSelectedQuestionIds — per-difficulty quota pools", () => {
+  const qd = (id: string, questionPoolId: string | null, order: number, difficulty?: string | null) => ({
+    id,
+    questionPoolId,
+    order,
+    difficulty,
+  });
+
+  it("a quota-unconfigured pool (all three quota fields null) behaves exactly like a plain drawCount pool", () => {
+    const questions = [qd("p1", "poolA", 0, "easy"), qd("p2", "poolA", 1, "easy"), qd("p3", "poolA", 2, "hard")];
+    const result = buildSelectedQuestionIds({
+      questions,
+      pools: [{ id: "poolA", drawCount: 2, drawCountEasy: null, drawCountMedium: null, drawCountHard: null }],
+      randomiseQuestionOrder: false,
+      rng: fakeRng([0.9, 0.1, 0.5]),
+    });
+    expect(result).toHaveLength(2);
+  });
+
+  it("draws exactly drawCountEasy/Medium/Hard from each band when quota-configured", () => {
+    const questions = [
+      qd("e1", "poolA", 0, "easy"),
+      qd("e2", "poolA", 1, "easy"),
+      qd("e3", "poolA", 2, "easy"),
+      qd("m1", "poolA", 3, "medium"),
+      qd("m2", "poolA", 4, "medium"),
+      qd("h1", "poolA", 5, "hard"),
+      qd("h2", "poolA", 6, "hard"),
+    ];
+    const result = buildSelectedQuestionIds({
+      questions,
+      pools: [{ id: "poolA", drawCount: null, drawCountEasy: 2, drawCountMedium: 1, drawCountHard: 1 }],
+      randomiseQuestionOrder: false,
+      rng: fakeRng([0.9, 0.1, 0.5, 0.2, 0.7, 0.3, 0.6]),
+    });
+    const easyDrawn = result.filter((id) => id.startsWith("e"));
+    const mediumDrawn = result.filter((id) => id.startsWith("m"));
+    const hardDrawn = result.filter((id) => id.startsWith("h"));
+    expect(easyDrawn).toHaveLength(2);
+    expect(mediumDrawn).toHaveLength(1);
+    expect(hardDrawn).toHaveLength(1);
+  });
+
+  it("a null individual band quota draws 0 from that band, never 'all of that band'", () => {
+    const questions = [qd("e1", "poolA", 0, "easy"), qd("h1", "poolA", 1, "hard"), qd("h2", "poolA", 2, "hard")];
+    const result = buildSelectedQuestionIds({
+      questions,
+      pools: [{ id: "poolA", drawCount: null, drawCountEasy: null, drawCountMedium: null, drawCountHard: 1 }],
+      randomiseQuestionOrder: false,
+    });
+    expect(result.filter((id) => id.startsWith("e"))).toHaveLength(0);
+    expect(result.filter((id) => id.startsWith("h"))).toHaveLength(1);
+  });
+
+  it("a band quota greater than that band's available questions draws all available in that band, no error", () => {
+    const questions = [qd("e1", "poolA", 0, "easy"), qd("e2", "poolA", 1, "easy")];
+    const result = buildSelectedQuestionIds({
+      questions,
+      pools: [{ id: "poolA", drawCount: null, drawCountEasy: 10, drawCountMedium: null, drawCountHard: null }],
+      randomiseQuestionOrder: false,
+    });
+    expect(result.sort()).toEqual(["e1", "e2"]);
+  });
+
+  it("a question with no recorded difficulty is never drawn by a quota-configured pool", () => {
+    const questions = [qd("nodiff", "poolA", 0, null), qd("e1", "poolA", 1, "easy")];
+    const result = buildSelectedQuestionIds({
+      questions,
+      pools: [{ id: "poolA", drawCount: null, drawCountEasy: 5, drawCountMedium: 5, drawCountHard: 5 }],
+      randomiseQuestionOrder: false,
+    });
+    expect(result).toEqual(["e1"]);
+  });
+});
+
 describe("resolveSelectedQuestionIds", () => {
   const examQuestionIds = ["q1", "q2", "q3", "q4", "q5"];
 

@@ -81,12 +81,41 @@ export type PoolQuestionInput = {
   questionPoolId: string | null;
   /** Original lecturer-defined order — used to order the selected set when randomiseQuestionOrder is off. */
   order: number;
+  /**
+   * Pool Selection Refinement v1 (see docs/pool-selection-refinement-v1.md)
+   * — only read when the question's pool is itself quota-configured (see
+   * PoolInput below). "easy" | "medium" | "hard" | null/absent; a
+   * question with no recorded difficulty can never be drawn by a
+   * quota-configured pool (there is no band it honestly belongs to).
+   */
+  difficulty?: string | null;
 };
 
 export type PoolInput = {
   id: string;
-  /** Null or <= 0 means "include every question in this pool." */
+  /** Null or <= 0 means "include every question in this pool." Ignored when this pool is quota-configured (see below). */
   drawCount: number | null;
+  /**
+   * Pool Selection Refinement v1 (additive) — see
+   * docs/pool-selection-refinement-v1.md. When ALL THREE are null/absent
+   * (every pool that predates this feature, and any pool that has never
+   * had a quota set), this pool is "quota-unconfigured" and `drawCount`
+   * alone governs the draw, byte-for-byte the same as before this
+   * feature. When ANY of the three is set, this pool becomes
+   * "quota-configured": exactly that many questions are drawn from each
+   * difficulty band instead (a null individual quota counts as 0 for
+   * that band, never "all of that band"), and `drawCount` is ignored for
+   * this pool. Mirrors the existing drawCount>pool-size rule: if a band
+   * has fewer eligible questions than requested, every available
+   * question in that band is drawn and no error is raised here — the
+   * blocking "not enough eligible questions" validation belongs to
+   * pool-construction/quota-editing time (see the auto-from-bank route
+   * and the pool quota PATCH validation), not to each individual
+   * student's draw.
+   */
+  drawCountEasy?: number | null;
+  drawCountMedium?: number | null;
+  drawCountHard?: number | null;
 };
 
 /**
@@ -120,6 +149,29 @@ export function buildSelectedQuestionIds(params: {
 
   for (const pool of params.pools) {
     const poolQuestions = byPool.get(pool.id) ?? [];
+    const isQuotaConfigured =
+      pool.drawCountEasy != null || pool.drawCountMedium != null || pool.drawCountHard != null;
+
+    if (isQuotaConfigured) {
+      // Pool Selection Refinement v1 — draw each difficulty band
+      // independently; a null band quota is 0, never "all of that band."
+      const bandQuotas: Array<[string, number]> = [
+        ["easy", pool.drawCountEasy ?? 0],
+        ["medium", pool.drawCountMedium ?? 0],
+        ["hard", pool.drawCountHard ?? 0],
+      ];
+      for (const [difficulty, quota] of bandQuotas) {
+        if (quota <= 0) continue;
+        const bandQuestions = poolQuestions.filter((q) => q.difficulty === difficulty);
+        const shuffledBand = shuffleWithRng(
+          bandQuestions.map((q) => q.id),
+          params.rng,
+        );
+        for (const id of shuffledBand.slice(0, Math.min(quota, bandQuestions.length))) selectedIds.add(id);
+      }
+      continue;
+    }
+
     const drawCount =
       pool.drawCount == null || pool.drawCount <= 0
         ? poolQuestions.length

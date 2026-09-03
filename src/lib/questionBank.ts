@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isQuestionDifficulty } from "./questionDifficulty";
 
 export const BANK_QUESTION_TYPES = ["MULTIPLE_CHOICE", "SHORT_ANSWER", "ESSAY"] as const;
 export type BankQuestionType = (typeof BANK_QUESTION_TYPES)[number];
@@ -61,6 +62,7 @@ export function mapBankQuestionToQuestionData(
     optionsJson: string | null;
     correctAnswer: string | null;
     points: number;
+    difficulty?: string | null;
   },
   examId: string,
   order: number,
@@ -85,5 +87,8 @@ export function mapBankQuestionToQuestionData(
     order,
     source: "QUESTION_BANK" as const,
     sourceBankQuestionId: bankQuestion.id,
+    // Pool Selection Refinement v1 — an independent snapshot taken once,
+    // at copy time; never re-derived from sourceBankQuestion afterward.
+    difficulty: isQuestionDifficulty(bankQuestion.difficulty) ? bankQuestion.difficulty : undefined,
   };
 }
