@@ -7,11 +7,13 @@ import { classifyStudentRequest, blockedRequestStudentMessage } from "./aiAssist
 import { STARTER_ACTIONS } from "@/components/AiBrainstormPanel";
 
 // Brainstorm starter-action reliability follow-up — the EXACT fixed
-// strings AiBrainstormPanel's six starter buttons send (imported from
-// the component, not hand-copied, so this can never silently drift from
-// what production actually sends). Confirms the "particular starter
-// wording" hypothesis is false: none of them trip the classifier, so a
-// starter button can never fail here where a typed prompt would succeed.
+// strings AiBrainstormPanel's starter buttons send (imported from the
+// component, not hand-copied, so this can never silently drift from
+// what production actually sends — currently two, see that file's own
+// "Simplify Brainstorm actions" doc comment). Confirms the "particular
+// starter wording" hypothesis is false: none of them trip the
+// classifier, so a starter button can never fail here where a typed
+// prompt would succeed.
 describe("Brainstorm starter actions are never classified as unsafe", () => {
   it.each(STARTER_ACTIONS)("$label", ({ prompt }) => {
     const result = classifyStudentRequest(prompt);

@@ -66,13 +66,19 @@ type HistoryResponse = {
 // Exported so tests can exercise the exact strings production sends
 // (rather than a hand-copied, driftable duplicate) — see
 // aiAssistanceClassifier.test.ts and aiAssistance.routes.test.ts.
+//
+// Simplify Brainstorm actions — trimmed from six presets down to these
+// two. The other four ("Give me a starting point", "Help me organise my
+// ideas", "Challenge my reasoning", "Suggest what I should check") are
+// deliberately removed from the panel, not merely hidden — a student can
+// still ask for any of that via the free-text input, which reaches the
+// exact same server pipeline (see aiAssistance.routes.test.ts's
+// "Brainstorm starter actions use the exact same pipeline as a manually
+// typed prompt"). Purely a UI simplification: no change to prompt
+// construction, the safety verifier, or attempt accounting.
 export const STARTER_ACTIONS = [
   { label: "Help me understand the question", prompt: "Can you help me understand what this question is asking?" },
-  { label: "Give me a starting point", prompt: "Can you give me a broad starting point for approaching this?" },
   { label: "Ask me a guiding question", prompt: "Can you ask me a guiding question to help me think this through?" },
-  { label: "Help me organise my ideas", prompt: "Can you help me organise my ideas for this question?" },
-  { label: "Challenge my reasoning", prompt: "Can you challenge my current reasoning on this question?" },
-  { label: "Suggest what I should check", prompt: "What should I check or verify before I finalise my answer?" },
 ];
 
 // A guardrail redirect (the assistant declining to hand over a final
@@ -433,7 +439,30 @@ export function AiBrainstormPanel(props: {
             ))}
           </div>
 
-          <div className="mt-2 flex gap-2">
+          {/* Enter-to-submit — a single <form onSubmit> path (Part 6's own
+              preferred implementation) rather than a separate onKeyDown
+              handler: pressing Enter in this single-line input and
+              clicking the "Ask" button both trigger this ONE onSubmit,
+              so there is no second submission code path to keep in sync
+              and no risk of a duplicate request from both firing at once.
+              The submit button's own `disabled` expression (identical to
+              the one already guarding the click handler below — empty/
+              whitespace input, a request already in flight, or prompts
+              exhausted) is reused as-is: per the HTML implicit-submission
+              spec, a disabled default submit button also blocks Enter
+              from submitting the form, so there is no separate Enter-
+              specific validation to maintain. A plain single-line
+              <input type="text"> does not treat an IME-composition-
+              confirming Enter as a submit trigger either — native
+              browser behaviour, not something this handler needs to
+              guard against itself. */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void sendPrompt(customPrompt);
+            }}
+            className="mt-2 flex gap-2"
+          >
             <label htmlFor={inputId} className="sr-only">
               Ask Tether Brainstorm a question
             </label>
@@ -449,14 +478,13 @@ export function AiBrainstormPanel(props: {
               className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm disabled:opacity-50"
             />
             <button
-              type="button"
+              type="submit"
               disabled={disabled || !customPrompt.trim()}
-              onClick={() => sendPrompt(customPrompt)}
               className="rounded border border-teal-700 bg-teal-700 px-3 py-1 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-50"
             >
               {sending ? "Thinking..." : "Ask"}
             </button>
-          </div>
+          </form>
         </div>
       </div>
     </section>
