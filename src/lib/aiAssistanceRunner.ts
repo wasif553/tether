@@ -36,7 +36,6 @@ import {
   nextCumulativeRiskScore,
   isCumulativeHintLeakageRisk,
   isApprovedResponseLengthValid,
-  isWeakSocraticOnlyResponse,
   boundedHiddenReference,
   isStaleReservation,
   AI_ASSISTANCE_FALLBACK_RESPONSE,
@@ -697,9 +696,8 @@ export async function runAiAssistanceRequest(params: {
   let outcome = initialOutcome;
   let regenerated = false;
   if (outcome.kind !== "approved") {
-    const regenerationReason = regenerationReasonForOutcome(outcome);
     outcome = await attemptGenerateAndVerify({
-      generatorInput: { ...generatorInput, regenerationReason },
+      generatorInput: { ...generatorInput, stricter: true },
       question,
       policy,
       studentPrompt: params.studentPrompt,
@@ -819,26 +817,8 @@ export type GenerateVerifyDiagnostics = {
 
 export type GenerateVerifyOutcome =
   | { kind: "approved"; response: string; riskScore: number; riskCodes: RiskCode[]; diagnostics: GenerateVerifyDiagnostics }
-  // `weak` (Brainstorm hint-quality pass) is true ONLY when the candidate
-  // passed the safety verifier but was itself a bare Socratic question
-  // with no substantive hint — never true alongside a real safety
-  // rejection (verifier disallow / cumulative-risk override / over-length),
-  // which always report weak: false. The runner uses this to pick the
-  // right regeneration instruction (see regenerationReason above).
-  | { kind: "rejected"; riskScore: number; riskCodes: RiskCode[]; weak: boolean; diagnostics: GenerateVerifyDiagnostics }
+  | { kind: "rejected"; riskScore: number; riskCodes: RiskCode[]; diagnostics: GenerateVerifyDiagnostics }
   | { kind: "error"; stage: "generator" | "verifier"; category: AiProviderErrorCategory; diagnostics: GenerateVerifyDiagnostics };
-
-/**
- * Brainstorm hint-quality pass — picks the regeneration instruction for
- * the single retry attempt. A "weak" rejection (bare Socratic question,
- * no safety concern) needs the OPPOSITE instruction from every other
- * rejection/error reason: add substance, not less of it. Exported pure
- * (no Prisma, no Anthropic) for direct unit testing alongside
- * attemptGenerateAndVerify — see aiAssistanceRunner.test.ts.
- */
-export function regenerationReasonForOutcome(outcome: GenerateVerifyOutcome): "TOO_RISKY" | "TOO_WEAK" {
-  return outcome.kind === "rejected" && outcome.weak ? "TOO_WEAK" : "TOO_RISKY";
-}
 
 /**
  * Exported for direct unit testing (mocked generator/verifier, no
@@ -920,15 +900,7 @@ export async function attemptGenerateAndVerify(params: {
     : verifierResult.riskCodes;
 
   if (verifierResult.allowed && !cumulativeOverride && lengthValid) {
-    // Brainstorm hint-quality pass — a candidate that is SAFE (passed
-    // every check above) can still be USELESS: a bare Socratic question
-    // with no actual hint. Checked only here, after safety has already
-    // cleared it, so a genuinely risky response is never reclassified as
-    // merely "weak" — the two are mutually exclusive by construction.
-    if (isWeakSocraticOnlyResponse(candidate)) {
-      return { kind: "rejected", riskScore: verifierResult.riskScore, riskCodes, weak: true, diagnostics };
-    }
     return { kind: "approved", response: candidate, riskScore: verifierResult.riskScore, riskCodes, diagnostics };
   }
-  return { kind: "rejected", riskScore: verifierResult.riskScore, riskCodes, weak: false, diagnostics };
+  return { kind: "rejected", riskScore: verifierResult.riskScore, riskCodes, diagnostics };
 }

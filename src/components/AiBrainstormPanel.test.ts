@@ -8,7 +8,13 @@
  * consistent with every other client component in this codebase.
  */
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { discussingPreview } from "./AiBrainstormPanel";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const source = fs.readFileSync(path.join(__dirname, "AiBrainstormPanel.tsx"), "utf8");
 
 describe("discussingPreview", () => {
   it("returns short question text unchanged", () => {
@@ -30,5 +36,23 @@ describe("discussingPreview", () => {
   it("does not append an ellipsis when the text is exactly at the boundary", () => {
     const exact = "a".repeat(70);
     expect(discussingPreview(exact)).toBe(exact);
+  });
+});
+
+describe("Brainstorm counter clarity pass — prompts-remaining display wiring", () => {
+  it("uses formatPromptsRemainingLabel for both the per-question and per-exam counters", () => {
+    expect(source).toContain('import { formatPromptsRemainingLabel } from "@/lib/brainstormCounterDisplay"');
+    expect(source).toContain("formatPromptsRemainingLabel(promptsRemainingForQuestion, maxPromptsPerQuestion)");
+    expect(source).toContain("formatPromptsRemainingLabel(promptsRemainingForAttempt, maxPromptsPerAttempt)");
+  });
+
+  it("no longer renders the ambiguous bare 'remaining / max' fraction for the two counters", () => {
+    expect(source).not.toContain("{promptsRemainingForQuestion ?? \"–\"} / {maxPromptsPerQuestion ?? \"–\"}");
+    expect(source).not.toContain("{promptsRemainingForAttempt ?? \"–\"} / {maxPromptsPerAttempt ?? \"–\"}");
+  });
+
+  it("still shows two distinct labelled rows — 'This question' and 'This exam' remain two genuinely independent counters", () => {
+    expect(source).toContain("<span>This question</span>");
+    expect(source).toContain("<span>This exam</span>");
   });
 });

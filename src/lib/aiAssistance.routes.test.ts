@@ -19,7 +19,7 @@ vi.mock("@/lib/aiAssistanceGenerator", async () => {
   const actual = await vi.importActual<typeof import("./aiAssistanceGenerator")>("./aiAssistanceGenerator");
   return {
     ...actual,
-    generateBrainstormResponse: vi.fn().mockResolvedValue("Focus on the core concept this question is testing. What specific idea does it require you to apply?"),
+    generateBrainstormResponse: vi.fn().mockResolvedValue("What concept do you think this question is testing?"),
     // Deterministic default for every route test below: the optional
     // Anthropic provider is treated as configured, so these tests exercise
     // ownership/limits/persistence logic without needing a real
@@ -502,7 +502,7 @@ describe("4/5/7/8. FAILED status — a genuine provider failure never shows gene
     expect(rows[0].status).toBe("FAILED");
     expect(rows[0].approvedResponse).toBeNull();
 
-    mocked.mockResolvedValue("Focus on the core concept this question is testing. What specific idea does it require you to apply?"); // restore default
+    mocked.mockResolvedValue("What concept do you think this question is testing?"); // restore default
   });
 });
 
@@ -661,11 +661,11 @@ describe("intermittent-failure follow-up — a verifier that cannot complete its
     expect(res.status).toBe(200);
     expect(body.status).toBe("FALLBACK");
     expect(typeof body.response).toBe("string");
-    expect(body.response).not.toContain("Focus on the core concept this question is testing. What specific idea does it require you to apply?"); // the mocked generator output — never shown unverified
+    expect(body.response).not.toContain("What concept do you think this question is testing?"); // the mocked generator output — never shown unverified
 
     const row = await prisma.aiAssistanceInteraction.findFirst({ where: { submissionId: submission.id } });
     expect(row?.status).toBe("FALLBACK");
-    expect(row?.approvedResponse).not.toContain("Focus on the core concept this question is testing. What specific idea does it require you to apply?");
+    expect(row?.approvedResponse).not.toContain("What concept do you think this question is testing?");
 
     mocked.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" }); // restore default
   });
@@ -689,6 +689,6 @@ describe("intermittent-failure follow-up — a verifier that cannot complete its
     expect(body.response).toBeNull();
     expect(body.studentMessage).toMatch(/temporarily unavailable/i);
 
-    mocked.mockResolvedValue("Focus on the core concept this question is testing. What specific idea does it require you to apply?"); // restore default
+    mocked.mockResolvedValue("What concept do you think this question is testing?"); // restore default
   });
 });

@@ -30,6 +30,7 @@
  * page's own 3-column grid threshold (see page.tsx).
  */
 import { useEffect, useId, useRef, useState } from "react";
+import { formatPromptsRemainingLabel } from "@/lib/brainstormCounterDisplay";
 
 // RATE_LIMITED and NETWORK_ERROR are client-local only — never a status
 // the server returns or persists. They exist so a 429 (rate limit) or a
@@ -336,16 +337,24 @@ export function AiBrainstormPanel(props: {
 
           <div className="mt-2 rounded border border-gray-200 bg-white p-2 text-xs">
             <p className="font-medium text-slate-900">Prompts remaining</p>
+            {/* Brainstorm counter clarity pass — "This question" and "This
+                exam" are two genuinely independent limits (see
+                src/lib/brainstormCounterDisplay.ts's own doc comment for
+                why), each stated unambiguously as "N of M remaining" —
+                never a bare "N / M" fraction, which reads as ambiguous
+                (used vs. remaining) and, when a lecturer has configured
+                both limits to the same value, can look like a display bug
+                even though the two counts are computed independently. */}
             <div className="mt-1 flex items-center justify-between text-slate-700">
               <span>This question</span>
               <span className="font-mono font-semibold tabular-nums text-teal-700">
-                {promptsRemainingForQuestion ?? "–"} / {maxPromptsPerQuestion ?? "–"}
+                {formatPromptsRemainingLabel(promptsRemainingForQuestion, maxPromptsPerQuestion)}
               </span>
             </div>
             <div className="flex items-center justify-between text-slate-700">
               <span>This exam</span>
               <span className="font-mono font-semibold tabular-nums text-teal-700">
-                {promptsRemainingForAttempt ?? "–"} / {maxPromptsPerAttempt ?? "–"}
+                {formatPromptsRemainingLabel(promptsRemainingForAttempt, maxPromptsPerAttempt)}
               </span>
             </div>
           </div>

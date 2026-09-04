@@ -41,7 +41,7 @@ vi.mock("./aiAssistanceVerifier", () => ({
 
 import { generateBrainstormResponse, AiAssistanceGenerationError } from "./aiAssistanceGenerator";
 import { verifyBrainstormResponse, AiAssistanceVerificationError } from "./aiAssistanceVerifier";
-import { attemptGenerateAndVerify, regenerationReasonForOutcome } from "./aiAssistanceRunner";
+import { attemptGenerateAndVerify } from "./aiAssistanceRunner";
 
 const mockedGenerate = vi.mocked(generateBrainstormResponse);
 const mockedVerify = vi.mocked(verifyBrainstormResponse);
@@ -366,127 +366,5 @@ describe("15/16. verifier receives hidden reference material the generator never
 
     const call = mockedVerify.mock.calls[0][0];
     expect(call.hiddenModelAnswer!.length).toBeLessThan(veryLongAnswer.length);
-  });
-});
-
-// Brainstorm hint-quality pass — a candidate can pass the safety
-// verifier and STILL be rejected for being a bare Socratic question with
-// no real guidance. This is a distinct failure mode from anything the
-// verifier itself checks (verifier "allowed" stays true throughout).
-describe("Brainstorm hint-quality pass — weak (bare Socratic) responses", () => {
-  it("a verifier-approved but bare Socratic question is rejected with weak: true", async () => {
-    mockedGenerate.mockResolvedValue("What do you think?");
-    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.05, riskCodes: [], reason: "safe but empty" });
-
-    const result = await attemptGenerateAndVerify({
-      generatorInput: baseGeneratorInput,
-      question: baseQuestion,
-      policy: basePolicy,
-      studentPrompt: "help",
-      approvedCountForQuestion: 0,
-      cumulativeSoFar: 0,
-    });
-
-    expect(result.kind).toBe("rejected");
-    if (result.kind === "rejected") expect(result.weak).toBe(true);
-  });
-
-  it("a verifier-approved candidate with a real hint AND a follow-up question is approved, not flagged weak", async () => {
-    mockedGenerate.mockResolvedValue(
-      "Focus on the Python keyword used immediately before the name of a function when it is declared. Which option corresponds to that keyword?",
-    );
-    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
-
-    const result = await attemptGenerateAndVerify({
-      generatorInput: baseGeneratorInput,
-      question: baseQuestion,
-      policy: basePolicy,
-      studentPrompt: "help",
-      approvedCountForQuestion: 0,
-      cumulativeSoFar: 0,
-    });
-
-    expect(result.kind).toBe("approved");
-  });
-
-  it("a safety rejection (verifier disallows) is never also flagged weak — the two failure modes stay distinct", async () => {
-    mockedGenerate.mockResolvedValue("The answer is B.");
-    mockedVerify.mockResolvedValue({ allowed: false, riskScore: 0.9, riskCodes: ["CORRECT_OPTION_DISCLOSED"], reason: "unsafe" });
-
-    const result = await attemptGenerateAndVerify({
-      generatorInput: baseGeneratorInput,
-      question: baseQuestion,
-      policy: basePolicy,
-      studentPrompt: "give me the answer",
-      approvedCountForQuestion: 0,
-      cumulativeSoFar: 0,
-    });
-
-    expect(result.kind).toBe("rejected");
-    if (result.kind === "rejected") expect(result.weak).toBe(false);
-  });
-});
-
-describe("regenerationReasonForOutcome — opposite instructions for opposite failure modes", () => {
-  it("a weak rejection asks for TOO_WEAK regeneration (add substance)", () => {
-    const outcome = {
-      kind: "rejected" as const,
-      riskScore: 0.05,
-      riskCodes: [],
-      weak: true,
-      diagnostics: { generator: { attempts: [], ranMs: 0 }, verifier: { attempts: [], ranMs: 0 } },
-    };
-    expect(regenerationReasonForOutcome(outcome)).toBe("TOO_WEAK");
-  });
-
-  it("a safety rejection asks for TOO_RISKY regeneration (be more conservative)", () => {
-    const outcome = {
-      kind: "rejected" as const,
-      riskScore: 0.9,
-      riskCodes: ["DIRECT_ANSWER" as const],
-      weak: false,
-      diagnostics: { generator: { attempts: [], ranMs: 0 }, verifier: { attempts: [], ranMs: 0 } },
-    };
-    expect(regenerationReasonForOutcome(outcome)).toBe("TOO_RISKY");
-  });
-
-  it("a generator/verifier error also defaults to TOO_RISKY (never TOO_WEAK for a failure that produced no judged candidate)", () => {
-    const outcome = {
-      kind: "error" as const,
-      stage: "generator" as const,
-      category: "SERVER_ERROR" as const,
-      diagnostics: { generator: { attempts: [], ranMs: 0 }, verifier: { attempts: [], ranMs: 0 } },
-    };
-    expect(regenerationReasonForOutcome(outcome)).toBe("TOO_RISKY");
-  });
-});
-
-// Question-scoped brainstorm sidebar v1 — priorApprovedInteractions is
-// built by the CALLER (runAiAssistanceRequest) scoped to one
-// (submissionId, questionId) pair; attemptGenerateAndVerify itself just
-// threads whatever it's given straight through to the generator, so a
-// caller that correctly scopes history per-question keeps that isolation
-// all the way through. Proven here at the boundary this function
-// actually owns: the generator receives exactly the interactions it was
-// given, never merged with anything else.
-describe("question-scoped history stays isolated through the generate/verify boundary", () => {
-  it("passes priorApprovedInteractions to the generator unchanged, scoped to whatever the caller supplied", async () => {
-    mockedGenerate.mockResolvedValue("A relevant hint. What do you notice about the pattern?");
-    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
-
-    const priorApprovedInteractions = [{ studentPrompt: "earlier prompt for THIS question", approvedResponse: "earlier hint for THIS question" }];
-    await attemptGenerateAndVerify({
-      generatorInput: { ...baseGeneratorInput, priorApprovedInteractions },
-      question: baseQuestion,
-      policy: basePolicy,
-      studentPrompt: "help",
-      approvedCountForQuestion: 1,
-      cumulativeSoFar: 0,
-    });
-
-    expect(mockedGenerate).toHaveBeenCalledWith(
-      expect.objectContaining({ priorApprovedInteractions }),
-      expect.anything(),
-    );
   });
 });
