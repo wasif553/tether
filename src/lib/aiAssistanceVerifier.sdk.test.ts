@@ -121,6 +121,20 @@ describe("message shape sent to Anthropic", () => {
     expect(call.system).toContain("guidance or method, not disclosure");
   });
 
+  // Misconception/concept-check follow-up — the verifier's prompt didn't
+  // distinguish "corrects a wrong claim" from "confirms a stated final
+  // answer", risking an over-cautious rejection of legitimate corrective
+  // guidance (e.g. "Not quite — a tuple is not a row").
+  it("clarifies that correcting a misconception is safe, but confirming a student's stated final answer is not", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("corrects a student's mistaken claim");
+    expect(call.system).toContain("even when phrased as agreement rather than as a fresh statement");
+  });
+
   it("includes the hidden model answer only in the user content, and only when supplied", async () => {
     mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
 

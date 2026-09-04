@@ -257,10 +257,19 @@ export function isStaleReservation(createdAt: Date, now: number = Date.now()): b
   return now - createdAt.getTime() > STALE_RESERVATION_MS;
 }
 
-/** The deterministic, always-safe fallback (Part 9) — never generated text, never model output of any kind. */
+/**
+ * The deterministic, always-safe fallback (Part 9) — never generated text,
+ * never model output of any kind. Neutral, corrective-guidance phrasing
+ * (never "I cannot provide...") — a concept-check/misconception-correction
+ * follow-up found this fallback firing for benign requests (e.g. "Tuple is
+ * row and list is a list, right?") too, and a refusal-flavoured opener
+ * reads as if the student had asked for the answer outright, which most
+ * requests reaching this fallback never did (this fallback only fires for
+ * a request the classifier already allowed through).
+ */
 export const AI_ASSISTANCE_FALLBACK_RESPONSE =
-  "I cannot provide that part of the answer. Start by identifying the main concept being assessed. " +
-  "What information in the question appears most relevant to that concept?";
+  "Let's check your reasoning step by step. Start by identifying the main concept being assessed, and think about " +
+  "what information in the question is most relevant to that concept.";
 
 /** Shown to the student on a genuine provider/parsing failure (status FAILED) — distinct wording from the fallback above, since nothing was actually generated at all, safe/degraded or otherwise. */
 export const AI_ASSISTANCE_UNAVAILABLE_MESSAGE =

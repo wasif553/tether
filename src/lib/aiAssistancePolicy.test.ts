@@ -148,7 +148,18 @@ describe("20. cumulative hint leakage protection", () => {
 describe("9. Part 9 deterministic fallback", () => {
   it("is a fixed string, never model output", () => {
     expect(AI_ASSISTANCE_FALLBACK_RESPONSE.length).toBeGreaterThan(0);
-    expect(AI_ASSISTANCE_FALLBACK_RESPONSE).toContain("cannot provide");
+  });
+
+  // Concept-check/misconception-correction follow-up — this fallback only
+  // ever fires for a request the classifier already allowed through (a
+  // BLOCKED request never reaches generation), so a refusal-flavoured
+  // opener ("I cannot provide...") misleadingly implies the student asked
+  // for the answer outright, which most fallback-reaching requests never
+  // did (e.g. "Tuple is row and list is a list, right?"). The fallback
+  // text must stay neutral/corrective, never phrased as a refusal.
+  it("is neutral corrective guidance, never phrased as a refusal", () => {
+    expect(AI_ASSISTANCE_FALLBACK_RESPONSE.toLowerCase()).not.toContain("cannot provide");
+    expect(AI_ASSISTANCE_FALLBACK_RESPONSE.toLowerCase()).not.toContain("i can't");
   });
 });
 

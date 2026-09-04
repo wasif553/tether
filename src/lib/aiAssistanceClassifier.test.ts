@@ -254,6 +254,56 @@ describe("ambiguous requests resolve to allowed (safe guidance), not a hard refu
   });
 });
 
+// Misconception/concept-check follow-up — manual Preview testing found
+// "Tuple is row and list is a list, right?" (a student exposing a
+// misconception and checking their understanding, not asking for the
+// final answer) falling back to the generic refusal. Traced to the
+// generator/verifier layer being unclear that correcting a misconception
+// is different from confirming a completed answer — see the updated
+// system prompts in aiAssistanceGenerator.ts/aiAssistanceVerifier.ts.
+// This classifier itself already allowed every phrase below before that
+// fix (confirmed here so a future change can't silently regress it).
+describe("concept-check / misconception-check requests are allowed", () => {
+  it.each([
+    "Tuple is row and list is a list, right?",
+    "Is a tuple like a row?",
+    "Does a list use parentheses?",
+    "Am I thinking about mutability correctly?",
+    "I think tuples can't be changed — is that what I should focus on?",
+    "Is this concept about changing values?",
+    "Have I understood the idea correctly?",
+    "I think this is about the syntax — am I on the right track?",
+    "I think this is about mutability — am I on the right track?",
+    "Have I understood the concept correctly?",
+  ])("%s", (prompt) => {
+    const result = classifyStudentRequest(prompt);
+    expect(result.allowed).toBe(true);
+    expect(result.blockReasonCodes).toHaveLength(0);
+  });
+});
+
+// Final-answer-CONFIRMATION requests are deliberately NOT blocked by this
+// classifier — see docs/controlled-ai-brainstorming-assistance-v1.md. The
+// classifier only screens the student's REQUEST for an explicit ask to
+// disclose; a student stating their own candidate answer and asking for
+// confirmation must still reach generation so it can be redirected, not
+// silently blocked (blocking it would look identical to a legitimate
+// concept-check being refused). The actual guardrail against a simple
+// "yes"/"correct" confirmation lives in the generator/verifier prompts —
+// see their own sdk tests — never in this deterministic pre-screen.
+describe("final-answer-confirmation requests reach generation (not blocked here — see generator/verifier tests for the no-confirmation guardrail)", () => {
+  it.each([
+    "Is the answer def?",
+    "Is B the correct option?",
+    "Lists are mutable and tuples are immutable. Is that the full answer?",
+    "So the final answer is 42, right?",
+    "This code is the answer, correct?",
+  ])("%s", (prompt) => {
+    const result = classifyStudentRequest(prompt);
+    expect(result.allowed).toBe(true);
+  });
+});
+
 describe("student-facing blocked messages", () => {
   it("never echoes the raw pattern/regex back", () => {
     const message = blockedRequestStudentMessage(["MCQ_OPTION_REQUEST"]);
