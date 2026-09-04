@@ -3,9 +3,11 @@
 import { useEffect, useState } from "react";
 import {
   buildExamWatermarkLines,
+  buildWatermarkTilePositions,
   shortenSubmissionId,
   studentIdentifierForWatermark,
   type WatermarkStudentInfo,
+  type WatermarkTilePosition,
 } from "@/lib/examWatermark";
 
 export type ExamWatermarkProps = {
@@ -15,18 +17,56 @@ export type ExamWatermarkProps = {
   refreshIntervalMs?: number;
 };
 
-// A grid of repeated tiles reads clearly across the whole question area in
-// a photo/screenshot without needing canvas or an image — plain CSS only.
-const WATERMARK_TILE_COUNT = 24;
+// Watermark layout refinement — see docs/exam-watermark-v1.md,
+// "Distributed layout". Two independent tile SETS (not one set scaled
+// down) — desktop gets more, smaller tiles; mobile/tablet gets fewer,
+// larger ones, per "reduce density rather than shrinking into
+// unreadable noise." Toggled purely via Tailwind responsive classes
+// (both render; CSS hides one) so there is no client-only viewport
+// detection and therefore no hydration mismatch.
+const DESKTOP_TILES = buildWatermarkTilePositions({ columns: 3, rows: 6 });
+const MOBILE_TILES = buildWatermarkTilePositions({ columns: 2, rows: 4 });
+
+function WatermarkLayer({
+  positions,
+  text,
+  textSizeClassName,
+}: {
+  positions: WatermarkTilePosition[];
+  text: string;
+  textSizeClassName: string;
+}) {
+  return (
+    <div className="relative h-full w-full">
+      {positions.map((pos, i) => (
+        <p
+          key={i}
+          className={`absolute whitespace-pre-line text-center font-medium leading-tight text-gray-900 ${textSizeClassName}`}
+          style={{
+            left: `${pos.leftPercent}%`,
+            top: `${pos.topPercent}%`,
+            transform: `translate(-50%, -50%) rotate(${pos.rotationDeg}deg)`,
+            opacity: 0.1,
+          }}
+        >
+          {text}
+        </p>
+      ))}
+    </div>
+  );
+}
 
 /**
  * Exam Watermark v1 — see docs/exam-watermark-v1.md. A visible,
- * low-opacity, diagonal, repeated watermark overlay for the exam question
- * area: a deterrence/traceability aid, never an access control. Purely
- * decorative — `pointer-events: none` so it can never intercept
+ * low-opacity, diagonal, staggered watermark overlay for the exam
+ * question area: a deterrence/traceability aid, never an access control.
+ * Purely decorative — `pointer-events: none` so it can never intercept
  * clicks/typing, and `aria-hidden="true"` so assistive tech skips it
  * entirely. The parent element must be `position: relative` (or similar)
- * for this absolutely-positioned overlay to cover it correctly.
+ * for this absolutely-positioned overlay to cover it correctly — sized
+ * via `inset-0` to match the parent, which (having no fixed height of
+ * its own) grows to the full scrollable question content, not just the
+ * viewport, so the watermark covers scrollable content too.
  */
 export function ExamWatermark({ student, submissionId, refreshIntervalMs = 45_000 }: ExamWatermarkProps) {
   const [timestamp, setTimestamp] = useState<string>(() => new Date().toLocaleString());
@@ -44,24 +84,11 @@ export function ExamWatermark({ student, submissionId, refreshIntervalMs = 45_00
 
   return (
     <div aria-hidden="true" className="pointer-events-none absolute inset-0 select-none overflow-hidden">
-      <div className="grid h-full w-full grid-cols-2 gap-10 p-2 sm:grid-cols-3">
-        {Array.from({ length: WATERMARK_TILE_COUNT }, (_, i) => (
-          <div key={i} className="flex items-center justify-center" style={{ transform: "rotate(-28deg)" }}>
-            <p
-              className="whitespace-pre-line text-center text-[10px] font-medium leading-tight text-gray-900"
-              // Final minor UX refinements v1 — restored to the
-              // original 0.1 (a prior pass had lightened this to 0.06
-              // for legibility; that was reverted — the watermark must
-              // remain clearly, darkly visible as an exam-integrity
-              // deterrent). Purely a visual adjustment (see this
-              // component's own doc comment: opacity is never read as
-              // a signal anywhere).
-              style={{ opacity: 0.1 }}
-            >
-              {text}
-            </p>
-          </div>
-        ))}
+      <div className="hidden h-full w-full sm:block">
+        <WatermarkLayer positions={DESKTOP_TILES} text={text} textSizeClassName="text-[10px]" />
+      </div>
+      <div className="h-full w-full sm:hidden">
+        <WatermarkLayer positions={MOBILE_TILES} text={text} textSizeClassName="text-xs" />
       </div>
     </div>
   );

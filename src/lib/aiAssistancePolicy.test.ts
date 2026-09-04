@@ -27,6 +27,7 @@ import {
   MAX_HIDDEN_REFERENCE_CHARACTERS,
   boundedHiddenReference,
   isApprovedResponseLengthValid,
+  isWeakSocraticOnlyResponse,
 } from "./aiAssistancePolicy";
 import { severityFor, DEFAULT_SECURE_SETTINGS } from "./secureExam";
 import { SEVERITY_WEIGHTS } from "./integrityRisk";
@@ -149,6 +150,54 @@ describe("9. Part 9 deterministic fallback", () => {
   it("is a fixed string, never model output", () => {
     expect(AI_ASSISTANCE_FALLBACK_RESPONSE.length).toBeGreaterThan(0);
     expect(AI_ASSISTANCE_FALLBACK_RESPONSE).toContain("cannot provide");
+  });
+
+  it("contains useful guidance rather than merely 'try again' — passes its own weak-response guard", () => {
+    expect(isWeakSocraticOnlyResponse(AI_ASSISTANCE_FALLBACK_RESPONSE)).toBe(false);
+  });
+});
+
+describe("Brainstorm hint-quality pass — isWeakSocraticOnlyResponse", () => {
+  it("rejects the exact generic bare-Socratic examples from the product spec", () => {
+    expect(isWeakSocraticOnlyResponse("What do you think?")).toBe(true);
+    expect(isWeakSocraticOnlyResponse("Which one do you think it is?")).toBe(true);
+    expect(isWeakSocraticOnlyResponse("Can you reason through it?")).toBe(true);
+    expect(isWeakSocraticOnlyResponse("Try again.")).toBe(true);
+  });
+
+  it("rejects an empty or whitespace-only response", () => {
+    expect(isWeakSocraticOnlyResponse("")).toBe(true);
+    expect(isWeakSocraticOnlyResponse("   ")).toBe(true);
+  });
+
+  it("rejects several bare generic questions strung together — still no real guidance", () => {
+    expect(isWeakSocraticOnlyResponse("What do you think? Try again.")).toBe(true);
+  });
+
+  it("accepts a response containing a real hint followed by a focused question (the required structure)", () => {
+    const good =
+      "Focus on the Python keyword used immediately before the name of a function when it is declared. " +
+      "Which option corresponds to that keyword?";
+    expect(isWeakSocraticOnlyResponse(good)).toBe(false);
+  });
+
+  it("accepts a genuine single-sentence hint that happens to have no follow-up question", () => {
+    expect(isWeakSocraticOnlyResponse("Consider what happens to prices when money supply grows faster than output.")).toBe(false);
+  });
+
+  it("accepts a short, ordinary hint statement (not a bare question, not a generic phrase)", () => {
+    expect(isWeakSocraticOnlyResponse("A short hint.")).toBe(false);
+    expect(isWeakSocraticOnlyResponse("A mild hint.")).toBe(false);
+  });
+
+  it("still rejects a short, bare (non-generic-worded) question on its own — a Socratic question alone is not sufficient guidance", () => {
+    expect(isWeakSocraticOnlyResponse("Is it addition or subtraction?")).toBe(true);
+  });
+
+  it("does not reject a longer, more specific single question that likely already carries real guidance", () => {
+    const specificQuestion =
+      "Which Python keyword introduces a function definition, and where does it appear relative to the function's name and parameter list?";
+    expect(isWeakSocraticOnlyResponse(specificQuestion)).toBe(false);
   });
 });
 

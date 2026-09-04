@@ -79,3 +79,51 @@ export function buildExamWatermarkLines(params: ExamWatermarkTextParams): string
 export function buildExamWatermarkText(params: ExamWatermarkTextParams): string {
   return buildExamWatermarkLines(params).join("\n");
 }
+
+// ---------------------------------------------------------------------------
+// Watermark tile layout (distributed/staggered pattern) — see
+// docs/exam-watermark-v1.md, "Distributed layout". A plain CSS grid of
+// equally-spaced, uniformly-centered tiles reads as obvious repeating
+// vertical columns/lines in a screenshot, even with each tile individually
+// rotated — rotating text INSIDE a grid cell tilts the text, but the
+// cells themselves stay perfectly aligned. This computes a staggered
+// ("brick"/masonry) layout instead: alternate rows are horizontally
+// offset by half a column width, so no two adjacent rows' tiles line up
+// into a column. Pure and deterministic (no randomness) — the same
+// inputs always produce the same layout, so there is never any
+// per-render layout shift.
+// ---------------------------------------------------------------------------
+
+export type WatermarkTilePosition = {
+  /** Center point, as a percentage of the container's width/height — pairs with CSS `translate(-50%, -50%)` so the tile is centered on this point regardless of its own rendered size. */
+  leftPercent: number;
+  topPercent: number;
+  rotationDeg: number;
+};
+
+/** Center of the requested "-25deg to -35deg" range — diagonal enough to visually break up horizontal reading lines without tipping past readable. */
+export const WATERMARK_DEFAULT_ROTATION_DEG = -30;
+
+export function buildWatermarkTilePositions(params: {
+  columns: number;
+  rows: number;
+  rotationDeg?: number;
+}): WatermarkTilePosition[] {
+  const { columns, rows, rotationDeg = WATERMARK_DEFAULT_ROTATION_DEG } = params;
+  const colWidthPercent = 100 / columns;
+  const rowHeightPercent = 100 / rows;
+  const positions: WatermarkTilePosition[] = [];
+  for (let r = 0; r < rows; r++) {
+    // Odd rows are offset by half a column width — the "brick" stagger
+    // that keeps alternate rows from lining up into a vertical column.
+    const rowOffsetPercent = r % 2 === 1 ? colWidthPercent / 2 : 0;
+    for (let c = 0; c < columns; c++) {
+      positions.push({
+        leftPercent: colWidthPercent * (c + 0.5) + rowOffsetPercent,
+        topPercent: rowHeightPercent * (r + 0.5),
+        rotationDeg,
+      });
+    }
+  }
+  return positions;
+}
