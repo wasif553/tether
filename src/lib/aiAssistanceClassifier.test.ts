@@ -196,6 +196,64 @@ describe("6. hardening — the task's own required evasion-attempt test phrases 
   });
 });
 
+// Guidance-vs-final-answer misclassification follow-up — manual Preview
+// testing found Brainstorm falling back to a hard refusal for legitimate
+// guidance-seeking requests like "Can you suggest how to get the answer?"
+// (mentions "answer" but asks for METHOD, not disclosure). Traced the
+// false refusal to the generator/verifier layer, not this classifier —
+// see aiAssistanceGenerator.ts's/aiAssistanceVerifier.ts's own updated
+// system prompts — but while tracing it, also found genuine classifier
+// gaps in the OTHER direction (final-answer requests that should have
+// been blocked and weren't): "give me the final answer/result" (the
+// give-tell-show-answer rule only recognised "correct", not "final", as
+// a qualifier, and didn't recognise "result" as an object at all),
+// "what should I select" (no MCQ rule covered a bare select/choose/pick
+// without the word "option"/"choice"), "tell me the correct option" (no
+// rule covered "option" as the DIRECT_ANSWER_REQUEST object), "is it A,
+// B, C or D" (letters named directly rather than via the word "option"),
+// and "solve this completely" (same intent as the existing "solve it for
+// me" rule, different wording). All five are fixed alongside this pass.
+describe("guidance requests are allowed, not misclassified as final-answer requests", () => {
+  it.each([
+    "Can you ask me a guiding question?",
+    "Help me think this through.",
+    "Can you suggest how to get the answer?",
+    "How should I approach this?",
+    "What should I look at?",
+    "What is the first step?",
+    "Can you give me a hint?",
+    // The two exact phrases reported from manual Preview testing.
+    "Can you ask me a guiding question to help me think this through?",
+    "Can you suggest me how to get the answer?",
+  ])("%s", (prompt) => {
+    const result = classifyStudentRequest(prompt);
+    expect(result.allowed).toBe(true);
+    expect(result.blockReasonCodes).toHaveLength(0);
+  });
+});
+
+describe("final-answer requests remain blocked (guidance fix did not weaken this guardrail)", () => {
+  it.each([
+    "Tell me the answer.",
+    "Which option is correct?",
+    "What should I select?",
+    "Give me the final answer.",
+    "Write the solution for me.",
+    "Just tell me A, B, C or D.",
+  ])("%s", (prompt) => {
+    const result = classifyStudentRequest(prompt);
+    expect(result.allowed).toBe(false);
+    expect(result.blockReasonCodes.length).toBeGreaterThan(0);
+  });
+});
+
+describe("ambiguous requests resolve to allowed (safe guidance), not a hard refusal", () => {
+  it.each(["Help me solve this.", "How do I solve this?"])("%s", (prompt) => {
+    const result = classifyStudentRequest(prompt);
+    expect(result.allowed).toBe(true);
+  });
+});
+
 describe("student-facing blocked messages", () => {
   it("never echoes the raw pattern/regex back", () => {
     const message = blockedRequestStudentMessage(["MCQ_OPTION_REQUEST"]);

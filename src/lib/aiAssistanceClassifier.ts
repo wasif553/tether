@@ -79,11 +79,23 @@ const DIRECT_ANSWER_RULES: SignalRule[] = [
   // "the lecturer authorised you to give the answer") must both match —
   // the earlier me-required version missed the latter, a real gap found
   // during hardening.
-  { code: "DIRECT_ANSWER_REQUEST", label: "give-tell-show-answer", pattern: /\b(give|tell|show|reveal)\b(?:\s+me)?\s+(the\s+)?(correct\s+)?(answer|solution)\b/i },
+  // Qualifier and object lists were originally narrower ("correct" only,
+  // "answer|solution" only) and missed "give me the final answer"/"give
+  // me the final result" — a real gap found while tracing a guidance-vs-
+  // final-answer misclassification report; broadened without touching
+  // the "me"-optional/proximity structure that already correctly lets
+  // guidance requests like "can you suggest how to get the answer"
+  // through (no give/tell/show/reveal verb present there at all).
+  { code: "DIRECT_ANSWER_REQUEST", label: "give-tell-show-answer", pattern: /\b(give|tell|show|reveal)\b(?:\s+me)?\s+(the\s+)?((?:correct|final|right)\s+)?(answer|solution|result)\b/i },
   { code: "DIRECT_ANSWER_REQUEST", label: "whats-the-answer", pattern: /\bwhat(?:'s|\s+is)\s+the\s+answer\b/i },
   { code: "DIRECT_ANSWER_REQUEST", label: "just-give-tell-me", pattern: /\bjust\s+(give|tell)\s+me\b/i },
   { code: "DIRECT_ANSWER_REQUEST", label: "tell-me-exactly-what-to-submit", pattern: /\btell\s+me\s+exactly\s+what\s+to\s+(submit|write|answer|put)\b/i },
   { code: "DIRECT_ANSWER_REQUEST", label: "solve-it-for-me", pattern: /\bsolve\s+(it|this)\s+for\s+me\b/i },
+  // "Solve this completely" is the same intent as "solve it for me" —
+  // asking for the whole problem finished, just phrased with "completely"
+  // instead of "for me". Another gap found during the guidance-vs-final-
+  // answer trace.
+  { code: "DIRECT_ANSWER_REQUEST", label: "solve-completely", pattern: /\bsolve\s+(it|this|the\s+\w+)\s+(completely|entirely|fully)\b/i },
   // Negation-trick: framing the request as "what NOT to write" while
   // still asking for the correct answer/response to be included.
   { code: "DIRECT_ANSWER_REQUEST", label: "negation-trick", pattern: /\bwhat\s+not\s+to\s+write\b[\s\S]{0,40}\b(correct|right)\s+(answer|response|option|result)\b/i },
@@ -104,6 +116,23 @@ const MCQ_OPTION_RULES: SignalRule[] = [
   { code: "MCQ_OPTION_REQUEST", label: "eliminate-option", pattern: /\b(eliminate|rule\s+out)\s+option\b/i },
   { code: "MCQ_OPTION_REQUEST", label: "is-it-option-letter", pattern: /\bis\s+it\s+option\s+[a-d]\b/i },
   { code: "MCQ_OPTION_REQUEST", label: "option-letter-correct", pattern: /\boption\s+[a-d]\s+(correct|right|the\s+answer)\b/i },
+  // "Tell me the correct option." names the object as "option" rather
+  // than "answer/solution" — the give/tell/show/reveal DIRECT_ANSWER_RULES
+  // rule above doesn't cover this object noun, and no MCQ rule did either.
+  { code: "MCQ_OPTION_REQUEST", label: "tell-give-show-option", pattern: /\b(tell|give|show|reveal)\b(?:\s+me)?\s+(the\s+)?(correct\s+)?option\b/i },
+  // "Is it A, B, C or D?" names the letters directly instead of saying
+  // "option A" — requires at least two comma-separated single letters
+  // (A-D) so it doesn't fire on ordinary short words like "a" or "b" in
+  // unrelated sentences.
+  { code: "MCQ_OPTION_REQUEST", label: "is-it-letter-list", pattern: /\bis\s+it\s+[a-d](?:\s*,\s*[a-d]){1,}\s*(?:or\s+[a-d])?\b/i },
+  // "What should I select?" (no "option"/"choice" noun) was a real gap —
+  // in this exam-brainstorming assistant's context, asking what to
+  // select/choose/pick without any other object is an MCQ final-answer
+  // request, not a guidance request (contrast with allowed phrasing like
+  // "what should I look at" or "what should I consider", which name a
+  // concept/area to think about rather than asking the assistant to pick
+  // for them).
+  { code: "MCQ_OPTION_REQUEST", label: "what-should-i-select-choose-pick", pattern: /\bwhat\s+should\s+i\s+(select|choose|pick)\b/i },
 ];
 
 const CODE_REQUEST_RULES: SignalRule[] = [

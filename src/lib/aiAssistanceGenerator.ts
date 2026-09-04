@@ -116,6 +116,7 @@ function buildSystemPrompt(policy: BrainstormPolicyCapabilities, stricter: boole
     "",
     "Prefer Socratic questions over statements. Be concise" + (policy.maxResponseCharacters ? ` — your ENTIRE response must be under ${policy.maxResponseCharacters} characters` : "") + ".",
     "If the student asks directly for the answer, a complete solution, complete code, an MCQ option, or the rubric, politely decline that specific part while still offering a safe alternative form of help (e.g. a concept explanation or a guiding question) in the same response.",
+    "A student asking HOW to approach, find, work out, or get the answer (for example \"can you suggest how to get the answer\", \"how do I work this out\", \"what's the first step\") is asking for guidance, not asking you to state the answer — treat that as a normal request for help, not as one of the direct requests above. Only decline the specific part of a request that explicitly asks you to state, confirm, or write the final answer, option, result, code, or rubric itself.",
     stricter
       ? "IMPORTANT: your previous response was rejected for being too close to a direct answer. Be noticeably more conservative this time — favour a single guiding question over any explanation, and give strictly less detail than before."
       : "",

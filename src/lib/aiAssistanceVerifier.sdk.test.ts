@@ -103,6 +103,24 @@ describe("message shape sent to Anthropic", () => {
     expect(call.messages[0].role).toBe("user");
   });
 
+  // Guidance-vs-final-answer misclassification follow-up — the fallback
+  // refusal students hit for legitimate guidance requests (e.g. "Can you
+  // suggest how to get the answer?") traced to this verifier: its prompt
+  // didn't tell the model that the STUDENT'S own wording is not what's
+  // being judged, only the candidate response is — so a guidance request
+  // that happens to contain "answer" risked being read as evidence the
+  // candidate response was unsafe. This clarifying instruction fixes that
+  // without weakening any UNSAFE criterion.
+  it("clarifies that only the candidate response (never the student's own request wording) can trigger an unsafe verdict", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("Judge ONLY the candidate response text");
+    expect(call.system).toContain("guidance or method, not disclosure");
+  });
+
   it("includes the hidden model answer only in the user content, and only when supplied", async () => {
     mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
 
