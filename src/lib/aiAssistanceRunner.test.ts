@@ -41,7 +41,7 @@ vi.mock("./aiAssistanceVerifier", () => ({
 
 import { generateBrainstormResponse, AiAssistanceGenerationError } from "./aiAssistanceGenerator";
 import { verifyBrainstormResponse, AiAssistanceVerificationError } from "./aiAssistanceVerifier";
-import { attemptGenerateAndVerify } from "./aiAssistanceRunner";
+import { attemptGenerateAndVerify, rejectionRegenerationHint } from "./aiAssistanceRunner";
 
 const mockedGenerate = vi.mocked(generateBrainstormResponse);
 const mockedVerify = vi.mocked(verifyBrainstormResponse);
@@ -366,5 +366,48 @@ describe("15/16. verifier receives hidden reference material the generator never
 
     const call = mockedVerify.mock.calls[0][0];
     expect(call.hiddenModelAnswer!.length).toBeLessThan(veryLongAnswer.length);
+  });
+});
+
+// Concept-explanation quality follow-up — the runner's targeted
+// regeneration instruction (section 1/5 of the follow-up: WHY the
+// previous candidate was rejected, not just "be more conservative").
+// Pure mapping, no Prisma/Anthropic involved.
+describe("rejectionRegenerationHint — targeted regeneration instruction from the rejection reason", () => {
+  const diagnostics = { generator: { attempts: [], ranMs: 0 }, verifier: { attempts: [], ranMs: 0 } };
+
+  it("describes a single risk code in plain language", () => {
+    const hint = rejectionRegenerationHint({ kind: "rejected", riskScore: 0.9, riskCodes: ["DIRECT_ANSWER"], diagnostics });
+    expect(hint).toContain("it stated or clearly implied the final answer");
+  });
+
+  it("joins multiple risk codes into one instruction", () => {
+    const hint = rejectionRegenerationHint({
+      kind: "rejected",
+      riskScore: 0.9,
+      riskCodes: ["CORRECT_OPTION_DISCLOSED", "OPTION_ELIMINATION"],
+      diagnostics,
+    });
+    expect(hint).toContain("it identified or implied which option is correct");
+    expect(hint).toContain("it ruled options in or out");
+  });
+
+  it("gives a length-specific instruction when the rejection carries no risk codes (verifier allowed it, but it was too long)", () => {
+    const hint = rejectionRegenerationHint({ kind: "rejected", riskScore: 0, riskCodes: [], diagnostics });
+    expect(hint).toContain("too long");
+  });
+
+  it("still permits concept/syntax/terminology explanation in the regeneration instruction — this is not the old blanket 'be more conservative' line", () => {
+    const hint = rejectionRegenerationHint({ kind: "rejected", riskScore: 0.9, riskCodes: ["EXCESSIVE_SPECIFICITY"], diagnostics });
+    expect(hint).toContain("you may still explain relevant concepts, syntax, or terminology");
+  });
+
+  it("returns null for a provider/verifier ERROR outcome (nothing specific to say — caller falls back to the generic stricter line)", () => {
+    expect(rejectionRegenerationHint({ kind: "error", stage: "verifier", category: "UNKNOWN", diagnostics })).toBeNull();
+    expect(rejectionRegenerationHint({ kind: "error", stage: "generator", category: "TIMEOUT", diagnostics })).toBeNull();
+  });
+
+  it("returns null for an approved outcome (defensive — never actually called this way by the runner)", () => {
+    expect(rejectionRegenerationHint({ kind: "approved", response: "ok", riskScore: 0, riskCodes: [], diagnostics })).toBeNull();
   });
 });

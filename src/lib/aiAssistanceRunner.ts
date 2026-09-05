@@ -36,9 +36,10 @@ import {
   nextCumulativeRiskScore,
   isCumulativeHintLeakageRisk,
   isApprovedResponseLengthValid,
+  isSubstantiallyIdenticalResponse,
+  buildFallbackGuidance,
   boundedHiddenReference,
   isStaleReservation,
-  AI_ASSISTANCE_FALLBACK_RESPONSE,
   AI_ASSISTANCE_UNAVAILABLE_MESSAGE,
   type AiAssistancePolicy,
   type AiAssistanceInteractionStatus,
@@ -289,6 +290,52 @@ type FinalizePayload = {
   latencyMs: number | null;
   wasRegenerated: boolean;
 };
+
+/** Human-readable, model-facing reasons for each risk code — see rejectionRegenerationHint below. Deliberately not exhaustive prose (a short clause per code); codes with no entry are simply skipped rather than producing an empty/garbled sentence. */
+const RISK_CODE_REGENERATION_REASONS: Partial<Record<RiskCode, string>> = {
+  DIRECT_ANSWER: "it stated or clearly implied the final answer",
+  NEAR_COMPLETE_ANSWER: "it got too close to the final answer",
+  CORRECT_OPTION_DISCLOSED: "it identified or implied which option is correct",
+  OPTION_ELIMINATION: "it ruled options in or out",
+  FINAL_NUMERIC_RESULT: "it gave the final numeric result",
+  SUBMISSION_READY_PROSE: "it was specific enough to submit directly as the answer",
+  COMPLETE_CODE: "it included complete working code",
+  HIDDEN_RUBRIC_DISCLOSURE: "it referenced the marking rubric or a model answer",
+  CUMULATIVE_HINT_LEAKAGE: "combined with earlier approved hints it revealed too much",
+  EXCESSIVE_SPECIFICITY: "it was more specific than appropriate at this stage",
+};
+
+/**
+ * Concept-explanation quality follow-up — builds a TARGETED regeneration
+ * instruction from WHY the previous candidate was rejected (the
+ * verifier's own risk codes, or a length-specific note when the verifier
+ * allowed it but it was too long), instead of only a generic "be more
+ * conservative" instruction. A specific reason lets the generator avoid
+ * the actual problem while still substantively answering the student's
+ * real request. Returns null when there's nothing specific to say (a
+ * provider/verifier ERROR, not a real content rejection, or an unmapped
+ * risk code) — the caller falls back to the old generic stricter wording
+ * in aiAssistanceGenerator.ts in that case. Exported for direct unit
+ * testing (no Prisma/Anthropic involved — pure).
+ */
+export function rejectionRegenerationHint(outcome: GenerateVerifyOutcome): string | null {
+  if (outcome.kind !== "rejected") return null;
+  if (outcome.riskCodes.length === 0) {
+    return (
+      "Your previous response was too long. Say the same kind of thing more concisely, while still directly and " +
+      "specifically addressing the student's actual request."
+    );
+  }
+  const reasons = outcome.riskCodes
+    .map((code) => RISK_CODE_REGENERATION_REASONS[code])
+    .filter((reason): reason is string => Boolean(reason));
+  if (reasons.length === 0) return null;
+  return (
+    `Your previous response for this same request was rejected because ${reasons.join("; ")}. Respond to the ` +
+    "student's actual request in a different, safe way — you may still explain relevant concepts, syntax, or " +
+    `terminology in as much substantive detail as helps them; you must simply avoid ${reasons.length > 1 ? "those issues" : "that issue"} this time.`
+  );
+}
 
 function messageForEventType(eventType: string): string {
   switch (eventType) {
@@ -696,8 +743,15 @@ export async function runAiAssistanceRequest(params: {
   let outcome = initialOutcome;
   let regenerated = false;
   if (outcome.kind !== "approved") {
+    // Concept-explanation quality follow-up — regenerate with a TARGETED
+    // instruction explaining why the previous candidate was rejected
+    // (mapped from the verifier's own risk codes, or a length-specific
+    // note when the verifier allowed it but it was too long) instead of
+    // only the old generic "be more conservative" line. A specific reason
+    // lets the model avoid the actual problem while still substantively
+    // helping with the student's real request.
     outcome = await attemptGenerateAndVerify({
-      generatorInput: { ...generatorInput, stricter: true },
+      generatorInput: { ...generatorInput, stricter: true, regenerationGuidance: rejectionRegenerationHint(outcome) },
       question,
       policy,
       studentPrompt: params.studentPrompt,
@@ -705,6 +759,36 @@ export async function runAiAssistanceRequest(params: {
       cumulativeSoFar,
     });
     regenerated = true;
+  } else {
+    // Concept-explanation quality follow-up — before accepting an
+    // immediately-approved candidate, check it against the immediately
+    // prior APPROVED response for this SAME question (question-scoped —
+    // never compared across questions). A student with a limited prompt
+    // allowance gets nothing useful from a repeated answer, so this is
+    // checked even though the candidate already passed safety
+    // verification; a narrow, conservative repetition check (normalized
+    // exact/near-exact equality only, see isSubstantiallyIdenticalResponse)
+    // rather than fuzzy semantic similarity, so it never rejects a
+    // genuinely different response for sharing a few common phrases.
+    // Bounded to exactly one extra regeneration, same as the rejection
+    // path above — whatever that second attempt produces is accepted as
+    // final, so a persistently-repeating model still doesn't loop.
+    const immediatelyPrior = priorApproved[priorApproved.length - 1];
+    if (immediatelyPrior && isSubstantiallyIdenticalResponse(outcome.response, immediatelyPrior.approvedResponse ?? "")) {
+      outcome = await attemptGenerateAndVerify({
+        generatorInput: {
+          ...generatorInput,
+          regenerationGuidance:
+            "The previous guidance already covered that. Respond specifically to the student's new request and provide a different useful explanation or reasoning direction.",
+        },
+        question,
+        policy,
+        studentPrompt: params.studentPrompt,
+        approvedCountForQuestion,
+        cumulativeSoFar,
+      });
+      regenerated = true;
+    }
   }
   const latencyMs = Date.now() - startedAt;
 
@@ -785,9 +869,16 @@ export async function runAiAssistanceRequest(params: {
   // discarded here and NEVER persisted or returned, on any path.
   const riskCodes = outcome.kind === "rejected" ? outcome.riskCodes : [];
   const riskScore = outcome.kind === "rejected" ? outcome.riskScore : 0;
+  // Concept-explanation quality follow-up — question-aware fallback
+  // instead of one universal paragraph: the student's own request and the
+  // (already-visible-to-them) question text are safe to quote back, and
+  // vary the guidance by what kind of request this was (concept
+  // explanation, approach, guiding question) rather than repeating the
+  // same generic sentence regardless of what was actually asked.
+  const fallbackResponse = buildFallbackGuidance({ questionText: question.text, studentRequest: params.studentPrompt });
   await finalizeInteraction(interactionId, submission, settings, {
     status: "FALLBACK",
-    approvedResponse: AI_ASSISTANCE_FALLBACK_RESPONSE,
+    approvedResponse: fallbackResponse,
     riskCodes,
     riskScore,
     cumulativeRiskScore: cumulativeSoFar,
@@ -798,7 +889,7 @@ export async function runAiAssistanceRequest(params: {
   });
   return {
     status: "FALLBACK",
-    response: AI_ASSISTANCE_FALLBACK_RESPONSE,
+    response: fallbackResponse,
     studentMessage: null,
     promptsRemainingForQuestion: Math.max(0, policy.maxPromptsPerQuestion - promptNumberForQuestion),
     promptsRemainingForAttempt: Math.max(0, policy.maxPromptsPerAttempt - promptNumberForAttempt),

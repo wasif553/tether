@@ -135,6 +135,22 @@ describe("message shape sent to Anthropic", () => {
     expect(call.system).toContain("even when phrased as agreement rather than as a fresh statement");
   });
 
+  // Concept-explanation quality follow-up — a substantive, accurate
+  // explanation of a general concept/syntax/terminology (e.g. what
+  // *args/**kwargs do in Python) was at risk of being rejected as
+  // EXCESSIVE_SPECIFICITY purely for being detailed, even though it never
+  // touched the actual question's answer. This clarifies the criterion is
+  // about answer-specific reasoning, not general subject-matter teaching.
+  it("clarifies that thorough concept/syntax/terminology explanation is not EXCESSIVE_SPECIFICITY by itself", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("EXCESSIVE_SPECIFICITY concerns answer-specific reasoning steps for the ACTUAL question, not general subject-matter teaching");
+    expect(call.system).toContain("is NOT excessive specificity by itself");
+  });
+
   it("includes the hidden model answer only in the user content, and only when supplied", async () => {
     mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
 

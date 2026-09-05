@@ -27,6 +27,8 @@ import {
   MAX_HIDDEN_REFERENCE_CHARACTERS,
   boundedHiddenReference,
   isApprovedResponseLengthValid,
+  isSubstantiallyIdenticalResponse,
+  buildFallbackGuidance,
 } from "./aiAssistancePolicy";
 import { severityFor, DEFAULT_SECURE_SETTINGS } from "./secureExam";
 import { SEVERITY_WEIGHTS } from "./integrityRisk";
@@ -240,5 +242,113 @@ describe("Part 9 — provider payload bounds", () => {
     expect(isApprovedResponseLengthValid("short", { maxResponseCharacters: 800 })).toBe(true);
     expect(isApprovedResponseLengthValid("x".repeat(801), { maxResponseCharacters: 800 })).toBe(false);
     expect(isApprovedResponseLengthValid("", { maxResponseCharacters: 800 })).toBe(false);
+  });
+});
+
+// Concept-explanation quality follow-up — repetition detection (section 8
+// of the follow-up). Deliberately conservative: normalized exact/near-
+// exact equality only, never fuzzy/semantic similarity, so a genuinely
+// different response sharing a few common phrases is never flagged.
+describe("isSubstantiallyIdenticalResponse — conservative repetition detection", () => {
+  it("flags an exact repeat", () => {
+    const text = "Consider what causes evaporation before condensation.";
+    expect(isSubstantiallyIdenticalResponse(text, text)).toBe(true);
+  });
+
+  it("flags a repeat that differs only in case, punctuation, or whitespace (near-exact, normalized)", () => {
+    const previous = "Consider what causes evaporation before condensation.";
+    const candidate = "consider   what causes evaporation before condensation";
+    expect(isSubstantiallyIdenticalResponse(candidate, previous)).toBe(true);
+  });
+
+  it("does NOT flag a genuinely different response, even one sharing a few common phrases", () => {
+    const previous = "Consider what causes evaporation before condensation.";
+    const candidate = "*args collects extra positional arguments into a tuple, while **kwargs collects extra keyword arguments into a dictionary.";
+    expect(isSubstantiallyIdenticalResponse(candidate, previous)).toBe(false);
+  });
+
+  it("does NOT flag two responses that share an opening phrase but diverge substantially", () => {
+    const previous = "Think about the parameters in order: first the named ones, then the rest.";
+    const candidate = "Think about the return value and how it's structured once every argument has been bound.";
+    expect(isSubstantiallyIdenticalResponse(candidate, previous)).toBe(false);
+  });
+
+  it("returns false for empty input on either side (nothing to compare)", () => {
+    expect(isSubstantiallyIdenticalResponse("", "something")).toBe(false);
+    expect(isSubstantiallyIdenticalResponse("something", "")).toBe(false);
+  });
+});
+
+// Concept-explanation quality follow-up — question-aware fallback
+// (sections 5/6/9 of the follow-up). Manual Preview testing found the
+// SAME generic paragraph returned for three different legitimate
+// requests on one question, wasting the student's limited allowance.
+// This is the LAST-RESORT deterministic path (reached only after
+// generation/verification genuinely could not produce a safe answer) —
+// it must vary by what the student actually asked, and must never
+// hard-code subject-specific vocabulary.
+describe("buildFallbackGuidance — request-shape-aware, question-aware, domain-agnostic fallback", () => {
+  const questionText =
+    "What is the output of the following code?\n\ndef func(a, b=5, *args, **kwargs):\n    return a, b, args, kwargs";
+
+  it("gives different text for a concept-explanation request than for an approach request or a guiding-question request", () => {
+    const concept = buildFallbackGuidance({
+      questionText,
+      studentRequest: "what are *args and **kwargs arguments, how they are different than a and b?",
+    });
+    const approach = buildFallbackGuidance({
+      questionText,
+      studentRequest: "how should I approach this?",
+    });
+    const guidingQuestion = buildFallbackGuidance({
+      questionText,
+      studentRequest: "Can you ask me a guiding question to help me think this through?",
+    });
+
+    expect(concept).not.toBe(approach);
+    expect(concept).not.toBe(guidingQuestion);
+    expect(approach).not.toBe(guidingQuestion);
+  });
+
+  it("the template wrapper itself never hard-codes subject-specific vocabulary — a completely different subject produces the same generic phrasing shape, no Python/*args/**kwargs residue baked in", () => {
+    const economicsResult = buildFallbackGuidance({
+      questionText: "Explain how supply and demand determine the equilibrium price.",
+      studentRequest: "What is price elasticity of demand?",
+    });
+    expect(economicsResult.toLowerCase()).not.toContain("python");
+    expect(economicsResult.toLowerCase()).not.toContain("*args");
+    expect(economicsResult.toLowerCase()).not.toContain("**kwargs");
+    expect(economicsResult).toContain("price elasticity of demand");
+  });
+
+  it("incorporates the student's own request and the question text rather than a fixed universal paragraph", () => {
+    const result = buildFallbackGuidance({
+      questionText,
+      studentRequest: "what are *args and **kwargs arguments, how they are different than a and b?",
+    });
+    expect(result).toContain("*args and **kwargs");
+    expect(result.toLowerCase()).toContain("what is the output of the following code");
+  });
+
+  it("never states or implies the final answer to the actual question", () => {
+    const result = buildFallbackGuidance({
+      questionText,
+      studentRequest: "what are *args and **kwargs arguments, how they are different than a and b?",
+    });
+    expect(result).not.toContain("(1, 2, (3, 4)");
+    expect(result.toLowerCase()).not.toContain("the output is");
+  });
+
+  it("falls back to the neutral generic guidance for a request matching no known shape", () => {
+    const result = buildFallbackGuidance({ questionText, studentRequest: "hmm" });
+    expect(result).toBe(AI_ASSISTANCE_FALLBACK_RESPONSE);
+  });
+
+  it("bounds very long question text/student requests rather than echoing them back unbounded", () => {
+    const result = buildFallbackGuidance({
+      questionText: "What is the output? ".repeat(50),
+      studentRequest: "What are *args and **kwargs? ".repeat(50),
+    });
+    expect(result.length).toBeLessThan(600);
   });
 });

@@ -271,6 +271,77 @@ export const AI_ASSISTANCE_FALLBACK_RESPONSE =
   "Let's check your reasoning step by step. Start by identifying the main concept being assessed, and think about " +
   "what information in the question is most relevant to that concept.";
 
+// ---------------------------------------------------------------------------
+// Question-aware fallback (concept-explanation quality follow-up) — a
+// student's own request and the (already-visible-to-them) question text
+// are safe to quote back, so the fallback can vary by what the student
+// actually asked for instead of one universal paragraph repeated across
+// every request. Deliberately domain-agnostic: no subject-specific
+// vocabulary is hard-coded here (never "Python", "*args", etc.) — only
+// generic problem-solving framing plus the student's/question's own
+// words, bounded in length. This is the LAST-RESORT deterministic path,
+// reached only after generation/verification genuinely could not produce
+// a safe candidate (see aiAssistanceRunner.ts) — the primary defense
+// against unhelpful fallbacks is the generator/verifier prompt work above
+// (concept explanation is no longer needlessly rejected) and the
+// regeneration guidance passed on a retry, so this should fire rarely.
+// ---------------------------------------------------------------------------
+
+const FALLBACK_SNIPPET_MAX_CHARS = 140;
+
+function truncateForFallback(text: string, maxChars: number = FALLBACK_SNIPPET_MAX_CHARS): string {
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  return trimmed.length > maxChars ? trimmed.slice(0, maxChars).trim() + "…" : trimmed;
+}
+
+const CONCEPT_EXPLANATION_FALLBACK_PATTERNS = [
+  /\bwhat\s+(?:is|are|does|do)\b/i,
+  /\bexplain\b/i,
+  /\bwork(?:s|ing)?\b.*\?$/i,
+  /\bhelp\s+me\s+understand\b/i,
+  /\bwhat'?s\s+the\s+difference\b/i,
+  /\bhow\s+(?:is|are|does|do)\b.*\bdifferent\b/i,
+];
+const APPROACH_FALLBACK_PATTERNS = [
+  /\bhow\s+(?:should|do|can)\s+i\s+(?:approach|start|begin|work\s+this\s+out|trace|solve)\b/i,
+  /\bwhat\s+(?:should|is)\s+the\s+first\s+step\b/i,
+  /\bhow\s+do\s+i\s+approach\b/i,
+];
+const GUIDING_QUESTION_FALLBACK_PATTERNS = [/\bguiding\s+question\b/i, /\bask\s+me\s+a\s+question\b/i];
+
+/**
+ * Builds a request-shape-aware, question-aware fallback — used only when
+ * generation/verification could not produce a safe approved candidate
+ * after regeneration. Never discloses anything the student couldn't
+ * already see (their own request, the question text they're already
+ * looking at) and never states or implies the actual answer.
+ */
+export function buildFallbackGuidance(input: { questionText: string; studentRequest: string }): string {
+  const questionSnippet = truncateForFallback(input.questionText);
+  const studentSnippet = truncateForFallback(input.studentRequest);
+  if (!questionSnippet || !studentSnippet) return AI_ASSISTANCE_FALLBACK_RESPONSE;
+
+  if (GUIDING_QUESTION_FALLBACK_PATTERNS.some((p) => p.test(input.studentRequest))) {
+    return (
+      `Here's a question to guide you: looking at "${questionSnippet}", what is the very first thing you'd need ` +
+      "to figure out before you could answer it?"
+    );
+  }
+  if (CONCEPT_EXPLANATION_FALLBACK_PATTERNS.some((p) => p.test(input.studentRequest))) {
+    return (
+      `You asked: "${studentSnippet}". Break that down into its separate parts, think about the role each part ` +
+      `plays on its own, and then connect that back to what "${questionSnippet}" is actually asking.`
+    );
+  }
+  if (APPROACH_FALLBACK_PATTERNS.some((p) => p.test(input.studentRequest))) {
+    return (
+      `For "${questionSnippet}", work through it one step at a time: identify exactly what is being asked, note ` +
+      "what information you already have, and decide what you still need to work out before going further."
+    );
+  }
+  return AI_ASSISTANCE_FALLBACK_RESPONSE;
+}
+
 /** Shown to the student on a genuine provider/parsing failure (status FAILED) — distinct wording from the fallback above, since nothing was actually generated at all, safe/degraded or otherwise. */
 export const AI_ASSISTANCE_UNAVAILABLE_MESSAGE =
   "The brainstorming assistant is temporarily unavailable. Please try again shortly.";
@@ -286,6 +357,44 @@ export const MAX_HIDDEN_REFERENCE_CHARACTERS = 2_000;
 export function boundedHiddenReference(text: string | null | undefined): string | null {
   if (!text) return null;
   return text.length > MAX_HIDDEN_REFERENCE_CHARACTERS ? text.slice(0, MAX_HIDDEN_REFERENCE_CHARACTERS) : text;
+}
+
+// ---------------------------------------------------------------------------
+// Repetition detection (concept-explanation quality follow-up) — manual
+// Preview testing found the SAME generic fallback returned for three
+// different, legitimate student requests on one question, wasting the
+// student's limited prompt allowance. Distinct from the fallback-text
+// change above: this guards against the (safe, verified) generator itself
+// producing a response that is essentially a repeat of the immediately
+// prior APPROVED response for the same question, so the runner can ask
+// for one different regeneration instead of silently repeating stale
+// guidance. Deliberately conservative — normalized exact/near-exact
+// equality only (never fuzzy/semantic similarity), so it can never reject
+// a genuinely different response merely for sharing a few common phrases.
+// ---------------------------------------------------------------------------
+
+function normalizeForRepetitionCheck(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * True only when both responses are identical once case, punctuation, and
+ * whitespace differences are normalized away — e.g. the exact same
+ * guidance re-sent with a different trailing period or capitalization.
+ * Two responses that merely share topic vocabulary or a few phrases are
+ * NOT considered a repeat (Part 8 of the concept-explanation quality
+ * follow-up: "do not reject legitimate responses just because a few
+ * common phrases overlap").
+ */
+export function isSubstantiallyIdenticalResponse(candidate: string, previous: string): boolean {
+  const a = normalizeForRepetitionCheck(candidate);
+  const b = normalizeForRepetitionCheck(previous);
+  if (a.length === 0 || b.length === 0) return false;
+  return a === b;
 }
 
 /**
