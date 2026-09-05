@@ -56,6 +56,7 @@ const baseInput = {
   studentRequest: "Can you help me understand this question?",
   priorApprovedHintCount: 0,
   cumulativeRiskScoreSoFar: 0,
+  priorApprovedResponses: [] as string[],
 };
 
 beforeAll(() => {
@@ -196,6 +197,47 @@ describe("message shape sent to Anthropic", () => {
     const call = mockCreate.mock.calls[0][0];
     expect(call.messages[0].content).toContain("Evaporation, condensation, precipitation.");
     expect(call.system).not.toContain("Evaporation, condensation, precipitation.");
+  });
+
+  // Cumulative answer-assembly follow-up — a SECOND, narrower safety
+  // question for open-response questions only: does this candidate,
+  // combined with prior approved guidance for the SAME question, now
+  // substantially assemble what the question requires? Deliberately NOT
+  // a return to the removed "too specific/detailed" framing.
+  it("adds the open-response cumulative-completion question, distinct from the removed excessive-specificity framing", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("For SHORT_ANSWER and ESSAY questions specifically (never for MULTIPLE_CHOICE");
+    expect(call.system).toContain("SUBMISSION_READY_COMPLETION");
+    expect(call.system).toContain("CUMULATIVE_RESPONSE_COMPLETION");
+    expect(call.system).toContain("This is NOT the same as 'too detailed' or 'too specific'");
+  });
+
+  it("includes the actual text of prior approved responses for this question, only in the user content", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse({
+      ...baseInput,
+      priorApprovedResponses: ["Tuples cannot be modified after creation.", "Lists can be modified after creation."],
+    });
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.messages[0].content).toContain("Prior approved responses for this SAME question");
+    expect(call.messages[0].content).toContain("1. Tuples cannot be modified after creation.");
+    expect(call.messages[0].content).toContain("2. Lists can be modified after creation.");
+    expect(call.system).not.toContain("Tuples cannot be modified after creation.");
+  });
+
+  it("omits the prior-approved-responses section entirely when this is the question's first interaction", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse({ ...baseInput, priorApprovedResponses: [] });
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.messages[0].content).not.toContain("Prior approved responses for this SAME question");
   });
 });
 

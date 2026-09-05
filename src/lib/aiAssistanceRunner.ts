@@ -305,6 +305,9 @@ const RISK_CODE_REGENERATION_REASONS: Partial<Record<RiskCode, string>> = {
   HIDDEN_RUBRIC_DISCLOSURE: "it referenced the marking rubric or a model answer",
   CUMULATIVE_HINT_LEAKAGE: "combined with earlier approved hints it revealed too much",
   EXCESSIVE_SPECIFICITY: "it was more specific than appropriate at this stage",
+  // Cumulative answer-assembly follow-up.
+  SUBMISSION_READY_COMPLETION: "it supplied enough content to substantially complete the assessed response on its own",
+  CUMULATIVE_RESPONSE_COMPLETION: "combined with earlier approved guidance for this question it substantially completed the assessed response",
 };
 
 /**
@@ -996,6 +999,14 @@ export async function attemptGenerateAndVerify(params: {
         hiddenRubricSummary: null,
         priorApprovedHintCount: params.approvedCountForQuestion,
         cumulativeRiskScoreSoFar: params.cumulativeSoFar,
+        // Cumulative answer-assembly follow-up — derived from the SAME
+        // question-scoped list already fetched once for the generator
+        // (params.generatorInput.priorApprovedInteractions), never a
+        // second query — so the verifier can judge whether this
+        // candidate, combined with what was already approved, now
+        // assembles the substantive content an open-response question
+        // requires.
+        priorApprovedResponses: params.generatorInput.priorApprovedInteractions.map((turn) => turn.approvedResponse),
       },
       { onAttempt: (log) => verifierAttempts.push(log) },
     );

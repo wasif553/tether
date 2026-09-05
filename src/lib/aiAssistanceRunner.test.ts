@@ -404,6 +404,27 @@ describe("rejectionRegenerationHint — targeted regeneration instruction from t
     expect(hint).toContain("you may still explain relevant concepts, syntax, or terminology");
   });
 
+  // Cumulative answer-assembly follow-up.
+  it("describes SUBMISSION_READY_COMPLETION and CUMULATIVE_RESPONSE_COMPLETION distinctly", () => {
+    const singleTurn = rejectionRegenerationHint({
+      kind: "rejected",
+      riskScore: 0.9,
+      riskCodes: ["SUBMISSION_READY_COMPLETION"],
+      reason: "completed the comparison alone",
+      diagnostics,
+    });
+    expect(singleTurn).toContain("it supplied enough content to substantially complete the assessed response on its own");
+
+    const cumulative = rejectionRegenerationHint({
+      kind: "rejected",
+      riskScore: 0.9,
+      riskCodes: ["CUMULATIVE_RESPONSE_COMPLETION"],
+      reason: "completed combined with prior guidance",
+      diagnostics,
+    });
+    expect(cumulative).toContain("combined with earlier approved guidance for this question it substantially completed the assessed response");
+  });
+
   it("returns null for a provider/verifier ERROR outcome (nothing specific to say — caller falls back to the generic stricter line)", () => {
     expect(rejectionRegenerationHint({ kind: "error", stage: "verifier", category: "UNKNOWN", diagnostics })).toBeNull();
     expect(rejectionRegenerationHint({ kind: "error", stage: "generator", category: "TIMEOUT", diagnostics })).toBeNull();

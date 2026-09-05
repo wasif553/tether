@@ -154,6 +154,7 @@ const REQUEST_MODE_INSTRUCTIONS: Record<BrainstormRequestMode, string> = {
 
 function buildSystemPrompt(
   policy: BrainstormPolicyCapabilities,
+  questionType: BrainstormQuestionType,
   requestMode: BrainstormRequestMode,
   stricter: boolean,
   regenerationGuidance?: string | null,
@@ -180,6 +181,16 @@ function buildSystemPrompt(
     "Be concise" + (policy.maxResponseCharacters ? ` — your ENTIRE response must be under ${policy.maxResponseCharacters} characters` : "") + ".",
     "",
     "For THIS request specifically: " + REQUEST_MODE_INSTRUCTIONS[requestMode],
+    // Cumulative answer-assembly follow-up — SHORT_ANSWER/ESSAY questions
+    // have no single "correct option" to protect, so the earlier
+    // instructions alone let a sequence of individually-safe concept
+    // explanations add up to the whole assessed response (e.g. "what is
+    // a tuple" + "what is a list" + "what's the difference" = the full
+    // comparison). MULTIPLE_CHOICE is unaffected — its protection is
+    // already the option/result boundary above.
+    questionType !== "MULTIPLE_CHOICE"
+      ? "This is an open-response question: teach or address ONE concept, ONE misconception, or ONE reasoning direction at a time — do not automatically compare or connect every concept the question requires, do not list multiple required distinguishing points, and do not assemble a submission-ready paragraph. This applies even combined with what you already told the student earlier for this same question (see prior approved assistance below, if any)."
+      : "",
     regenerationGuidance
       ? regenerationGuidance
       : stricter
@@ -292,7 +303,7 @@ export async function generateBrainstormResponse(
   diagnostics?: GenerateBrainstormDiagnostics,
 ): Promise<string> {
   const client = getClient();
-  const system = buildSystemPrompt(input.policy, input.requestMode, input.stricter === true, input.regenerationGuidance);
+  const system = buildSystemPrompt(input.policy, input.questionType, input.requestMode, input.stricter === true, input.regenerationGuidance);
   const userPrompt = buildUserPrompt(input);
 
   let response;

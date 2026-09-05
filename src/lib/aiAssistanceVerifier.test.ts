@@ -18,6 +18,7 @@ function verifierInput(overrides: Partial<BrainstormVerifierInput> = {}): Brains
     studentRequest: "Tuple is row and list is a list, right?",
     priorApprovedHintCount: 0,
     cumulativeRiskScoreSoFar: 0,
+    priorApprovedResponses: [],
     ...overrides,
   };
 }
@@ -35,6 +36,9 @@ describe("8. risk-code vocabulary matches the required set", () => {
       "HIDDEN_RUBRIC_DISCLOSURE",
       "CUMULATIVE_HINT_LEAKAGE",
       "EXCESSIVE_SPECIFICITY",
+      // Cumulative answer-assembly follow-up.
+      "SUBMISSION_READY_COMPLETION",
+      "CUMULATIVE_RESPONSE_COMPLETION",
     ];
     expect([...RISK_CODES].sort()).toEqual([...required].sort());
   });
@@ -157,6 +161,38 @@ describe("consolidated verifier matrix — must reject", () => {
   );
 });
 
+// Cumulative answer-assembly follow-up — the deterministic fast-check
+// deliberately does NOT attempt to judge cumulative completion itself
+// (that requires genuine semantic understanding of what the question
+// asks for vs. what has already been said — exactly the kind of
+// judgment this fast layer is NOT meant to make; see
+// fastVerifyBrainstormResponse's own doc comment: "obvious leakage is
+// rejected immediately... everything else defers"). These prove the fast
+// layer still correctly DEFERS every SAFE single-concept example from
+// the open-response test matrix regardless of prior question-scoped
+// history — the actual completion judgment lives entirely in the
+// semantic verifier's prompt (see aiAssistanceVerifier.sdk.test.ts).
+describe("open-response test matrix — single-concept teaching always defers at the fast layer, cumulative history included", () => {
+  it.each([
+    "A tuple is an ordered immutable collection in Python.",
+    "A list is mutable, meaning it can be changed after creation.",
+    "One useful comparison dimension is mutability.",
+  ])("%s (no prior history)", (candidateResponse) => {
+    const decision = fastVerifyBrainstormResponse(verifierInput({ candidateResponse, priorApprovedResponses: [] }));
+    expect(decision.kind).toBe("DEFER");
+  });
+
+  it("still defers a single-concept candidate even with two prior approved responses for this question (cumulative judgment is the semantic verifier's job, not the fast layer's)", () => {
+    const decision = fastVerifyBrainstormResponse(
+      verifierInput({
+        candidateResponse: "One useful comparison dimension is mutability.",
+        priorApprovedResponses: ["A tuple is immutable.", "A list is mutable."],
+      }),
+    );
+    expect(decision.kind).toBe("DEFER");
+  });
+});
+
 describe("23. hidden rubric/model answer may be used only by the verifier", () => {
   it("BrainstormVerifierInput has fields for hidden reference material (unlike the generator's input type)", () => {
     const input: BrainstormVerifierInput = {
@@ -168,6 +204,7 @@ describe("23. hidden rubric/model answer may be used only by the verifier", () =
       hiddenRubricSummary: "the rubric",
       priorApprovedHintCount: 0,
       cumulativeRiskScoreSoFar: 0,
+      priorApprovedResponses: [],
     };
     expect(Object.keys(input)).toContain("hiddenModelAnswer");
     expect(Object.keys(input)).toContain("hiddenRubricSummary");

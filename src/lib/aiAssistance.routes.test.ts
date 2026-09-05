@@ -839,6 +839,147 @@ describe("unified retry — repetition (question-scoped)", () => {
   });
 });
 
+// Cumulative answer-assembly follow-up (section 6/18) — the semantic
+// verifier now receives the actual TEXT of prior approved responses for
+// the SAME question (see aiAssistanceVerifier.ts's priorApprovedResponses)
+// so it can judge whether a candidate, combined with what was already
+// approved, now substantially completes an open-response question's
+// assessed answer. These exercise the real orchestration end to end
+// (mocked generate/verify, real DB) — the verifier's own semantic
+// judgment itself is not something a mock can prove, but the WIRING
+// (what it receives, and that a CUMULATIVE_RESPONSE_COMPLETION rejection
+// retries exactly once with targeted guidance) is fully testable.
+describe("cumulative answer-assembly — question-scoped, semantic-verifier-driven", () => {
+  it("the verifier receives the actual prior approved response text for this SAME question, question-scoped", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    mockedGenerate.mockResolvedValueOnce("A tuple is an ordered immutable collection in Python.");
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is a tuple?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    // First interaction for this question — no prior approved responses yet.
+    expect(mockedVerify.mock.calls[0][0].priorApprovedResponses).toEqual([]);
+
+    mockedGenerate.mockResolvedValueOnce("A list is mutable, meaning it can be changed after creation.");
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is a list?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    // Second interaction — the verifier now sees the first response's text.
+    expect(mockedVerify.mock.calls[1][0].priorApprovedResponses).toEqual([
+      "A tuple is an ordered immutable collection in Python.",
+    ]);
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("a candidate rejected for CUMULATIVE_RESPONSE_COMPLETION retries exactly once with targeted guidance, and the retry is shown", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    // Two prior approved responses already on record for this question.
+    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+    mockedGenerate.mockResolvedValueOnce("A tuple is an ordered immutable collection in Python.");
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is a tuple?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    mockedGenerate.mockResolvedValueOnce("A list is mutable, meaning it can be changed after creation.");
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is a list?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+
+    // Third request: the model's first attempt completes the whole
+    // comparison given what was already approved; the verifier rejects
+    // for CUMULATIVE_RESPONSE_COMPLETION, and the retry gives one safe
+    // reasoning direction instead.
+    mockedGenerate
+      .mockResolvedValueOnce(
+        "Lists use square brackets while tuples use parentheses, and lists are better for changing data while tuples are better for fixed data.",
+      )
+      .mockResolvedValueOnce("Think about what happens if you try to replace an element in each type.");
+    mockedVerify
+      .mockResolvedValueOnce({
+        allowed: false,
+        riskScore: 0.9,
+        riskCodes: ["CUMULATIVE_RESPONSE_COMPLETION"],
+        reason: "combined with prior approved guidance this completes the comparison",
+      })
+      .mockResolvedValueOnce({ allowed: true, riskScore: 0.2, riskCodes: [], reason: "safe reasoning direction" });
+
+    const third = await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is the difference between the two?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const thirdBody = await third.json();
+
+    expect(thirdBody.status).toBe("APPROVED");
+    expect(thirdBody.response).toBe("Think about what happens if you try to replace an element in each type.");
+    // 1 + 1 + 2 (third request's initial + retry) — bounded, never a second retry.
+    expect(mockedGenerate).toHaveBeenCalledTimes(4);
+    expect(mockedGenerate.mock.calls[3][0].regenerationGuidance).toContain(
+      "combined with earlier approved guidance for this question it substantially completed the assessed response",
+    );
+
+    const rows = await prisma.aiAssistanceInteraction.findMany({
+      where: { submissionId: submission.id, questionId: question.id },
+      orderBy: { createdAt: "asc" },
+    });
+    expect(rows[2]?.wasRegenerated).toBe(true);
+    expect(rows[2]?.status).toBe("APPROVED");
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("approved responses on a DIFFERENT question never appear in this question's priorApprovedResponses", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+
+    const { exam, submission, question: question1 } = await createExamAndSubmission();
+    const question2 = await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Explain the water cycle.", points: 5, order: 1 },
+    });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    mockedGenerate.mockResolvedValueOnce("A tuple is an ordered immutable collection in Python.");
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is a tuple?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question1.id }),
+    });
+
+    mockedGenerate.mockResolvedValueOnce("Evaporation turns liquid water into vapour.");
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is evaporation?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question2.id }),
+    });
+
+    // question2's verifier call must see an EMPTY prior-approved list —
+    // question1's approved response must never leak across.
+    expect(mockedVerify.mock.calls[1][0].priorApprovedResponses).toEqual([]);
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+});
+
 describe("FALLBACK status on a starter prompt — a guardrail redirect is expected behaviour, never a failure", () => {
   it("both verify attempts rejecting resolves to FALLBACK with the deterministic safe response, never FAILED", async () => {
     const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");

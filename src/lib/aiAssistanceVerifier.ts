@@ -33,6 +33,22 @@ export const RISK_CODES = [
   "HIDDEN_RUBRIC_DISCLOSURE",
   "CUMULATIVE_HINT_LEAKAGE",
   "EXCESSIVE_SPECIFICITY",
+  // Cumulative answer-assembly follow-up — additive, backward-compatible
+  // (riskCodesJson is an unstructured JSON array column; no migration).
+  // Distinct from SUBMISSION_READY_PROSE/NEAR_COMPLETE_ANSWER: those are
+  // about a single candidate reading as a polished final answer.
+  // SUBMISSION_READY_COMPLETION is about assembling MOST of the
+  // substantive content the question requires (e.g. every distinguishing
+  // point in a comparison) even if not phrased as polished prose — a
+  // bullet-style list of all the differences is just as much a completed
+  // answer as a paragraph would be. CUMULATIVE_RESPONSE_COMPLETION is the
+  // same judgment but only crosses the line when THIS candidate is
+  // combined with prior approved guidance for the SAME question — see
+  // priorApprovedResponses below. Open-response (SHORT_ANSWER/ESSAY)
+  // question types only; MULTIPLE_CHOICE keeps its existing
+  // option/result-disclosure boundary unchanged.
+  "SUBMISSION_READY_COMPLETION",
+  "CUMULATIVE_RESPONSE_COMPLETION",
 ] as const;
 export type RiskCode = (typeof RISK_CODES)[number];
 
@@ -48,6 +64,17 @@ export type BrainstormVerifierInput = {
   priorApprovedHintCount: number;
   /** Running sum of riskScore across every previously-approved interaction for this question (Part 10). */
   cumulativeRiskScoreSoFar: number;
+  /**
+   * Cumulative answer-assembly follow-up — the actual TEXT of every
+   * previously-approved response for this SAME question (question-scoped
+   * — never another question's history), oldest first. Needed so the
+   * verifier can judge whether THIS candidate, combined with what was
+   * already approved, now substantially completes the assessed response
+   * for an open-response question — a judgment that requires seeing the
+   * actual prior content, not just a count/score. Empty for a question's
+   * first interaction.
+   */
+  priorApprovedResponses: string[];
 };
 
 export type BrainstormVerifierResult = {
@@ -269,6 +296,18 @@ function buildSystemPrompt(): string {
     "",
     "For an open-response question (essay/short-answer), teaching and substantial explanation are SAFE — reject only when the candidate becomes a complete, submission-ready version of the student's final assessed response, never merely because it is thorough or detailed.",
     "",
+    // Cumulative answer-assembly follow-up — a SECOND, narrower safety
+    // question for SHORT_ANSWER/ESSAY only. Deliberately NOT a return to
+    // the removed "is this too specific/detailed" framing — that broad
+    // question caused useful single-concept teaching to be rejected and
+    // must never come back. This one only asks whether the substantive
+    // CONTENT the question requires has now been assembled, whether in
+    // one message or spread across several approved ones.
+    "For SHORT_ANSWER and ESSAY questions specifically (never for MULTIPLE_CHOICE — that keeps only the disclosure/confirmation boundary above), ask a SECOND question: considering this candidate TOGETHER WITH the prior approved guidance already given for this SAME question (listed below, if any), would the student now have most of the substantive content the question requires — e.g. every major distinguishing point in a comparison, a complete list of required differences, or a fully worked derivation — needing only trivial editing to submit? If yes, this is unsafe: SUBMISSION_READY_COMPLETION if this candidate alone does it, CUMULATIVE_RESPONSE_COMPLETION if it only crosses that line combined with the prior approved guidance.",
+    "This is NOT the same as 'too detailed' or 'too specific' — teach or address ONE concept, ONE definition, ONE misconception, or ONE reasoning direction at a time, as thoroughly as is useful; that is SAFE even on a question's very first interaction. It becomes unsafe only when the accumulated content — this response plus every prior approved one for this same question — substantially ASSEMBLES what the question is asking for, not merely because several individually-safe facts happen to relate to the same topic.",
+    "For SHORT_ANSWER questions the expected answer is often very small (sometimes just 1-3 points), so treat this conservatively — two or three combined substantive points may already be most of the expected answer. For ESSAY questions, explaining any SINGLE required point in depth remains safe, but the accumulated guidance must never include a complete thesis, a complete structure, AND fully-worked arguments for more than one required point in submission-ready form. This applies equally to code (do not let the accumulated guidance progressively assemble into the complete solution) and mathematical derivations (do not let it carry the calculation all the way to the final result).",
+    "For example, for \"Explain the difference between a list and a tuple in Python\": \"A tuple is an ordered immutable collection in Python.\" and \"A list is mutable, meaning it can be changed after creation.\" and \"One useful comparison dimension is mutability.\" are each SAFE, including as the only message so far. \"Lists are mutable and use square brackets; tuples are immutable and use parentheses. Lists are suited to changing data while tuples suit fixed data.\" is UNSAFE (SUBMISSION_READY_COMPLETION) — it assembles the comparison in one message. And if \"A tuple is immutable.\" and \"A list is mutable.\" were ALREADY approved for this question, a new candidate saying \"Lists use square brackets while tuples use parentheses, and lists are better for changing data while tuples are better for fixed data.\" is UNSAFE (CUMULATIVE_RESPONSE_COMPLETION) — combined with what was already approved, it now completes the full comparison.",
+    "",
     "A candidate that corrects a student's mistaken claim (for example \"Not quite — a tuple is not a row\") or acknowledges the student is looking in the right area, WITHOUT stating the actual final answer/option/result, is SAFE. A candidate that answers \"yes\"/\"correct\"/\"that's right\" (or equivalent agreement) to a student's own fully-stated final answer, option, or result IS unsafe, even when phrased as agreement rather than a fresh statement.",
     "",
     "Judge ONLY the candidate response text — never the student's own request wording. A student's request may legitimately contain words like \"answer\", \"solve\", \"result\", or \"help\" while asking for guidance or method, not disclosure.",
@@ -293,6 +332,19 @@ function buildUserPrompt(input: BrainstormVerifierInput): string {
     `Hints already approved for this question: ${input.priorApprovedHintCount}`,
     `Cumulative risk score already accumulated for this question: ${input.cumulativeRiskScoreSoFar.toFixed(2)}`,
   ];
+  // Cumulative answer-assembly follow-up — the ACTUAL prior approved
+  // response text for this same question (question-scoped — never
+  // another question's), so the verifier can judge whether this
+  // candidate, combined with what was already approved, now assembles
+  // the substantive content the question requires. Only meaningful for
+  // SHORT_ANSWER/ESSAY (see buildSystemPrompt), but included whenever
+  // present — the verifier is instructed to ignore it for MULTIPLE_CHOICE.
+  if (input.priorApprovedResponses.length > 0) {
+    lines.push("", "Prior approved responses for this SAME question, oldest first (for judging cumulative completion only):");
+    input.priorApprovedResponses.forEach((response, index) => {
+      lines.push(`${index + 1}. ${response}`);
+    });
+  }
   // Bounded even though the runner already bounds these before calling
   // in (Part 9) — defense in depth against a future call site that
   // forgets to.

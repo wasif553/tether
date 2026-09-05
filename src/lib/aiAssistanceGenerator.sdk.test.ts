@@ -144,6 +144,25 @@ describe("message shape sent to Anthropic", () => {
     }
   });
 
+  // Cumulative answer-assembly follow-up — SHORT_ANSWER/ESSAY questions
+  // have no single "correct option" to protect, so without this
+  // instruction a sequence of individually-safe concept explanations
+  // could add up to the whole assessed response. MULTIPLE_CHOICE is
+  // unaffected — its protection is already the option/result boundary.
+  it("includes the open-response answer-assembly instruction for SHORT_ANSWER/ESSAY, never for MULTIPLE_CHOICE", async () => {
+    mockCreate.mockResolvedValue(textResponse("Consider what causes evaporation."));
+
+    for (const questionType of ["SHORT_ANSWER", "ESSAY"] as const) {
+      await generateBrainstormResponse({ ...baseInput, questionType });
+      const call = mockCreate.mock.calls[mockCreate.mock.calls.length - 1][0];
+      expect(call.system).toContain("This is an open-response question: teach or address ONE concept");
+    }
+
+    await generateBrainstormResponse({ ...baseInput, questionType: "MULTIPLE_CHOICE" });
+    const call = mockCreate.mock.calls[mockCreate.mock.calls.length - 1][0];
+    expect(call.system).not.toContain("This is an open-response question");
+  });
+
   it("uses a targeted regenerationGuidance instruction instead of the generic stricter line when both are present", async () => {
     mockCreate.mockResolvedValue(textResponse("A different, safe response."));
 
