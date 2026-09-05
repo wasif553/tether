@@ -240,6 +240,40 @@ export type AiAssistanceInteractionStatus = (typeof AI_ASSISTANCE_INTERACTION_ST
 export const TERMINAL_AI_ASSISTANCE_STATUSES = ["APPROVED", "BLOCKED", "FALLBACK", "FAILED"] as const;
 
 /**
+ * Architectural simplification follow-up (observability) — a
+ * human-readable label distinguishing MODEL_APPROVED /
+ * MODEL_APPROVED_AFTER_RETRY / DETERMINISTIC_FALLBACK for Preview
+ * debugging, derived entirely from the EXISTING status + wasRegenerated
+ * columns — no schema migration. Every AiAssistanceInteraction row
+ * already stores both; this is purely a naming/derivation convenience so
+ * a future investigation doesn't have to re-derive "was this the raw
+ * model output, a retried model output, or the deterministic template"
+ * from first principles every time.
+ */
+export type AiAssistanceOutcomeLabel =
+  | "MODEL_APPROVED"
+  | "MODEL_APPROVED_AFTER_RETRY"
+  | "DETERMINISTIC_FALLBACK"
+  | "BLOCKED"
+  | "FAILED";
+
+export function describeInteractionOutcome(interaction: {
+  status: AiAssistanceInteractionStatus;
+  wasRegenerated: boolean;
+}): AiAssistanceOutcomeLabel {
+  switch (interaction.status) {
+    case "APPROVED":
+      return interaction.wasRegenerated ? "MODEL_APPROVED_AFTER_RETRY" : "MODEL_APPROVED";
+    case "FALLBACK":
+      return "DETERMINISTIC_FALLBACK";
+    case "BLOCKED":
+      return "BLOCKED";
+    default:
+      return "FAILED";
+  }
+}
+
+/**
  * A RESERVED row this old was almost certainly left behind by a crashed or
  * timed-out server invocation (the whole reserve→generate→verify→finalize
  * sequence runs synchronously within one request — see

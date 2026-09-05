@@ -77,15 +77,35 @@ const DIRECT_ANSWER_PATTERNS = [
   // "answer" to be immediately followed by "is", with nothing in
   // between) — a real gap in the direct-answer fast-check, not a
   // weakening: still requires the same qualifier+answer+is structure.
-  /\b(?:the|your|correct|final)\s+answer(?:\s+to\s+(?:this|the)\s+question)?\s+(?:is|would be|should be)\b/i,
+  // Architectural simplification follow-up — also allow an optional
+  // "full/complete/whole" between the qualifier and "answer", found
+  // missing "Yes, your full answer is correct." (a confirmation of a
+  // stated final answer).
+  /\b(?:the|your|correct|final)\s+(?:full\s+|complete\s+|whole\s+)?answer(?:\s+to\s+(?:this|the)\s+question)?\s+(?:is|would be|should be)\b/i,
   /\b(?:therefore|thus|hence)\s+(?:the\s+)?(?:answer|result)\s+(?:is|=)\b/i,
   /\b(?:the\s+)?correct\s+(?:option|choice)\s+(?:is|would be)\b/i,
   /\byou\s+should\s+(?:choose|select|answer)\b/i,
+  // Architectural simplification follow-up — "The output is [1, 2, 3,
+  // 4]." names a computed VALUE, not a general concept, so it's a
+  // direct-answer disclosure like the others above. Deliberately narrow:
+  // only fires when "output/result is" is immediately followed by
+  // something that reads as a literal value (bracket/brace/quote/digit/
+  // minus sign) — "the output is a tuple" (explaining a TYPE, not a
+  // value) must still defer to the semantic verifier, not be
+  // deterministically rejected here.
+  /\bthe\s+(?:output|result)\s+is\s*[[{('"-]|\bthe\s+(?:output|result)\s+is\s+\d/i,
 ];
 
 const OPTION_DISCLOSURE_PATTERNS = [
   /\b(?:option|choice)\s*[A-Z0-9]\s+(?:is|looks|seems|would be)\s+(?:correct|right|best)\b/i,
   /\b(?:eliminate|rule out)\s+(?:option|choice)\s*[A-Z0-9]\b/i,
+  // Architectural simplification follow-up — "Yes, B is correct." names
+  // the option letter directly without the word "option"/"choice",
+  // which the two patterns above require. MCQ-only (see
+  // fastVerifyBrainstormResponse's questionType guard), and requires an
+  // uppercase single letter (conventional MCQ option style) to avoid
+  // matching ordinary lowercase words.
+  /\b[A-D]\s+is\s+correct\b/,
 ];
 
 const CODE_DISCLOSURE_PATTERNS = [
@@ -184,49 +204,82 @@ export function fastVerifyBrainstormResponse(input: BrainstormVerifierInput): Fa
   return { kind: "DEFER" };
 }
 
+/**
+ * Architectural simplification follow-up — `reason` deliberately has NO
+ * upper bound in the model-facing schema. It is an internal audit note
+ * (never shown to the student), and a long-but-valid safety
+ * justification must never itself invalidate an otherwise-correct
+ * verdict — a prior version capped this at 400 chars, which meant a
+ * verbose (but entirely valid) `reason` string failed schema validation
+ * and the WHOLE interaction fell to the deterministic fallback, even
+ * when the model's `allowed` judgment was itself correct. Length is
+ * enforced separately, AFTER parsing succeeds — see
+ * MAX_VERIFIER_REASON_CHARACTERS below and its use in
+ * verifyBrainstormResponse.
+ */
 const verifierResultSchema = z.object({
   allowed: z.boolean(),
   riskScore: z.number().min(0).max(1),
   riskCodes: z.array(z.enum(RISK_CODES)),
-  reason: z.string().min(1).max(400),
+  reason: z.string().min(1),
 });
 
+/** Applied only AFTER a verdict has already parsed and validated successfully — never part of the parse/validate step itself (see verifierResultSchema's own doc comment). */
+export const MAX_VERIFIER_REASON_CHARACTERS = 400;
+
+/**
+ * Architectural simplification follow-up — replaces the prior broad,
+ * accumulated "too specific / excessive detail / relevance" style
+ * judgment with a single narrow question. Four successive rounds of
+ * patches each added another carve-out to that broader framing, and
+ * repeated live Preview testing kept finding new false-positive
+ * rejections of genuinely safe teaching content — evidence that the
+ * broader framing itself, not any one missing carve-out, was the
+ * problem. This prompt asks ONLY whether the candidate discloses,
+ * confirms, or completes the graded final answer; teaching content is
+ * categorically safe regardless of how detailed or how relevant to the
+ * active question it is.
+ */
 function buildSystemPrompt(): string {
   return [
-    "You are a strict, independent safety verifier for an exam brainstorming assistant. You do not generate help yourself — you only judge whether a CANDIDATE RESPONSE, already drafted by another system, is safe to show a student during a live exam.",
+    "You are a strict, independent safety verifier for an exam brainstorming assistant — a restricted tutor. You do not generate help yourself — you only judge whether a CANDIDATE RESPONSE, already drafted by another system, is safe to show a student during a live exam.",
     "",
-    "A response is UNSAFE (allowed=false) if it does ANY of the following, even partially or by strong implication:",
-    "- states or clearly implies the correct answer, or gets a student most of the way there (DIRECT_ANSWER / NEAR_COMPLETE_ANSWER)",
-    "- states, implies, ranks, or eliminates any multiple-choice option, including narrowing down to 2 options (CORRECT_OPTION_DISCLOSED / OPTION_ELIMINATION)",
-    "- gives a final numeric result, or performs the last substitution/computation step for the student (FINAL_NUMERIC_RESULT)",
-    "- contains prose specific and complete enough that the student could paste it directly into their submission (SUBMISSION_READY_PROSE)",
-    "- contains a complete function, complete algorithm, or code that would pass the assessment's hidden tests as-is (COMPLETE_CODE)",
+    "Ask exactly ONE question: does this candidate response STATE, CONFIRM, TRIVIALLY IMPLY, or PROVIDE A SUBMISSION-READY VERSION of the graded final answer for the ACTIVE question? That is the only thing that makes a response unsafe.",
+    "",
+    "A response is UNSAFE (allowed=false) only if it does ANY of the following:",
+    "- states or clearly implies the correct final answer, or gets the student all the way there (DIRECT_ANSWER / NEAR_COMPLETE_ANSWER)",
+    "- states, confirms, ranks, or eliminates the correct multiple-choice option (CORRECT_OPTION_DISCLOSED / OPTION_ELIMINATION)",
+    "- gives the final numeric result, or performs the last substitution/computation step for the student (FINAL_NUMERIC_RESULT)",
+    "- is a complete, submission-ready essay/prose response the student could paste directly as their final answer (SUBMISSION_READY_PROSE)",
+    "- is complete, working code that directly answers the assessed question (COMPLETE_CODE)",
     "- discloses or paraphrases the rubric/marking scheme/model answer text you were given as hidden reference material (HIDDEN_RUBRIC_DISCLOSURE)",
-    "- combined with the hint count/cumulative history you're given, would let the student reconstruct the answer piece-by-piece even though this one message looks mild on its own (CUMULATIVE_HINT_LEAKAGE)",
-    "- is simply far more specific/detailed than a Socratic brainstorming hint should be for this stage (EXCESSIVE_SPECIFICITY)",
     "",
-    "EXCESSIVE_SPECIFICITY concerns answer-specific reasoning steps for the ACTUAL question, not general subject-matter teaching. Thoroughly explaining a concept, syntax rule, term, or how a construct/algorithm works (for example what *args/**kwargs do in Python, or how a formula is structured) is NOT excessive specificity by itself, and is exactly the kind of help this assistant should give — it becomes unsafe only if it goes on to state or clearly imply the final answer to the actual question.",
-    "",
-    "Concept-explanation quality follow-up — a factual, general explanation of a concept/term/rule is SAFE even when it is highly relevant to the active question's subject matter. RELEVANCE TO THE QUESTION IS NOT THE SAME AS REVEALING THE FINAL ANSWER. For example, ALL of the following are SAFE even if the active question is directly about them:",
+    "TEACHING CONTENT IS SAFE, EVEN WHEN HIGHLY RELEVANT TO THE ACTIVE QUESTION. Relevance to the question is NEVER by itself a reason to reject. All of the following are SAFE, including when the active question is directly about them:",
     '- "*args collects extra positional arguments into a tuple, while **kwargs collects extra keyword arguments into a dictionary."',
-    '- "A tuple is immutable while a list is mutable."',
-    '- "A Python decorator wraps or modifies a callable\'s behaviour."',
+    '- "x is a list because square brackets create a list."',
+    '- "append() mutates an existing list in place."',
+    '- "A list is mutable while a tuple is immutable."',
+    '- "A decorator is a callable that wraps another function to modify or extend its behaviour."',
     '- "Classification predicts categories, while regression predicts numeric values."',
-    "Contrast with what actually IS unsafe — resolving the active question, not merely discussing its subject matter:",
-    '- "The correct answer is that lists are mutable and tuples are immutable, so choose option B." (states the answer AND the option)',
-    '- "The answer to this question is @decorator." (states the final answer)',
-    "Only reject a candidate for crossing from teaching the general concept into resolving the ACTIVE question's final answer, MCQ option, or numeric/code result — never merely because the concept it explains happens to be central to what the question is testing.",
+    "Contrast with what actually IS unsafe — resolving the active question itself, not merely teaching its subject matter:",
+    '- "The correct option is B."',
+    "- \"The output is (1, 2, (3, 4), {'x': 10}).\"",
+    '- "The answer is def."',
+    '- "Yes, B is correct." / "Yes, your final answer is correct."',
     "",
-    "Judge ONLY the candidate response text — never the student's own request wording. A student's request may legitimately contain words like \"answer\", \"solve\", \"result\", or \"help\" while asking for guidance or method, not disclosure (for example \"can you suggest how to get the answer\" or \"how do I solve this\" are guidance requests, not requests for you to disclose the answer). Only what the CANDIDATE RESPONSE itself states or implies can trigger the UNSAFE criteria above.",
-    "A candidate response that corrects a student's mistaken claim (for example \"Not quite — a tuple is not a row\") or acknowledges the student is looking in the right area, WITHOUT stating the actual final answer/option/result, is SAFE — correcting a misconception or reasoning step is not the same as disclosing the answer. However, a response that answers \"yes\"/\"correct\"/\"that's right\" (or equivalent agreement) to a student's own fully-stated final answer, option, or result, or that completes their remaining reasoning for them, IS unsafe (DIRECT_ANSWER / NEAR_COMPLETE_ANSWER / CORRECT_OPTION_DISCLOSED as appropriate) even when phrased as agreement rather than as a fresh statement.",
-    "If it is genuinely unclear whether the candidate response crosses a line, prefer allowed=true with a moderately higher riskScore over an outright rejection — a false-positive rejection of a safe guidance response is worse than a cautious approval, provided the candidate response does not actually meet any UNSAFE criterion above.",
+    "For an open-response question (essay/short-answer), teaching and substantial explanation are SAFE — reject only when the candidate becomes a complete, submission-ready version of the student's final assessed response, never merely because it is thorough or detailed.",
+    "",
+    "A candidate that corrects a student's mistaken claim (for example \"Not quite — a tuple is not a row\") or acknowledges the student is looking in the right area, WITHOUT stating the actual final answer/option/result, is SAFE. A candidate that answers \"yes\"/\"correct\"/\"that's right\" (or equivalent agreement) to a student's own fully-stated final answer, option, or result IS unsafe, even when phrased as agreement rather than a fresh statement.",
+    "",
+    "Judge ONLY the candidate response text — never the student's own request wording. A student's request may legitimately contain words like \"answer\", \"solve\", \"result\", or \"help\" while asking for guidance or method, not disclosure.",
+    "If it is genuinely unclear whether the candidate crosses the line, prefer allowed=true with a moderately higher riskScore over an outright rejection.",
     "",
     "You ARE given the hidden model answer and/or rubric summary (when available) purely so you can judge disclosure accurately — never quote them back in your reason field.",
     "",
     "Respond with ONLY a JSON object — no markdown, no preamble:",
     '{ "allowed": boolean, "riskScore": number (0-1), "riskCodes": string[], "reason": string }',
     "riskCodes must only use these exact values: " + RISK_CODES.join(", "),
-    "riskScore reflects how close the response comes to violating the rules even when allowed=true (0 = completely safe, 1 = essentially the answer).",
+    "riskScore reflects how close the response comes to violating the rule even when allowed=true (0 = completely safe, 1 = essentially the answer).",
     "reason is a short internal note for audit logs — never quote the hidden model answer/rubric in it, and never write anything intended to be shown to the student.",
   ].join("\n");
 }
@@ -359,5 +412,15 @@ export async function verifyBrainstormResponse(
     throw new AiAssistanceVerificationError("Verifier output did not match the expected schema", "SCHEMA_ERROR");
   }
 
-  return validated.data;
+  // Truncate ONLY here, after a successful parse+validate — never as
+  // part of the schema itself (see verifierResultSchema's doc comment).
+  // A long-but-valid `reason` must never invalidate the verdict it
+  // belongs to; this only bounds what gets persisted/logged afterward.
+  return {
+    ...validated.data,
+    reason:
+      validated.data.reason.length > MAX_VERIFIER_REASON_CHARACTERS
+        ? validated.data.reason.slice(0, MAX_VERIFIER_REASON_CHARACTERS)
+        : validated.data.reason,
+  };
 }

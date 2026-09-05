@@ -38,6 +38,7 @@ import {
   isApprovedResponseLengthValid,
   isSubstantiallyIdenticalResponse,
   buildFallbackGuidance,
+  describeInteractionOutcome,
   boundedHiddenReference,
   isStaleReservation,
   AI_ASSISTANCE_UNAVAILABLE_MESSAGE,
@@ -49,6 +50,7 @@ import {
   blockedRequestStudentMessage,
   type RequestBlockReasonCode,
 } from "@/lib/aiAssistanceClassifier";
+import { classifyBrainstormRequestMode } from "@/lib/aiAssistanceRequestMode";
 import {
   generateBrainstormResponse,
   isAnthropicConfigured,
@@ -331,11 +333,18 @@ export function rejectionRegenerationHint(outcome: GenerateVerifyOutcome): strin
     .filter((reason): reason is string => Boolean(reason));
   if (reasons.length === 0) return null;
   return (
-    `Your previous response for this same request was rejected because ${reasons.join("; ")}. Respond to the ` +
-    "student's actual request in a different, safe way — you may still explain relevant concepts, syntax, or " +
-    `terminology in as much substantive detail as helps them; you must simply avoid ${reasons.length > 1 ? "those issues" : "that issue"} this time.`
+    `Your previous response crossed too close to the final assessed answer — specifically, ${reasons.join("; ")}. ` +
+    "Keep the useful teaching content — you may still explain relevant concepts, syntax, or terminology in as " +
+    `much substantive detail as helps the student — but stop before resolving the final graded result this time.`
   );
 }
+
+/** Architectural simplification follow-up (unified retry) — the two, and only two, reasons a candidate is not acceptable on the first attempt. Either way: exactly one targeted retry, never a loop. */
+type RetryReason = "REJECTED" | "REPETITIVE";
+
+/** Fixed instruction for the REPETITIVE retry reason — unlike a rejection, there is no risk-code-specific detail to report, so this is the one reusable string (see RetryReason/the unified retry block in runAiAssistanceRequest). */
+const REPETITION_REGENERATION_GUIDANCE =
+  "The previous guidance already covered that. Respond specifically to the student's new request with a different useful explanation, reasoning direction, or targeted question.";
 
 function messageForEventType(eventType: string): string {
   switch (eventType) {
@@ -594,12 +603,21 @@ function logAiAssistanceDiagnostics(params: {
   if (!isServerTimingHeaderEnabled(process.env.TETHER_TIMING_HEADERS_ENABLED)) return;
   const passes = [summarizeOutcome(params.initialOutcome)];
   if (params.wasRegenerated) passes.push(summarizeOutcome(params.finalOutcome));
+  // Architectural simplification follow-up (observability) — the same
+  // MODEL_APPROVED / MODEL_APPROVED_AFTER_RETRY / DETERMINISTIC_FALLBACK
+  // distinction the interaction row itself represents via status +
+  // wasRegenerated (see describeInteractionOutcome), surfaced here too so
+  // a future Preview investigation can read it straight off this log
+  // line instead of cross-referencing the database.
+  const finalStatus: AiAssistanceInteractionStatus =
+    params.finalOutcome.kind === "approved" ? "APPROVED" : params.finalOutcome.kind === "error" && params.finalOutcome.stage === "generator" ? "FAILED" : "FALLBACK";
   // eslint-disable-next-line no-console
   console.log(
     JSON.stringify({
       event: "AI_ASSISTANCE_DIAGNOSTICS",
       interactionId: params.interactionId,
       wasRegenerated: params.wasRegenerated,
+      outcomeLabel: describeInteractionOutcome({ status: finalStatus, wasRegenerated: params.wasRegenerated }),
       totalAiMs: Math.round(params.totalAiMs),
       generatorModel: `anthropic:${getAnthropicBrainstormModel()}`,
       verifierModel: `anthropic:${getAnthropicBrainstormVerifierModel()}`,
@@ -733,6 +751,11 @@ export async function runAiAssistanceRequest(params: {
       maxResponseCharacters: policy.maxResponseCharacters,
     },
     studentRequest: params.studentPrompt,
+    // Architectural simplification follow-up — non-blocking: this only
+    // selects which short generator instruction template to use (see
+    // aiAssistanceRequestMode.ts). The hard classifyStudentRequest check
+    // above already decided this request is allowed; this never re-gates it.
+    requestMode: classifyBrainstormRequestMode(params.studentPrompt),
     priorApprovedInteractions: priorApproved.map((p) => ({
       studentPrompt: p.studentPrompt,
       approvedResponse: p.approvedResponse ?? "",
@@ -752,16 +775,30 @@ export async function runAiAssistanceRequest(params: {
   });
   let outcome = initialOutcome;
   let regenerated = false;
-  if (outcome.kind !== "approved") {
-    // Concept-explanation quality follow-up — regenerate with a TARGETED
-    // instruction explaining why the previous candidate was rejected
-    // (mapped from the verifier's own risk codes, or a length-specific
-    // note when the verifier allowed it but it was too long) instead of
-    // only the old generic "be more conservative" line. A specific reason
-    // lets the model avoid the actual problem while still substantively
-    // helping with the student's real request.
+  // Architectural simplification follow-up (unified retry) — a single
+  // bounded decision instead of two separate branches for "verifier
+  // rejected" and "response repeats prior guidance": not-acceptable is
+  // not-acceptable, whichever of those two reasons caused it, and either
+  // way the response is exactly ONE targeted retry, never a loop. Total
+  // generation attempts per student interaction stays bounded at 2.
+  const immediatelyPriorApproved = priorApproved[priorApproved.length - 1];
+  const retryReason: RetryReason | null =
+    outcome.kind !== "approved"
+      ? "REJECTED"
+      : immediatelyPriorApproved && isSubstantiallyIdenticalResponse(outcome.response, immediatelyPriorApproved.approvedResponse ?? "")
+        ? "REPETITIVE"
+        : null;
+
+  if (retryReason !== null) {
     outcome = await attemptGenerateAndVerify({
-      generatorInput: { ...generatorInput, stricter: true, regenerationGuidance: rejectionRegenerationHint(outcome) },
+      generatorInput: {
+        ...generatorInput,
+        // Only the REJECTED path tightens temperature — a repetition
+        // retry wants MORE variety in phrasing, not less, so it stays at
+        // the normal (non-stricter) temperature.
+        stricter: retryReason === "REJECTED",
+        regenerationGuidance: retryReason === "REJECTED" ? rejectionRegenerationHint(outcome) : REPETITION_REGENERATION_GUIDANCE,
+      },
       question,
       policy,
       studentPrompt: params.studentPrompt,
@@ -769,36 +806,6 @@ export async function runAiAssistanceRequest(params: {
       cumulativeSoFar,
     });
     regenerated = true;
-  } else {
-    // Concept-explanation quality follow-up — before accepting an
-    // immediately-approved candidate, check it against the immediately
-    // prior APPROVED response for this SAME question (question-scoped —
-    // never compared across questions). A student with a limited prompt
-    // allowance gets nothing useful from a repeated answer, so this is
-    // checked even though the candidate already passed safety
-    // verification; a narrow, conservative repetition check (normalized
-    // exact/near-exact equality only, see isSubstantiallyIdenticalResponse)
-    // rather than fuzzy semantic similarity, so it never rejects a
-    // genuinely different response for sharing a few common phrases.
-    // Bounded to exactly one extra regeneration, same as the rejection
-    // path above — whatever that second attempt produces is accepted as
-    // final, so a persistently-repeating model still doesn't loop.
-    const immediatelyPrior = priorApproved[priorApproved.length - 1];
-    if (immediatelyPrior && isSubstantiallyIdenticalResponse(outcome.response, immediatelyPrior.approvedResponse ?? "")) {
-      outcome = await attemptGenerateAndVerify({
-        generatorInput: {
-          ...generatorInput,
-          regenerationGuidance:
-            "The previous guidance already covered that. Respond specifically to the student's new request and provide a different useful explanation or reasoning direction.",
-        },
-        question,
-        policy,
-        studentPrompt: params.studentPrompt,
-        approvedCountForQuestion,
-        cumulativeSoFar,
-      });
-      regenerated = true;
-    }
   }
   const latencyMs = Date.now() - startedAt;
 

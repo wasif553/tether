@@ -626,6 +626,219 @@ describe("rate limiting — content-independent, applies identically regardless 
   });
 });
 
+// Architectural simplification follow-up (section 11/22) — the unified
+// retry: not-acceptable (whether the verifier rejected the candidate, or
+// the candidate repeats the immediately-prior approved response for this
+// same question) is exactly ONE targeted retry, never a loop, and a
+// first-try success never retries at all. These exercise the actual
+// orchestration in aiAssistanceRunner.ts's runAiAssistanceRequest (never
+// tested directly elsewhere — that function is Prisma-heavy, so this
+// DB-backed route layer is where it's genuinely exercised).
+describe("unified retry — verifier rejection", () => {
+  it("a rejected first candidate retries exactly once with a targeted instruction, and an approved retry is shown", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    // These mocks are shared across the whole file with no per-test
+    // reset elsewhere, so an absolute toHaveBeenCalledTimes assertion
+    // needs a clean baseline — clear call history (never the queued
+    // mockResolvedValueOnce return values, which are set up next).
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedGenerate.mockResolvedValueOnce("A risky candidate.").mockResolvedValueOnce("A safe teaching response.");
+    mockedVerify
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.9, riskCodes: ["DIRECT_ANSWER"], reason: "too close to the answer" })
+      .mockResolvedValueOnce({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "What are *args and **kwargs?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("APPROVED");
+    expect(body.response).toBe("A safe teaching response.");
+    expect(mockedGenerate).toHaveBeenCalledTimes(2); // exactly one retry — never a loop
+    expect(mockedVerify).toHaveBeenCalledTimes(2);
+    // The retry carries a TARGETED instruction derived from why the
+    // previous candidate was rejected, not merely a generic "try again".
+    expect(mockedGenerate.mock.calls[1][0].regenerationGuidance).toContain("crossed too close to the final assessed answer");
+
+    const row = await prisma.aiAssistanceInteraction.findFirst({ where: { submissionId: submission.id } });
+    expect(row?.status).toBe("APPROVED");
+    expect(row?.wasRegenerated).toBe(true);
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("a candidate approved on the FIRST attempt never triggers a retry", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    // These mocks are shared across the whole file with no per-test
+    // reset elsewhere, so an absolute toHaveBeenCalledTimes assertion
+    // needs a clean baseline — clear call history (never the queued
+    // mockResolvedValueOnce return values, which are set up next).
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedGenerate.mockResolvedValueOnce("A perfectly safe response on the first try.");
+    mockedVerify.mockResolvedValueOnce({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is a decorator?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("APPROVED");
+    expect(mockedGenerate).toHaveBeenCalledTimes(1);
+    expect(mockedVerify).toHaveBeenCalledTimes(1);
+
+    const row = await prisma.aiAssistanceInteraction.findFirst({ where: { submissionId: submission.id } });
+    expect(row?.wasRegenerated).toBe(false);
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("a retry that ALSO fails resolves to the (last-resort) deterministic fallback, never a second retry", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    // These mocks are shared across the whole file with no per-test
+    // reset elsewhere, so an absolute toHaveBeenCalledTimes assertion
+    // needs a clean baseline — clear call history (never the queued
+    // mockResolvedValueOnce return values, which are set up next).
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedGenerate.mockResolvedValueOnce("Risky candidate one.").mockResolvedValueOnce("Risky candidate two.");
+    mockedVerify
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.9, riskCodes: ["DIRECT_ANSWER"], reason: "too close" })
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.9, riskCodes: ["DIRECT_ANSWER"], reason: "still too close" });
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is a decorator?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("FALLBACK");
+    expect(mockedGenerate).toHaveBeenCalledTimes(2); // bounded — never a second retry
+    expect(mockedVerify).toHaveBeenCalledTimes(2);
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+});
+
+describe("unified retry — repetition (question-scoped)", () => {
+  it("a candidate that repeats the immediately-prior APPROVED response for the SAME question retries once with a different response", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    // These mocks are shared across the whole file with no per-test
+    // reset elsewhere, so an absolute toHaveBeenCalledTimes assertion
+    // needs a clean baseline — clear call history (never the queued
+    // mockResolvedValueOnce return values, which are set up next).
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    mockedGenerate.mockResolvedValueOnce("Consider what causes evaporation.");
+    const first = await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is a tuple?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    expect((await first.json()).status).toBe("APPROVED");
+
+    // Second, different request — but the model repeats the exact same
+    // guidance already given (differing only in trivial capitalization,
+    // proving normalization). The runner must retry once and surface the
+    // DIFFERENT second candidate, not the repeat.
+    mockedGenerate
+      .mockResolvedValueOnce("consider what causes evaporation")
+      .mockResolvedValueOnce("A tuple is immutable, unlike a list.");
+    const second = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Is a tuple like a list?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const secondBody = await second.json();
+
+    expect(secondBody.status).toBe("APPROVED");
+    expect(secondBody.response).toBe("A tuple is immutable, unlike a list.");
+    expect(mockedGenerate).toHaveBeenCalledTimes(3); // 1 (first request) + 2 (second request's initial + retry)
+
+    const rows = await prisma.aiAssistanceInteraction.findMany({
+      where: { submissionId: submission.id, questionId: question.id },
+      orderBy: { createdAt: "asc" },
+    });
+    expect(rows[1]?.wasRegenerated).toBe(true);
+    // The retry instruction is the fixed repetition-specific text, not
+    // the risk-code-derived rejection hint (the candidate was SAFE, just
+    // repetitive).
+    expect(mockedGenerate.mock.calls[2][0].regenerationGuidance).toContain("previous guidance already covered that");
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("an approved response on a DIFFERENT question never counts as a repeat, even with identical text", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    // These mocks are shared across the whole file with no per-test
+    // reset elsewhere, so an absolute toHaveBeenCalledTimes assertion
+    // needs a clean baseline — clear call history (never the queued
+    // mockResolvedValueOnce return values, which are set up next).
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+
+    const { exam, submission, question: question1 } = await createExamAndSubmission();
+    const question2 = await prisma.question.create({
+      data: { examId: exam.id, type: "ESSAY", text: "Explain the water cycle.", points: 5, order: 1 },
+    });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    mockedGenerate.mockResolvedValueOnce("Identical wording on purpose.");
+    const first = await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is a tuple?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question1.id }),
+    });
+    expect((await first.json()).status).toBe("APPROVED");
+
+    // Same exact text, but on a DIFFERENT question — must be accepted
+    // on the first try, never treated as a repeat of question1's answer.
+    mockedGenerate.mockResolvedValueOnce("Identical wording on purpose.");
+    const second = await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is a decorator?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question2.id }),
+    });
+    const secondBody = await second.json();
+
+    expect(secondBody.status).toBe("APPROVED");
+    expect(secondBody.response).toBe("Identical wording on purpose.");
+    expect(mockedGenerate).toHaveBeenCalledTimes(2); // 1 per question — no retry triggered
+
+    const row2 = await prisma.aiAssistanceInteraction.findFirst({ where: { submissionId: submission.id, questionId: question2.id } });
+    expect(row2?.wasRegenerated).toBe(false);
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+});
+
 describe("FALLBACK status on a starter prompt — a guardrail redirect is expected behaviour, never a failure", () => {
   it("both verify attempts rejecting resolves to FALLBACK with the deterministic safe response, never FAILED", async () => {
     const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");

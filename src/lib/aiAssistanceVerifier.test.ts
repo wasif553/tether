@@ -119,6 +119,44 @@ describe("concept-explanation quality follow-up — factual concept teaching vs.
   });
 });
 
+// Architectural simplification follow-up — consolidated verifier test
+// matrix (section 20 of the architecture task). Covers the deterministic
+// fast-check layer end to end against the exact SAFE/UNSAFE example set,
+// plus closes three real gaps found while building this matrix: none of
+// "The output is [1, 2, 3, 4].", "Yes, B is correct.", or "Yes, your full
+// answer is correct." were previously caught deterministically.
+describe("consolidated verifier matrix — must allow (defers to semantic verifier, never deterministically rejected)", () => {
+  it.each([
+    "*args collects extra positional arguments into a tuple.",
+    "**kwargs collects extra keyword arguments into a dictionary.",
+    "x is a list because square brackets create a list.",
+    "append() modifies the existing list in place.",
+    "A list is mutable while a tuple is immutable.",
+    "A decorator wraps another callable to modify or extend its behaviour.",
+  ])("%s", (candidateResponse) => {
+    const decision = fastVerifyBrainstormResponse(verifierInput({ questionType: "MULTIPLE_CHOICE", candidateResponse }));
+    expect(decision.kind).toBe("DEFER");
+  });
+
+  it("a teaching statement naming a TYPE (not a value) using the word 'output'/'result' is never mistaken for disclosure", () => {
+    const decision = fastVerifyBrainstormResponse(
+      verifierInput({ candidateResponse: "The output type is a tuple, not a list, because print formats it that way." }),
+    );
+    expect(decision.kind).toBe("DEFER");
+  });
+});
+
+describe("consolidated verifier matrix — must reject", () => {
+  it.each(["The correct option is B.", "The output is [1, 2, 3, 4].", "The answer is def.", "Yes, B is correct.", "Yes, your full answer is correct."])(
+    "%s",
+    (candidateResponse) => {
+      const decision = fastVerifyBrainstormResponse(verifierInput({ questionType: "MULTIPLE_CHOICE", candidateResponse }));
+      expect(decision.kind).toBe("REJECT");
+      if (decision.kind === "REJECT") expect(decision.result.allowed).toBe(false);
+    },
+  );
+});
+
 describe("23. hidden rubric/model answer may be used only by the verifier", () => {
   it("BrainstormVerifierInput has fields for hidden reference material (unlike the generator's input type)", () => {
     const input: BrainstormVerifierInput = {

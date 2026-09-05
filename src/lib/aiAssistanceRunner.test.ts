@@ -57,6 +57,7 @@ const baseGeneratorInput = {
     maxResponseCharacters: 800,
   },
   studentRequest: "Can you help me understand this?",
+  requestMode: "GENERIC_HELP" as const,
   priorApprovedInteractions: [],
   hintLadderLevel: 1,
 };

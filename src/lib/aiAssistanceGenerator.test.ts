@@ -23,6 +23,7 @@ describe("22. model answer is not included in generator input", () => {
         maxResponseCharacters: 800,
       },
       studentRequest: "Can you help me understand this question?",
+      requestMode: "GENERIC_HELP",
       priorApprovedInteractions: [],
       hintLadderLevel: 1,
     };

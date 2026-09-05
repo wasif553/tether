@@ -48,6 +48,7 @@ const baseInput = {
     maxResponseCharacters: 800,
   },
   studentRequest: "Can you help me understand what this question is asking?",
+  requestMode: "GENERIC_HELP" as const,
   priorApprovedInteractions: [],
   hintLadderLevel: 1,
 };
@@ -94,83 +95,53 @@ describe("message shape sent to Anthropic", () => {
 
     const call = mockCreate.mock.calls[0][0];
     expect(typeof call.system).toBe("string");
-    expect(call.system).toContain("NOT permitted to produce anything the student could submit as their answer");
+    expect(call.system).toContain("NOT permitted to state, confirm, or produce the final graded answer");
     expect(call.messages).toHaveLength(1);
     expect(call.messages[0].role).toBe("user");
   });
 
-  // Guidance-vs-final-answer misclassification follow-up — the fallback
-  // refusal students hit for legitimate guidance requests traced to the
-  // generator/verifier layer being unclear that a student's own wording
-  // ("how do I get the answer") can be a guidance request, not a request
-  // to disclose. This clarifying instruction was added to fix that
-  // without touching the response-shaping structure (still no rigid
-  // hint+question template — see the rejected commit 73c9521).
-  it("clarifies that a student asking HOW to get the answer is a guidance request, not a direct-answer request", async () => {
+  // Architectural simplification follow-up — replaces the prior
+  // accumulated stack of prose caveats (guidance-vs-answer wording,
+  // misconception-vs-confirmation wording, hint-ladder-vs-concept
+  // wording, concrete example sentences) added across four successive
+  // patches. Each request now gets ONE short, focused instruction picked
+  // by aiAssistanceRequestMode.ts instead of one giant prompt trying to
+  // cover every request shape at once.
+  it.each([
+    ["CONCEPT_EXPLANATION", "Explain the relevant concepts substantively."],
+    ["APPROACH_GUIDANCE", "Give the student a concrete reasoning procedure or first steps"],
+    ["MISCONCEPTION_CHECK", "Correct factual misconceptions and explain the relevant concept."],
+    ["GUIDING_QUESTION", "Ask one question-specific guiding question"],
+    ["ANSWER_CONFIRMATION", "Do not confirm or deny the student's proposed final answer directly."],
+    ["GENERIC_HELP", "Provide useful subject-specific guidance"],
+  ] as const)("uses the %s mode's own short instruction, not a shared giant prompt", async (mode, expectedSnippet) => {
     mockCreate.mockResolvedValue(textResponse("Consider what causes evaporation."));
 
-    await generateBrainstormResponse(baseInput);
+    await generateBrainstormResponse({ ...baseInput, requestMode: mode });
 
     const call = mockCreate.mock.calls[0][0];
-    expect(call.system).toContain("is asking for guidance, not asking you to state the answer");
+    expect(call.system).toContain(expectedSnippet);
   });
 
-  // Misconception/concept-check follow-up — "Tuple is row and list is a
-  // list, right?" (exposing a misconception, checking understanding) was
-  // falling back to a hard refusal. This clarifies the generator may
-  // correct the wrong claim but must not simply confirm a student's own
-  // fully-stated final answer with "yes"/"correct".
-  it("clarifies that misconceptions may be corrected but a stated final answer must not simply be confirmed", async () => {
+  // Architectural simplification follow-up — the hint ladder governs how
+  // much ANSWER-SPECIFIC reasoning progression to reveal; a concept
+  // explanation, misconception correction, or guiding-question request
+  // must never be gated by it (a student's FIRST interaction may still
+  // get a full explanation of what *args means).
+  it("includes the hint-ladder line only for APPROACH_GUIDANCE and GENERIC_HELP, never for the other modes", async () => {
     mockCreate.mockResolvedValue(textResponse("Consider what causes evaporation."));
 
-    await generateBrainstormResponse(baseInput);
+    for (const mode of ["APPROACH_GUIDANCE", "GENERIC_HELP"] as const) {
+      await generateBrainstormResponse({ ...baseInput, requestMode: mode });
+      const call = mockCreate.mock.calls[mockCreate.mock.calls.length - 1][0];
+      expect(call.messages[0].content).toContain("Hint level for this question's answer-specific reasoning so far");
+    }
 
-    const call = mockCreate.mock.calls[0][0];
-    expect(call.system).toContain("do NOT simply answer \"yes\", \"correct\", \"that's right\"");
-  });
-
-  // Concept-explanation quality follow-up — manual Preview testing found
-  // the generator producing only vague non-answers to plain concept
-  // questions (e.g. "what are *args and **kwargs?"), because the hint-
-  // ladder wording ("1 = clarify the task only") read as forbidding real
-  // explanation at an early stage, and the programming-help capability
-  // was phrased as "at a high level" rather than permitting real depth.
-  it("permits substantive concept/syntax/terminology explanation, not just high-level mentions", async () => {
-    mockCreate.mockResolvedValue(textResponse("Consider what causes evaporation."));
-
-    await generateBrainstormResponse(baseInput);
-
-    const call = mockCreate.mock.calls[0][0];
-    expect(call.system).toContain("in as much substantive detail as helps the student understand them");
-    expect(call.system).toContain("including precisely how they work");
-  });
-
-  it("clarifies that concept/syntax/terminology explanation is allowed at ANY hint-ladder stage, not limited by it", async () => {
-    mockCreate.mockResolvedValue(textResponse("Consider what causes evaporation."));
-
-    await generateBrainstormResponse(baseInput);
-
-    const call = mockCreate.mock.calls[0][0];
-    expect(call.system).toContain("ALWAYS allowed when the student asks about it directly, at any hint-ladder stage");
-    expect(call.messages[0].content).toContain(
-      "does not limit explaining general concepts, syntax, or terminology the student directly asks about",
-    );
-  });
-
-  // Concept-explanation quality follow-up (second pass) — manual Preview
-  // testing still found a substantive concept explanation collapsing to
-  // the deterministic fallback (both attempts failed). Concrete example
-  // sentences push the generator to actually commit to factual content
-  // instead of hedging into a vague paraphrase of the student's request.
-  it("gives concrete example sentences of the substantive factual detail expected, not just abstract permission", async () => {
-    mockCreate.mockResolvedValue(textResponse("Consider what causes evaporation."));
-
-    await generateBrainstormResponse(baseInput);
-
-    const call = mockCreate.mock.calls[0][0];
-    expect(call.system).toContain("*args collects extra positional arguments into a tuple");
-    expect(call.system).toContain("a tuple is immutable while a list is mutable");
-    expect(call.system).toContain("not a reason to hedge or merely restate the student's own words back to them");
+    for (const mode of ["CONCEPT_EXPLANATION", "MISCONCEPTION_CHECK", "GUIDING_QUESTION", "ANSWER_CONFIRMATION"] as const) {
+      await generateBrainstormResponse({ ...baseInput, requestMode: mode });
+      const call = mockCreate.mock.calls[mockCreate.mock.calls.length - 1][0];
+      expect(call.messages[0].content).not.toContain("Hint level for this question's answer-specific reasoning so far");
+    }
   });
 
   it("uses a targeted regenerationGuidance instruction instead of the generic stricter line when both are present", async () => {

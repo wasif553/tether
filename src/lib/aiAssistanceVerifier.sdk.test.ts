@@ -103,14 +103,11 @@ describe("message shape sent to Anthropic", () => {
     expect(call.messages[0].role).toBe("user");
   });
 
-  // Guidance-vs-final-answer misclassification follow-up — the fallback
-  // refusal students hit for legitimate guidance requests (e.g. "Can you
-  // suggest how to get the answer?") traced to this verifier: its prompt
-  // didn't tell the model that the STUDENT'S own wording is not what's
-  // being judged, only the candidate response is — so a guidance request
-  // that happens to contain "answer" risked being read as evidence the
-  // candidate response was unsafe. This clarifying instruction fixes that
-  // without weakening any UNSAFE criterion.
+  // Guidance-vs-final-answer misclassification follow-up — the verifier
+  // judges only the CANDIDATE RESPONSE, never the student's own request
+  // wording, so a guidance request that happens to contain "answer"
+  // isn't mistaken for disclosure. Preserved through the architectural
+  // simplification below.
   it("clarifies that only the candidate response (never the student's own request wording) can trigger an unsafe verdict", async () => {
     mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
 
@@ -121,10 +118,66 @@ describe("message shape sent to Anthropic", () => {
     expect(call.system).toContain("guidance or method, not disclosure");
   });
 
+  // Architectural simplification follow-up — replaces the prior broad,
+  // accumulated "too specific / excessive detail / relevance" style
+  // judgment (patched incrementally across four rounds) with a single
+  // narrow question: does the candidate disclose/confirm/complete the
+  // graded final answer? EXCESSIVE_SPECIFICITY and "relevance" are no
+  // longer presented as independent LLM rejection criteria at all.
+  it("asks the single narrow disclosure question, not a broad specificity/relevance judgment", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain(
+      "Ask exactly ONE question: does this candidate response STATE, CONFIRM, TRIVIALLY IMPLY, or PROVIDE A SUBMISSION-READY VERSION of the graded final answer",
+    );
+    // EXCESSIVE_SPECIFICITY remains a valid (unused-in-practice) riskCode
+    // for schema/storage backward-compatibility — see RISK_CODES — but
+    // must no longer be PRESENTED to the model as something to judge.
+    expect(call.system).not.toContain("far more specific/detailed than a Socratic brainstorming hint should be");
+    expect(call.system).not.toContain("is exactly the kind of help this assistant should give");
+  });
+
+  it("states plainly that relevance to the question is never itself a reason to reject teaching content", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("TEACHING CONTENT IS SAFE, EVEN WHEN HIGHLY RELEVANT TO THE ACTIVE QUESTION");
+    expect(call.system).toContain("Relevance to the question is NEVER by itself a reason to reject");
+  });
+
+  it("gives concrete SAFE examples (concept facts relevant to the question) and contrastive UNSAFE examples (resolving the question)", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("*args collects extra positional arguments into a tuple");
+    expect(call.system).toContain("A list is mutable while a tuple is immutable.");
+    expect(call.system).toContain("x is a list because square brackets create a list.");
+    expect(call.system).toContain("The correct option is B.");
+    expect(call.system).toContain("The answer is def.");
+  });
+
+  it("allows teaching/substantial explanation for open-response questions, rejecting only a submission-ready final response", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("For an open-response question (essay/short-answer), teaching and substantial explanation are SAFE");
+    expect(call.system).toContain("reject only when the candidate becomes a complete, submission-ready version of the student's final assessed response");
+  });
+
   // Misconception/concept-check follow-up — the verifier's prompt didn't
   // distinguish "corrects a wrong claim" from "confirms a stated final
   // answer", risking an over-cautious rejection of legitimate corrective
-  // guidance (e.g. "Not quite — a tuple is not a row").
+  // guidance (e.g. "Not quite — a tuple is not a row"). Preserved through
+  // the architectural simplification above.
   it("clarifies that correcting a misconception is safe, but confirming a student's stated final answer is not", async () => {
     mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
 
@@ -132,42 +185,7 @@ describe("message shape sent to Anthropic", () => {
 
     const call = mockCreate.mock.calls[0][0];
     expect(call.system).toContain("corrects a student's mistaken claim");
-    expect(call.system).toContain("even when phrased as agreement rather than as a fresh statement");
-  });
-
-  // Concept-explanation quality follow-up — a substantive, accurate
-  // explanation of a general concept/syntax/terminology (e.g. what
-  // *args/**kwargs do in Python) was at risk of being rejected as
-  // EXCESSIVE_SPECIFICITY purely for being detailed, even though it never
-  // touched the actual question's answer. This clarifies the criterion is
-  // about answer-specific reasoning, not general subject-matter teaching.
-  it("clarifies that thorough concept/syntax/terminology explanation is not EXCESSIVE_SPECIFICITY by itself", async () => {
-    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
-
-    await verifyBrainstormResponse(baseInput);
-
-    const call = mockCreate.mock.calls[0][0];
-    expect(call.system).toContain("EXCESSIVE_SPECIFICITY concerns answer-specific reasoning steps for the ACTUAL question, not general subject-matter teaching");
-    expect(call.system).toContain("is NOT excessive specificity by itself");
-  });
-
-  // Concept-explanation quality follow-up (second pass) — manual Preview
-  // testing still found a substantive concept explanation collapsing to
-  // the deterministic fallback. Concrete positive/contrastive examples
-  // (rather than only abstract criteria) sharpen an LLM verifier's
-  // judgment far more reliably than prose alone — relevance to the
-  // question is not by itself a reason to reject.
-  it("gives concrete SAFE examples (concept facts relevant to the question) and contrastive UNSAFE examples (resolving the question)", async () => {
-    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
-
-    await verifyBrainstormResponse(baseInput);
-
-    const call = mockCreate.mock.calls[0][0];
-    expect(call.system).toContain("RELEVANCE TO THE QUESTION IS NOT THE SAME AS REVEALING THE FINAL ANSWER");
-    expect(call.system).toContain("*args collects extra positional arguments into a tuple");
-    expect(call.system).toContain("A tuple is immutable while a list is mutable.");
-    expect(call.system).toContain("The correct answer is that lists are mutable and tuples are immutable, so choose option B.");
-    expect(call.system).toContain("The answer to this question is @decorator.");
+    expect(call.system).toContain("even when phrased as agreement rather than a fresh statement");
   });
 
   it("includes the hidden model answer only in the user content, and only when supplied", async () => {
@@ -198,6 +216,25 @@ describe("response parsing", () => {
     const result = await verifyBrainstormResponse(baseInput);
 
     expect(result.allowed).toBe(true);
+  });
+
+  // Architectural simplification follow-up (section 5/21) — a genuine
+  // bug: `reason` used to be capped at 400 chars IN the model-facing
+  // schema, so a long-but-valid safety justification failed schema
+  // validation and discarded an otherwise-correct verdict (SCHEMA_ERROR,
+  // treated identically to a real safety failure). Fixed by removing the
+  // upper bound from the schema itself and truncating only AFTER a
+  // successful parse.
+  it("accepts a valid verdict whose reason exceeds 400 characters — no SCHEMA_ERROR caused by reason length alone, and the verdict is truncated for storage, not discarded", async () => {
+    const longReason = "This response teaches the concept thoroughly without disclosing the final answer. ".repeat(6);
+    expect(longReason.length).toBeGreaterThan(400);
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson({ allowed: true, riskScore: 0.2, reason: longReason })));
+
+    const result = await verifyBrainstormResponse(baseInput);
+
+    expect(result.allowed).toBe(true);
+    expect(result.reason.length).toBeLessThanOrEqual(400);
+    expect(longReason.startsWith(result.reason)).toBe(true);
   });
 });
 
