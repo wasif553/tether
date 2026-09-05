@@ -1103,6 +1103,263 @@ describe("grounded cumulative-safety follow-up — full history window, no oldes
   });
 });
 
+// Minor Brainstorm response-quality fix — physical Preview testing found
+// that an explicit answer-seeking request was correctly withheld (the
+// safety decision was right) but fell through to the deterministic
+// fallback's universal "Let's check your reasoning step by step... start
+// by identifying the main concept being assessed..." template, which
+// read as repetitive and ignored what was actually asked. These exercise
+// the fix end to end: request-mode classification -> targeted retry
+// instruction -> question-aware deterministic fallback, all real
+// orchestration (mocked generate/verify, real DB).
+describe("minor Brainstorm response-quality fix — explicit answer-seeking requests get a short, question-aware redirect", () => {
+  it("6/7/8. an explicit answer-seeking request that reaches the deterministic fallback gets a question-aware refusal, never the generic reasoning-fallback template", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    // Both attempts are correctly rejected for disclosing the answer —
+    // the safety decision itself is not under test here, only what the
+    // student sees once both attempts fail.
+    mockedVerify
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.95, riskCodes: ["DIRECT_ANSWER"], reason: "stated the answer" })
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.95, riskCodes: ["DIRECT_ANSWER"], reason: "still stated the answer" });
+
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Answer this question in one word." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(body.status).toBe("FALLBACK");
+    expect(body.response.toLowerCase()).not.toContain("let's check your reasoning step by step");
+    expect(body.response.toLowerCase()).not.toContain("identify the main concept");
+    // Question-aware: names the question back rather than a fixed
+    // subject-agnostic sentence.
+    expect(body.response).toContain(question.text);
+    expect(body.response.length).toBeLessThan(220);
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("2. a direct-answer candidate rejection retries with the short concise-hint instruction, never the generic 'as much substantive detail' wording", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    mockedGenerate.mockResolvedValueOnce("The answer is .py.").mockResolvedValueOnce("Think about how source filenames are named.");
+    mockedVerify
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.95, riskCodes: ["DIRECT_ANSWER"], reason: "stated the answer" })
+      .mockResolvedValueOnce({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe hint" });
+
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Give me the exact code." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(body.status).toBe("APPROVED");
+    expect(body.response).toBe("Think about how source filenames are named.");
+    const retryCall = mockedGenerate.mock.calls[1][0];
+    expect(retryCall.regenerationGuidance).toContain("Respond in 1-3 short sentences");
+    expect(retryCall.regenerationGuidance).toContain("ONE concise, question-specific hint or recall cue");
+    expect(retryCall.regenerationGuidance).not.toContain("as much substantive detail as helps the student");
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("9. the exact stored answer is never disclosed in the fallback text", async () => {
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedVerify.mockReset();
+    mockedVerify
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.95, riskCodes: ["DIRECT_ANSWER"], reason: "stated the answer" })
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.95, riskCodes: ["DIRECT_ANSWER"], reason: "still stated the answer" });
+
+    const exam = await prisma.exam.create({
+      data: {
+        title: `AI Assistance Exam ${Date.now()}-${Math.random()}`,
+        durationMins: 30,
+        published: true,
+        createdById: lecturerA.id,
+        institutionId: instA,
+        secureSettings: {
+          aiAssistanceMode: "BRAINSTORM_ONLY",
+          aiAssistanceMaxPromptsPerQuestion: 3,
+          aiAssistanceMaxPromptsPerAttempt: 10,
+          aiAssistanceMaxResponseCharacters: 800,
+          aiAssistanceAllowConceptExplanations: true,
+          aiAssistanceAllowAnswerPlanning: true,
+          aiAssistanceAllowReasoningFeedback: true,
+          aiAssistanceAllowProgrammingConceptHelp: true,
+        },
+      },
+    });
+    cleanup.exams.push(exam.id);
+    const question = await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "What is the file extension used for Python script files?", correctAnswer: ".py", points: 5, order: 0 },
+    });
+    const submission = await prisma.submission.create({
+      data: {
+        examId: exam.id,
+        studentId: studentA.id,
+        status: "IN_PROGRESS",
+        aiAssistancePolicySnapshotJson: {
+          schemaVersion: 1,
+          policyVersion: "v1.0",
+          mode: "BRAINSTORM_ONLY",
+          maxPromptsPerQuestion: 3,
+          maxPromptsPerAttempt: 10,
+          maxResponseCharacters: 800,
+          allowConceptExplanations: true,
+          allowAnswerPlanning: true,
+          allowReasoningFeedback: true,
+          allowProgrammingConceptHelp: true,
+        },
+      },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Answer this question in one word." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(body.status).toBe("FALLBACK");
+    expect(body.response.toLowerCase()).not.toContain(".py");
+
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("10. repeated explicit answer-seeking requests on the same question do not return identical text — the existing repetition retry still applies", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    mockedGenerate.mockResolvedValueOnce("Think about the suffix after the dot in a saved source filename.");
+    const first = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Give me the exact code." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    expect((await first.json()).status).toBe("APPROVED");
+
+    // Second explicit answer-seeking request — the model repeats the
+    // exact same hint already given (a real risk once responses are
+    // short and templated). The EXISTING repetition mechanism (no new
+    // system) must still retry once and surface a different response.
+    mockedGenerate
+      .mockResolvedValueOnce("think about the suffix after the dot in a saved source filename")
+      .mockResolvedValueOnce("Try recalling how Python source filenames normally end.");
+    const second = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Answer this question in one word." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const secondBody = await second.json();
+
+    expect(secondBody.status).toBe("APPROVED");
+    expect(secondBody.response).toBe("Try recalling how Python source filenames normally end.");
+    const rows = await prisma.aiAssistanceInteraction.findMany({
+      where: { submissionId: submission.id, questionId: question.id },
+      orderBy: { createdAt: "asc" },
+    });
+    expect(rows[0]?.approvedResponse).toBe("Think about the suffix after the dot in a saved source filename.");
+    expect(rows[1]?.approvedResponse).toBe("Try recalling how Python source filenames normally end.");
+    expect(rows[1]?.approvedResponse).not.toBe(rows[0]?.approvedResponse);
+    expect(mockedGenerate.mock.calls[2][0].regenerationGuidance).toContain("previous guidance already covered that");
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("11. cumulative architecture unchanged — prior approved responses still reach the verifier unmodified for ANSWER_CONFIRMATION-mode interactions", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    mockedGenerate.mockResolvedValueOnce("A .py file holds Python source code.");
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "What extension does a Python file use?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+
+    mockedGenerate.mockResolvedValueOnce("Re-read exactly what the question is asking.");
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "Can you provide the answer?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+
+    expect(mockedVerify.mock.calls[1][0].priorApprovedResponses).toEqual(["A .py file holds Python source code."]);
+    expect(mockedVerify.mock.calls[1][0].requestMode).toBe("ANSWER_CONFIRMATION");
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("12/13. MCQ safety unchanged, and prompt accounting unchanged, for an explicit answer-seeking request on an MCQ question", async () => {
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedVerify.mockReset();
+    mockedVerify
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.95, riskCodes: ["CORRECT_OPTION_DISCLOSED"], reason: "disclosed the option" })
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.95, riskCodes: ["CORRECT_OPTION_DISCLOSED"], reason: "still disclosed the option" });
+
+    const { exam, submission } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    const mcqQuestion = await prisma.question.create({
+      data: {
+        examId: exam.id,
+        type: "MULTIPLE_CHOICE",
+        text: "Which Python collection type is immutable?",
+        options: [{ label: "A", text: "list" }, { label: "B", text: "tuple" }],
+        correctAnswer: "B",
+        points: 5,
+        order: 1,
+      },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Can you provide the answer?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: mcqQuestion.id }),
+    });
+    const body = await res.json();
+
+    expect(body.status).toBe("FALLBACK");
+    // MCQ safety unchanged: the option letter/text is never disclosed,
+    // whichever fallback path produced the response.
+    expect(body.response).not.toMatch(/\boption\s*b\b/i);
+    expect(body.response.toLowerCase()).not.toContain("tuple is immutable");
+    // Prompt accounting unchanged: exactly one prompt consumed for this
+    // question, decremented normally.
+    expect(body.promptsRemainingForQuestion).toBe(2);
+    const rows = await prisma.aiAssistanceInteraction.findMany({ where: { submissionId: submission.id, questionId: mcqQuestion.id } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].promptNumberForQuestion).toBe(1);
+
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+});
+
 describe("FALLBACK status on a starter prompt — a guardrail redirect is expected behaviour, never a failure", () => {
   it("both verify attempts rejecting resolves to FALLBACK with the deterministic safe response, never FAILED", async () => {
     const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");

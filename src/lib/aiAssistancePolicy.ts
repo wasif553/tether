@@ -11,6 +11,7 @@
  * misconduct/risk score.
  */
 import type { SecureExamSettings, AiAssistanceMode } from "@/lib/secureExam";
+import type { BrainstormRequestMode } from "@/lib/aiAssistanceRequestMode";
 
 export const AI_ASSISTANCE_POLICY_VERSION = "v1.0";
 /** Bumped only if the snapshot's shape changes in a way old snapshots can't be read as. */
@@ -374,10 +375,25 @@ function extractSalientTerms(text: string): string[] {
  * already see (their own request, the question text they're already
  * looking at) and never states or implies the actual answer.
  */
-export function buildFallbackGuidance(input: { questionText: string; studentRequest: string }): string {
+export function buildFallbackGuidance(input: { questionText: string; studentRequest: string; requestMode?: BrainstormRequestMode }): string {
   const questionSnippet = truncateForFallback(input.questionText);
   const studentSnippet = truncateForFallback(input.studentRequest);
   if (!questionSnippet || !studentSnippet) return AI_ASSISTANCE_FALLBACK_RESPONSE;
+
+  // Minor Brainstorm response-quality fix — an explicit answer-seeking
+  // request (ANSWER_CONFIRMATION — see aiAssistanceRequestMode.ts) must
+  // never fall through to the universal AI_ASSISTANCE_FALLBACK_RESPONSE
+  // template below: physical Preview testing found that read as
+  // repetitive/mechanical and ignored what was actually asked. This is
+  // the deterministic (non-LLM) last-resort path, so it stays
+  // conservative rather than inventing a subject-specific hint it has
+  // no way to verify: it names the question back (already visible to
+  // the student, so safe to quote) and asks them to isolate the
+  // specific rule/term/step that decides it, instead of a fixed
+  // "identify the main concept"/"reasoning step by step" phrasing.
+  if (input.requestMode === "ANSWER_CONFIRMATION") {
+    return `I can't give you the exact answer to "${questionSnippet}" — re-read exactly what it's asking, and work out the one rule, term, or step that decides it.`;
+  }
 
   if (GUIDING_QUESTION_FALLBACK_PATTERNS.some((p) => p.test(input.studentRequest))) {
     return (

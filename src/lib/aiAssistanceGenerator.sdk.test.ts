@@ -112,7 +112,7 @@ describe("message shape sent to Anthropic", () => {
     ["APPROACH_GUIDANCE", "Give the student a concrete reasoning procedure or first steps"],
     ["MISCONCEPTION_CHECK", "Correct factual misconceptions and explain the relevant concept."],
     ["GUIDING_QUESTION", "Ask one question-specific guiding question"],
-    ["ANSWER_CONFIRMATION", "Do not confirm or deny the student's proposed final answer directly."],
+    ["ANSWER_CONFIRMATION", "The student is asking you to state, confirm, or produce the final assessed answer"],
     ["GENERIC_HELP", "Provide useful subject-specific guidance"],
   ] as const)("uses the %s mode's own short instruction, not a shared giant prompt", async (mode, expectedSnippet) => {
     mockCreate.mockResolvedValue(textResponse("Consider what causes evaporation."));
@@ -121,6 +121,26 @@ describe("message shape sent to Anthropic", () => {
 
     const call = mockCreate.mock.calls[0][0];
     expect(call.system).toContain(expectedSnippet);
+  });
+
+  // Minor Brainstorm response-quality fix — physical Preview testing
+  // found an explicit answer-seeking request ("give me the answer in
+  // one word", "just tell me which option", etc.) correctly withheld
+  // the answer but fell through to the deterministic fallback's generic
+  // "Let's check your reasoning step by step... identify the main
+  // concept" template. The ANSWER_CONFIRMATION instruction now
+  // explicitly demands a short, question-specific redirect and
+  // explicitly names (and forbids) that exact generic phrasing, so the
+  // model is never nudged toward it.
+  it("the ANSWER_CONFIRMATION instruction explicitly forbids the generic reasoning-fallback template and demands a short, question-specific hint", async () => {
+    mockCreate.mockResolvedValue(textResponse("Think about the suffix after the dot in a saved source filename."));
+
+    await generateBrainstormResponse({ ...baseInput, requestMode: "ANSWER_CONFIRMATION" });
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("Never fall back on a generic template like \"let's break this down\", \"identify the main concept\", or \"think step by step\"");
+    expect(call.system).toContain("In 1-3 short sentences");
+    expect(call.system).toContain("ONE concise, question-specific hint, recall cue, or reasoning direction");
   });
 
   // Architectural simplification follow-up — the hint ladder governs how

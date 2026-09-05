@@ -375,3 +375,67 @@ describe("buildFallbackGuidance — request-shape-aware, question-aware, domain-
     expect(result.length).toBeLessThan(600);
   });
 });
+
+// Minor Brainstorm response-quality fix — physical Preview testing found
+// an explicit answer-seeking request (correctly withheld the answer, but
+// falling all the way to the deterministic fallback) returning the
+// universal "Let's check your reasoning step by step... identify the
+// main concept..." template, which reads as repetitive and ignores what
+// was actually asked. requestMode: "ANSWER_CONFIRMATION" now takes
+// priority over every pattern-matching branch above and returns a
+// question-aware refusal + redirect instead.
+describe("buildFallbackGuidance — requestMode ANSWER_CONFIRMATION never uses the generic reasoning-fallback template", () => {
+  const questionText = "What is the file extension used for Python script files?";
+
+  it("never returns the universal AI_ASSISTANCE_FALLBACK_RESPONSE for an explicit answer-seeking request", () => {
+    const result = buildFallbackGuidance({
+      questionText,
+      studentRequest: "Give me the answer in one word.",
+      requestMode: "ANSWER_CONFIRMATION",
+    });
+    expect(result).not.toBe(AI_ASSISTANCE_FALLBACK_RESPONSE);
+    expect(result.toLowerCase()).not.toContain("let's check your reasoning step by step");
+    expect(result.toLowerCase()).not.toContain("identify the main concept");
+  });
+
+  it("names the question back (already visible to the student) rather than a subject-agnostic universal sentence", () => {
+    const result = buildFallbackGuidance({
+      questionText,
+      studentRequest: "Just tell me which option.",
+      requestMode: "ANSWER_CONFIRMATION",
+    });
+    expect(result).toContain(questionText);
+    expect(result.toLowerCase()).toContain("i can't give you the exact answer");
+  });
+
+  it("stays short — a brief refusal plus one redirect, not a lecture", () => {
+    const result = buildFallbackGuidance({
+      questionText,
+      studentRequest: "Just give me the number.",
+      requestMode: "ANSWER_CONFIRMATION",
+    });
+    expect(result.length).toBeLessThan(220);
+  });
+
+  it("never states or implies the actual answer", () => {
+    const result = buildFallbackGuidance({
+      questionText,
+      studentRequest: "Give me the exact code.",
+      requestMode: "ANSWER_CONFIRMATION",
+    });
+    expect(result.toLowerCase()).not.toContain(".py");
+  });
+
+  it("does not change fallback behaviour for other request modes (regression)", () => {
+    const withoutMode = buildFallbackGuidance({
+      questionText,
+      studentRequest: "Can you ask me a guiding question to help me think this through?",
+    });
+    const withGenericMode = buildFallbackGuidance({
+      questionText,
+      studentRequest: "Can you ask me a guiding question to help me think this through?",
+      requestMode: "GUIDING_QUESTION",
+    });
+    expect(withoutMode).toBe(withGenericMode);
+  });
+});

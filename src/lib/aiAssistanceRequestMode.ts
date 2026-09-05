@@ -47,6 +47,20 @@ const ANSWER_CONFIRMATION_PATTERNS = [
   /\bis\s+[a-d]\s+correct\b/i,
   /\bis\s+the\s+correct\s+option\b/i,
   /\bfinal\s+answer\s+is\b/i,
+  // Minor Brainstorm response-quality fix — the patterns above catch a
+  // student confirming their OWN stated answer; these catch the mirror
+  // case, an explicit request for TETHER to state/produce the final
+  // answer, option, result, or code outright (e.g. "give me the answer
+  // in one word", "just tell me which option", "write the answer for
+  // me"). Both shapes need the exact same generator/regeneration/
+  // fallback framing (don't answer, give one concise question-specific
+  // redirect instead), so both route to this same mode rather than a
+  // second, competing classifier.
+  /\bgive\s+me\s+the\s+(?:exact\s+|final\s+)?(?:answer|result|number|code|option|solution)\b/i,
+  /\btell\s+me\s+(?:the|which)\s+(?:answer|option|result)\b/i,
+  /\bwrite\s+the\s+(?:answer|code|solution)\s+for\s+me\b/i,
+  /\bprovide\s+the\s+(?:full\s+|exact\s+|final\s+)?answer\b/i,
+  /\bin\s+one\s+word\b/i,
 ];
 
 const MISCONCEPTION_CHECK_PATTERNS = [

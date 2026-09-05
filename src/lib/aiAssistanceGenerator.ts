@@ -146,8 +146,18 @@ const REQUEST_MODE_INSTRUCTIONS: Record<BrainstormRequestMode, string> = {
     "Correct factual misconceptions and explain the relevant concept. You may say that an idea is mistaken or incomplete. Do not confirm a complete final answer.",
   GUIDING_QUESTION:
     "Ask one question-specific guiding question that moves the student's reasoning forward. It must relate directly to the actual question, not be generic.",
+  // Minor Brainstorm response-quality fix — this mode now also covers an
+  // explicit request for Tether itself to state/produce the answer (not
+  // only a student confirming their own stated answer — see
+  // aiAssistanceRequestMode.ts). Physical Preview testing found requests
+  // like this falling through to the deterministic fallback's generic
+  // "Let's check your reasoning step by step..." template, which reads
+  // as repetitive and ignores what was actually asked. This instruction
+  // is deliberately explicit about SHORT + QUESTION-SPECIFIC + NEVER A
+  // GENERIC TEMPLATE, since the goal is refuse-then-help, not
+  // refuse-then-lecture.
   ANSWER_CONFIRMATION:
-    "Do not confirm or deny the student's proposed final answer directly. Redirect them to the reasoning, rule, or test they should use to evaluate it.",
+    "The student is asking you to state, confirm, or produce the final assessed answer, option, result, or code directly. Do not do this, and do not confirm or deny a proposed answer either. In 1-3 short sentences: briefly say you can't give the exact answer, then give ONE concise, question-specific hint, recall cue, or reasoning direction that actually helps with THIS question. Never fall back on a generic template like \"let's break this down\", \"identify the main concept\", or \"think step by step\" — the hint must be specific to what this exact question is asking, not a restated version of these instructions.",
   GENERIC_HELP:
     "Provide useful subject-specific guidance relevant to the student's request while withholding the final graded answer.",
 };

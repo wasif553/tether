@@ -50,7 +50,7 @@ import {
   blockedRequestStudentMessage,
   type RequestBlockReasonCode,
 } from "@/lib/aiAssistanceClassifier";
-import { classifyBrainstormRequestMode } from "@/lib/aiAssistanceRequestMode";
+import { classifyBrainstormRequestMode, type BrainstormRequestMode } from "@/lib/aiAssistanceRequestMode";
 import {
   generateBrainstormResponse,
   isAnthropicConfigured,
@@ -322,9 +322,26 @@ const RISK_CODE_REGENERATION_REASONS: Partial<Record<RiskCode, string>> = {
  * risk code) — the caller falls back to the old generic stricter wording
  * in aiAssistanceGenerator.ts in that case. Exported for direct unit
  * testing (no Prisma/Anthropic involved — pure).
+ *
+ * `requestMode` is optional (existing call sites/tests are unaffected)
+ * — when it is ANSWER_CONFIRMATION (minor Brainstorm response-quality
+ * fix: an explicit answer-seeking request, not only a student
+ * confirming their own stated answer — see aiAssistanceRequestMode.ts),
+ * this returns a short, concise-hint-only instruction instead of the
+ * risk-code-reasons instruction below, which explicitly invites "as
+ * much substantive detail as helps" — exactly the wrong direction for a
+ * request that should get a brief refusal + one hint, never a longer
+ * explanation.
  */
-export function rejectionRegenerationHint(outcome: GenerateVerifyOutcome): string | null {
+export function rejectionRegenerationHint(outcome: GenerateVerifyOutcome, requestMode?: BrainstormRequestMode): string | null {
   if (outcome.kind !== "rejected") return null;
+  if (requestMode === "ANSWER_CONFIRMATION") {
+    return (
+      "Do not provide the exact assessed answer, option, result, or code. Respond in 1-3 short sentences: briefly " +
+      "say you can't give the exact answer, then give ONE concise, question-specific hint or recall cue that helps " +
+      "the student continue. Never use a generic template like \"let's break this down\" or \"identify the main concept\"."
+    );
+  }
   if (outcome.riskCodes.length === 0) {
     return (
       "Your previous response was too long. Say the same kind of thing more concisely, while still directly and " +
@@ -826,7 +843,8 @@ export async function runAiAssistanceRequest(params: {
         // retry wants MORE variety in phrasing, not less, so it stays at
         // the normal (non-stricter) temperature.
         stricter: retryReason === "REJECTED",
-        regenerationGuidance: retryReason === "REJECTED" ? rejectionRegenerationHint(outcome) : REPETITION_REGENERATION_GUIDANCE,
+        regenerationGuidance:
+          retryReason === "REJECTED" ? rejectionRegenerationHint(outcome, generatorInput.requestMode) : REPETITION_REGENERATION_GUIDANCE,
       },
       question,
       policy,
@@ -925,7 +943,11 @@ export async function runAiAssistanceRequest(params: {
   // vary the guidance by what kind of request this was (concept
   // explanation, approach, guiding question) rather than repeating the
   // same generic sentence regardless of what was actually asked.
-  const fallbackResponse = buildFallbackGuidance({ questionText: question.text, studentRequest: params.studentPrompt });
+  const fallbackResponse = buildFallbackGuidance({
+    questionText: question.text,
+    studentRequest: params.studentPrompt,
+    requestMode: generatorInput.requestMode,
+  });
   await finalizeInteraction(interactionId, submission, settings, {
     status: "FALLBACK",
     approvedResponse: fallbackResponse,

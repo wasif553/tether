@@ -463,4 +463,37 @@ describe("rejectionRegenerationHint — targeted regeneration instruction from t
   it("returns null for an approved outcome (defensive — never actually called this way by the runner)", () => {
     expect(rejectionRegenerationHint({ kind: "approved", response: "ok", riskScore: 0, riskCodes: [], diagnostics })).toBeNull();
   });
+
+  // Minor Brainstorm response-quality fix — physical Preview testing
+  // found a direct-answer rejection's retry instruction ("keep the
+  // useful teaching content... in as much substantive detail as helps
+  // the student") nudging the regenerated candidate toward a longer
+  // explanation, exactly the wrong direction for an explicit
+  // answer-seeking request that should get a brief refusal plus one
+  // concise hint. requestMode is optional — every test above (which
+  // never passes it) is unaffected.
+  describe("requestMode ANSWER_CONFIRMATION overrides the risk-code-reasons instruction with a short concise-hint instruction", () => {
+    it("returns the short concise-hint instruction regardless of which risk codes were on the rejection", () => {
+      const hint = rejectionRegenerationHint(
+        { kind: "rejected", riskScore: 0.9, riskCodes: ["DIRECT_ANSWER"], reason: "stated the answer", diagnostics },
+        "ANSWER_CONFIRMATION",
+      );
+      expect(hint).toContain("Respond in 1-3 short sentences");
+      expect(hint).toContain("ONE concise, question-specific hint or recall cue");
+      expect(hint).not.toContain("as much substantive detail as helps the student");
+    });
+
+    it("still returns null for a provider/verifier ERROR outcome even with requestMode set (nothing specific to say)", () => {
+      expect(rejectionRegenerationHint({ kind: "error", stage: "verifier", category: "UNKNOWN", diagnostics }, "ANSWER_CONFIRMATION")).toBeNull();
+    });
+
+    it("does not affect other request modes (regression) — the risk-code-reasons instruction is unchanged for e.g. CONCEPT_EXPLANATION", () => {
+      const hint = rejectionRegenerationHint(
+        { kind: "rejected", riskScore: 0.9, riskCodes: ["DIRECT_ANSWER"], reason: "stated the answer", diagnostics },
+        "CONCEPT_EXPLANATION",
+      );
+      expect(hint).toContain("it stated or clearly implied the final answer");
+      expect(hint).toContain("as much substantive detail as helps the student");
+    });
+  });
 });

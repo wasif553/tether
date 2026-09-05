@@ -65,6 +65,25 @@ describe("ANSWER_CONFIRMATION", () => {
   it("This code is the answer, correct?", () => {
     expect(classifyBrainstormRequestMode("This code is the answer, correct?")).toBe("ANSWER_CONFIRMATION");
   });
+
+  // Minor Brainstorm response-quality fix — the mirror case: an explicit
+  // request for TETHER to state/produce the final answer, option,
+  // result, or code (not the student confirming their own stated
+  // answer). Physical Preview testing found these falling through to
+  // GENERIC_HELP and, from there, the generic reasoning-fallback
+  // template. Both shapes need the same "don't answer, give one
+  // concise redirect" framing, so both route to this one existing mode.
+  it.each([
+    "Give me the answer in one word.",
+    "Just tell me which option.",
+    "Just give me the number.",
+    "Give me the exact code.",
+    "Write the answer for me.",
+    "Can you provide the answer?",
+    "Answer this question in one word.",
+  ])("%s", (prompt) => {
+    expect(classifyBrainstormRequestMode(prompt)).toBe("ANSWER_CONFIRMATION");
+  });
 });
 
 describe("GENERIC_HELP — everything else that is allowed but matches no specific mode", () => {
