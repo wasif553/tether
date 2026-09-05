@@ -297,7 +297,19 @@ function buildSystemPrompt(): string {
     "Ask exactly ONE question: does this candidate response STATE, CONFIRM, TRIVIALLY IMPLY, or PROVIDE A SUBMISSION-READY VERSION of the graded final answer for the ACTIVE question? That is the only thing that makes a response unsafe. Call this \"Check 1\".",
     "",
     "A response is UNSAFE (allowed=false) only if it does ANY of the following:",
-    "- states or clearly implies the correct final answer, or gets the student all the way there (DIRECT_ANSWER / NEAR_COMPLETE_ANSWER)",
+    // MCQ semantic-verifier calibration follow-up — "gets the student all
+    // the way there" was ambiguous between "the candidate itself reaches
+    // the graded result" (correct reading) and "the candidate gives the
+    // student enough that THEY could now reach it" (an over-broad
+    // reading that a semantic model can plausibly apply to good
+    // teaching). Live Preview testing found substantive, general concept
+    // teaching for an MCQ rejected as DIRECT_ANSWER — this bullet is the
+    // most direct textual source of that ambiguity. Narrowed to name
+    // what actually makes it unsafe (the CANDIDATE doing the reasoning/
+    // computation, not the student), and to say explicitly that teaching
+    // a general rule/method the student must still apply is not this,
+    // even when it gives the student everything they need.
+    "- states or clearly implies the correct final answer, or does the reasoning/computation FOR the student such that the graded result is reached without the student applying anything themselves (DIRECT_ANSWER / NEAR_COMPLETE_ANSWER) — teaching the general rule, method, or mechanism the student must still apply is NOT this, even when it gives the student everything they need to work out the result on their own",
     "- states, confirms, ranks, or eliminates the correct multiple-choice option (CORRECT_OPTION_DISCLOSED / OPTION_ELIMINATION)",
     "- gives the final numeric result, or performs the last substitution/computation step for the student (FINAL_NUMERIC_RESULT)",
     "- is a complete, submission-ready essay/prose response the student could paste directly as their final answer (SUBMISSION_READY_PROSE)",
@@ -321,6 +333,33 @@ function buildSystemPrompt(): string {
     '- "Lists are mutable. They use square brackets. They are useful for changing collections. Tuples are immutable. They use parentheses. They are useful for fixed collections." — even though every individual fact here is separately safe, THIS single candidate packages essentially the whole comparison at once, so it is unsafe (SUBMISSION_READY_COMPLETION) regardless of whether any of it was said before.',
     "",
     "For an open-response question (essay/short-answer), teaching and substantial explanation are SAFE — reject only when the candidate becomes a complete, submission-ready version of the student's final assessed response, never merely because it is thorough or detailed.",
+    "",
+    // MCQ semantic-verifier calibration follow-up — Check 1's holistic
+    // "would this substantially satisfy the active question" framing was
+    // written for open-response questions, where "satisfying the
+    // question" and "assembling the required content" are the same
+    // thing. For MULTIPLE_CHOICE there is no partial "submission" other
+    // than the option itself, so applying that SAME holistic test lets
+    // a semantic model collapse "does this candidate substantially help
+    // the student solve it" into "does this candidate disclose the
+    // answer" — exactly the false positive found in Preview testing
+    // (a general *args/**kwargs explanation rejected as DIRECT_ANSWER).
+    // This makes Check 1's MCQ meaning explicit and DIFFERENT from its
+    // open-response meaning, rather than one wording doing both jobs.
+    "=== MULTIPLE_CHOICE — CHECK 1 IS NARROWER THAN FOR OPEN-RESPONSE QUESTIONS ===",
+    "For a MULTIPLE_CHOICE question, Check 1 is NOT 'would this content substantially help or explain enough that a competent student could work out the option' — that is exactly what Brainstorm is FOR, and is never itself unsafe. Check 1 for MULTIPLE_CHOICE asks a narrower, different question: does this candidate STATE, CONFIRM, or MAKE TRIVIAL the correct option or the exact graded result FOR THIS ASSESSED INSTANCE?",
+    "The governing distinction: Tether may TEACH THE RULE — terminology, syntax, language semantics, relevant concepts, intermediate mechanics, misconception correction, analogous examples, how to reason through the options, what a construct means, how a general rule or algorithm works — even when that teaching is highly relevant and gives the student everything they need to work out the option themselves. Tether may NOT APPLY THE RULE ALL THE WAY TO THE GRADED RESULT for the specific assessed instance — perform the actual substitution/binding/computation for this exact question, state the correct option or exact final result/output that trivially identifies it, or confirm a student's proposed option/result.",
+    "MCQ OPTION-TRIVIALIZATION: a candidate does not need to name an option letter to be unsafe. If it states the one decisive fact that, given the ACTUAL options shown for this question, leaves only one of them possible, that is CORRECT_OPTION_DISCLOSED even without naming the option — judge this against the real options for this question, not against the concept in the abstract.",
+    "MCQ worked examples:",
+    '- SAFE (general rule): "*args collects extra positional arguments into a tuple, and **kwargs collects extra keyword arguments into a dictionary." Safe even when the active question asks to trace a specific function call, because it teaches the mechanism, not this call\'s actual values.',
+    '- SAFE (describes the reasoning to do, not its result): "The question is asking you to trace how each argument is assigned to the function parameters and then reason about the structure that gets returned."',
+    '- UNSAFE (applies the rule to this instance): "`a` is 1, `b` is 2, `args` is (3, 4), and `kwargs` is {\'x\': 10}." — this performs the actual binding for the SPECIFIC assessed call, which trivially yields the printed result; unsafe even though it never uses the word "answer".',
+    '- UNSAFE: "The output is (1, 2, (3, 4), {\'x\': 10})."',
+    '- SAFE (general rule): "Merge sort repeatedly divides the collection in half and merges the sorted halves back together." — for "Which sorting algorithm has O(n log n) average complexity?"; teaches how merge sort works without presenting it as the answer to pick.',
+    '- UNSAFE: "The correct option is merge sort."',
+    '- SAFE for "Which collection is immutable?" (options: list, set, tuple, dictionary): "Immutable means an object cannot be changed after creation." / "Think about which collection types permit item replacement or append-like mutation." Both teach the concept without resolving which option it applies to.',
+    '- UNSAFE for that same question: "A tuple is immutable; lists, sets, and dictionaries are mutable." — this names the deciding property for EVERY option shown, not just what "immutable" means, so it is option-trivialization (CORRECT_OPTION_DISCLOSED) even though no option letter is stated.',
+    '- Context-dependent: "HTTPS is the encrypted form of HTTP and normally uses TLS." is a SAFE general fact on its own, but for "Which protocol uses port 443?" judge it against the actual options shown — if HTTPS is one of the displayed options and stating this fact leaves no other option plausible, it is option-trivialization exactly like the immutability case above.',
     "",
     "=== WHAT THE ACTIVE QUESTION ACTUALLY REQUIRES ===",
     "Both Check 1 above and Check 2 below ultimately depend on knowing what would 'substantially satisfy' or 'substantially complete' the active question. Ground that judgment using this strict priority order. Tether must never invent an unstated marking rubric from its own general subject knowledge:",
@@ -365,7 +404,7 @@ function buildSystemPrompt(): string {
     "- ANSWER_CONFIRMATION: keep the strict confirmation protection above — do not confirm or deny a stated final answer.",
     "- GENERIC_HELP: useful direction is expected; answer assembly is not.",
     "",
-    "You ARE given the hidden model answer and/or rubric summary (when available) purely so you can judge disclosure and grounded completion accurately — never quote them back in your reason field.",
+    "You ARE given the hidden model answer and/or rubric summary (when available) purely so you can judge disclosure and grounded completion accurately — never quote them back in your reason field. Merely sharing WORDS or CONCEPTS with the hidden model answer is not itself disclosure — e.g. if the hidden answer contains a tuple or a dictionary, explaining that '*args produces a tuple' or '**kwargs produces a dictionary' is teaching a prerequisite concept, not disclosing the answer. Only flag HIDDEN_RUBRIC_DISCLOSURE when the candidate states the actual answer/result itself or a meaningfully equivalent restatement of it — not when it merely uses a term or concept that also happens to appear within it.",
     "",
     "Respond with ONLY a JSON object — no markdown, no preamble:",
     '{ "allowed": boolean, "riskScore": number (0-1), "riskCodes": string[], "reason": string }',

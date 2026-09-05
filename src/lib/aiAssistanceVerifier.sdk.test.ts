@@ -350,6 +350,165 @@ describe("grounded cumulative-safety follow-up — assessment-context grounding 
   });
 });
 
+// MCQ semantic-verifier calibration follow-up — live Preview testing
+// found a real MCQ (function call with *args/**kwargs, hidden answer
+// "(1, 2, (3, 4), {'x': 10})") rejected as DIRECT_ANSWER for substantive
+// but GENERAL concept teaching ("how are a, b different from *args,
+// **kwargs?"). Root cause: Check 1's holistic "would this substantially
+// satisfy the active question" framing (written for open-response
+// questions) was being applied identically to MULTIPLE_CHOICE, where
+// "substantially helps the student solve it" and "discloses the answer"
+// are NOT the same thing. These confirm the prompt now states the
+// narrower MCQ-specific rule and its worked examples — the actual live
+// semantic judgment can only be confirmed against the real model (see
+// the manual acceptance checklist), since this file mocks the Anthropic
+// response; what's testable here is that the governing instruction text
+// is actually present in what gets sent.
+describe("MCQ semantic-verifier calibration follow-up — Check 1 is narrower for MULTIPLE_CHOICE than for open-response", () => {
+  it("states that MCQ Check 1 is NOT 'does this substantially help solve it', and explicitly says that is what Brainstorm is for", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain(
+      "For a MULTIPLE_CHOICE question, Check 1 is NOT 'would this content substantially help or explain enough that a competent student could work out the option'",
+    );
+    expect(call.system).toContain("that is exactly what Brainstorm is FOR, and is never itself unsafe");
+  });
+
+  it("states the TEACH THE RULE vs APPLY THE RULE TO THE GRADED RESULT distinction", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("Tether may TEACH THE RULE");
+    expect(call.system).toContain("Tether may NOT APPLY THE RULE ALL THE WAY TO THE GRADED RESULT for the specific assessed instance");
+  });
+
+  it("removes the ambiguous 'gets the student all the way there' phrasing and replaces it with a candidate-scoped rule", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).not.toContain("gets the student all the way there");
+    expect(call.system).toContain(
+      "does the reasoning/computation FOR the student such that the graded result is reached without the student applying anything themselves",
+    );
+    expect(call.system).toContain("teaching the general rule, method, or mechanism the student must still apply is NOT this");
+  });
+
+  // SAFE examples 1-4 (general rule / reasoning-to-do, live regression
+  // shapes from the actual failed Preview interaction).
+  it.each([
+    "*args collects extra positional arguments into a tuple, and **kwargs collects extra keyword arguments into a dictionary.",
+    "The question is asking you to trace how each argument is assigned to the function parameters and then reason about the structure that gets returned.",
+  ])("declares SAFE (general rule, not instance resolution): %s", (safeExample) => {
+    expect(
+      [
+        '- SAFE (general rule): "*args collects extra positional arguments into a tuple, and **kwargs collects extra keyword arguments into a dictionary." Safe even when the active question asks to trace a specific function call, because it teaches the mechanism, not this call\'s actual values.',
+        '- SAFE (describes the reasoning to do, not its result): "The question is asking you to trace how each argument is assigned to the function parameters and then reason about the structure that gets returned."',
+      ].some((line) => line.includes(safeExample)),
+    ).toBe(true);
+  });
+
+  it("declares UNSAFE the actual-binding-resolution shape (test 7) and the final-output shape (test 8)", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("`a` is 1, `b` is 2, `args` is (3, 4), and `kwargs` is {'x': 10}");
+    expect(call.system).toContain("this performs the actual binding for the SPECIFIC assessed call, which trivially yields the printed result");
+    expect(call.system).toContain("The output is (1, 2, (3, 4), {'x': 10}).");
+  });
+
+  it("declares UNSAFE stating the correct option directly (tests 9/10 shape) via the general sorting-algorithm example", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("Merge sort repeatedly divides the collection in half and merges the sorted halves back together.");
+    expect(call.system).toContain("The correct option is merge sort.");
+  });
+
+  // Test 11 — option-trivialization without naming an option letter.
+  it("declares MCQ option-trivialization unsafe even without naming an option letter, and states the general rule for it", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain(
+      "If it states the one decisive fact that, given the ACTUAL options shown for this question, leaves only one of them possible, that is CORRECT_OPTION_DISCLOSED even without naming the option",
+    );
+    expect(call.system).toContain('"A tuple is immutable; lists, sets, and dictionaries are mutable."');
+    expect(call.system).toContain("this names the deciding property for EVERY option shown, not just what \"immutable\" means, so it is option-trivialization");
+    // The corresponding SAFE contrast for the same question must also be present.
+    expect(call.system).toContain('"Immutable means an object cannot be changed after creation."');
+    expect(call.system).toContain('"Think about which collection types permit item replacement or append-like mutation."');
+  });
+
+  it("frames a context-dependent example (port 443/HTTPS) as judged against the actual displayed options, not banned outright", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("HTTPS is the encrypted form of HTTP and normally uses TLS.");
+    expect(call.system).toContain("judge it against the actual options shown");
+  });
+
+  // Test 6 — hidden-answer semantic overlap is not itself disclosure.
+  it("clarifies that sharing words/concepts with the hidden model answer is not itself HIDDEN_RUBRIC_DISCLOSURE", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse({ ...baseInput, hiddenModelAnswer: "(1, 2, (3, 4), {'x': 10})" });
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("Merely sharing WORDS or CONCEPTS with the hidden model answer is not itself disclosure");
+    expect(call.system).toContain("explaining that '*args produces a tuple' or '**kwargs produces a dictionary' is teaching a prerequisite concept, not disclosing the answer");
+  });
+
+  // Regression (tests 12-14) — MCQ narrowing must not touch open-response
+  // Check 1, Check 2, or the assessment-grounding hierarchy.
+  it("REGRESSION: open-response Check 1's holistic wording is unchanged", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain(
+      "if this exact text, with only trivial editing or reformatting, were submitted as the student's answer, would it already substantially satisfy the active question",
+    );
+  });
+
+  it("REGRESSION: Check 2 (SHORT_ANSWER/ESSAY cumulative completion) wording and MULTIPLE_CHOICE exclusion are unchanged", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("For SHORT_ANSWER and ESSAY questions specifically (never for MULTIPLE_CHOICE");
+    expect(call.system).toContain("SUBMISSION_READY_COMPLETION");
+    expect(call.system).toContain("CUMULATIVE_RESPONSE_COMPLETION");
+  });
+
+  it("REGRESSION: the Level 1/2/3 assessment-grounding hierarchy is unchanged", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("LEVEL 1 (highest confidence): explicit requirements literally stated in the question's own text");
+    expect(call.system).toContain("LEVEL 2: a hidden model answer / marking guidance");
+    expect(call.system).toContain("LEVEL 3: if the question names no explicit requirements");
+  });
+});
+
 describe("response parsing", () => {
   it("parses a well-formed JSON verdict", async () => {
     mockCreate.mockResolvedValue(textResponse(validVerifierJson({ allowed: false, riskScore: 0.8, riskCodes: ["DIRECT_ANSWER"] })));
