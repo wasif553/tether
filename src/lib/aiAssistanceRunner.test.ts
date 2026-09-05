@@ -349,6 +349,36 @@ describe("15/16. verifier receives hidden reference material the generator never
     // own type signature has no field for it, enforced structurally (see
     // aiAssistanceGenerator.test.ts).
     expect(mockedGenerate).toHaveBeenCalledWith(expect.not.objectContaining({ correctAnswer: expect.anything() }), expect.anything());
+    // Grounded-cumulative-safety follow-up (section 18 — mandatory
+    // generator-isolation regression) — a stronger, content-level check
+    // than the structural one above: the hidden reference value itself
+    // must never appear anywhere in what was actually sent to the
+    // generator, not merely absent from a named field.
+    const generatorCallContent = JSON.stringify(mockedGenerate.mock.calls[0][0]);
+    expect(generatorCallContent).not.toContain("Paris");
+  });
+
+  // Grounded-cumulative-safety follow-up (MUST HAVE, section 8) —
+  // requestMode was already computed for the generator; it must reach
+  // the verifier too (calibration only), reusing the SAME classification
+  // rather than a second one.
+  it("passes the same requestMode already computed for the generator through to the verifier", async () => {
+    mockedGenerate.mockResolvedValue("A hint.");
+    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0, riskCodes: [], reason: "ok" });
+
+    await attemptGenerateAndVerify({
+      generatorInput: { ...baseGeneratorInput, requestMode: "MISCONCEPTION_CHECK" },
+      question: baseQuestion,
+      policy: basePolicy,
+      studentPrompt: "help",
+      approvedCountForQuestion: 0,
+      cumulativeSoFar: 0,
+    });
+
+    expect(mockedVerify).toHaveBeenCalledWith(
+      expect.objectContaining({ requestMode: "MISCONCEPTION_CHECK" }),
+      expect.anything(),
+    );
   });
 
   it("caps an over-length hidden model answer before sending it to the verifier (Part 9 payload bound)", async () => {

@@ -602,6 +602,17 @@ function logAiAssistanceDiagnostics(params: {
   finalOutcome: GenerateVerifyOutcome;
   wasRegenerated: boolean;
   totalAiMs: number;
+  // Grounded-cumulative-safety follow-up (section 14, observability) —
+  // repeated Preview investigations found the log line alone couldn't
+  // distinguish "which request mode / question type / how much prior
+  // history / was there grounding data" without cross-referencing the
+  // database. All bounded, non-content fields — never the student
+  // prompt, the candidate/verified response text, or the hidden model
+  // answer's actual contents (hasHiddenModelAnswer is a boolean only).
+  requestMode: string;
+  questionType: string;
+  priorApprovedResponseCount: number;
+  hasHiddenModelAnswer: boolean;
 }): void {
   if (!isServerTimingHeaderEnabled(process.env.TETHER_TIMING_HEADERS_ENABLED)) return;
   const passes = [summarizeOutcome(params.initialOutcome)];
@@ -624,6 +635,10 @@ function logAiAssistanceDiagnostics(params: {
       totalAiMs: Math.round(params.totalAiMs),
       generatorModel: `anthropic:${getAnthropicBrainstormModel()}`,
       verifierModel: `anthropic:${getAnthropicBrainstormVerifierModel()}`,
+      requestMode: params.requestMode,
+      questionType: params.questionType,
+      priorApprovedResponseCount: params.priorApprovedResponseCount,
+      hasHiddenModelAnswer: params.hasHiddenModelAnswer,
       passes,
     }),
   );
@@ -734,10 +749,21 @@ export async function runAiAssistanceRequest(params: {
       where: { submissionId: submission.id, questionId: question.id, status: "APPROVED" },
     }),
     currentCumulativeRiskScore(submission.id, question.id),
+    // Grounded-cumulative-safety follow-up (MUST HAVE) — ALL approved
+    // responses for this submission+question, never an arbitrary
+    // recency window. A fixed `take: 5` here meant a student could burn
+    // a handful of throwaway turns and have every subsequent turn become
+    // permanently invisible to cumulative-completion judgment — an
+    // adversarially exploitable gap, not just a UX limit. The count is
+    // already bounded by the lecturer-configured
+    // aiAssistanceMaxPromptsPerQuestion (reserveInteractionSlot enforces
+    // this before any interaction row can even be created — see
+    // hasReachedQuestionPromptLimit above), so no second arbitrary cap is
+    // introduced here. Isolation to this exact submissionId+questionId
+    // (never another student, attempt/retake, or question) is unchanged.
     prisma.aiAssistanceInteraction.findMany({
       where: { submissionId: submission.id, questionId: question.id, status: "APPROVED" },
       orderBy: { createdAt: "asc" },
-      take: 5,
       select: { studentPrompt: true, approvedResponse: true },
     }),
   ]);
@@ -818,6 +844,10 @@ export async function runAiAssistanceRequest(params: {
     finalOutcome: outcome,
     wasRegenerated: regenerated,
     totalAiMs: latencyMs,
+    requestMode: generatorInput.requestMode,
+    questionType,
+    priorApprovedResponseCount: priorApproved.length,
+    hasHiddenModelAnswer: Boolean(question.correctAnswer),
   });
 
   if (outcome.kind === "approved") {
@@ -997,6 +1027,12 @@ export async function attemptGenerateAndVerify(params: {
         // generator (params.generatorInput above) never received it.
         hiddenModelAnswer: boundedHiddenReference(params.question.correctAnswer),
         hiddenRubricSummary: null,
+        // Grounded-cumulative-safety follow-up (MUST HAVE) — calibration
+        // only, never a safety bypass (see buildSystemPrompt's own
+        // per-mode notes in aiAssistanceVerifier.ts). Reuses the SAME
+        // mode already computed for the generator — never a second,
+        // independent classification.
+        requestMode: params.generatorInput.requestMode,
         priorApprovedHintCount: params.approvedCountForQuestion,
         cumulativeRiskScoreSoFar: params.cumulativeSoFar,
         // Cumulative answer-assembly follow-up — derived from the SAME

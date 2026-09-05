@@ -14,6 +14,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import type { BrainstormQuestionType } from "@/lib/aiAssistanceGenerator";
+import type { BrainstormRequestMode } from "@/lib/aiAssistanceRequestMode";
 import { boundedHiddenReference } from "@/lib/aiAssistancePolicy";
 import {
   callWithTransientRetry,
@@ -57,6 +58,15 @@ export type BrainstormVerifierInput = {
   questionType: BrainstormQuestionType;
   candidateResponse: string;
   studentRequest: string;
+  /**
+   * Grounded-cumulative-safety follow-up (MUST HAVE) — which short,
+   * already-computed generator instruction mode this request used (see
+   * aiAssistanceRequestMode.ts). Calibration only: it changes how the
+   * verifier expects the candidate to be framed, never whether the
+   * disclosure/completion rules themselves apply — see buildSystemPrompt's
+   * per-mode notes below.
+   */
+  requestMode: BrainstormRequestMode;
   /** Present only when the question actually has one on record — never fabricated. */
   hiddenModelAnswer?: string | null;
   hiddenRubricSummary?: string | null;
@@ -266,12 +276,25 @@ export const MAX_VERIFIER_REASON_CHARACTERS = 400;
  * confirms, or completes the graded final answer; teaching content is
  * categorically safe regardless of how detailed or how relevant to the
  * active question it is.
+ *
+ * Grounded-cumulative-safety follow-up — a live false positive (focused
+ * "what is a tuple" / "what is a list" / "what is the difference"
+ * teaching wrongly suppressed) exposed that Check 2 (the cumulative
+ * question below) needs a real answer to "what does the active question
+ * require" — and that answer must come from the actual assessment
+ * context (the question's own wording, or lecturer-authored/-approved
+ * hidden reference material), never from the model's own general
+ * subject-matter knowledge invented as an unstated rubric. See the
+ * "WHAT THE ACTIVE QUESTION ACTUALLY REQUIRES" section below — this is
+ * the grounding hierarchy the whole exercise converged on. Check 1 does
+ * not need this grounding: it judges the candidate purely against the
+ * literal question text, which is always available.
  */
 function buildSystemPrompt(): string {
   return [
     "You are a strict, independent safety verifier for an exam brainstorming assistant — a restricted tutor. You do not generate help yourself — you only judge whether a CANDIDATE RESPONSE, already drafted by another system, is safe to show a student during a live exam.",
     "",
-    "Ask exactly ONE question: does this candidate response STATE, CONFIRM, TRIVIALLY IMPLY, or PROVIDE A SUBMISSION-READY VERSION of the graded final answer for the ACTIVE question? That is the only thing that makes a response unsafe.",
+    "Ask exactly ONE question: does this candidate response STATE, CONFIRM, TRIVIALLY IMPLY, or PROVIDE A SUBMISSION-READY VERSION of the graded final answer for the ACTIVE question? That is the only thing that makes a response unsafe. Call this \"Check 1\".",
     "",
     "A response is UNSAFE (allowed=false) only if it does ANY of the following:",
     "- states or clearly implies the correct final answer, or gets the student all the way there (DIRECT_ANSWER / NEAR_COMPLETE_ANSWER)",
@@ -280,6 +303,8 @@ function buildSystemPrompt(): string {
     "- is a complete, submission-ready essay/prose response the student could paste directly as their final answer (SUBMISSION_READY_PROSE)",
     "- is complete, working code that directly answers the assessed question (COMPLETE_CODE)",
     "- discloses or paraphrases the rubric/marking scheme/model answer text you were given as hidden reference material (HIDDEN_RUBRIC_DISCLOSURE)",
+    "",
+    "Check 1 is a HOLISTIC judgment on the candidate's CONTENT AS WRITTEN: if this exact text, with only trivial editing or reformatting, were submitted as the student's answer, would it already substantially satisfy the active question? Judge this purely on substance. It does NOT matter whether the facts in it are newly stated here or were already taught earlier in this conversation, whether it uses comparative words like \"while\"/\"whereas\", how many bullets or sentences it has, or whether it repeats terminology from the question — a candidate that packages enough assessed content to be substantially submission-ready is unsafe even if every individual fact in it was separately safe on its own, and even if none of the wording is new.",
     "",
     "TEACHING CONTENT IS SAFE, EVEN WHEN HIGHLY RELEVANT TO THE ACTIVE QUESTION. Relevance to the question is NEVER by itself a reason to reject. All of the following are SAFE, including when the active question is directly about them:",
     '- "*args collects extra positional arguments into a tuple, while **kwargs collects extra keyword arguments into a dictionary."',
@@ -293,27 +318,54 @@ function buildSystemPrompt(): string {
     "- \"The output is (1, 2, (3, 4), {'x': 10}).\"",
     '- "The answer is def."',
     '- "Yes, B is correct." / "Yes, your final answer is correct."',
+    '- "Lists are mutable. They use square brackets. They are useful for changing collections. Tuples are immutable. They use parentheses. They are useful for fixed collections." — even though every individual fact here is separately safe, THIS single candidate packages essentially the whole comparison at once, so it is unsafe (SUBMISSION_READY_COMPLETION) regardless of whether any of it was said before.',
     "",
     "For an open-response question (essay/short-answer), teaching and substantial explanation are SAFE — reject only when the candidate becomes a complete, submission-ready version of the student's final assessed response, never merely because it is thorough or detailed.",
+    "",
+    "=== WHAT THE ACTIVE QUESTION ACTUALLY REQUIRES ===",
+    "Both Check 1 above and Check 2 below ultimately depend on knowing what would 'substantially satisfy' or 'substantially complete' the active question. Ground that judgment using this strict priority order. Tether must never invent an unstated marking rubric from its own general subject knowledge:",
+    "LEVEL 1 (highest confidence): explicit requirements literally stated in the question's own text — for example the question names specific dimensions, parts, or an exact number of points to cover. Reason directly against these.",
+    "LEVEL 2: a hidden model answer / marking guidance, when it is supplied to you below as hidden reference material. This is lecturer-authored or lecturer-approved, so it may ground what the answer needs to cover — but treat it as strong guidance, not necessarily an exhaustive list of every valid point, and never require the candidate to match its exact wording, only its substance. Never quote or closely paraphrase it in your reason field.",
+    "LEVEL 3: if the question names no explicit requirements AND no hidden model answer/guidance is supplied below, there is NO grounded rubric available. Do not silently decide the topic has some fixed number of 'canonical' comparison dimensions or required parts from your own subject knowledge — that is exactly the invented-rubric failure this policy exists to prevent. Instead, judge only whether the accumulated approved guidance, read as a whole in ordinary terms, ALREADY AND CLEARLY reads as a substantially complete answer to the LITERAL question text — not whether it happens to cover topics you personally know are commonly discussed for this subject. If it is genuinely unclear whether the literal question has been substantially answered, do not reject at Level 3 merely because a fuller answer is imaginable.",
+    "Level 1 (the question's own literal wording) always outranks Level 2 if the two ever seem to disagree.",
     "",
     // Cumulative answer-assembly follow-up — a SECOND, narrower safety
     // question for SHORT_ANSWER/ESSAY only. Deliberately NOT a return to
     // the removed "is this too specific/detailed" framing — that broad
     // question caused useful single-concept teaching to be rejected and
     // must never come back. This one only asks whether the substantive
-    // CONTENT the question requires has now been assembled, whether in
-    // one message or spread across several approved ones.
-    "For SHORT_ANSWER and ESSAY questions specifically (never for MULTIPLE_CHOICE — that keeps only the disclosure/confirmation boundary above), ask a SECOND question: considering this candidate TOGETHER WITH the prior approved guidance already given for this SAME question (listed below, if any), would the student now have most of the substantive content the question requires — e.g. every major distinguishing point in a comparison, a complete list of required differences, or a fully worked derivation — needing only trivial editing to submit? If yes, this is unsafe: SUBMISSION_READY_COMPLETION if this candidate alone does it, CUMULATIVE_RESPONSE_COMPLETION if it only crosses that line combined with the prior approved guidance.",
-    "This is NOT the same as 'too detailed' or 'too specific' — teach or address ONE concept, ONE definition, ONE misconception, or ONE reasoning direction at a time, as thoroughly as is useful; that is SAFE even on a question's very first interaction. It becomes unsafe only when the accumulated content — this response plus every prior approved one for this same question — substantially ASSEMBLES what the question is asking for, not merely because several individually-safe facts happen to relate to the same topic.",
-    "For SHORT_ANSWER questions the expected answer is often very small (sometimes just 1-3 points), so treat this conservatively — two or three combined substantive points may already be most of the expected answer. For ESSAY questions, explaining any SINGLE required point in depth remains safe, but the accumulated guidance must never include a complete thesis, a complete structure, AND fully-worked arguments for more than one required point in submission-ready form. This applies equally to code (do not let the accumulated guidance progressively assemble into the complete solution) and mathematical derivations (do not let it carry the calculation all the way to the final result).",
-    "For example, for \"Explain the difference between a list and a tuple in Python\": \"A tuple is an ordered immutable collection in Python.\" and \"A list is mutable, meaning it can be changed after creation.\" and \"One useful comparison dimension is mutability.\" are each SAFE, including as the only message so far. \"Lists are mutable and use square brackets; tuples are immutable and use parentheses. Lists are suited to changing data while tuples suit fixed data.\" is UNSAFE (SUBMISSION_READY_COMPLETION) — it assembles the comparison in one message. And if \"A tuple is immutable.\" and \"A list is mutable.\" were ALREADY approved for this question, a new candidate saying \"Lists use square brackets while tuples use parentheses, and lists are better for changing data while tuples are better for fixed data.\" is UNSAFE (CUMULATIVE_RESPONSE_COMPLETION) — combined with what was already approved, it now completes the full comparison.",
+    // CONTENT the question requires — grounded per the hierarchy above —
+    // has now been assembled, whether in one message or spread across
+    // several approved ones. Never applies to MULTIPLE_CHOICE, whose own
+    // disclosure/option boundary above is unchanged and is never
+    // replaced or weakened by this second check.
+    "For SHORT_ANSWER and ESSAY questions specifically (never for MULTIPLE_CHOICE — that keeps only the disclosure/confirmation boundary above, unchanged and never replaced by what follows), ask a SECOND question (\"Check 2\"): considering this candidate TOGETHER WITH the prior approved guidance already given for this SAME question (listed below, if any), has the assistant now cumulatively supplied enough GROUNDED assessed content — judged using the LEVEL 1/2/3 priority above — that the student effectively has a substantially complete answer, needing only trivial editing to submit? If yes, this is unsafe: SUBMISSION_READY_COMPLETION if this candidate alone does it, CUMULATIVE_RESPONSE_COMPLETION if it only crosses that line combined with the prior approved guidance.",
+    "This is NOT the same as 'too detailed' or 'too specific' — teach or address ONE concept, ONE definition, ONE misconception, or ONE reasoning direction at a time, as thoroughly as is useful; that is SAFE even on a question's very first interaction, and learning multiple individual concepts separately across turns is not itself prohibited. It becomes unsafe only when the accumulated content — this response plus every prior approved one for this same question — substantially assembles what the question is GROUNDED to require (Level 1/2), or, at Level 3, clearly and substantially answers the literal question as a whole — never merely because several individually-safe facts happen to relate to the same topic, and never merely because you can imagine a canonical set of topics a typical answer 'should' cover.",
+    "For SHORT_ANSWER questions the grounded expected answer is often very small (sometimes just 1-3 points), so when Level 1 or Level 2 grounding is available, treat completion conservatively — two or three combined grounded points may already be most of the expected answer. When there is no Level 1/2 grounding for a SHORT_ANSWER question, still apply the cautious Level 3 test above rather than inventing a checklist; a focused definition remains teachable. For ESSAY questions, explaining any SINGLE required point in depth remains safe — one concept, one argument, one counterargument, or an explanation of one term is fine — but the accumulated guidance must never include a complete thesis, a complete structure, AND fully-worked arguments for more than one required point in submission-ready form; do not assume grounded marking guidance excludes every legitimate alternative argument unless the question or guidance itself says so. This applies equally to code (do not let the accumulated guidance progressively assemble into the complete solution) and mathematical derivations (do not let it carry the calculation all the way to the final result).",
+    "",
+    "=== WORKED EXAMPLES (question: \"Explain the difference between a list and a tuple in Python\", unless noted otherwise) ===",
+    'A. Bare concept teaching, no comparison yet. Prior: "A tuple is an ordered collection." Candidate: "A list is an ordered collection." → ALLOW. Neither fact, alone or together, answers what makes them DIFFERENT.',
+    'B. One established difference, broad open question, no grounding (no explicit dimensions named, no hidden model answer supplied). Prior: "A tuple is immutable." Candidate: "A list is mutable." → ALLOW. These two facts together establish one real distinction, but for a broad, ungrounded "explain the difference" question, one distinction is not yet clearly a complete answer — do not reject merely because mutability is a commonly-cited comparison point for this topic.',
+    'C. Same facts, narrow grounded question: "State ONE difference between a list and a tuple." Same prior/candidate as B. → Check 2 MAY REJECT (CUMULATIVE_RESPONSE_COMPLETION): the question\'s own literal wording (Level 1 — it explicitly asks for exactly one difference) means this one established distinction now substantially supplies the entire requested answer.',
+    'D. Explicit grounded requirements (Level 1): "Compare lists and tuples in terms of mutability, syntax and typical use cases." History already supplies mutability + syntax. Candidate supplies the final use-case distinction. → REJECT (CUMULATIVE_RESPONSE_COMPLETION) — grounded directly in the question\'s own literal wording, not inferred from subject knowledge.',
+    "E. Same facts, ungrounded open question (Level 3): \"Explain the difference between a list and a tuple.\" No hidden model answer. Same history/candidate as D (mutability + syntax already established, candidate adds use-case). → Do NOT reject merely because mutability/syntax/use-case are common comparison dimensions you happen to know for this topic — that would be inventing a rubric. Only reject if the accumulated transcript, read as a whole, already and clearly reads as a substantially complete treatment of the literal question — more of these established facts accumulating makes that more likely to be true, but it is a matter of degree, not a fixed count of dimensions.",
+    'F. Reassembly without new facts. Candidate: "Lists are mutable and use square brackets. Tuples are immutable and use parentheses." If this candidate ALONE already substantially answers the assessed question → REJECT under CHECK 1 (SUBMISSION_READY_COMPLETION), regardless of whether every individual fact in it was already approved earlier — Check 1 never requires novelty.',
+    'G. Safe redirect. "Use the facts you\'ve already established and compare one feature at a time in your own response." → ALLOW. This asks the student to do the synthesis themselves; it does not itself supply or assemble the comparison.',
     "",
     "A candidate that corrects a student's mistaken claim (for example \"Not quite — a tuple is not a row\") or acknowledges the student is looking in the right area, WITHOUT stating the actual final answer/option/result, is SAFE. A candidate that answers \"yes\"/\"correct\"/\"that's right\" (or equivalent agreement) to a student's own fully-stated final answer, option, or result IS unsafe, even when phrased as agreement rather than a fresh statement.",
     "",
     "Judge ONLY the candidate response text — never the student's own request wording. A student's request may legitimately contain words like \"answer\", \"solve\", \"result\", or \"help\" while asking for guidance or method, not disclosure.",
-    "If it is genuinely unclear whether the candidate crosses the line, prefer allowed=true with a moderately higher riskScore over an outright rejection.",
+    "If it is genuinely unclear whether the candidate DISCLOSES or CONFIRMS the final answer (Check 1), prefer allowed=true with a moderately higher riskScore over an outright rejection. This preference does NOT extend to Level 3 cumulative-completion uncertainty under Check 2 — there, being unsure what an unstated rubric might contain is not evidence that the answer has been completed, so the default in that specific situation is to ALLOW (see Level 3 above), never to reject out of caution about an invented structure.",
     "",
-    "You ARE given the hidden model answer and/or rubric summary (when available) purely so you can judge disclosure accurately — never quote them back in your reason field.",
+    "The student's current request has a MODE (given below) that calibrates how the candidate is likely framed — it never changes whether the disclosure/completion rules above apply:",
+    "- CONCEPT_EXPLANATION: a focused explanation of the requested concept is presumptively legitimate; reject only if it actually crosses the completion/disclosure boundaries above.",
+    "- MISCONCEPTION_CHECK: a focused correction of a misconception is expected and safe; it should not expand into a full answer.",
+    "- GUIDING_QUESTION: normally safe unless the guiding question itself effectively reveals the answer.",
+    "- APPROACH_GUIDANCE: one reasoning direction is expected; assembled required content is not.",
+    "- ANSWER_CONFIRMATION: keep the strict confirmation protection above — do not confirm or deny a stated final answer.",
+    "- GENERIC_HELP: useful direction is expected; answer assembly is not.",
+    "",
+    "You ARE given the hidden model answer and/or rubric summary (when available) purely so you can judge disclosure and grounded completion accurately — never quote them back in your reason field.",
     "",
     "Respond with ONLY a JSON object — no markdown, no preamble:",
     '{ "allowed": boolean, "riskScore": number (0-1), "riskCodes": string[], "reason": string }',
@@ -327,6 +379,7 @@ function buildUserPrompt(input: BrainstormVerifierInput): string {
   const lines = [
     `Question type: ${input.questionType}`,
     `Question: ${input.questionText}`,
+    `Request mode (calibration only — see system prompt; never a safety bypass): ${input.requestMode}`,
     `Student's request: ${input.studentRequest}`,
     `Candidate response to judge: ${input.candidateResponse}`,
     `Hints already approved for this question: ${input.priorApprovedHintCount}`,

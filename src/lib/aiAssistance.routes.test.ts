@@ -980,6 +980,129 @@ describe("cumulative answer-assembly — question-scoped, semantic-verifier-driv
   });
 });
 
+// Grounded-cumulative-safety follow-up (MUST HAVE, section 2/15) — the
+// prior-approved-response query used `take: 5` (oldest-first), so a
+// question's 6th+ approved turn became permanently invisible to
+// cumulative-completion judgment — an adversarially exploitable gap (a
+// student could burn a handful of throwaway turns, then have every
+// subsequent turn go unchecked), not merely a UX limit. Fixed to fetch
+// ALL approved responses for this submission+question, bounded only by
+// the existing lecturer-configured aiAssistanceMaxPromptsPerQuestion.
+// History is seeded directly via Prisma (bypassing the route and its
+// submission-scoped rate limiter — 3 requests/20s — which would
+// otherwise throttle a test driving many sequential POSTs) so only the
+// ONE real request under test actually exercises the route.
+describe("grounded cumulative-safety follow-up — full history window, no oldest-five truncation", () => {
+  it("all approved responses for this question reach the verifier, not just the first five, in stable chronological order", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 20 });
+
+    const seededResponses: string[] = [];
+    const baseTime = Date.now() - 60_000;
+    for (let i = 0; i < 8; i++) {
+      const response = `Approved fact number ${i + 1}.`;
+      seededResponses.push(response);
+      await prisma.aiAssistanceInteraction.create({
+        data: {
+          submissionId: submission.id,
+          questionId: question.id,
+          examId: submission.examId,
+          studentId: submission.studentId,
+          studentPrompt: `Student turn ${i + 1}`,
+          approvedResponse: response,
+          status: "APPROVED",
+          promptNumberForQuestion: i + 1,
+          promptNumberForAttempt: i + 1,
+          policyVersion: "v1.0",
+          createdAt: new Date(baseTime + i * 1_000),
+        },
+      });
+    }
+
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    mockedGenerate.mockResolvedValueOnce("A further focused fact.");
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "What else can you tell me?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+
+    // All 8 seeded responses must appear — not just the first 5 — in the
+    // exact order they were approved.
+    expect(mockedVerify.mock.calls[0][0].priorApprovedResponses).toEqual(seededResponses);
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("a new attempt (retake) never inherits a prior submission's approved history for the same question", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedVerify.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+
+    const { exam, submission: firstAttempt, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 20 });
+
+    await prisma.aiAssistanceInteraction.create({
+      data: {
+        submissionId: firstAttempt.id,
+        questionId: question.id,
+        examId: exam.id,
+        studentId: firstAttempt.studentId,
+        studentPrompt: "What is a tuple?",
+        approvedResponse: "A tuple is immutable.",
+        status: "APPROVED",
+        promptNumberForQuestion: 1,
+        promptNumberForAttempt: 1,
+        policyVersion: "v1.0",
+      },
+    });
+
+    // A genuinely NEW Submission row — mirrors how a real retake is
+    // created (src/app/api/exams/[id]/start/route.ts, nextAttemptNumber())
+    // — never an update-in-place of the first attempt's row.
+    const secondAttempt = await prisma.submission.create({
+      data: {
+        examId: exam.id,
+        studentId: firstAttempt.studentId,
+        status: "IN_PROGRESS",
+        attemptNumber: 2,
+        aiAssistancePolicySnapshotJson: {
+          schemaVersion: 1,
+          policyVersion: "v1.0",
+          mode: "BRAINSTORM_ONLY",
+          maxPromptsPerQuestion: 20,
+          maxPromptsPerAttempt: 10,
+          maxResponseCharacters: 800,
+          allowConceptExplanations: true,
+          allowAnswerPlanning: true,
+          allowReasoningFeedback: true,
+          allowProgrammingConceptHelp: true,
+        },
+      },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(firstAttempt.studentId, "STUDENT", instA));
+    mockedGenerate.mockResolvedValueOnce("A fresh fact for the new attempt.");
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "What is a tuple?" }), {
+      params: Promise.resolve({ id: secondAttempt.id, questionId: question.id }),
+    });
+
+    expect(mockedVerify.mock.calls[0][0].priorApprovedResponses).toEqual([]);
+
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+});
+
 describe("FALLBACK status on a starter prompt — a guardrail redirect is expected behaviour, never a failure", () => {
   it("both verify attempts rejecting resolves to FALLBACK with the deterministic safe response, never FAILED", async () => {
     const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");

@@ -54,6 +54,7 @@ const baseInput = {
   questionType: "SHORT_ANSWER" as const,
   candidateResponse: "What stages might water move through as it heats and cools?",
   studentRequest: "Can you help me understand this question?",
+  requestMode: "GENERIC_HELP" as const,
   priorApprovedHintCount: 0,
   cumulativeRiskScoreSoFar: 0,
   priorApprovedResponses: [] as string[],
@@ -238,6 +239,114 @@ describe("message shape sent to Anthropic", () => {
 
     const call = mockCreate.mock.calls[0][0];
     expect(call.messages[0].content).not.toContain("Prior approved responses for this SAME question");
+  });
+});
+
+// Grounded-cumulative-safety follow-up (section 17) — requestMode
+// (already computed for the generator — see aiAssistanceRequestMode.ts)
+// is now threaded into the verifier too, purely as calibration context.
+// It must reach the user-facing content for every mode, and the fixed
+// per-mode calibration text must be present in the system prompt
+// regardless of which mode a given call used (it is not duplicated per
+// call — it's part of the one fixed policy prompt).
+describe("grounded cumulative-safety follow-up — request mode reaches the verifier", () => {
+  it.each([
+    "CONCEPT_EXPLANATION",
+    "APPROACH_GUIDANCE",
+    "MISCONCEPTION_CHECK",
+    "GUIDING_QUESTION",
+    "ANSWER_CONFIRMATION",
+    "GENERIC_HELP",
+  ] as const)("includes requestMode %s in the user content, and the system prompt's calibration text", async (requestMode) => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse({ ...baseInput, requestMode });
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.messages[0].content).toContain(
+      `Request mode (calibration only — see system prompt; never a safety bypass): ${requestMode}`,
+    );
+    expect(call.system).toContain("CONCEPT_EXPLANATION: a focused explanation of the requested concept is presumptively legitimate");
+    expect(call.system).toContain("ANSWER_CONFIRMATION: keep the strict confirmation protection above");
+  });
+
+  it("request mode calibrates framing but is never presented as a bypass of the disclosure/completion rules", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse({ ...baseInput, requestMode: "CONCEPT_EXPLANATION" });
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("it never changes whether the disclosure/completion rules above apply");
+  });
+});
+
+// Grounded-cumulative-safety follow-up (sections 5/6/10) — the live
+// false positive this whole follow-up fixes was traced to Check 2
+// inventing an unstated marking rubric from the model's own subject
+// knowledge. These confirm the three-level grounding hierarchy, the
+// explicit prohibition on inventing a rubric, and the required worked
+// examples are all actually present in the prompt sent to the model —
+// not just described in this task's approved design.
+describe("grounded cumulative-safety follow-up — assessment-context grounding hierarchy", () => {
+  it("states the three-level grounding hierarchy and forbids inventing a rubric", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("LEVEL 1 (highest confidence): explicit requirements literally stated in the question's own text");
+    expect(call.system).toContain("LEVEL 2: a hidden model answer / marking guidance");
+    expect(call.system).toContain(
+      "LEVEL 3: if the question names no explicit requirements AND no hidden model answer/guidance is supplied below, there is NO grounded rubric available.",
+    );
+    expect(call.system).toContain("Do not silently decide the topic has some fixed number of 'canonical' comparison dimensions");
+  });
+
+  it("includes the D/E contrastive worked examples distinguishing grounded (Level 1) from ungrounded (Level 3) rejection", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("Compare lists and tuples in terms of mutability, syntax and typical use cases");
+    expect(call.system).toContain(
+      "REJECT (CUMULATIVE_RESPONSE_COMPLETION) — grounded directly in the question's own literal wording, not inferred from subject knowledge",
+    );
+    expect(call.system).toContain(
+      "Do NOT reject merely because mutability/syntax/use-case are common comparison dimensions you happen to know for this topic — that would be inventing a rubric",
+    );
+  });
+
+  it("includes the narrow-vs-broad question contrast (worked examples B and C)", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain('"State ONE difference between a list and a tuple."');
+    expect(call.system).toContain("this one established distinction now substantially supplies the entire requested answer");
+  });
+
+  it("includes the reassembly (Check 1, no novelty required) and safe-redirect worked examples", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("Check 1 never requires novelty");
+    expect(call.system).toContain("compare one feature at a time in your own response");
+  });
+
+  it("fail-closed at Level 3 defaults to ALLOW on rubric uncertainty, never REJECT out of caution", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain(
+      "being unsure what an unstated rubric might contain is not evidence that the answer has been completed",
+    );
+    expect(call.system).toContain("never to reject out of caution about an invented structure");
   });
 });
 
