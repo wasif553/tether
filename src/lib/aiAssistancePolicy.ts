@@ -310,6 +310,30 @@ const APPROACH_FALLBACK_PATTERNS = [
 const GUIDING_QUESTION_FALLBACK_PATTERNS = [/\bguiding\s+question\b/i, /\bask\s+me\s+a\s+question\b/i];
 
 /**
+ * Extracts salient concept/topic TERMS from the student's own request —
+ * never subject-specific vocabulary hard-coded here, only a generic
+ * pattern for tokens that read as a specific named concept: backtick- or
+ * quote-wrapped spans, and asterisk-prefixed identifiers (e.g. *args,
+ * **kwargs — a generic "symbol-like token" shape, not a Python-specific
+ * rule). An empty result is expected and fine for many requests (e.g.
+ * "explain how supply and demand work" names no single isolable term) —
+ * the caller falls back to a definition-and-compare instruction that
+ * still avoids merely restating the question (concept-explanation
+ * quality follow-up, section 5: "avoid merely repeating 'break it into
+ * parts'").
+ */
+function extractSalientTerms(text: string): string[] {
+  const found = new Set<string>();
+  for (const m of text.matchAll(/`([^`]{1,40})`/g)) found.add(m[1].trim());
+  for (const m of text.matchAll(/"([^"]{1,40})"|'([^']{1,40})'/g)) {
+    const term = (m[1] ?? m[2])?.trim();
+    if (term) found.add(term);
+  }
+  for (const m of text.matchAll(/\*{1,2}[A-Za-z_]\w*/g)) found.add(m[0]);
+  return [...found].slice(0, 6);
+}
+
+/**
  * Builds a request-shape-aware, question-aware fallback — used only when
  * generation/verification could not produce a safe approved candidate
  * after regeneration. Never discloses anything the student couldn't
@@ -328,9 +352,19 @@ export function buildFallbackGuidance(input: { questionText: string; studentRequ
     );
   }
   if (CONCEPT_EXPLANATION_FALLBACK_PATTERNS.some((p) => p.test(input.studentRequest))) {
+    const terms = extractSalientTerms(input.studentRequest);
+    if (terms.length > 0) {
+      return (
+        `You're asking about specific terms: ${terms.join(", ")}. Write a one-sentence definition for each on ` +
+        "its own — what it means and when it applies — then compare them against each other: what role each one " +
+        `plays, and how their behaviour differs. Once you can state those differences precisely, connect that ` +
+        `back to what "${questionSnippet}" is actually asking.`
+      );
+    }
     return (
-      `You asked: "${studentSnippet}". Break that down into its separate parts, think about the role each part ` +
-      `plays on its own, and then connect that back to what "${questionSnippet}" is actually asking.`
+      `You asked: "${studentSnippet}". Identify each distinct concept in your question, write a one-sentence ` +
+      "definition for each, and compare them along whatever dimension the question is testing (for example: " +
+      `what triggers each one, or how they differ in effect), before connecting that back to what "${questionSnippet}" is actually asking.`
     );
   }
   if (APPROACH_FALLBACK_PATTERNS.some((p) => p.test(input.studentRequest))) {

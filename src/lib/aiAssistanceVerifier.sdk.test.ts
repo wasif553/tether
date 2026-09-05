@@ -151,6 +151,25 @@ describe("message shape sent to Anthropic", () => {
     expect(call.system).toContain("is NOT excessive specificity by itself");
   });
 
+  // Concept-explanation quality follow-up (second pass) — manual Preview
+  // testing still found a substantive concept explanation collapsing to
+  // the deterministic fallback. Concrete positive/contrastive examples
+  // (rather than only abstract criteria) sharpen an LLM verifier's
+  // judgment far more reliably than prose alone — relevance to the
+  // question is not by itself a reason to reject.
+  it("gives concrete SAFE examples (concept facts relevant to the question) and contrastive UNSAFE examples (resolving the question)", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("RELEVANCE TO THE QUESTION IS NOT THE SAME AS REVEALING THE FINAL ANSWER");
+    expect(call.system).toContain("*args collects extra positional arguments into a tuple");
+    expect(call.system).toContain("A tuple is immutable while a list is mutable.");
+    expect(call.system).toContain("The correct answer is that lists are mutable and tuples are immutable, so choose option B.");
+    expect(call.system).toContain("The answer to this question is @decorator.");
+  });
+
   it("includes the hidden model answer only in the user content, and only when supplied", async () => {
     mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
 

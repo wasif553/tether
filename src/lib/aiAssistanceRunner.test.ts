@@ -377,7 +377,7 @@ describe("rejectionRegenerationHint — targeted regeneration instruction from t
   const diagnostics = { generator: { attempts: [], ranMs: 0 }, verifier: { attempts: [], ranMs: 0 } };
 
   it("describes a single risk code in plain language", () => {
-    const hint = rejectionRegenerationHint({ kind: "rejected", riskScore: 0.9, riskCodes: ["DIRECT_ANSWER"], diagnostics });
+    const hint = rejectionRegenerationHint({ kind: "rejected", riskScore: 0.9, riskCodes: ["DIRECT_ANSWER"], reason: "too close to the answer", diagnostics });
     expect(hint).toContain("it stated or clearly implied the final answer");
   });
 
@@ -386,6 +386,7 @@ describe("rejectionRegenerationHint — targeted regeneration instruction from t
       kind: "rejected",
       riskScore: 0.9,
       riskCodes: ["CORRECT_OPTION_DISCLOSED", "OPTION_ELIMINATION"],
+      reason: "disclosed the option",
       diagnostics,
     });
     expect(hint).toContain("it identified or implied which option is correct");
@@ -393,12 +394,12 @@ describe("rejectionRegenerationHint — targeted regeneration instruction from t
   });
 
   it("gives a length-specific instruction when the rejection carries no risk codes (verifier allowed it, but it was too long)", () => {
-    const hint = rejectionRegenerationHint({ kind: "rejected", riskScore: 0, riskCodes: [], diagnostics });
+    const hint = rejectionRegenerationHint({ kind: "rejected", riskScore: 0, riskCodes: [], reason: "allowed but over length", diagnostics });
     expect(hint).toContain("too long");
   });
 
   it("still permits concept/syntax/terminology explanation in the regeneration instruction — this is not the old blanket 'be more conservative' line", () => {
-    const hint = rejectionRegenerationHint({ kind: "rejected", riskScore: 0.9, riskCodes: ["EXCESSIVE_SPECIFICITY"], diagnostics });
+    const hint = rejectionRegenerationHint({ kind: "rejected", riskScore: 0.9, riskCodes: ["EXCESSIVE_SPECIFICITY"], reason: "too specific", diagnostics });
     expect(hint).toContain("you may still explain relevant concepts, syntax, or terminology");
   });
 

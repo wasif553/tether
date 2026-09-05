@@ -326,8 +326,21 @@ describe("buildFallbackGuidance — request-shape-aware, question-aware, domain-
       questionText,
       studentRequest: "what are *args and **kwargs arguments, how they are different than a and b?",
     });
-    expect(result).toContain("*args and **kwargs");
+    expect(result).toContain("*args");
+    expect(result).toContain("**kwargs");
     expect(result.toLowerCase()).toContain("what is the output of the following code");
+  });
+
+  it("names the specific terms the student asked about, instead of merely paraphrasing their request back at them", () => {
+    const result = buildFallbackGuidance({
+      questionText,
+      studentRequest: "Please explain the difference between a, b and *args, **kwargs parameter? What does * and ** indicate here?",
+    });
+    expect(result).toContain("*args");
+    expect(result).toContain("**kwargs");
+    expect(result).not.toContain("Break that down into its separate parts");
+    // Gives a concrete comparison instruction, not just "break it into parts".
+    expect(result.toLowerCase()).toContain("compare them");
   });
 
   it("never states or implies the final answer to the actual question", () => {
@@ -337,6 +350,16 @@ describe("buildFallbackGuidance — request-shape-aware, question-aware, domain-
     });
     expect(result).not.toContain("(1, 2, (3, 4)");
     expect(result.toLowerCase()).not.toContain("the output is");
+  });
+
+  it("still gives a define-and-compare instruction (not a bare paraphrase) even when no specific term can be isolated from the request", () => {
+    const result = buildFallbackGuidance({
+      questionText: "Explain how supply and demand determine the equilibrium price.",
+      studentRequest: "Can you explain how supply and demand interact?",
+    });
+    expect(result).not.toContain("Break that down into its separate parts");
+    expect(result.toLowerCase()).toContain("definition");
+    expect(result.toLowerCase()).toContain("compare");
   });
 
   it("falls back to the neutral generic guidance for a request matching no known shape", () => {

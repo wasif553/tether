@@ -157,6 +157,22 @@ describe("message shape sent to Anthropic", () => {
     );
   });
 
+  // Concept-explanation quality follow-up (second pass) — manual Preview
+  // testing still found a substantive concept explanation collapsing to
+  // the deterministic fallback (both attempts failed). Concrete example
+  // sentences push the generator to actually commit to factual content
+  // instead of hedging into a vague paraphrase of the student's request.
+  it("gives concrete example sentences of the substantive factual detail expected, not just abstract permission", async () => {
+    mockCreate.mockResolvedValue(textResponse("Consider what causes evaporation."));
+
+    await generateBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("*args collects extra positional arguments into a tuple");
+    expect(call.system).toContain("a tuple is immutable while a list is mutable");
+    expect(call.system).toContain("not a reason to hedge or merely restate the student's own words back to them");
+  });
+
   it("uses a targeted regenerationGuidance instruction instead of the generic stricter line when both are present", async () => {
     mockCreate.mockResolvedValue(textResponse("A different, safe response."));
 

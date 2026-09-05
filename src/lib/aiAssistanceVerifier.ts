@@ -71,7 +71,13 @@ export type FastVerifierDecision =
   | { kind: "DEFER" };
 
 const DIRECT_ANSWER_PATTERNS = [
-  /\b(?:the|your|correct|final)\s+answer\s+(?:is|would be|should be)\b/i,
+  // Concept-explanation quality follow-up — the optional "to this/the
+  // question" clause was added after finding "The answer to this
+  // question is @decorator." slipped past this pattern (it required
+  // "answer" to be immediately followed by "is", with nothing in
+  // between) — a real gap in the direct-answer fast-check, not a
+  // weakening: still requires the same qualifier+answer+is structure.
+  /\b(?:the|your|correct|final)\s+answer(?:\s+to\s+(?:this|the)\s+question)?\s+(?:is|would be|should be)\b/i,
   /\b(?:therefore|thus|hence)\s+(?:the\s+)?(?:answer|result)\s+(?:is|=)\b/i,
   /\b(?:the\s+)?correct\s+(?:option|choice)\s+(?:is|would be)\b/i,
   /\byou\s+should\s+(?:choose|select|answer)\b/i,
@@ -200,6 +206,16 @@ function buildSystemPrompt(): string {
     "- is simply far more specific/detailed than a Socratic brainstorming hint should be for this stage (EXCESSIVE_SPECIFICITY)",
     "",
     "EXCESSIVE_SPECIFICITY concerns answer-specific reasoning steps for the ACTUAL question, not general subject-matter teaching. Thoroughly explaining a concept, syntax rule, term, or how a construct/algorithm works (for example what *args/**kwargs do in Python, or how a formula is structured) is NOT excessive specificity by itself, and is exactly the kind of help this assistant should give — it becomes unsafe only if it goes on to state or clearly imply the final answer to the actual question.",
+    "",
+    "Concept-explanation quality follow-up — a factual, general explanation of a concept/term/rule is SAFE even when it is highly relevant to the active question's subject matter. RELEVANCE TO THE QUESTION IS NOT THE SAME AS REVEALING THE FINAL ANSWER. For example, ALL of the following are SAFE even if the active question is directly about them:",
+    '- "*args collects extra positional arguments into a tuple, while **kwargs collects extra keyword arguments into a dictionary."',
+    '- "A tuple is immutable while a list is mutable."',
+    '- "A Python decorator wraps or modifies a callable\'s behaviour."',
+    '- "Classification predicts categories, while regression predicts numeric values."',
+    "Contrast with what actually IS unsafe — resolving the active question, not merely discussing its subject matter:",
+    '- "The correct answer is that lists are mutable and tuples are immutable, so choose option B." (states the answer AND the option)',
+    '- "The answer to this question is @decorator." (states the final answer)',
+    "Only reject a candidate for crossing from teaching the general concept into resolving the ACTIVE question's final answer, MCQ option, or numeric/code result — never merely because the concept it explains happens to be central to what the question is testing.",
     "",
     "Judge ONLY the candidate response text — never the student's own request wording. A student's request may legitimately contain words like \"answer\", \"solve\", \"result\", or \"help\" while asking for guidance or method, not disclosure (for example \"can you suggest how to get the answer\" or \"how do I solve this\" are guidance requests, not requests for you to disclose the answer). Only what the CANDIDATE RESPONSE itself states or implies can trigger the UNSAFE criteria above.",
     "A candidate response that corrects a student's mistaken claim (for example \"Not quite — a tuple is not a row\") or acknowledges the student is looking in the right area, WITHOUT stating the actual final answer/option/result, is SAFE — correcting a misconception or reasoning step is not the same as disclosing the answer. However, a response that answers \"yes\"/\"correct\"/\"that's right\" (or equivalent agreement) to a student's own fully-stated final answer, option, or result, or that completes their remaining reasoning for them, IS unsafe (DIRECT_ANSWER / NEAR_COMPLETE_ANSWER / CORRECT_OPTION_DISCLOSED as appropriate) even when phrased as agreement rather than as a fresh statement.",

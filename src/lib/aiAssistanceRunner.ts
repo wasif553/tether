@@ -571,6 +571,16 @@ function summarizeOutcome(outcome: GenerateVerifyOutcome): Record<string, unknow
   if (outcome.kind === "error") {
     return { ...base, outcome: "error", errorStage: outcome.stage, errorCategory: outcome.category };
   }
+  if (outcome.kind === "rejected") {
+    // Concept-explanation quality follow-up — riskCodes and the
+    // verifier's own reason are safe to log (see the verifier's own doc
+    // comment: its `reason` field never quotes hidden reference material
+    // or student-facing text) and let a future over-rejection report be
+    // traced to its actual cause via this log line, rather than only
+    // reconstructed after the fact from the prompts. Bounded defensively
+    // in case a future verifier change ever lengthens `reason`.
+    return { ...base, outcome: outcome.kind, riskCodes: outcome.riskCodes, reason: outcome.reason.slice(0, 400) };
+  }
   return { ...base, outcome: outcome.kind };
 }
 
@@ -908,7 +918,14 @@ export type GenerateVerifyDiagnostics = {
 
 export type GenerateVerifyOutcome =
   | { kind: "approved"; response: string; riskScore: number; riskCodes: RiskCode[]; diagnostics: GenerateVerifyDiagnostics }
-  | { kind: "rejected"; riskScore: number; riskCodes: RiskCode[]; diagnostics: GenerateVerifyDiagnostics }
+  // `reason` (concept-explanation quality follow-up) is the verifier's own
+  // short internal audit note — never quotes hidden reference material or
+  // student-facing text (see aiAssistanceVerifier.ts's buildSystemPrompt) —
+  // carried through ONLY for the diagnostics log below, so a future
+  // over-rejection report can be traced to its actual cause instead of
+  // reconstructed by re-reading prompts after the fact. Never persisted to
+  // the database and never shown to the student.
+  | { kind: "rejected"; riskScore: number; riskCodes: RiskCode[]; reason: string; diagnostics: GenerateVerifyDiagnostics }
   | { kind: "error"; stage: "generator" | "verifier"; category: AiProviderErrorCategory; diagnostics: GenerateVerifyDiagnostics };
 
 /**
@@ -993,5 +1010,5 @@ export async function attemptGenerateAndVerify(params: {
   if (verifierResult.allowed && !cumulativeOverride && lengthValid) {
     return { kind: "approved", response: candidate, riskScore: verifierResult.riskScore, riskCodes, diagnostics };
   }
-  return { kind: "rejected", riskScore: verifierResult.riskScore, riskCodes, diagnostics };
+  return { kind: "rejected", riskScore: verifierResult.riskScore, riskCodes, reason: verifierResult.reason, diagnostics };
 }

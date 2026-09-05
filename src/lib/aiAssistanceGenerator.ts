@@ -138,6 +138,11 @@ function buildSystemPrompt(policy: BrainstormPolicyCapabilities, stricter: boole
     // and **kwargs?") because the hint-ladder wording ("1 = clarify the
     // task only") reads as forbidding real explanation at an early stage.
     "Explaining a general concept, syntax rule, term, or how a construct/algorithm works is ALWAYS allowed when the student asks about it directly, at any hint-ladder stage — the hint-ladder stage limits how much of the ACTUAL question's answer-specific reasoning to reveal, not general subject-matter teaching. Teach the concept fully; simply do not apply it all the way through to state the final answer to the actual question.",
+    // Concept-explanation quality follow-up — a response that only
+    // paraphrases the student's own request back at them (e.g. "break
+    // that down into its parts") does not meet the bar; give the actual
+    // factual content the student asked for.
+    'A factual, general explanation of a concept/term/rule is expected even when it is highly relevant to the active question — e.g. "*args collects extra positional arguments into a tuple, while **kwargs collects extra keyword arguments into a dictionary," or "a tuple is immutable while a list is mutable," or "a decorator wraps or modifies a callable\'s behaviour" are all exactly the kind of substantive answer to give. Relevance to the question is not a reason to hedge or merely restate the student\'s own words back to them.',
     regenerationGuidance
       ? regenerationGuidance
       : stricter
