@@ -86,6 +86,17 @@ const CONCEPT_EXPLANATION_PATTERNS = [
   /\bhow\s+(?:is|are|does|do)\b.*\bdifferent\b/i,
   /\bhelp\s+me\s+understand\s+how\b/i,
   /\bhelp\s+me\s+understand\b/i,
+  // Illustrative-code follow-up — "what is X used for?" already matched
+  // the first pattern above ("what is/are..."), but the same legitimate
+  // concept/use-case question phrased as "where"/"why" ("where are
+  // decorators used?", "why and where @ is used?", "why do we use
+  // recursion?") fell all the way through to GENERIC_HELP. General
+  // shape, not tied to any specific subject/keyword — a where/why
+  // question asking what a construct is FOR is a concept question, not
+  // a request for the assistant to do anything.
+  /\b(?:where|why)\b[\s\S]*\bused\b/i,
+  /\bwhere\s+(?:would|do|can|should)\s+(?:i|you|we)\s+use\b/i,
+  /\bwhy\s+(?:do|would|does)\s+(?:we|you|people)\s+use\b/i,
 ];
 
 /**

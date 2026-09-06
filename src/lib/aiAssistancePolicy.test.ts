@@ -439,3 +439,42 @@ describe("buildFallbackGuidance — requestMode ANSWER_CONFIRMATION never uses t
     expect(withoutMode).toBe(withGenericMode);
   });
 });
+
+// Illustrative-code follow-up (section 13, fallback quality) — a
+// "where/why is X used?" style request is a legitimate use-case
+// question, but is a poor fit for the CONCEPT_EXPLANATION fallback's
+// "define and compare" framing (there is nothing to compare for a
+// single-concept usage question), and previously fell all the way to
+// the universal "Let's check your reasoning step by step..." template.
+// Never hard-codes "decorator" or any Python-specific wording — the
+// redirect is built generically from the student's own request text.
+describe("buildFallbackGuidance — 'where/why is X used?' gets a generic use-case redirect, not the universal template", () => {
+  const questionText = "Explain what a Python decorator is and provide a general use case for one.";
+
+  it("never returns the universal template for a where/why-used request", () => {
+    const result = buildFallbackGuidance({ questionText, studentRequest: "where are decorators used?" });
+    expect(result).not.toBe(AI_ASSISTANCE_FALLBACK_RESPONSE);
+    expect(result.toLowerCase()).not.toContain("let's check your reasoning step by step");
+  });
+
+  it("names the salient term extracted from the student's own request, not hard-coded subject vocabulary", () => {
+    const result = buildFallbackGuidance({ questionText, studentRequest: "why and where `@decorator` is used?" });
+    expect(result).toContain("@decorator");
+    expect(result.toLowerCase()).toContain("practical use case");
+  });
+
+  it("frames it generically as 'what problem it solves', not an invented Python-specific mechanism", () => {
+    const result = buildFallbackGuidance({ questionText, studentRequest: "why do we use decorators?" });
+    expect(result.toLowerCase()).toContain("what problem it solves");
+    expect(result.toLowerCase()).not.toContain("rewriting each function");
+  });
+
+  it("still works for a completely different subject with no Python residue", () => {
+    const result = buildFallbackGuidance({
+      questionText: "Explain the purpose of a firewall in network security.",
+      studentRequest: "where would I use a firewall?",
+    });
+    expect(result.toLowerCase()).not.toContain("python");
+    expect(result.toLowerCase()).not.toContain("decorator");
+  });
+});

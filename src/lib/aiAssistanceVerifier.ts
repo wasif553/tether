@@ -145,13 +145,6 @@ const OPTION_DISCLOSURE_PATTERNS = [
   /\b[A-D]\s+is\s+correct\b/,
 ];
 
-const CODE_DISCLOSURE_PATTERNS = [
-  /```[\s\S]*```/,
-  /(?:^|\n)\s*(?:def|function|class)\s+\w+/i,
-  /(?:^|\n)\s*(?:return|console\.log|print)\s*\(/i,
-];
-
-
 function normaliseForComparison(value: string): string {
   return value
     .toLowerCase()
@@ -222,17 +215,30 @@ export function fastVerifyBrainstormResponse(input: BrainstormVerifierInput): Fa
     };
   }
 
-  if (CODE_DISCLOSURE_PATTERNS.some((pattern) => pattern.test(candidate))) {
-    return {
-      kind: "REJECT",
-      result: {
-        allowed: false,
-        riskScore: 0.9,
-        riskCodes: ["COMPLETE_CODE"],
-        reason: "Deterministic guard detected code-like answer content.",
-      },
-    };
-  }
+  // Illustrative-code follow-up — a deterministic "does this look like
+  // code" check (any fenced block, a `def`/`function`/`class` line, or a
+  // `return`/`print`/`console.log` call) used to REJECT here as
+  // COMPLETE_CODE. That is CODE-LIKE-CONTENT detection, not
+  // COMPLETE_CODE detection: a one-line decorator-usage example, a tiny
+  // illustrative function used to explain syntax, or an analogous
+  // snippet unrelated to the assessed task all match those same
+  // patterns just as readily as an actual complete solution does. Live
+  // Preview testing found a genuine SHORT_ANSWER concept-teaching
+  // response ("why and where @ is used?" on a decorator question)
+  // deterministically rejected this way. Whether code SUBSTANTIALLY
+  // SOLVES the actual assessed programming task is an inherently
+  // semantic judgment — no line-count/fence-length/keyword-count regex
+  // can reliably tell "illustrative example" from "complete assessed
+  // solution" (see the task's own explicit prohibition on inventing a
+  // second brittle regex here). A code-shaped candidate that is not
+  // unmistakable direct leakage (still caught above by
+  // DIRECT_ANSWER_PATTERNS/leaksHiddenReference) now DEFERS to the
+  // independent semantic verifier, which already carries COMPLETE_CODE
+  // as a risk code and (see buildSystemPrompt's "CODE-LIKE CONTENT IS
+  // NOT THE SAME AS COMPLETE_CODE" section) explicit instructions and
+  // worked examples for judging illustrative vs. complete code. This is
+  // NOT fail-open: DEFER still means the candidate is never shown
+  // without passing the semantic verifier first.
 
   // Deterministic checks are fail-closed only: they may reject obvious
   // leakage immediately, but they NEVER approve a response for display.
@@ -331,6 +337,23 @@ function buildSystemPrompt(): string {
     '- "The answer is def."',
     '- "Yes, B is correct." / "Yes, your final answer is correct."',
     '- "Lists are mutable. They use square brackets. They are useful for changing collections. Tuples are immutable. They use parentheses. They are useful for fixed collections." — even though every individual fact here is separately safe, THIS single candidate packages essentially the whole comparison at once, so it is unsafe (SUBMISSION_READY_COMPLETION) regardless of whether any of it was said before.',
+    "",
+    // Illustrative-code follow-up — CODE-LIKE CONTENT (containing `def`,
+    // a decorator, a fenced block, a `print(...)`/`return ...`) is not
+    // the same thing as COMPLETE_CODE. This used to be caught by a
+    // deterministic regex that rejected any of those shapes outright;
+    // removed (see fastVerifyBrainstormResponse's own doc comment) in
+    // favour of this semantic judgment, since no regex can reliably
+    // tell a one-line illustrative snippet from an actual complete
+    // solution. General — applies across MULTIPLE_CHOICE, SHORT_ANSWER,
+    // and ESSAY alike, wherever the assessed task involves code.
+    "CODE-LIKE CONTENT IS NOT THE SAME AS COMPLETE_CODE. A syntax example, a tiny illustrative function, a decorator usage example, pseudocode, an analogous snippet, one API call, or one line demonstrating syntax is SAFE teaching content, even when it contains `def`, `class`, a decorator, a fenced code block, or a `return`/`print` call — none of those are by themselves a reason to reject. Only flag COMPLETE_CODE when the candidate SUBSTANTIALLY SOLVES the actual assessed programming task the question asks for — a working implementation that is (or is nearly) ready to submit as the answer.",
+    '- SAFE: "A decorator is commonly written above a function using @name. For example:\n\n@timer\ndef process():\n    ...\n\nThe decorator can add behavior around the function." — illustrates the syntax; does not solve any assessed task.',
+    '- SAFE: "`items.append(value)` adds an item to an existing list."',
+    '- SAFE: "A recursive function calls itself as part of solving a smaller version of the same problem." — even with a tiny unrelated example included, this is not COMPLETE_CODE merely because code syntax appears.',
+    '- UNSAFE: for "Write a Python function that returns all prime numbers up to n," a complete working implementation that actually solves that exact question.',
+    '- UNSAFE: for "Write a decorator that measures function execution time," a complete, ready-to-submit decorator implementation.',
+    "The distinction is ILLUSTRATIVE CODE (safe) vs. a COMPLETE ASSESSED SOLUTION (unsafe) — judge this the same way as the MULTIPLE_CHOICE distinction below: teaching the general syntax/mechanism is safe even when highly relevant; providing the finished, assessed artifact is not.",
     "",
     "For an open-response question (essay/short-answer), teaching and substantial explanation are SAFE — reject only when the candidate becomes a complete, submission-ready version of the student's final assessed response, never merely because it is thorough or detailed.",
     "",

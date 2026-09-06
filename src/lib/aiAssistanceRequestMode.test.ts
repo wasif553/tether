@@ -21,6 +21,22 @@ describe("CONCEPT_EXPLANATION", () => {
   ])("%s", (prompt) => {
     expect(classifyBrainstormRequestMode(prompt)).toBe("CONCEPT_EXPLANATION");
   });
+
+  // Illustrative-code follow-up — live Preview testing found "where are
+  // decorators used?" and "why and where @ is used?" (legitimate
+  // concept/use-case questions) falling through to GENERIC_HELP; only
+  // "what is X used for?" was already caught. General where/why-used
+  // shape, never tied to "decorator" or any other specific subject term.
+  it.each([
+    "where are decorators used?",
+    "why and where @ is used?",
+    "where would I use recursion?",
+    "why do we use decorators?",
+    "what is a decorator used for?",
+    "what are decorators used for?",
+  ])("%s", (prompt) => {
+    expect(classifyBrainstormRequestMode(prompt)).toBe("CONCEPT_EXPLANATION");
+  });
 });
 
 describe("APPROACH_GUIDANCE", () => {

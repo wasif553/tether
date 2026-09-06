@@ -344,6 +344,20 @@ const APPROACH_FALLBACK_PATTERNS = [
 ];
 const GUIDING_QUESTION_FALLBACK_PATTERNS = [/\bguiding\s+question\b/i, /\bask\s+me\s+a\s+question\b/i];
 
+// Illustrative-code follow-up — a "where/why is X used?" style request is
+// a legitimate use-case question, but is a poor fit for the
+// CONCEPT_EXPLANATION branch's "define and compare" framing below (there
+// is nothing to compare for a single-concept usage question). Mirrors
+// aiAssistanceRequestMode.ts's own general (non-subject-specific)
+// where/why-used patterns — checked BEFORE the broader CONCEPT_EXPLANATION
+// patterns below so a usage question gets the more specific framing.
+const USE_CASE_FALLBACK_PATTERNS = [
+  /\b(?:where|why)\b[\s\S]*\bused\b/i,
+  /\bwhere\s+(?:would|do|can|should)\s+(?:i|you|we)\s+use\b/i,
+  /\bwhy\s+(?:do|would|does)\s+(?:we|you|people)\s+use\b/i,
+  /\bwhat\s+(?:is|are)\b.+\bused\s+for\b/i,
+];
+
 /**
  * Extracts salient concept/topic TERMS from the student's own request —
  * never subject-specific vocabulary hard-coded here, only a generic
@@ -399,6 +413,14 @@ export function buildFallbackGuidance(input: { questionText: string; studentRequ
     return (
       `Here's a question to guide you: looking at "${questionSnippet}", what is the very first thing you'd need ` +
       "to figure out before you could answer it?"
+    );
+  }
+  if (USE_CASE_FALLBACK_PATTERNS.some((p) => p.test(input.studentRequest))) {
+    const terms = extractSalientTerms(input.studentRequest);
+    const subject = terms.length > 0 ? terms.join(", ") : studentSnippet;
+    return (
+      `You're asking about the practical use case for ${subject}. Think about what problem it solves or what ` +
+      `situation would call for it, then connect that back to what "${questionSnippet}" is actually asking.`
     );
   }
   if (CONCEPT_EXPLANATION_FALLBACK_PATTERNS.some((p) => p.test(input.studentRequest))) {

@@ -151,6 +151,32 @@ describe("consolidated verifier matrix — must allow (defers to semantic verifi
   });
 });
 
+// Illustrative-code follow-up — a deterministic "does this look like
+// code" check used to REJECT any candidate matching a fenced code
+// block, a def/function/class line, or a return/print/console.log call
+// as COMPLETE_CODE. Live Preview testing found this deterministically
+// rejecting a genuine SHORT_ANSWER concept-teaching response containing
+// a tiny decorator-usage illustration. Removed — see
+// fastVerifyBrainstormResponse's own doc comment — in favour of
+// deferring every code-shaped candidate that is not unmistakable direct
+// leakage to the semantic verifier, which now carries explicit
+// illustrative-vs-complete guidance (see aiAssistanceVerifier.sdk.test.ts).
+describe("illustrative-code follow-up — code-like content defers to the semantic verifier, never deterministically rejected as COMPLETE_CODE", () => {
+  it.each([
+    // A. small fenced illustrative example
+    "Here's the general shape:\n```\n@timer\ndef process():\n    ...\n```\nThe decorator adds behaviour around the function.",
+    // B. simple def example used only to explain syntax
+    "A decorator is commonly written above a function using @name. For example:\n\n@timer\ndef process():\n    ...",
+    // D. decorator concept explanation containing @decorator + def
+    "@timer\ndef process():\n    ...\n\nThis is a simple example of applying a decorator to a function.",
+    "`items.append(value)` adds an item to an existing list.",
+    "A recursive function calls itself as part of solving a smaller version of the same problem. For example:\ndef countdown(n):\n    return countdown(n - 1)",
+  ])("%s", (candidateResponse) => {
+    const decision = fastVerifyBrainstormResponse(verifierInput({ questionType: "SHORT_ANSWER", candidateResponse }));
+    expect(decision.kind).toBe("DEFER");
+  });
+});
+
 describe("consolidated verifier matrix — must reject", () => {
   it.each(["The correct option is B.", "The output is [1, 2, 3, 4].", "The answer is def.", "Yes, B is correct.", "Yes, your full answer is correct."])(
     "%s",
@@ -160,6 +186,39 @@ describe("consolidated verifier matrix — must reject", () => {
       if (decision.kind === "REJECT") expect(decision.result.allowed).toBe(false);
     },
   );
+
+  // Illustrative-code follow-up (regression, tests E/F/G) — confirms
+  // removing CODE_DISCLOSURE_PATTERNS did not weaken any OTHER
+  // deterministic rejection: exact hidden-answer disclosure, the MCQ
+  // final-output shape, and direct option disclosure are all still
+  // caught, even though several of these candidates also contain
+  // code-like syntax.
+  it("E. exact hidden-answer disclosure is still deterministically rejected", () => {
+    const decision = fastVerifyBrainstormResponse(
+      verifierInput({
+        questionType: "SHORT_ANSWER",
+        candidateResponse: "The answer is (1, 2, (3, 4), {'x': 10}).",
+        hiddenModelAnswer: "(1, 2, (3, 4), {'x': 10})",
+      }),
+    );
+    expect(decision.kind).toBe("REJECT");
+  });
+
+  it("F. MCQ final-output disclosure is still deterministically rejected", () => {
+    const decision = fastVerifyBrainstormResponse(
+      verifierInput({ questionType: "MULTIPLE_CHOICE", candidateResponse: "The output is (1, 2, (3, 4), {'x': 10})." }),
+    );
+    expect(decision.kind).toBe("REJECT");
+    if (decision.kind === "REJECT") expect(decision.result.riskCodes).toContain("DIRECT_ANSWER");
+  });
+
+  it("G. direct option disclosure is still deterministically rejected", () => {
+    const decision = fastVerifyBrainstormResponse(
+      verifierInput({ questionType: "MULTIPLE_CHOICE", candidateResponse: "The correct option is B." }),
+    );
+    expect(decision.kind).toBe("REJECT");
+    if (decision.kind === "REJECT") expect(decision.result.riskCodes).toContain("DIRECT_ANSWER");
+  });
 });
 
 // Cumulative answer-assembly follow-up — the deterministic fast-check

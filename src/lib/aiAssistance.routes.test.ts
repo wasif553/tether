@@ -1421,6 +1421,66 @@ describe("intermittent-failure follow-up — a verifier that cannot complete its
     mocked.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" }); // restore default
   });
 
+  // Illustrative-code follow-up (section 11, observability) — a live
+  // Preview interaction persisted as FALLBACK / riskCodesJson=[] /
+  // riskScore=0, which the runner's own code shows is exactly what a
+  // verifier-stage ERROR produces (see the `riskCodes`/`riskScore`
+  // assignment right before the FALLBACK finalizeInteraction call in
+  // aiAssistanceRunner.ts) — but that shape is indistinguishable from an
+  // ordinary rejection-with-no-codes in the persisted row alone. This
+  // confirms the new, ALWAYS-ON (never gated behind
+  // TETHER_TIMING_HEADERS_ENABLED) diagnostic log fires for exactly this
+  // case, carries only safe/bounded fields, and never logs the
+  // candidate, the student prompt, or any hidden answer content.
+  it("L. a verifier-stage error is fail-closed (still FALLBACK) AND logs a safe, always-on diagnostic distinct from an ordinary rejection", async () => {
+    const { verifyBrainstormResponse, AiAssistanceVerificationError } = await import("./aiAssistanceVerifier");
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    mockedVerify
+      .mockRejectedValueOnce(new AiAssistanceVerificationError("Anthropic API request failed", "TIMEOUT"))
+      .mockRejectedValueOnce(new AiAssistanceVerificationError("Anthropic API request failed", "TIMEOUT"));
+    mockedGenerate.mockResolvedValue("This is the never-shown generated candidate, containing SECRET_CANDIDATE_MARKER.");
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { submission, question } = await createExamAndSubmission();
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "where are decorators used?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    // Fail-closed: still FALLBACK, and the unverified candidate is never shown.
+    expect(body.status).toBe("FALLBACK");
+    expect(body.response).not.toContain("SECRET_CANDIDATE_MARKER");
+    const row = await prisma.aiAssistanceInteraction.findFirst({ where: { submissionId: submission.id } });
+    expect(row?.riskCodesJson).toEqual([]);
+    expect(row?.riskScore).toBe(0);
+    expect(row?.approvedResponse).not.toContain("SECRET_CANDIDATE_MARKER");
+
+    // The new diagnostic fired, unconditionally (no TETHER_TIMING_HEADERS_ENABLED needed).
+    const logCall = errorSpy.mock.calls.find((call) => typeof call[0] === "string" && call[0].includes("AI_ASSISTANCE_VERIFIER_STAGE_ERROR"));
+    expect(logCall).toBeDefined();
+    const logged = JSON.parse(logCall![0] as string);
+    expect(logged).toMatchObject({
+      event: "AI_ASSISTANCE_VERIFIER_STAGE_ERROR",
+      stage: "verifier",
+      errorCategory: "TIMEOUT",
+      questionType: "ESSAY",
+      requestMode: "CONCEPT_EXPLANATION",
+    });
+    expect(typeof logged.interactionId).toBe("string");
+    expect(typeof logged.wasRetry).toBe("boolean");
+    // Never the candidate, the student prompt, or hidden answer content.
+    const loggedText = JSON.stringify(logged);
+    expect(loggedText).not.toContain("SECRET_CANDIDATE_MARKER");
+    expect(loggedText).not.toContain("where are decorators used");
+
+    errorSpy.mockRestore();
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+    mockedGenerate.mockReset().mockResolvedValue("What concept do you think this question is testing?");
+  });
+
   it("a genuine GENERATOR failure (no candidate ever produced) still resolves to FAILED, distinct from a verifier failure", async () => {
     const { generateBrainstormResponse, AiAssistanceGenerationError } = await import("./aiAssistanceGenerator");
     const mocked = vi.mocked(generateBrainstormResponse);

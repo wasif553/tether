@@ -509,6 +509,56 @@ describe("MCQ semantic-verifier calibration follow-up — Check 1 is narrower fo
   });
 });
 
+// Illustrative-code follow-up — the deterministic CODE_DISCLOSURE_PATTERNS
+// fast-check (any fenced block, def/function/class line, or
+// return/print/console.log call) was removed from fastVerifyBrainstormResponse
+// (see aiAssistanceVerifier.test.ts's own "illustrative-code follow-up"
+// describe block for the DEFER-not-REJECT proof at that layer). These
+// confirm the semantic verifier's prompt — the layer every code-shaped
+// candidate now reaches — carries explicit illustrative-vs-complete
+// guidance so it can make the judgment the deterministic layer no
+// longer attempts.
+describe("illustrative-code follow-up — semantic verifier distinguishes illustrative code from a complete assessed solution", () => {
+  it("states that code-like content is not the same as COMPLETE_CODE, and names the governing test", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("CODE-LIKE CONTENT IS NOT THE SAME AS COMPLETE_CODE");
+    expect(call.system).toContain(
+      "Only flag COMPLETE_CODE when the candidate SUBSTANTIALLY SOLVES the actual assessed programming task the question asks for",
+    );
+    expect(call.system).toContain("none of those are by themselves a reason to reject");
+  });
+
+  it("gives the decorator-illustration SAFE worked example (test D shape) and the two complete-solution UNSAFE worked examples (test C shape)", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("@timer\ndef process():");
+    expect(call.system).toContain("illustrates the syntax; does not solve any assessed task");
+    expect(call.system).toContain("`items.append(value)` adds an item to an existing list.");
+    expect(call.system).toContain(
+      "for \"Write a Python function that returns all prime numbers up to n,\" a complete working implementation that actually solves that exact question",
+    );
+    expect(call.system).toContain(
+      "for \"Write a decorator that measures function execution time,\" a complete, ready-to-submit decorator implementation",
+    );
+  });
+
+  it("frames the distinction generically (illustrative vs. complete assessed solution), not as a Python-specific carve-out", async () => {
+    mockCreate.mockResolvedValue(textResponse(validVerifierJson()));
+
+    await verifyBrainstormResponse(baseInput);
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("ILLUSTRATIVE CODE (safe) vs. a COMPLETE ASSESSED SOLUTION (unsafe)");
+  });
+});
+
 describe("response parsing", () => {
   it("parses a well-formed JSON verdict", async () => {
     mockCreate.mockResolvedValue(textResponse(validVerifierJson({ allowed: false, riskScore: 0.8, riskCodes: ["DIRECT_ANSWER"] })));

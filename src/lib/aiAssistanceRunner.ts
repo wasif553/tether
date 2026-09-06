@@ -613,6 +613,48 @@ function summarizeOutcome(outcome: GenerateVerifyOutcome): Record<string, unknow
   return { ...base, outcome: outcome.kind };
 }
 
+/**
+ * Illustrative-code follow-up (section 11, observability) — a verifier-
+ * stage ERROR (provider failure, timeout, malformed/unparseable output,
+ * schema mismatch) resolves to the SAME FALLBACK status/empty
+ * riskCodes/riskScore-0 shape as an ordinary content rejection with no
+ * risk codes (see the finalizeInteraction call below), so a live
+ * Preview investigation looking only at the persisted
+ * AiAssistanceInteraction row cannot tell these apart. The existing
+ * logAiAssistanceDiagnostics call already carries this detail
+ * (errorStage/errorCategory via summarizeOutcome), but it is gated
+ * behind TETHER_TIMING_HEADERS_ENABLED — "off by default in every
+ * environment including Production" by its own design (a bounded
+ * controlled-test-window switch, not a standing reliability log) — so a
+ * genuine verifier failure occurring outside that window leaves no
+ * retrievable error category at all. This is a SEPARATE, always-on log
+ * for exactly that one rare, important failure signal — never gated,
+ * since it fires only on an actual verifier-stage error, not on every
+ * request. Deliberately narrow: interactionId, stage, the error
+ * classification, questionType, requestMode, and whether this was the
+ * retry attempt — never hiddenModelAnswer, the question's answer, any
+ * candidate/response text, or anything else student- or answer-derived.
+ */
+function logVerifierStageError(params: {
+  interactionId: string;
+  category: AiProviderErrorCategory;
+  questionType: string;
+  requestMode: string;
+  wasRetry: boolean;
+}): void {
+  console.error(
+    JSON.stringify({
+      event: "AI_ASSISTANCE_VERIFIER_STAGE_ERROR",
+      interactionId: params.interactionId,
+      stage: "verifier",
+      errorCategory: params.category,
+      questionType: params.questionType,
+      requestMode: params.requestMode,
+      wasRetry: params.wasRetry,
+    }),
+  );
+}
+
 function logAiAssistanceDiagnostics(params: {
   interactionId: string;
   initialOutcome: GenerateVerifyOutcome;
@@ -867,6 +909,15 @@ export async function runAiAssistanceRequest(params: {
     priorApprovedResponseCount: priorApproved.length,
     hasHiddenModelAnswer: Boolean(question.correctAnswer),
   });
+  if (outcome.kind === "error" && outcome.stage === "verifier") {
+    logVerifierStageError({
+      interactionId,
+      category: outcome.category,
+      questionType,
+      requestMode: generatorInput.requestMode,
+      wasRetry: regenerated,
+    });
+  }
 
   if (outcome.kind === "approved") {
     const newCumulative = nextCumulativeRiskScore(cumulativeSoFar, outcome.riskScore);
