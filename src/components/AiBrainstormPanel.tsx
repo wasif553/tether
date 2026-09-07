@@ -38,7 +38,12 @@ import { useEffect, useId, useRef, useState } from "react";
 // both a genuine provider failure (FAILED) and a guardrail redirect
 // (BLOCKED/FALLBACK) — see the Brainstorm starter-action reliability
 // follow-up below.
-type TranscriptStatus = "APPROVED" | "FALLBACK" | "BLOCKED" | "FAILED" | "ERROR" | "RATE_LIMITED" | "NETWORK_ERROR";
+// NO_HELP (Brainstorm no-help-refund follow-up) — the response text is
+// the SAME real content the 84452cc pipeline produced (never hidden or
+// replaced); this is not a guardrail redirect, so it is rendered
+// through the same generic `entry.response` path as APPROVED, with no
+// special badge — the only difference is server-side prompt accounting.
+type TranscriptStatus = "APPROVED" | "FALLBACK" | "BLOCKED" | "FAILED" | "NO_HELP" | "ERROR" | "RATE_LIMITED" | "NETWORK_ERROR";
 
 type TranscriptEntry = {
   id: string;
@@ -54,7 +59,7 @@ type HistoryResponse = {
     studentPrompt: string;
     response: string | null;
     studentMessage: string | null;
-    status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED";
+    status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED" | "NO_HELP";
   }>;
   promptsRemainingForQuestion: number;
   promptsRemainingForAttempt: number;

@@ -19,7 +19,7 @@ vi.mock("@/lib/aiAssistanceGenerator", async () => {
   const actual = await vi.importActual<typeof import("./aiAssistanceGenerator")>("./aiAssistanceGenerator");
   return {
     ...actual,
-    generateBrainstormResponse: vi.fn().mockResolvedValue("What concept do you think this question is testing?"),
+    generateBrainstormResponse: vi.fn().mockResolvedValue("This response explains the relevant concept the question is testing."),
     isAnthropicConfigured: vi.fn().mockReturnValue(true),
   };
 });

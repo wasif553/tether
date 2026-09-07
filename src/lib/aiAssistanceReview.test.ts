@@ -64,6 +64,14 @@ describe("summarizeAiAssistanceInteractions", () => {
     expect(summary.failedCount).toBe(0);
   });
 
+  // Brainstorm no-help-refund follow-up.
+  it("counts a NO_HELP interaction toward guidanceShownCount — the exact same response text was still shown to the student, just not charged", () => {
+    const summary = summarizeAiAssistanceInteractions([interaction({ status: "NO_HELP" })]);
+    expect(summary.guidanceShownCount).toBe(1);
+    expect(summary.declinedCount).toBe(0);
+    expect(summary.failedCount).toBe(0);
+  });
+
   it("counts a BLOCKED interaction toward declinedCount only", () => {
     const summary = summarizeAiAssistanceInteractions([interaction({ status: "BLOCKED", response: null })]);
     expect(summary.guidanceShownCount).toBe(0);

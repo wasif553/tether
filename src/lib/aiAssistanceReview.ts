@@ -70,7 +70,10 @@ export function summarizeAiAssistanceInteractions(
   let failedCount = 0;
   for (const interaction of interactions) {
     questionIds.add(interaction.questionId);
-    if (interaction.status === "APPROVED" || interaction.status === "FALLBACK") {
+    // Brainstorm no-help-refund follow-up — NO_HELP carries the exact
+    // same response text an APPROVED interaction would; guidance really
+    // was shown, it just was not charged against the allowance.
+    if (interaction.status === "APPROVED" || interaction.status === "FALLBACK" || interaction.status === "NO_HELP") {
       guidanceShownCount += 1;
     } else if (interaction.status === "BLOCKED") {
       declinedCount += 1;

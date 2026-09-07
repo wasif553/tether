@@ -27,6 +27,7 @@ import {
   MAX_HIDDEN_REFERENCE_CHARACTERS,
   boundedHiddenReference,
   isApprovedResponseLengthValid,
+  isNonSubstantiveBrainstormResponse,
 } from "./aiAssistancePolicy";
 import { severityFor, DEFAULT_SECURE_SETTINGS } from "./secureExam";
 import { SEVERITY_WEIGHTS } from "./integrityRisk";
@@ -170,9 +171,14 @@ describe("24. permitted AI-assistance use never increases integrity risk", () =>
 });
 
 describe("4. interaction status lifecycle", () => {
-  it("is exactly the six-state (five persisted-terminal-plus-RESERVED) lifecycle", () => {
+  // Brainstorm no-help-refund follow-up — extended to seven states (six
+  // persisted-terminal-plus-RESERVED): NO_HELP added for a candidate
+  // that is essentially just a question/redirect with no real content —
+  // treated identically to APPROVED in every respect except prompt
+  // accounting (see isNonSubstantiveBrainstormResponse).
+  it("is exactly the seven-state (six persisted-terminal-plus-RESERVED) lifecycle", () => {
     expect([...AI_ASSISTANCE_INTERACTION_STATUSES].sort()).toEqual(
-      ["RESERVED", "APPROVED", "BLOCKED", "FALLBACK", "FAILED"].sort(),
+      ["RESERVED", "APPROVED", "BLOCKED", "FALLBACK", "FAILED", "NO_HELP"].sort(),
     );
   });
 
@@ -229,5 +235,48 @@ describe("Part 9 — provider payload bounds", () => {
     expect(isApprovedResponseLengthValid("short", { maxResponseCharacters: 800 })).toBe(true);
     expect(isApprovedResponseLengthValid("x".repeat(801), { maxResponseCharacters: 800 })).toBe(false);
     expect(isApprovedResponseLengthValid("", { maxResponseCharacters: 800 })).toBe(false);
+  });
+});
+
+// Brainstorm no-help-refund follow-up — the deterministic helper deciding
+// whether a (verifier-approved) candidate gave the student any real help,
+// or was effectively just a question/redirect back at them.
+describe("isNonSubstantiveBrainstormResponse", () => {
+  it.each([
+    "What do you know about this?",
+    "What do you think a thread is?",
+    "What do you think *args means?",
+    "Can you identify the main concept?",
+    "What happens next?",
+    "Think about what the question is asking.",
+  ])("NON-SUBSTANTIVE: %s", (response) => {
+    expect(isNonSubstantiveBrainstormResponse(response)).toBe(true);
+  });
+
+  it.each([
+    "A thread is a sequence of execution within a process. What might happen if two threads modify the same shared variable?",
+    "`*args` collects extra positional arguments into a tuple. What might happen to the remaining arguments?",
+    "A decorator can add behaviour around another function without editing the original function. Where might that be useful?",
+    "`*args` collects extra positional arguments into a tuple.",
+    "A thread is a sequence of execution within a process.",
+  ])("SUBSTANTIVE: %s", (response) => {
+    expect(isNonSubstantiveBrainstormResponse(response)).toBe(false);
+  });
+
+  it("is not triggered merely by the presence of a question mark — a declarative sentence starting with a wh-word is not itself a question", () => {
+    expect(isNonSubstantiveBrainstormResponse("What matters here is that dictionaries preserve insertion order since Python 3.7.")).toBe(false);
+  });
+
+  it("a longer sentence that merely starts with a bare-redirect verb but goes on to state real content is substantive, not swept up by the prefix match", () => {
+    expect(
+      isNonSubstantiveBrainstormResponse(
+        "Consider that *args always collects a tuple regardless of how many positional arguments are passed, unlike **kwargs which builds a dictionary keyed by name.",
+      ),
+    ).toBe(false);
+  });
+
+  it("treats an empty/whitespace-only response as non-substantive (defensive)", () => {
+    expect(isNonSubstantiveBrainstormResponse("")).toBe(true);
+    expect(isNonSubstantiveBrainstormResponse("   ")).toBe(true);
   });
 });

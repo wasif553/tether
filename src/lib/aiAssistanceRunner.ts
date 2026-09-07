@@ -38,6 +38,7 @@ import {
   isApprovedResponseLengthValid,
   boundedHiddenReference,
   isStaleReservation,
+  isNonSubstantiveBrainstormResponse,
   AI_ASSISTANCE_FALLBACK_RESPONSE,
   AI_ASSISTANCE_UNAVAILABLE_MESSAGE,
   type AiAssistancePolicy,
@@ -229,11 +230,21 @@ async function reserveInteractionSlot(params: {
       }
     }
 
+    // Brainstorm no-help-refund follow-up — NO_HELP rows (a candidate
+    // that was essentially just a question/redirect with no real
+    // content — see isNonSubstantiveBrainstormResponse) are excluded
+    // from both counts below, so a refunded interaction's slot is
+    // correctly reused by the NEXT real request. A still-RESERVED
+    // (in-flight) row is deliberately still counted here — its eventual
+    // outcome isn't known yet, and counting it conservatively is what
+    // prevents a burst of concurrent requests from over-allocating past
+    // the limit before any of them resolves (concurrency safety,
+    // unchanged from 84452cc).
     const promptsForQuestion = await tx.aiAssistanceInteraction.count({
-      where: { submissionId: params.submission.id, questionId: params.question.id },
+      where: { submissionId: params.submission.id, questionId: params.question.id, status: { not: "NO_HELP" } },
     });
     const promptsForAttempt = await tx.aiAssistanceInteraction.count({
-      where: { submissionId: params.submission.id },
+      where: { submissionId: params.submission.id, status: { not: "NO_HELP" } },
     });
 
     if (hasReachedQuestionPromptLimit(promptsForQuestion, params.policy)) {
@@ -279,7 +290,7 @@ async function reserveInteractionSlot(params: {
 }
 
 type FinalizePayload = {
-  status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED";
+  status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED" | "NO_HELP";
   approvedResponse: string | null;
   riskCodes: string[];
   riskScore: number;
@@ -373,9 +384,19 @@ async function recordLimitReached(
     });
 }
 
+// Brainstorm no-help-refund follow-up — NO_HELP is included alongside
+// APPROVED here (and in every other query below this comment that
+// selects "the prior approved/shown interactions for this question") so
+// cumulative-risk continuity, hint-ladder progression, and the
+// conversation context passed back into the generator are ALL exactly
+// what the unmodified 84452cc pipeline would have computed — a NO_HELP
+// interaction really did happen and really was shown to the student, it
+// is only excluded from prompt-ALLOWANCE accounting (a completely
+// separate set of queries — see reserveInteractionSlot and the
+// remaining-count queries below).
 async function currentCumulativeRiskScore(submissionId: string, questionId: string): Promise<number> {
   const last = await prisma.aiAssistanceInteraction.findFirst({
-    where: { submissionId, questionId, status: "APPROVED" },
+    where: { submissionId, questionId, status: { in: ["APPROVED", "NO_HELP"] } },
     orderBy: { createdAt: "desc" },
     select: { cumulativeRiskScore: true },
   });
@@ -391,8 +412,8 @@ async function resultFromExistingInteraction(
   if (!row) throw new AiAssistanceError(500, "Could not retrieve your previous request. Please try again.");
 
   const [promptsForQuestion, promptsForAttempt] = await Promise.all([
-    prisma.aiAssistanceInteraction.count({ where: { submissionId: row.submissionId, questionId: row.questionId } }),
-    prisma.aiAssistanceInteraction.count({ where: { submissionId: row.submissionId } }),
+    prisma.aiAssistanceInteraction.count({ where: { submissionId: row.submissionId, questionId: row.questionId, status: { not: "NO_HELP" } } }),
+    prisma.aiAssistanceInteraction.count({ where: { submissionId: row.submissionId, status: { not: "NO_HELP" } } }),
   ]);
 
   const status = row.status as AiAssistanceInteractionStatus;
@@ -423,7 +444,7 @@ export type AiAssistanceHistoryEntry = {
   studentPrompt: string;
   response: string | null;
   studentMessage: string | null;
-  status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED";
+  status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED" | "NO_HELP";
   createdAt: string;
 };
 
@@ -466,8 +487,8 @@ export async function loadInteractionHistory(params: {
       where: { submissionId: params.submissionId, questionId: params.questionId },
       orderBy: { createdAt: "asc" },
     }),
-    prisma.aiAssistanceInteraction.count({ where: { submissionId: params.submissionId, questionId: params.questionId } }),
-    prisma.aiAssistanceInteraction.count({ where: { submissionId: params.submissionId } }),
+    prisma.aiAssistanceInteraction.count({ where: { submissionId: params.submissionId, questionId: params.questionId, status: { not: "NO_HELP" } } }),
+    prisma.aiAssistanceInteraction.count({ where: { submissionId: params.submissionId, status: { not: "NO_HELP" } } }),
   ]);
 
   const interactions: AiAssistanceHistoryEntry[] = rows.flatMap((row) => {
@@ -651,13 +672,20 @@ export async function runAiAssistanceRequest(params: {
   }
 
   // Independent reads: run concurrently to reduce pre-generation DB latency.
+  // Brainstorm no-help-refund follow-up — status includes NO_HELP
+  // alongside APPROVED in both queries below (see currentCumulativeRiskScore's
+  // own comment): a NO_HELP interaction really was shown to the student
+  // with the unmodified 84452cc pipeline's real output, so it must count
+  // toward the hint ladder and appear as prior conversation context
+  // exactly as it would have if it were APPROVED — only prompt-ALLOWANCE
+  // accounting treats it differently.
   const [approvedCountForQuestion, cumulativeSoFar, priorApproved] = await Promise.all([
     prisma.aiAssistanceInteraction.count({
-      where: { submissionId: submission.id, questionId: question.id, status: "APPROVED" },
+      where: { submissionId: submission.id, questionId: question.id, status: { in: ["APPROVED", "NO_HELP"] } },
     }),
     currentCumulativeRiskScore(submission.id, question.id),
     prisma.aiAssistanceInteraction.findMany({
-      where: { submissionId: submission.id, questionId: question.id, status: "APPROVED" },
+      where: { submissionId: submission.id, questionId: question.id, status: { in: ["APPROVED", "NO_HELP"] } },
       orderBy: { createdAt: "asc" },
       take: 5,
       select: { studentPrompt: true, approvedResponse: true },
@@ -717,9 +745,24 @@ export async function runAiAssistanceRequest(params: {
   });
 
   if (outcome.kind === "approved") {
+    // Brainstorm no-help-refund follow-up — the unmodified 84452cc
+    // pipeline above has already produced its final candidate; nothing
+    // about generation, verification, or the response TEXT changes
+    // below. The only question asked here is whether that candidate,
+    // exactly as produced, is essentially just a question/redirect with
+    // no real information of its own. If so, the interaction is
+    // recorded as NO_HELP instead of APPROVED — same response shown to
+    // the student, same risk/ladder/context bookkeeping, only excluded
+    // from prompt-allowance accounting (see reserveInteractionSlot and
+    // the remaining-count queries, all updated to exclude NO_HELP).
+    const isNoHelp = isNonSubstantiveBrainstormResponse(outcome.response);
+    const finalStatus = isNoHelp ? "NO_HELP" : "APPROVED";
+    // Cumulative risk is computed and stored exactly as 84452cc always
+    // did, regardless of NO_HELP — this task changes prompt accounting
+    // only, never cumulative-risk logic.
     const newCumulative = nextCumulativeRiskScore(cumulativeSoFar, outcome.riskScore);
     await finalizeInteraction(interactionId, submission, settings, {
-      status: "APPROVED",
+      status: finalStatus,
       approvedResponse: outcome.response,
       riskCodes: outcome.riskCodes,
       riskScore: outcome.riskScore,
@@ -730,11 +773,22 @@ export async function runAiAssistanceRequest(params: {
       wasRegenerated: regenerated,
     });
     return {
-      status: "APPROVED",
+      status: finalStatus,
       response: outcome.response,
       studentMessage: null,
-      promptsRemainingForQuestion: Math.max(0, policy.maxPromptsPerQuestion - promptNumberForQuestion),
-      promptsRemainingForAttempt: Math.max(0, policy.maxPromptsPerAttempt - promptNumberForAttempt),
+      // A refunded (NO_HELP) interaction is reported as if its own
+      // reservation-time slot never happened (N-1) — reserveInteractionSlot's
+      // own count queries now exclude NO_HELP rows too, so the next real
+      // request correctly reuses this slot number rather than skipping
+      // past it.
+      promptsRemainingForQuestion: Math.max(
+        0,
+        policy.maxPromptsPerQuestion - (isNoHelp ? promptNumberForQuestion - 1 : promptNumberForQuestion),
+      ),
+      promptsRemainingForAttempt: Math.max(
+        0,
+        policy.maxPromptsPerAttempt - (isNoHelp ? promptNumberForAttempt - 1 : promptNumberForAttempt),
+      ),
       maxPromptsPerQuestion: policy.maxPromptsPerQuestion,
       maxPromptsPerAttempt: policy.maxPromptsPerAttempt,
     };

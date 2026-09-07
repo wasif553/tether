@@ -49,6 +49,10 @@ const STATUS_LABELS: Record<string, string> = {
   FALLBACK: "Guidance shown",
   BLOCKED: "Request declined",
   FAILED: "Could not be completed",
+  // Brainstorm no-help-refund follow-up — the SAME response text as an
+  // APPROVED interaction (never modified/hidden); only the prompt was
+  // not charged, since the response gave no real guidance.
+  NO_HELP: "Guidance shown (not charged)",
 };
 
 function statusLabel(interaction: Interaction): string {
