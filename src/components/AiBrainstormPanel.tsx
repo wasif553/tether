@@ -70,13 +70,14 @@ type HistoryResponse = {
 // Exported so tests can exercise the exact strings production sends
 // (rather than a hand-copied, driftable duplicate) — see
 // aiAssistanceClassifier.test.ts and aiAssistance.routes.test.ts.
+//
+// Simplify Brainstorm prompt controls — trimmed from six starter
+// buttons to exactly this one; the free-text input covers every other
+// case the removed buttons used to pre-fill. UI-only: the prompt string
+// itself is unchanged and still goes through the exact same
+// classify/generate/verify pipeline as any typed prompt.
 export const STARTER_ACTIONS = [
   { label: "Help me understand the question", prompt: "Can you help me understand what this question is asking?" },
-  { label: "Give me a starting point", prompt: "Can you give me a broad starting point for approaching this?" },
-  { label: "Ask me a guiding question", prompt: "Can you ask me a guiding question to help me think this through?" },
-  { label: "Help me organise my ideas", prompt: "Can you help me organise my ideas for this question?" },
-  { label: "Challenge my reasoning", prompt: "Can you challenge my current reasoning on this question?" },
-  { label: "Suggest what I should check", prompt: "What should I check or verify before I finalise my answer?" },
 ];
 
 // A guardrail redirect (the assistant declining to hand over a final
@@ -429,7 +430,18 @@ export function AiBrainstormPanel(props: {
             ))}
           </div>
 
-          <div className="mt-2 flex gap-2">
+          {/* Simplify Brainstorm prompt controls — normal form semantics
+              (not a bare div/input/button) so pressing Enter while
+              focused in the input submits exactly like clicking Ask,
+              with no separate keydown handler and no second submission
+              path: onSubmit is the ONLY place that calls sendPrompt. */}
+          <form
+            className="mt-2 flex gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void sendPrompt(customPrompt);
+            }}
+          >
             <label htmlFor={inputId} className="sr-only">
               Ask Tether Brainstorm a question
             </label>
@@ -445,14 +457,13 @@ export function AiBrainstormPanel(props: {
               className="flex-1 rounded border border-gray-300 px-2 py-1 text-sm disabled:opacity-50"
             />
             <button
-              type="button"
+              type="submit"
               disabled={disabled || !customPrompt.trim()}
-              onClick={() => sendPrompt(customPrompt)}
               className="rounded border border-teal-700 bg-teal-700 px-3 py-1 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-50"
             >
               {sending ? "Thinking..." : "Ask"}
             </button>
-          </div>
+          </form>
         </div>
       </div>
     </section>
