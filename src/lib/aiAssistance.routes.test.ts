@@ -44,10 +44,22 @@ const { getOrCreateTestInstitution } = await import("./testInstitution");
 const assistanceRoute = await import("../app/api/submissions/[id]/questions/[questionId]/ai-assistance/route");
 const reviewRoute = await import("../app/api/lecturer/submissions/[id]/ai-assistance/route");
 // Brainstorm starter-action reliability follow-up — the EXACT fixed
-// strings AiBrainstormPanel's six starter buttons send, imported rather
-// than hand-copied so these tests can never silently drift from what
-// production actually sends.
+// string AiBrainstormPanel's one remaining starter button sends, imported
+// rather than hand-copied so these tests can never silently drift from
+// what production actually sends.
 const { STARTER_ACTIONS } = await import("../components/AiBrainstormPanel");
+
+// UI-only change (single-preset AiBrainstormPanel) trimmed STARTER_ACTIONS
+// to one entry, so the content-independent rate-limiting tests below
+// (which need SEVERAL genuinely DISTINCT prompt strings, never about
+// which button they came from) can no longer slice/index it. These are
+// local test-only strings, not tied to any production starter button.
+const RATE_LIMIT_TEST_PROMPTS = [
+  STARTER_ACTIONS[0].prompt,
+  "Can you give me a broad starting point for approaching this?",
+  "Can you ask me a guiding question to help me think this through?",
+  "Can you help me organise my ideas for this question?",
+];
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT" | "PLATFORM_ADMIN", institutionId: string) {
   return {
@@ -571,8 +583,8 @@ describe("rate limiting — content-independent, applies identically regardless 
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
 
     const statuses: number[] = [];
-    for (const action of STARTER_ACTIONS.slice(0, 4)) {
-      const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: action.prompt }), {
+    for (const prompt of RATE_LIMIT_TEST_PROMPTS) {
+      const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: prompt }), {
         params: Promise.resolve({ id: submission.id, questionId: question.id }),
       });
       statuses.push(res.status);
@@ -585,8 +597,8 @@ describe("rate limiting — content-independent, applies identically regardless 
   it("a manually typed prompt is rate-limited identically once the window is exhausted by starter clicks — never shown as a provider/API failure", async () => {
     const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 10, maxPromptsPerAttempt: 10 });
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
-    for (const action of STARTER_ACTIONS.slice(0, 3)) {
-      const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: action.prompt }), {
+    for (const prompt of RATE_LIMIT_TEST_PROMPTS.slice(0, 3)) {
+      const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: prompt }), {
         params: Promise.resolve({ id: submission.id, questionId: question.id }),
       });
       expect(res.status).toBe(200);
@@ -619,7 +631,7 @@ describe("FALLBACK status on a starter prompt — a guardrail redirect is expect
 
     const { submission, question } = await createExamAndSubmission();
     mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
-    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: STARTER_ACTIONS[1].prompt }), {
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: RATE_LIMIT_TEST_PROMPTS[1] }), {
       params: Promise.resolve({ id: submission.id, questionId: question.id }),
     });
     const body = await res.json();
