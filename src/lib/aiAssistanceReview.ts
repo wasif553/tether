@@ -38,6 +38,11 @@ export type AiAssistanceReviewSummary = {
   guidanceShownCount: number;
   declinedCount: number;
   failedCount: number;
+  // Non-substantive-response prompt-accounting follow-up — counted
+  // separately from guidanceShownCount (no guidance was actually shown)
+  // and declinedCount (not a policy decline) — see AiAssistanceInteraction
+  // status "NO_HELP". Never charged against the student's allowance.
+  noHelpCount: number;
   questionsUsedCount: number;
 };
 
@@ -68,6 +73,7 @@ export function summarizeAiAssistanceInteractions(
   let guidanceShownCount = 0;
   let declinedCount = 0;
   let failedCount = 0;
+  let noHelpCount = 0;
   for (const interaction of interactions) {
     questionIds.add(interaction.questionId);
     if (interaction.status === "APPROVED" || interaction.status === "FALLBACK") {
@@ -76,6 +82,8 @@ export function summarizeAiAssistanceInteractions(
       declinedCount += 1;
     } else if (interaction.status === "FAILED") {
       failedCount += 1;
+    } else if (interaction.status === "NO_HELP") {
+      noHelpCount += 1;
     }
   }
   return {
@@ -83,6 +91,7 @@ export function summarizeAiAssistanceInteractions(
     guidanceShownCount,
     declinedCount,
     failedCount,
+    noHelpCount,
     questionsUsedCount: questionIds.size,
   };
 }

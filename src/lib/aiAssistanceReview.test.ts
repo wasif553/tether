@@ -45,6 +45,7 @@ describe("summarizeAiAssistanceInteractions", () => {
       guidanceShownCount: 0,
       declinedCount: 0,
       failedCount: 0,
+      noHelpCount: 0,
       questionsUsedCount: 0,
     });
   });
@@ -107,8 +108,19 @@ describe("summarizeAiAssistanceInteractions", () => {
       guidanceShownCount: 2,
       declinedCount: 1,
       failedCount: 1,
+      noHelpCount: 0,
       questionsUsedCount: 3,
     });
+  });
+
+  // Non-substantive-response prompt-accounting follow-up.
+  it("counts a NO_HELP interaction toward noHelpCount only — never guidanceShownCount, declinedCount, or failedCount", () => {
+    const summary = summarizeAiAssistanceInteractions([interaction({ status: "NO_HELP", response: null })]);
+    expect(summary.totalRequests).toBe(1);
+    expect(summary.guidanceShownCount).toBe(0);
+    expect(summary.declinedCount).toBe(0);
+    expect(summary.failedCount).toBe(0);
+    expect(summary.noHelpCount).toBe(1);
   });
 });
 
@@ -252,6 +264,7 @@ describe("buildAiAssistanceReview — aiAssistanceEnabled reflects the snapshot'
       guidanceShownCount: 0,
       declinedCount: 0,
       failedCount: 0,
+      noHelpCount: 0,
       questionsUsedCount: 0,
     });
     expect(review.interactions).toEqual([]);

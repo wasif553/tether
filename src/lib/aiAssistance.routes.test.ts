@@ -19,7 +19,7 @@ vi.mock("@/lib/aiAssistanceGenerator", async () => {
   const actual = await vi.importActual<typeof import("./aiAssistanceGenerator")>("./aiAssistanceGenerator");
   return {
     ...actual,
-    generateBrainstormResponse: vi.fn().mockResolvedValue("What concept do you think this question is testing?"),
+    generateBrainstormResponse: vi.fn().mockResolvedValue("This response explains the relevant concept the question is testing."),
     // Deterministic default for every route test below: the optional
     // Anthropic provider is treated as configured, so these tests exercise
     // ownership/limits/persistence logic without needing a real
@@ -502,7 +502,7 @@ describe("4/5/7/8. FAILED status — a genuine provider failure never shows gene
     expect(rows[0].status).toBe("FAILED");
     expect(rows[0].approvedResponse).toBeNull();
 
-    mocked.mockResolvedValue("What concept do you think this question is testing?"); // restore default
+    mocked.mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
   });
 });
 
@@ -661,11 +661,11 @@ describe("intermittent-failure follow-up — a verifier that cannot complete its
     expect(res.status).toBe(200);
     expect(body.status).toBe("FALLBACK");
     expect(typeof body.response).toBe("string");
-    expect(body.response).not.toContain("What concept do you think this question is testing?"); // the mocked generator output — never shown unverified
+    expect(body.response).not.toContain("This response explains the relevant concept the question is testing."); // the mocked generator output — never shown unverified
 
     const row = await prisma.aiAssistanceInteraction.findFirst({ where: { submissionId: submission.id } });
     expect(row?.status).toBe("FALLBACK");
-    expect(row?.approvedResponse).not.toContain("What concept do you think this question is testing?");
+    expect(row?.approvedResponse).not.toContain("This response explains the relevant concept the question is testing.");
 
     mocked.mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" }); // restore default
   });
@@ -689,6 +689,438 @@ describe("intermittent-failure follow-up — a verifier that cannot complete its
     expect(body.response).toBeNull();
     expect(body.studentMessage).toMatch(/temporarily unavailable/i);
 
-    mocked.mockResolvedValue("What concept do you think this question is testing?"); // restore default
+    mocked.mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Non-substantive-response prompt-accounting follow-up — a student's
+// Brainstorm allowance must be consumed only when Tether actually delivers
+// meaningful assistance. A response that is effectively only a
+// question/redirect back at the student ("What do you know about this?")
+// must not cost a prompt: the runner regenerates ONCE internally (same
+// reserved slot, same one-retry budget 84452cc already had for the
+// safety-rejection path) with a targeted instruction, and if that retry
+// is STILL non-substantive, the interaction is refunded (status NO_HELP)
+// rather than charged.
+// ---------------------------------------------------------------------------
+
+describe("non-substantive-response prompt-accounting follow-up", () => {
+  it("1. a pure question-back first candidate is not shown; the runner regenerates once internally; no extra student prompt is consumed", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    // Mocks are shared across the whole file with no per-test reset
+    // elsewhere, so an absolute toHaveBeenCalledTimes assertion needs a
+    // clean baseline — clear call history only (never the queued
+    // mockResolvedValueOnce return values, set up next).
+    mockedGenerate.mockClear();
+    mockedGenerate
+      .mockResolvedValueOnce("What do you know about this?")
+      .mockResolvedValueOnce("Can you identify the main concept?");
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "What are *args and **kwargs?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(body.status).toBe("NO_HELP");
+    expect(body.response).toBeNull();
+    expect(body.studentMessage).toMatch(/couldn't provide useful guidance/i);
+    // Not charged: the full configured allowance is still available.
+    expect(body.promptsRemainingForQuestion).toBe(3);
+    expect(mockedGenerate).toHaveBeenCalledTimes(2); // exactly one internal retry, never more
+
+    const row = await prisma.aiAssistanceInteraction.findFirst({ where: { submissionId: submission.id, questionId: question.id } });
+    expect(row?.status).toBe("NO_HELP");
+    expect(row?.wasRegenerated).toBe(true);
+    expect(row?.approvedResponse).toBeNull();
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+
+  it("2. retry becomes substantive: first candidate is question-only, second is a useful explanation — exactly one student prompt is consumed total", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedGenerate
+      .mockResolvedValueOnce("What do you know about this?")
+      .mockResolvedValueOnce("A tuple is immutable, unlike a list.");
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "What are *args and **kwargs?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(body.status).toBe("APPROVED");
+    expect(body.response).toBe("A tuple is immutable, unlike a list.");
+    expect(body.promptsRemainingForQuestion).toBe(2); // exactly one prompt consumed
+    expect(mockedGenerate).toHaveBeenCalledTimes(2);
+    // The retry used the targeted non-substantive-retry instruction, not the generic `stricter` line.
+    expect(mockedGenerate.mock.calls[1][0].regenerationGuidance).toContain(
+      "Provide at least one concrete explanatory statement",
+    );
+    expect(mockedGenerate.mock.calls[1][0].stricter).not.toBe(true);
+
+    const row = await prisma.aiAssistanceInteraction.findFirst({ where: { submissionId: submission.id, questionId: question.id } });
+    expect(row?.status).toBe("APPROVED");
+    expect(row?.wasRegenerated).toBe(true);
+    expect(row?.promptNumberForQuestion).toBe(1);
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+
+  it("3. both the original and the retried candidate are question-only: neutral no-help message, zero prompt consumption", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedGenerate
+      .mockResolvedValueOnce("What happens next?")
+      .mockResolvedValueOnce("Think about what the question is asking.");
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Can you help me understand this?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(body.status).toBe("NO_HELP");
+    expect(body.promptsRemainingForQuestion).toBe(3);
+    expect(mockedGenerate).toHaveBeenCalledTimes(2);
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+
+  it("4. a substantive response containing a guiding question consumes exactly one prompt, no retry", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedGenerate.mockResolvedValueOnce(
+      "`*args` collects additional positional arguments into a tuple. How might that affect this function call?",
+    );
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "What are *args and **kwargs?" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(body.status).toBe("APPROVED");
+    expect(body.promptsRemainingForQuestion).toBe(2);
+    expect(mockedGenerate).toHaveBeenCalledTimes(1); // no retry needed
+
+    const row = await prisma.aiAssistanceInteraction.findFirst({ where: { submissionId: submission.id, questionId: question.id } });
+    expect(row?.wasRegenerated).toBe(false);
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+
+  it("5. a direct useful concept explanation with no question at all consumes exactly one prompt", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedGenerate.mockResolvedValueOnce("A decorator is a function that wraps another function to modify its behaviour.");
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Explain decorators." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(body.status).toBe("APPROVED");
+    expect(body.response).toBe("A decorator is a function that wraps another function to modify its behaviour.");
+    expect(body.promptsRemainingForQuestion).toBe(2);
+    expect(mockedGenerate).toHaveBeenCalledTimes(1);
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+
+  it("6. a blocked direct-answer request is unaffected — 84452cc classifier behaviour unchanged", async () => {
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Write the code for me" }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(body.status).toBe("BLOCKED");
+    // A blocked request is still counted (unchanged 84452cc behaviour —
+    // this task is only about Tether itself failing to deliver help on
+    // an ALLOWED request, never about the classifier's own decisions).
+    expect(body.promptsRemainingForQuestion).toBe(2);
+  });
+
+  it("7. concurrent requests: atomic reservation still prevents exceeding a 1-prompt-per-question limit, even with non-substantive responses in play", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    // Both concurrent attempts would resolve to question-only candidates
+    // if both got to run — the point of this test is that only ONE of
+    // them is ever reserved in the first place, so only one ever
+    // consumes a generation attempt.
+    mockedGenerate.mockResolvedValue("What do you know about this?");
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 1 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    const [resA, resB] = await Promise.all([
+      assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this, take one." }), {
+        params: Promise.resolve({ id: submission.id, questionId: question.id }),
+      }),
+      assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this, take two." }), {
+        params: Promise.resolve({ id: submission.id, questionId: question.id }),
+      }),
+    ]);
+    const [bodyA, bodyB] = await Promise.all([resA.json(), resB.json()]);
+    const statuses = [bodyA.status, bodyB.status];
+
+    // Exactly one request was ever reserved; the other was blocked by
+    // the atomic reservation before any generation happened — a
+    // still-in-flight reservation is conservatively counted even though
+    // it might later resolve to a non-consuming NO_HELP outcome (Part 7
+    // — "atomic reservations that are currently in-flight must still
+    // prevent concurrent over-allocation").
+    expect(statuses.filter((s) => s === "BLOCKED")).toHaveLength(1);
+    expect(statuses.filter((s) => s === "NO_HELP")).toHaveLength(1);
+
+    const rows = await prisma.aiAssistanceInteraction.count({ where: { submissionId: submission.id, questionId: question.id } });
+    expect(rows).toBe(1); // the blocked request never reserved a row at all
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+
+  it("7b. sequentially, a refunded (NO_HELP) interaction's slot is correctly reused by the next real request", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedGenerate
+      .mockResolvedValueOnce("What do you know about this?")
+      .mockResolvedValueOnce("Can you identify the main concept?");
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 1 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const first = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    expect((await first.json()).status).toBe("NO_HELP");
+
+    mockedGenerate.mockResolvedValueOnce("A decorator wraps another function to modify its behaviour.");
+    const second = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Explain decorators." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const secondBody = await second.json();
+
+    // With maxPromptsPerQuestion: 1, this second request would have been
+    // BLOCKED had the first one actually consumed the only slot — it
+    // succeeds only because the refund correctly freed it up again.
+    expect(secondBody.status).toBe("APPROVED");
+    expect(secondBody.promptsRemainingForQuestion).toBe(0);
+
+    const rows = await prisma.aiAssistanceInteraction.findMany({
+      where: { submissionId: submission.id, questionId: question.id },
+      orderBy: { createdAt: "asc" },
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows[0].promptNumberForQuestion).toBe(1);
+    expect(rows[1].promptNumberForQuestion).toBe(1); // slot reused, not skipped to 2
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+
+  it("8. clientRequestId replay of a NO_HELP interaction never creates a duplicate row or a second refund/consumption", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedGenerate
+      .mockResolvedValueOnce("What do you know about this?")
+      .mockResolvedValueOnce("Can you identify the main concept?");
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const clientRequestId = "22222222-2222-4222-8222-222222222222";
+
+    const first = await assistanceRoute.POST(
+      jsonRequest({ studentPrompt: "Help me understand this.", clientRequestId }),
+      { params: Promise.resolve({ id: submission.id, questionId: question.id }) },
+    );
+    const firstBody = await first.json();
+    expect(firstBody.status).toBe("NO_HELP");
+
+    const second = await assistanceRoute.POST(
+      jsonRequest({ studentPrompt: "Help me understand this.", clientRequestId }),
+      { params: Promise.resolve({ id: submission.id, questionId: question.id }) },
+    );
+    const secondBody = await second.json();
+
+    expect(secondBody.status).toBe("NO_HELP");
+    expect(secondBody.promptsRemainingForQuestion).toBe(3);
+    expect(mockedGenerate).toHaveBeenCalledTimes(2); // the replay never called the generator again
+
+    const rows = await prisma.aiAssistanceInteraction.count({ where: { submissionId: submission.id, questionId: question.id } });
+    expect(rows).toBe(1);
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+
+  it("9. question and attempt counters stay consistent across a NO_HELP interaction followed by a real one", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedGenerate
+      .mockResolvedValueOnce("What do you know about this?")
+      .mockResolvedValueOnce("Can you identify the main concept?");
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3, maxPromptsPerAttempt: 10 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const first = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    expect((await first.json()).status).toBe("NO_HELP");
+
+    mockedGenerate.mockResolvedValueOnce("A decorator wraps another function to modify its behaviour.");
+    const second = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Explain decorators." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const secondBody = await second.json();
+
+    expect(secondBody.status).toBe("APPROVED");
+    expect(secondBody.promptsRemainingForQuestion).toBe(2); // 3 - 1, not 3 - 2
+    expect(secondBody.promptsRemainingForAttempt).toBe(9); // 10 - 1, not 10 - 2
+
+    const rows = await prisma.aiAssistanceInteraction.findMany({
+      where: { submissionId: submission.id, questionId: question.id },
+      orderBy: { createdAt: "asc" },
+    });
+    expect(rows[1].promptNumberForQuestion).toBe(1);
+    expect(rows[1].promptNumberForAttempt).toBe(1);
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+
+  it("10. history still records the NO_HELP interaction, with the correct status/message and a non-decremented remaining count", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedGenerate
+      .mockResolvedValueOnce("What do you know about this?")
+      .mockResolvedValueOnce("Can you identify the main concept?");
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+
+    const historyRes = await assistanceRoute.GET(jsonRequest(), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const history = await historyRes.json();
+
+    expect(history.interactions).toHaveLength(1);
+    expect(history.interactions[0].status).toBe("NO_HELP");
+    expect(history.interactions[0].response).toBeNull();
+    expect(history.interactions[0].studentMessage).toMatch(/couldn't provide useful guidance/i);
+    expect(history.promptsRemainingForQuestion).toBe(3);
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+
+  it("a hint-ladder level and cumulative-risk queries never treat a NO_HELP interaction as approved", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedGenerate
+      .mockResolvedValueOnce("What do you know about this?")
+      .mockResolvedValueOnce("Can you identify the main concept?");
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+
+    mockedGenerate.mockResolvedValueOnce("A decorator wraps another function to modify its behaviour.");
+    await assistanceRoute.POST(jsonRequest({ studentPrompt: "Explain decorators." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+
+    // If the NO_HELP interaction had counted as "approved", this would be
+    // hint ladder level 2 (specificityLevel) instead of 1.
+    const rows = await prisma.aiAssistanceInteraction.findMany({
+      where: { submissionId: submission.id, questionId: question.id, status: "APPROVED" },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].specificityLevel).toBe(1);
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing."); // restore default
+  });
+
+  it("the retry triggered by a non-substantive first candidate coming back REJECTED (unsafe) on the retry is still refunded, not shown as FALLBACK", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedGenerate
+      .mockResolvedValueOnce("What do you know about this?")
+      .mockResolvedValueOnce("The answer is 42.");
+    mockedVerify
+      .mockResolvedValueOnce({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe but non-substantive" })
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.9, riskCodes: ["DIRECT_ANSWER"], reason: "unsafe" });
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    expect(body.status).toBe("NO_HELP");
+    expect(body.response).toBeNull();
+    expect(body.promptsRemainingForQuestion).toBe(3);
+    expect(mockedGenerate).toHaveBeenCalledTimes(2);
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing.");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
+  });
+
+  it("a candidate rescued from a safety rejection that is still non-substantive is refunded too, not shown thin", async () => {
+    const { generateBrainstormResponse } = await import("./aiAssistanceGenerator");
+    const { verifyBrainstormResponse } = await import("./aiAssistanceVerifier");
+    const mockedGenerate = vi.mocked(generateBrainstormResponse);
+    const mockedVerify = vi.mocked(verifyBrainstormResponse);
+    mockedGenerate.mockClear();
+    mockedVerify.mockClear();
+    mockedGenerate
+      .mockResolvedValueOnce("The answer is 42.")
+      .mockResolvedValueOnce("What do you think the answer might be?");
+    mockedVerify
+      .mockResolvedValueOnce({ allowed: false, riskScore: 0.9, riskCodes: ["DIRECT_ANSWER"], reason: "unsafe" })
+      .mockResolvedValueOnce({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe but still non-substantive" });
+
+    const { submission, question } = await createExamAndSubmission({ maxPromptsPerQuestion: 3 });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await assistanceRoute.POST(jsonRequest({ studentPrompt: "Help me understand this." }), {
+      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    });
+    const body = await res.json();
+
+    // The retry here used `stricter: true` (the REJECTED path, unchanged
+    // 84452cc mechanics) but its result is STILL checked for
+    // substantiveness — never shown as a thin "what do you think..."
+    // response just because it passed the safety check.
+    expect(body.status).toBe("NO_HELP");
+    expect(body.response).toBeNull();
+    expect(mockedGenerate.mock.calls[1][0].stricter).toBe(true);
+    expect(body.promptsRemainingForQuestion).toBe(3);
+
+    mockedGenerate.mockReset().mockResolvedValue("This response explains the relevant concept the question is testing.");
+    mockedVerify.mockReset().mockResolvedValue({ allowed: true, riskScore: 0.1, riskCodes: [], reason: "safe" });
   });
 });

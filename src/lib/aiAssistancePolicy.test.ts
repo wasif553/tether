@@ -27,6 +27,9 @@ import {
   MAX_HIDDEN_REFERENCE_CHARACTERS,
   boundedHiddenReference,
   isApprovedResponseLengthValid,
+  isNonSubstantiveBrainstormResponse,
+  AI_ASSISTANCE_NO_HELP_MESSAGE,
+  NON_SUBSTANTIVE_REGENERATION_INSTRUCTION,
 } from "./aiAssistancePolicy";
 import { severityFor, DEFAULT_SECURE_SETTINGS } from "./secureExam";
 import { SEVERITY_WEIGHTS } from "./integrityRisk";
@@ -170,9 +173,16 @@ describe("24. permitted AI-assistance use never increases integrity risk", () =>
 });
 
 describe("4. interaction status lifecycle", () => {
-  it("is exactly the six-state (five persisted-terminal-plus-RESERVED) lifecycle", () => {
+  // Non-substantive-response prompt-accounting follow-up — extended to
+  // seven states (six persisted-terminal-plus-RESERVED): NO_HELP added
+  // for a safe candidate that never delivered any substantive content,
+  // even after one internal regeneration attempt (see
+  // isNonSubstantiveBrainstormResponse) — distinct from FALLBACK, which
+  // DOES consume a prompt (Tether correctly declining an unsafe
+  // request).
+  it("is exactly the seven-state (six persisted-terminal-plus-RESERVED) lifecycle", () => {
     expect([...AI_ASSISTANCE_INTERACTION_STATUSES].sort()).toEqual(
-      ["RESERVED", "APPROVED", "BLOCKED", "FALLBACK", "FAILED"].sort(),
+      ["RESERVED", "APPROVED", "BLOCKED", "FALLBACK", "FAILED", "NO_HELP"].sort(),
     );
   });
 
@@ -229,5 +239,57 @@ describe("Part 9 — provider payload bounds", () => {
     expect(isApprovedResponseLengthValid("short", { maxResponseCharacters: 800 })).toBe(true);
     expect(isApprovedResponseLengthValid("x".repeat(801), { maxResponseCharacters: 800 })).toBe(false);
     expect(isApprovedResponseLengthValid("", { maxResponseCharacters: 800 })).toBe(false);
+  });
+});
+
+// Non-substantive-response prompt-accounting follow-up — the deterministic
+// helper deciding whether a (verifier-approved) candidate gave the
+// student any real help, or was effectively just a question/redirect
+// back at them. Every example is verbatim or equivalent to the task's
+// own worked examples.
+describe("isNonSubstantiveBrainstormResponse", () => {
+  it.each([
+    "What do you know about this?",
+    "What do you think *args means?",
+    "Can you identify the main concept?",
+    "What happens next?",
+    "Think about what the question is asking.",
+    "Can you think about what *args does?",
+    "What do you know about *args and **kwargs?",
+  ])("NON-SUBSTANTIVE: %s", (response) => {
+    expect(isNonSubstantiveBrainstormResponse(response)).toBe(true);
+  });
+
+  it.each([
+    "`*args` collects additional positional arguments into a tuple. How might that affect this function call?",
+    "A decorator can add behaviour around another function without editing the original function. Where might that be useful?",
+    "`*args` collects additional positional arguments and `**kwargs` collects additional keyword arguments. Think about where each kind of argument would go in the function call.",
+    "`*args` collects extra positional arguments into a tuple.",
+    "A decorator is a function that wraps another function to modify its behaviour.",
+  ])("SUBSTANTIVE: %s", (response) => {
+    expect(isNonSubstantiveBrainstormResponse(response)).toBe(false);
+  });
+
+  it("is not triggered merely by the presence of a question mark — a declarative sentence starting with a wh-word is not itself a question", () => {
+    expect(isNonSubstantiveBrainstormResponse("What matters here is that dictionaries preserve insertion order since Python 3.7.")).toBe(false);
+  });
+
+  it("a longer sentence that merely starts with a bare-redirect verb but goes on to state real content is substantive, not swept up by the prefix match", () => {
+    expect(
+      isNonSubstantiveBrainstormResponse(
+        "Consider that *args always collects a tuple regardless of how many positional arguments are passed, unlike **kwargs which builds a dictionary keyed by name.",
+      ),
+    ).toBe(false);
+  });
+
+  it("treats an empty/whitespace-only response as non-substantive (defensive — the generator already guards against this)", () => {
+    expect(isNonSubstantiveBrainstormResponse("")).toBe(true);
+    expect(isNonSubstantiveBrainstormResponse("   ")).toBe(true);
+  });
+
+  it("the NO_HELP student-facing message and the regeneration instruction are fixed, non-empty strings", () => {
+    expect(AI_ASSISTANCE_NO_HELP_MESSAGE.length).toBeGreaterThan(0);
+    expect(NON_SUBSTANTIVE_REGENERATION_INSTRUCTION.length).toBeGreaterThan(0);
+    expect(NON_SUBSTANTIVE_REGENERATION_INSTRUCTION.toLowerCase()).toContain("do not provide the final assessed answer");
   });
 });

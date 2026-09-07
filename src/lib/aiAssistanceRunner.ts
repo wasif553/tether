@@ -38,8 +38,11 @@ import {
   isApprovedResponseLengthValid,
   boundedHiddenReference,
   isStaleReservation,
+  isNonSubstantiveBrainstormResponse,
   AI_ASSISTANCE_FALLBACK_RESPONSE,
   AI_ASSISTANCE_UNAVAILABLE_MESSAGE,
+  AI_ASSISTANCE_NO_HELP_MESSAGE,
+  NON_SUBSTANTIVE_REGENERATION_INSTRUCTION,
   type AiAssistancePolicy,
   type AiAssistanceInteractionStatus,
 } from "@/lib/aiAssistancePolicy";
@@ -229,11 +232,21 @@ async function reserveInteractionSlot(params: {
       }
     }
 
+    // Non-substantive-response prompt-accounting follow-up — NO_HELP rows
+    // (a safe candidate that never delivered any substantive content,
+    // even after one internal regeneration — see
+    // isNonSubstantiveBrainstormResponse) are excluded from both counts
+    // below, so a refunded interaction's slot is correctly reused by the
+    // NEXT real request. A still-RESERVED (in-flight) row is
+    // deliberately still counted here — its eventual outcome isn't known
+    // yet, and counting it conservatively is what prevents a burst of
+    // concurrent requests from over-allocating past the limit before any
+    // of them resolves (Part 2 concurrency safety, unchanged).
     const promptsForQuestion = await tx.aiAssistanceInteraction.count({
-      where: { submissionId: params.submission.id, questionId: params.question.id },
+      where: { submissionId: params.submission.id, questionId: params.question.id, status: { not: "NO_HELP" } },
     });
     const promptsForAttempt = await tx.aiAssistanceInteraction.count({
-      where: { submissionId: params.submission.id },
+      where: { submissionId: params.submission.id, status: { not: "NO_HELP" } },
     });
 
     if (hasReachedQuestionPromptLimit(promptsForQuestion, params.policy)) {
@@ -279,7 +292,7 @@ async function reserveInteractionSlot(params: {
 }
 
 type FinalizePayload = {
-  status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED";
+  status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED" | "NO_HELP";
   approvedResponse: string | null;
   riskCodes: string[];
   riskScore: number;
@@ -324,14 +337,27 @@ async function finalizeInteraction(
     },
   });
 
+  // Non-substantive-response prompt-accounting follow-up — NO_HELP maps
+  // to the existing AI_ASSISTANCE_USED event type (no new
+  // IntegrityEventType enum value; that column is a real Prisma enum,
+  // not a free-text String, so adding one would need a migration this
+  // task doesn't require — see the AiAssistanceInteraction.status
+  // comment for the same reasoning on THIS row's own status column,
+  // which IS a plain String). Checked before the wasRegenerated branch:
+  // NO_HELP always has wasRegenerated=true (it's only reached after the
+  // one internal retry), but "regenerated under stricter guidance
+  // before being shown" would be factually wrong here — nothing was
+  // shown.
   const eventType =
     payload.status === "BLOCKED"
       ? ("AI_ASSISTANCE_REQUEST_BLOCKED" as const)
       : payload.status === "FAILED"
         ? ("AI_ASSISTANCE_REQUEST_FAILED" as const)
-        : payload.wasRegenerated
-          ? ("AI_ASSISTANCE_RESPONSE_REGENERATED" as const)
-          : ("AI_ASSISTANCE_USED" as const);
+        : payload.status === "NO_HELP"
+          ? ("AI_ASSISTANCE_USED" as const)
+          : payload.wasRegenerated
+            ? ("AI_ASSISTANCE_RESPONSE_REGENERATED" as const)
+            : ("AI_ASSISTANCE_USED" as const);
 
   await prisma.integrityEvent
     .create({
@@ -391,8 +417,8 @@ async function resultFromExistingInteraction(
   if (!row) throw new AiAssistanceError(500, "Could not retrieve your previous request. Please try again.");
 
   const [promptsForQuestion, promptsForAttempt] = await Promise.all([
-    prisma.aiAssistanceInteraction.count({ where: { submissionId: row.submissionId, questionId: row.questionId } }),
-    prisma.aiAssistanceInteraction.count({ where: { submissionId: row.submissionId } }),
+    prisma.aiAssistanceInteraction.count({ where: { submissionId: row.submissionId, questionId: row.questionId, status: { not: "NO_HELP" } } }),
+    prisma.aiAssistanceInteraction.count({ where: { submissionId: row.submissionId, status: { not: "NO_HELP" } } }),
   ]);
 
   const status = row.status as AiAssistanceInteractionStatus;
@@ -401,7 +427,9 @@ async function resultFromExistingInteraction(
       ? blockedRequestStudentMessage(((row.riskCodesJson as string[] | null) ?? []) as RequestBlockReasonCode[])
       : status === "FAILED"
         ? AI_ASSISTANCE_UNAVAILABLE_MESSAGE
-        : null;
+        : status === "NO_HELP"
+          ? AI_ASSISTANCE_NO_HELP_MESSAGE
+          : null;
 
   return {
     status,
@@ -423,7 +451,7 @@ export type AiAssistanceHistoryEntry = {
   studentPrompt: string;
   response: string | null;
   studentMessage: string | null;
-  status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED";
+  status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED" | "NO_HELP";
   createdAt: string;
 };
 
@@ -466,8 +494,8 @@ export async function loadInteractionHistory(params: {
       where: { submissionId: params.submissionId, questionId: params.questionId },
       orderBy: { createdAt: "asc" },
     }),
-    prisma.aiAssistanceInteraction.count({ where: { submissionId: params.submissionId, questionId: params.questionId } }),
-    prisma.aiAssistanceInteraction.count({ where: { submissionId: params.submissionId } }),
+    prisma.aiAssistanceInteraction.count({ where: { submissionId: params.submissionId, questionId: params.questionId, status: { not: "NO_HELP" } } }),
+    prisma.aiAssistanceInteraction.count({ where: { submissionId: params.submissionId, status: { not: "NO_HELP" } } }),
   ]);
 
   const interactions: AiAssistanceHistoryEntry[] = rows.flatMap((row) => {
@@ -479,7 +507,9 @@ export async function loadInteractionHistory(params: {
         ? blockedRequestStudentMessage(((row.riskCodesJson as string[] | null) ?? []) as RequestBlockReasonCode[])
         : status === "FAILED"
           ? AI_ASSISTANCE_UNAVAILABLE_MESSAGE
-          : null;
+          : status === "NO_HELP"
+            ? AI_ASSISTANCE_NO_HELP_MESSAGE
+            : null;
     return [
       {
         id: row.id,
@@ -695,9 +725,30 @@ export async function runAiAssistanceRequest(params: {
   });
   let outcome = initialOutcome;
   let regenerated = false;
+
+  // Non-substantive-response prompt-accounting follow-up — TWO
+  // independent reasons the first candidate is not shown as-is, using
+  // the SAME single reserved prompt slot and the SAME one-retry budget
+  // 84452cc already had (never a second, additional retry): the
+  // verifier rejected it (unchanged 84452cc behaviour — "REJECTED"), or
+  // it was APPROVED but judged non-substantive by the deterministic
+  // helper below — a safe candidate that gives the student nothing but
+  // a question/redirect back ("NON_SUBSTANTIVE", new). Each gets its
+  // own targeted regeneration instruction; `stricter` and
+  // `regenerationGuidance` are never both set on the same attempt.
+  let retryReason: "REJECTED" | "NON_SUBSTANTIVE" | null = null;
   if (outcome.kind !== "approved") {
+    retryReason = "REJECTED";
+  } else if (isNonSubstantiveBrainstormResponse(outcome.response)) {
+    retryReason = "NON_SUBSTANTIVE";
+  }
+
+  if (retryReason !== null) {
     outcome = await attemptGenerateAndVerify({
-      generatorInput: { ...generatorInput, stricter: true },
+      generatorInput:
+        retryReason === "REJECTED"
+          ? { ...generatorInput, stricter: true }
+          : { ...generatorInput, regenerationGuidance: NON_SUBSTANTIVE_REGENERATION_INSTRUCTION },
       question,
       policy,
       studentPrompt: params.studentPrompt,
@@ -716,7 +767,20 @@ export async function runAiAssistanceRequest(params: {
     totalAiMs: latencyMs,
   });
 
-  if (outcome.kind === "approved") {
+  // Non-substantive-response prompt-accounting follow-up — applied to
+  // whichever outcome is FINAL, regardless of which retry path (if any)
+  // produced it: an APPROVED candidate that is still non-substantive
+  // must never be shown or charged. This also covers the
+  // NON_SUBSTANTIVE-triggered retry coming back rejected/errored on its
+  // own — nothing useful was ever produced on this interaction either
+  // way, so it is refunded exactly the same as a still-non-substantive
+  // approval, never routed to the (consuming) FAILED/FALLBACK paths
+  // below, which stay reserved for the UNCHANGED 84452cc
+  // safety-rejection path.
+  const finalApprovedButNonSubstantive = outcome.kind === "approved" && isNonSubstantiveBrainstormResponse(outcome.response);
+  const noHelpDelivered = finalApprovedButNonSubstantive || (retryReason === "NON_SUBSTANTIVE" && outcome.kind !== "approved");
+
+  if (outcome.kind === "approved" && !finalApprovedButNonSubstantive) {
     const newCumulative = nextCumulativeRiskScore(cumulativeSoFar, outcome.riskScore);
     await finalizeInteraction(interactionId, submission, settings, {
       status: "APPROVED",
@@ -739,6 +803,42 @@ export async function runAiAssistanceRequest(params: {
       maxPromptsPerAttempt: policy.maxPromptsPerAttempt,
     };
   }
+
+  if (noHelpDelivered) {
+    // Refund: this interaction's own reservation-time slot number
+    // (promptNumberForQuestion/promptNumberForAttempt) is no longer
+    // occupied — reported here as "as if this reservation never
+    // happened" (N-1), and reserveInteractionSlot's own count queries
+    // now exclude NO_HELP rows too, so the NEXT real request correctly
+    // reuses this slot number rather than skipping past it.
+    const riskCodes = outcome.kind === "rejected" ? outcome.riskCodes : [];
+    const riskScore = outcome.kind === "rejected" ? outcome.riskScore : 0;
+    await finalizeInteraction(interactionId, submission, settings, {
+      status: "NO_HELP",
+      approvedResponse: null,
+      riskCodes,
+      riskScore,
+      cumulativeRiskScore: cumulativeSoFar,
+      specificityLevel: generatorInput.hintLadderLevel,
+      providerModel: `anthropic:${getAnthropicBrainstormModel()}`,
+      latencyMs,
+      wasRegenerated: regenerated,
+    });
+    return {
+      status: "NO_HELP",
+      response: null,
+      studentMessage: AI_ASSISTANCE_NO_HELP_MESSAGE,
+      promptsRemainingForQuestion: Math.max(0, policy.maxPromptsPerQuestion - (promptNumberForQuestion - 1)),
+      promptsRemainingForAttempt: Math.max(0, policy.maxPromptsPerAttempt - (promptNumberForAttempt - 1)),
+      maxPromptsPerQuestion: policy.maxPromptsPerQuestion,
+      maxPromptsPerAttempt: policy.maxPromptsPerAttempt,
+    };
+  }
+
+  // From here on, retryReason === "REJECTED" is guaranteed (the
+  // NON_SUBSTANTIVE path is fully handled by noHelpDelivered above) —
+  // this is exactly 84452cc's original, unchanged safety-rejection
+  // behaviour.
 
   // Intermittent-failure follow-up — a genuine GENERATOR failure on the
   // (stricter) final attempt is still shown as FAILED, never the

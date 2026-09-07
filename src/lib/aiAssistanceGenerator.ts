@@ -54,6 +54,17 @@ export type BrainstormGeneratorInput = {
   hintLadderLevel: number;
   /** True on the single stricter regeneration attempt after a first candidate failed verification (Part 9). */
   stricter?: boolean;
+  /**
+   * Non-substantive-response prompt-accounting follow-up — a targeted
+   * instruction for the SAME single internal regeneration attempt, used
+   * instead of `stricter` when the first candidate was safe but
+   * non-substantive (a bare question/redirect with no real content —
+   * see isNonSubstantiveBrainstormResponse in aiAssistancePolicy.ts).
+   * Mutually exclusive with `stricter` in practice: that flag is for a
+   * REJECTED (unsafe) candidate, this is for an APPROVED-but-unhelpful
+   * one — never both set on the same attempt.
+   */
+  regenerationGuidance?: string | null;
 };
 
 /** `category` defaults to "UNKNOWN" only for the handful of call sites that construct this error directly in tests — every real throw site below always supplies a real classification. */
@@ -94,7 +105,7 @@ export const ANTHROPIC_MAX_RETRIES = 0;
  */
 export const AI_ASSISTANCE_GENERATOR_MAX_ATTEMPTS = 3;
 
-function buildSystemPrompt(policy: BrainstormPolicyCapabilities, stricter: boolean): string {
+function buildSystemPrompt(policy: BrainstormPolicyCapabilities, stricter: boolean, regenerationGuidance?: string | null): string {
   const capabilities: string[] = [];
   if (policy.allowConceptExplanations) capabilities.push("explaining relevant concepts in general terms");
   if (policy.allowAnswerPlanning) capabilities.push("helping the student plan or structure their approach");
@@ -116,9 +127,11 @@ function buildSystemPrompt(policy: BrainstormPolicyCapabilities, stricter: boole
     "",
     "Prefer Socratic questions over statements. Be concise" + (policy.maxResponseCharacters ? ` — your ENTIRE response must be under ${policy.maxResponseCharacters} characters` : "") + ".",
     "If the student asks directly for the answer, a complete solution, complete code, an MCQ option, or the rubric, politely decline that specific part while still offering a safe alternative form of help (e.g. a concept explanation or a guiding question) in the same response.",
-    stricter
-      ? "IMPORTANT: your previous response was rejected for being too close to a direct answer. Be noticeably more conservative this time — favour a single guiding question over any explanation, and give strictly less detail than before."
-      : "",
+    regenerationGuidance
+      ? regenerationGuidance
+      : stricter
+        ? "IMPORTANT: your previous response was rejected for being too close to a direct answer. Be noticeably more conservative this time — favour a single guiding question over any explanation, and give strictly less detail than before."
+        : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -214,7 +227,7 @@ export async function generateBrainstormResponse(
   diagnostics?: GenerateBrainstormDiagnostics,
 ): Promise<string> {
   const client = getClient();
-  const system = buildSystemPrompt(input.policy, input.stricter === true);
+  const system = buildSystemPrompt(input.policy, input.stricter === true, input.regenerationGuidance);
   const userPrompt = buildUserPrompt(input);
 
   let response;

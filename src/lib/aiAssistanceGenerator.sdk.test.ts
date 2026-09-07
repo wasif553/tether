@@ -122,6 +122,48 @@ describe("message shape sent to Anthropic", () => {
   });
 });
 
+// Non-substantive-response prompt-accounting follow-up — regenerationGuidance
+// is the targeted instruction used on the single internal regeneration
+// attempt triggered by a safe-but-non-substantive first candidate,
+// distinct from (and taking priority over) the existing `stricter` flag
+// used for a REJECTED (unsafe) candidate.
+describe("regenerationGuidance — the non-substantive-retry instruction", () => {
+  it("is included in the system prompt when supplied", async () => {
+    mockCreate.mockResolvedValue(textResponse("Consider what causes evaporation."));
+
+    await generateBrainstormResponse({
+      ...baseInput,
+      regenerationGuidance: "Provide at least one concrete explanatory statement before asking the student any question.",
+    });
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("Provide at least one concrete explanatory statement before asking the student any question.");
+  });
+
+  it("takes priority over the generic `stricter` instruction when both are somehow set", async () => {
+    mockCreate.mockResolvedValue(textResponse("Consider what causes evaporation."));
+
+    await generateBrainstormResponse({
+      ...baseInput,
+      stricter: true,
+      regenerationGuidance: "Add one concrete fact before your question.",
+    });
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("Add one concrete fact before your question.");
+    expect(call.system).not.toContain("Be noticeably more conservative this time");
+  });
+
+  it("is absent from the system prompt when not supplied — no regression to the plain `stricter` retry", async () => {
+    mockCreate.mockResolvedValue(textResponse("Consider what causes evaporation."));
+
+    await generateBrainstormResponse({ ...baseInput, stricter: true });
+
+    const call = mockCreate.mock.calls[0][0];
+    expect(call.system).toContain("Be noticeably more conservative this time");
+  });
+});
+
 // Intermittent-failure follow-up — physical Preview testing showed
 // Brainstorm intermittently failing with "temporarily unavailable" while
 // typed prompts sometimes worked. Root cause: a transient provider

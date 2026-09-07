@@ -38,7 +38,14 @@ import { useEffect, useId, useRef, useState } from "react";
 // both a genuine provider failure (FAILED) and a guardrail redirect
 // (BLOCKED/FALLBACK) — see the Brainstorm starter-action reliability
 // follow-up below.
-type TranscriptStatus = "APPROVED" | "FALLBACK" | "BLOCKED" | "FAILED" | "ERROR" | "RATE_LIMITED" | "NETWORK_ERROR";
+// NO_HELP (non-substantive-response prompt-accounting follow-up) — the
+// server tried, but neither the original candidate nor the one internal
+// regeneration attempt produced anything substantive; this specific
+// request is never charged against the student's allowance. Treated the
+// same as a guardrail redirect below (neutral, never styled as an
+// error) — it's Tether coming up short, not the student doing anything
+// wrong.
+type TranscriptStatus = "APPROVED" | "FALLBACK" | "BLOCKED" | "FAILED" | "NO_HELP" | "ERROR" | "RATE_LIMITED" | "NETWORK_ERROR";
 
 type TranscriptEntry = {
   id: string;
@@ -54,7 +61,7 @@ type HistoryResponse = {
     studentPrompt: string;
     response: string | null;
     studentMessage: string | null;
-    status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED";
+    status: "APPROVED" | "BLOCKED" | "FALLBACK" | "FAILED" | "NO_HELP";
   }>;
   promptsRemainingForQuestion: number;
   promptsRemainingForAttempt: number;
@@ -82,7 +89,7 @@ export const STARTER_ACTIONS = [
 // (a local fetch failure with a server-supplied message), FAILED (a
 // genuine provider error), and NETWORK_ERROR (the request never reached
 // the server at all) represent something actually going wrong.
-const GUARDRAIL_STATUSES = new Set<TranscriptStatus>(["BLOCKED", "FALLBACK"]);
+const GUARDRAIL_STATUSES = new Set<TranscriptStatus>(["BLOCKED", "FALLBACK", "NO_HELP"]);
 const PACING_STATUSES = new Set<TranscriptStatus>(["RATE_LIMITED"]);
 const FAILURE_STATUSES = new Set<TranscriptStatus>(["ERROR", "FAILED", "NETWORK_ERROR"]);
 

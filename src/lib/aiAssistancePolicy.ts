@@ -227,17 +227,32 @@ export function isCumulativeHintLeakageRisk(
 // status value.
 // ---------------------------------------------------------------------------
 
+// Non-substantive-response prompt-accounting follow-up — a seventh
+// status, NO_HELP: the generator produced a candidate the verifier
+// judged safe, but it was a bare question-back/redirect with no
+// meaningful content (see isNonSubstantiveBrainstormResponse below),
+// even after the one internal regeneration attempt. Distinct from
+// FALLBACK (which shows a fixed Socratic response and DOES consume a
+// prompt — that is Tether correctly declining an unsafe request) —
+// NO_HELP is Tether FAILING to provide any real help despite a safe
+// request, so it must NOT consume the student's allowance (see
+// src/lib/aiAssistanceRunner.ts's prompt-accounting queries, all of
+// which explicitly exclude this status). No schema migration: `status`
+// is a plain String column (see the AiAssistanceInteraction model
+// comment in prisma/schema.prisma), so a new terminal value is safe to
+// add in application code alone.
 export const AI_ASSISTANCE_INTERACTION_STATUSES = [
   "RESERVED",
   "APPROVED",
   "BLOCKED",
   "FALLBACK",
   "FAILED",
+  "NO_HELP",
 ] as const;
 export type AiAssistanceInteractionStatus = (typeof AI_ASSISTANCE_INTERACTION_STATUSES)[number];
 
 /** Every one of these is a genuinely terminal outcome — RESERVED is the only non-terminal status. */
-export const TERMINAL_AI_ASSISTANCE_STATUSES = ["APPROVED", "BLOCKED", "FALLBACK", "FAILED"] as const;
+export const TERMINAL_AI_ASSISTANCE_STATUSES = ["APPROVED", "BLOCKED", "FALLBACK", "FAILED", "NO_HELP"] as const;
 
 /**
  * A RESERVED row this old was almost certainly left behind by a crashed or
@@ -265,6 +280,84 @@ export const AI_ASSISTANCE_FALLBACK_RESPONSE =
 /** Shown to the student on a genuine provider/parsing failure (status FAILED) — distinct wording from the fallback above, since nothing was actually generated at all, safe/degraded or otherwise. */
 export const AI_ASSISTANCE_UNAVAILABLE_MESSAGE =
   "The brainstorming assistant is temporarily unavailable. Please try again shortly.";
+
+// ---------------------------------------------------------------------------
+// Non-substantive-response prompt-accounting follow-up — a student's
+// Brainstorm allowance is meant to be consumed only when Tether actually
+// delivers meaningful assistance (a definition, explanation, hint, rule,
+// reasoning direction, misconception correction, or a short example —
+// optionally followed by a guiding question). A response that is
+// effectively only a question/redirect back at the student ("What do you
+// know about this?", "Think about what the question is asking.") gives
+// nothing away and must not cost a prompt.
+// ---------------------------------------------------------------------------
+
+/** Shown to the student when neither the original candidate nor the one internal regeneration attempt produced any substantive content (status NO_HELP) — this specific interaction is never charged against their allowance. */
+export const AI_ASSISTANCE_NO_HELP_MESSAGE =
+  "I couldn't provide useful guidance for that request. Try rephrasing your question.";
+
+/** The exact instruction given to the generator on the single internal, non-student-facing regeneration attempt triggered by a non-substantive first candidate — see runAiAssistanceRequest. Deliberately does not relax the existing safety instructions (still "Do not provide the final assessed answer"), only asks for substance before any question. */
+export const NON_SUBSTANTIVE_REGENERATION_INSTRUCTION =
+  "Provide at least one concrete explanatory statement, useful hint, rule, or piece of guidance before asking the student any question. Do not provide the final assessed answer.";
+
+// A "bare redirect" sentence either (a) is phrased as a question (wh-word
+// or an auxiliary/modal-led yes/no question, ending in "?" — a genuine
+// question mark is required so a declarative sentence that merely
+// contains a question word, e.g. "What matters here is...", is never
+// mistaken for one), or (b) is a short imperative telling the student to
+// go think/consider/identify/work something out THEMSELVES, with no
+// informational content of its own. (b) is length-bounded
+// (BARE_REDIRECT_MAX_WORDS) so a longer sentence that happens to START
+// with "Consider..."/"Think about..." but goes on to state real content
+// is correctly treated as substantive, not swept up by the prefix match.
+const QUESTION_REDIRECT_PATTERNS = [
+  /^(?:what|why|how|where|when|which|who)\b.*\?$/i,
+  /^(?:can|could|do|does|did|would|will|is|are|should)\b.*\?$/i,
+];
+const BARE_IMPERATIVE_REDIRECT_PATTERNS = [
+  /^think about\b/i,
+  /^consider\b/i,
+  /^try to (?:recall|remember|think|work out|figure out)\b/i,
+  /^identify\b/i,
+  /^work out\b/i,
+  /^figure out\b/i,
+  /^ask yourself\b/i,
+];
+const BARE_REDIRECT_MAX_WORDS = 14;
+
+function splitIntoSentences(text: string): string[] {
+  return text
+    .split(/(?<=[.?!])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+function isBareRedirectSentence(sentence: string): boolean {
+  if (QUESTION_REDIRECT_PATTERNS.some((p) => p.test(sentence))) return true;
+  const wordCount = sentence.split(/\s+/).filter(Boolean).length;
+  return wordCount <= BARE_REDIRECT_MAX_WORDS && BARE_IMPERATIVE_REDIRECT_PATTERNS.some((p) => p.test(sentence));
+}
+
+/**
+ * True when a (verifier-approved, otherwise-safe) candidate response
+ * consists ESSENTIALLY of a question/redirect back at the student, with
+ * no explanatory content of its own — the product defect this follow-up
+ * fixes (e.g. "What do you know about this?", "Can you identify the main
+ * concept?"). Deliberately narrow and deterministic (no model call,
+ * matching the task's "prefer a small deterministic helper with focused
+ * tests over another model call") — a response counts as substantive as
+ * soon as ANY one sentence in it survives the bare-redirect check, so a
+ * response like "`*args` collects extra positional arguments into a
+ * tuple. How might that affect this function call?" is substantive (the
+ * first sentence carries real content) even though it also asks a
+ * question. NOT triggered merely by the presence of a question mark
+ * anywhere in the response.
+ */
+export function isNonSubstantiveBrainstormResponse(response: string): boolean {
+  const sentences = splitIntoSentences(response);
+  if (sentences.length === 0) return true;
+  return sentences.every(isBareRedirectSentence);
+}
 
 // ---------------------------------------------------------------------------
 // Provider payload bounds (Part 9) — server-side, never relies on the

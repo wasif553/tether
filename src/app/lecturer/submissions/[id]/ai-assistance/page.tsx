@@ -49,6 +49,11 @@ const STATUS_LABELS: Record<string, string> = {
   FALLBACK: "Guidance shown",
   BLOCKED: "Request declined",
   FAILED: "Could not be completed",
+  // Non-substantive-response prompt-accounting follow-up — no guidance
+  // was actually shown (distinct from FALLBACK, which does show a fixed
+  // response), and this specific request was never charged against the
+  // student's allowance.
+  NO_HELP: "No guidance available (not charged)",
 };
 
 function statusLabel(interaction: Interaction): string {
