@@ -15,9 +15,18 @@ export type ExamWatermarkProps = {
   refreshIntervalMs?: number;
 };
 
-// A grid of repeated tiles reads clearly across the whole question area in
-// a photo/screenshot without needing canvas or an image — plain CSS only.
-const WATERMARK_TILE_COUNT = 24;
+// Fixed positions deliberately avoid the visible vertical stripes a regular grid creates.
+// The first eight cover narrow viewports; the rest complete the desktop distribution.
+const WATERMARK_TILE_POSITIONS = [
+  { left: 14, top: 11 }, { left: 57, top: 14 }, { left: 88, top: 10 },
+  { left: 31, top: 33 }, { left: 72, top: 30 },
+  { left: 12, top: 55 }, { left: 50, top: 58 }, { left: 86, top: 53 },
+  { left: 24, top: 19 }, { left: 76, top: 22 }, { left: 43, top: 42 },
+  { left: 94, top: 39 }, { left: 27, top: 68 }, { left: 68, top: 72 },
+  { left: 5, top: 82 }, { left: 48, top: 87 }, { left: 91, top: 84 },
+  { left: 35, top: 96 },
+] as const;
+const WATERMARK_TILE_COUNT = WATERMARK_TILE_POSITIONS.length;
 
 /**
  * Exam Watermark v1 — see docs/exam-watermark-v1.md. A visible,
@@ -44,9 +53,12 @@ export function ExamWatermark({ student, submissionId, refreshIntervalMs = 45_00
 
   return (
     <div aria-hidden="true" className="pointer-events-none absolute inset-0 select-none overflow-hidden">
-      <div className="grid h-full w-full grid-cols-2 gap-10 p-2 sm:grid-cols-3">
-        {Array.from({ length: WATERMARK_TILE_COUNT }, (_, i) => (
-          <div key={i} className="flex items-center justify-center" style={{ transform: "rotate(-28deg)" }}>
+      {WATERMARK_TILE_POSITIONS.slice(0, WATERMARK_TILE_COUNT).map((position, index) => (
+          <div
+            className={index < 8 ? "absolute" : "absolute hidden lg:block"}
+            key={`${position.left}-${position.top}`}
+            style={{ left: `${position.left}%`, top: `${position.top}%`, transform: "translate(-50%, -50%) rotate(-28deg)" }}
+          >
             <p
               className="whitespace-pre-line text-center text-[10px] font-medium leading-tight text-gray-900"
               // Final minor UX refinements v1 — restored to the
@@ -62,7 +74,6 @@ export function ExamWatermark({ student, submissionId, refreshIntervalMs = 45_00
             </p>
           </div>
         ))}
-      </div>
     </div>
   );
 }

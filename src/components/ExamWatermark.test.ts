@@ -27,9 +27,11 @@ describe("ExamWatermark opacity", () => {
     expect(source).toContain('aria-hidden="true"');
   });
 
-  it("the repeated-tile pattern, per-tile rotation, and text-building call are all unchanged by the opacity restoration", () => {
+  it("uses deterministic staggered tile positions while preserving per-tile rotation and watermark text", () => {
     expect(source).toContain("WATERMARK_TILE_COUNT");
-    expect(source).toContain('transform: "rotate(-28deg)"');
+    expect(source).toContain("WATERMARK_TILE_POSITIONS");
+    expect(source).toContain('translate(-50%, -50%) rotate(-28deg)');
+    expect(source).toContain('"absolute hidden lg:block"');
     expect(source).toContain("buildExamWatermarkLines(");
   });
 });
