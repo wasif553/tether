@@ -11,7 +11,8 @@
  * the student directly either — only used to decide whether the
  * candidate response may be shown.
  */
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { APIError } from "@anthropic-ai/sdk";
+import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import type { BrainstormQuestionType } from "@/lib/aiAssistanceGenerator";
 import { boundedHiddenReference } from "@/lib/aiAssistancePolicy";
@@ -232,12 +233,6 @@ function buildUserPrompt(input: BrainstormVerifierInput): string {
   return lines.join("\n");
 }
 
-function stripMarkdownFences(text: string): string {
-  const trimmed = text.trim();
-  const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
-  return fenceMatch ? fenceMatch[1].trim() : trimmed;
-}
-
 let cachedClient: Anthropic | undefined;
 
 /** Bounded request timeout and retry count (Part 10 hardening) — see the matching constants in aiAssistanceGenerator.ts. */
@@ -291,48 +286,48 @@ export async function verifyBrainstormResponse(
   try {
     response = await callWithTransientRetry(
       () =>
-        client.messages.create({
+        client.messages.parse({
           model: getAnthropicBrainstormVerifierModel(),
           max_tokens: 220,
           temperature: 0,
           system: buildSystemPrompt(),
           messages: [{ role: "user", content: buildUserPrompt(input) }],
+          output_config: { format: zodOutputFormat(verifierResultSchema) },
         }),
       { maxAttempts: AI_ASSISTANCE_VERIFIER_MAX_ATTEMPTS, onAttempt: diagnostics?.onAttempt },
     );
   } catch (err) {
-    // Never include the caught error's own message — see the identical
-    // note in aiAssistanceGenerator.ts. A verifier failure is at least
-    // as sensitive to sanitise as a generator one, since the SDK error
-    // could in principle echo back request content — the classification
-    // category alone (never the message) is safe to log/persist.
-    throw new AiAssistanceVerificationError("Anthropic API request failed", classifyProviderError(err));
+    // A genuine transport/API failure (network, auth, rate limit, 5xx,
+    // timeout) is always an APIError (or one of its connection-error
+    // subclasses, both of which extend APIError) and keeps using the
+    // existing classification. Anthropic's own structured-output parser
+    // (zodOutputFormat's `.parse`, invoked internally by
+    // client.messages.parse) throws a plain AnthropicError — never an
+    // APIError, since no HTTP failure occurred — when the model's JSON is
+    // malformed or fails verifierResultSchema; that is a schema failure,
+    // not a provider failure, so it must never be relabelled "Anthropic
+    // API request failed". Never forward the caught error's own message
+    // either way — see the identical note in aiAssistanceGenerator.ts: it
+    // could echo back request/candidate content.
+    if (err instanceof APIError) {
+      throw new AiAssistanceVerificationError("Anthropic API request failed", classifyProviderError(err));
+    }
+    throw new AiAssistanceVerificationError("Verifier output did not match the expected schema", "SCHEMA_ERROR");
   }
 
-  const textBlock = response.content.find((block) => block.type === "text");
-  if (!textBlock || textBlock.type !== "text") {
-    throw new AiAssistanceVerificationError("Anthropic response did not contain a text block", "PARSE_ERROR");
+  const parsed = response.parsed_output;
+  if (!parsed) {
+    throw new AiAssistanceVerificationError("Verifier structured output was unavailable", "SCHEMA_ERROR");
   }
 
-  const cleaned = stripMarkdownFences(textBlock.text);
-
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(cleaned);
-  } catch {
-    // Do not include the raw model text or the parser's own message —
-    // both could contain a snippet of the (potentially unsafe) candidate
-    // content the verifier was judging.
-    throw new AiAssistanceVerificationError("Failed to parse verifier output as JSON", "PARSE_ERROR");
-  }
-
+  // Not trusted blindly — verifierResultSchema remains authoritative.
   // Also structurally rejects an unknown/invented risk code (Part 1 —
   // "the verifier returns an unknown risk code") via the z.enum(RISK_CODES)
   // array element schema: any code outside the fixed RISK_CODES list
   // fails validation here exactly like any other malformed payload, so
   // it hits the same fail-closed path rather than being silently
   // accepted or crashing later.
-  const validated = verifierResultSchema.safeParse(parsedJson);
+  const validated = verifierResultSchema.safeParse(parsed);
   if (!validated.success) {
     throw new AiAssistanceVerificationError("Verifier output did not match the expected schema", "SCHEMA_ERROR");
   }
