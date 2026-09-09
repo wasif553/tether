@@ -332,8 +332,15 @@ export async function POST(
             id: q.id,
             questionPoolId: q.questionPoolId,
             order: q.order,
+            difficulty: q.difficulty,
           })),
-          pools: exam.questionPools.map((p) => ({ id: p.id, drawCount: p.drawCount })),
+          pools: exam.questionPools.map((p) => ({
+            id: p.id,
+            drawCount: p.drawCount,
+            drawCountEasy: p.drawCountEasy,
+            drawCountMedium: p.drawCountMedium,
+            drawCountHard: p.drawCountHard,
+          })),
           randomiseQuestionOrder: settings.randomiseQuestionOrder,
         });
         const selectedSet = new Set(selectedQuestionIds);

@@ -1,0 +1,77 @@
+-- Pool Selection Refinement v1 (additive) — see
+-- docs/pool-selection-refinement-v1.md.
+--
+-- Generated via:
+--   npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script
+-- then hand-extracted to just the new statements this feature adds —
+-- Question and QuestionPool already exist in production, so unlike a
+-- genuinely new table (where the --from-empty diff's CREATE TABLE can be
+-- used as-is), the four new columns below are hand-written as ALTER TABLE
+-- ADD COLUMN statements. Additive only — no existing table, column,
+-- constraint, or enum value is changed or removed.
+--
+-- Changes:
+--   1. One new nullable column on the EXISTING Question table:
+--      - difficulty (TEXT) — "easy" | "medium" | "hard", validated in
+--        src/lib/questionDifficulty.ts. A plain String, not a Prisma enum,
+--        matching this schema's own established convention (see
+--        Question.source / SubmissionSimilarityAnalysis.status) to avoid
+--        enum-alteration migration risk. Stamped once, at creation time,
+--        from the source BankQuestion's own difficulty (Bank -> Exam
+--        copy) or the AI generator's own per-question difficulty (AI
+--        generation) — an independent snapshot, never re-derived from
+--        BankQuestion after copy. Null for every question created before
+--        this feature, and for manual/bulk-paste questions, which have no
+--        difficulty signal to record — their difficulty is genuinely
+--        unrecorded and is never guessed or backfilled.
+--   2. Three new nullable columns on the EXISTING QuestionPool table:
+--      - drawCountEasy, drawCountMedium, drawCountHard (INTEGER) —
+--        optional per-difficulty draw quotas, layered on top of the
+--        existing drawCount without replacing it. All three null (the
+--        default, and every pool that predates this feature) means
+--        "quota-unconfigured" — drawCount alone still governs the draw
+--        exactly as before, zero behavior change for any existing pool.
+--
+-- IMPORTANT — shared database: Preview and Production currently point at
+-- the SAME Supabase database (see docs/migration-ledger.md). This
+-- migration must be applied ONCE, not once per environment. Run the
+-- pre-check query below first; if it already shows the change applied,
+-- do not re-run this file.
+--
+-- Apply via the Supabase SQL Editor (or `psql`). Do NOT run
+-- `prisma db push`, `prisma migrate deploy`, `prisma migrate dev`, or
+-- `prisma migrate resolve`.
+--
+-- Idempotency: this file is NOT idempotent — it is a ONE-TIME script.
+-- Re-running it after a successful apply will error ("column already
+-- exists"). Run the pre-check query first.
+--
+-- THIS MIGRATION HAS NOT BEEN APPLIED TO ANY ENVIRONMENT. Do not apply it
+-- without explicit authorization — see docs/migration-ledger.md. Mark as
+-- PENDING — NOT APPLIED until an operator actually runs it.
+
+-- ============================================================================
+-- 0. Pre-check (read-only) — run BEFORE applying anything below, to
+--    confirm this migration has not already been applied to this
+--    database (remember: Preview and Production are the SAME database).
+-- ============================================================================
+-- SELECT column_name FROM information_schema.columns
+--   WHERE table_name = 'Question' AND column_name = 'difficulty'
+--   UNION ALL
+--   SELECT column_name FROM information_schema.columns
+--   WHERE table_name = 'QuestionPool' AND column_name IN ('drawCountEasy', 'drawCountMedium', 'drawCountHard');
+-- No rows -> safe to apply. Any rows -> this migration (or part of it)
+-- has already run; investigate before re-applying.
+
+-- ============================================================================
+-- 1. AlterTable: Question — add the new nullable difficulty snapshot column.
+-- ============================================================================
+ALTER TABLE "Question" ADD COLUMN "difficulty" TEXT;
+
+-- ============================================================================
+-- 2. AlterTable: QuestionPool — add the three new nullable per-difficulty
+--    draw-quota columns.
+-- ============================================================================
+ALTER TABLE "QuestionPool" ADD COLUMN "drawCountEasy" INTEGER;
+ALTER TABLE "QuestionPool" ADD COLUMN "drawCountMedium" INTEGER;
+ALTER TABLE "QuestionPool" ADD COLUMN "drawCountHard" INTEGER;

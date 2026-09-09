@@ -14,10 +14,18 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 
+// Pool Selection Refinement v1 — see docs/pool-selection-refinement-v1.md.
+// A per-difficulty quota is >= 0 (unlike drawCount, 0 is a meaningful
+// value here — "none from this band," not "unlimited").
+const drawQuotaField = z.number().int().min(0).nullable().optional();
+
 const updatePoolSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().nullable().optional(),
   drawCount: z.number().int().positive().nullable().optional(),
+  drawCountEasy: drawQuotaField,
+  drawCountMedium: drawQuotaField,
+  drawCountHard: drawQuotaField,
   order: z.number().int().optional(),
 });
 
@@ -61,6 +69,9 @@ export async function PATCH(
       name: updated.name,
       description: updated.description,
       drawCount: updated.drawCount,
+      drawCountEasy: updated.drawCountEasy,
+      drawCountMedium: updated.drawCountMedium,
+      drawCountHard: updated.drawCountHard,
       order: updated.order,
     });
   } catch (err) {
