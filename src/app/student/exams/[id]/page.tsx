@@ -127,6 +127,7 @@ import {
 import { resolveNativeLockdownConfirmation, shouldBlockExamContentRendering, type ContentGateState } from "@/lib/secureExamNativeLockdown";
 import { buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
 import { fetchWithTimeoutAndRetry } from "@/lib/fetchWithTimeout";
+import { withTimeout, PromiseTimeoutError } from "@/lib/promiseTimeout";
 
 // Exam-load latency follow-up (physical acceptance review) — bounds how
 // long the exam-open critical-path fetches below (secure-client status,
@@ -135,6 +136,50 @@ import { fetchWithTimeoutAndRetry } from "@/lib/fetchWithTimeout";
 // indefinitely on a stalled connection. One retry only — this is for the
 // latency-sensitive opening sequence, not a background sync queue.
 const EXAM_LOAD_FETCH_TIMEOUT_MS = 12_000;
+
+// Physical hang investigation follow-up — the fetch timeout above does
+// NOT protect window.sesLockdown.getSecureClientEnforcementState(): it's
+// a plain Electron IPC Promise, not a fetch(), so a stuck main-process
+// handler previously left it (and therefore contentGateState === "PENDING",
+// and the plain "Loading..." screen) unsettled forever — the confirmed
+// root cause of exam-open hangs that outlasted every fetch timeout on this
+// page by minutes. No retry here (unlike the fetch helper above): both
+// call sites already fail closed identically whether the bridge call
+// threw or simply never answered (see resolveNativeLockdownConfirmation —
+// nativeState: null always resolves to REACTIVATION_REQUIRED, never a
+// bypass), so retrying in place would only add latency before reaching
+// that same safe outcome.
+const NATIVE_BRIDGE_TIMEOUT_MS = 8_000;
+
+// Physical hang investigation follow-up — a top-level safety net,
+// independent of (and in addition to) the two bounded timeouts above:
+// if contentGateState is still "PENDING" this long after mount, something
+// on the critical path is misbehaving in a way neither timeout catches
+// (see EXAM_OPEN_WATCHDOG_MS's usage below). Chosen so the worst case
+// (secure-client/status fetch timeout+retry at EXAM_LOAD_FETCH_TIMEOUT_MS
+// each, ~24s) still resolves to its own deterministic STATUS_UNAVAILABLE
+// screen well before this fires, while still giving a hard <=30s bound on
+// reaching SOME deterministic screen (never an indefinite spinner).
+const EXAM_OPEN_WATCHDOG_MS = 30_000;
+
+// Physical hang investigation follow-up, Part 3 — Preview/dev-only visible
+// loading-stage diagnostics (never Production): an allowlist, deliberately
+// never a `!== "production"` denylist, so an unset/misconfigured env
+// variable fails closed to "hidden" rather than accidentally showing
+// internal diagnostic timing on a real student's Production exam. Next.js
+// inlines NODE_ENV and any NEXT_PUBLIC_-prefixed variable referenced this
+// way at build time (see the existing NEXT_PUBLIC_TETHER_PHONE_CALIBRATION_ENABLED
+// usage below for the same pattern already established in this file).
+// NEXT_PUBLIC_VERCEL_ENV is Vercel's own automatically-injected mirror of
+// its server-only VERCEL_ENV (see src/lib/secureClientAvailability.ts's
+// doc comment for why VERCEL_ENV, not NODE_ENV, is what actually
+// distinguishes a Preview deployment from Production); the explicit env
+// var is a manual fallback if a project's automatic system-env exposure
+// is ever off.
+const SHOW_EXAM_LOAD_DIAGNOSTICS =
+  process.env.NODE_ENV === "development" ||
+  process.env.NEXT_PUBLIC_VERCEL_ENV === "preview" ||
+  process.env.NEXT_PUBLIC_TETHER_EXAM_LOAD_DIAGNOSTICS_ENABLED === "true";
 
 /**
  * Strengthened phone detection (Part 3/4) — converts raw detector output
@@ -959,6 +1004,36 @@ export default function TakeExamPage({
   // render gate from this — see the render-time check near `if (!data)`.
   const [contentGateState, setContentGateState] = useState<ContentGateState>("PENDING");
 
+  // Physical hang investigation follow-up, Part 7 — a top-level safety
+  // net INDEPENDENT of the bounded fetch/bridge timeouts above: if
+  // something on the critical path this pass didn't find (or a future
+  // regression) leaves contentGateState stuck at "PENDING" past
+  // EXAM_OPEN_WATCHDOG_MS, this stops the indefinite spinner and shows a
+  // deterministic retry screen instead. Read via a ref (not the state
+  // value itself) inside the watchdog's single setTimeout callback below,
+  // since that callback is captured once on mount and must see the
+  // LATEST gate state, not the one from the render that scheduled it.
+  const contentGateStateRef = useRef(contentGateState);
+  useEffect(() => {
+    contentGateStateRef.current = contentGateState;
+  }, [contentGateState]);
+  const [examOpenStalled, setExamOpenStalled] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (contentGateStateRef.current === "PENDING") {
+        logClientTetherDiagnostic("EXAM_OPEN_WATCHDOG_FIRED", {
+          watchdogMs: EXAM_OPEN_WATCHDOG_MS,
+          secureStatusFetchCount: secureStatusFetchCountRef.current,
+          nativeBridgeQueryCount: nativeBridgeQueryCountRef.current,
+          loadSubmissionFetchCount: loadSubmissionFetchCountRef.current,
+          questionFetchCount: questionFetchCountRef.current,
+        });
+        setExamOpenStalled(true);
+      }
+    }, EXAM_OPEN_WATCHDOG_MS);
+    return () => clearTimeout(timer);
+  }, []);
+
   // v1.7.5 P0 — REMOVED the old Corrective-pass-v1.2.1/Task-C blind
   // mount-time cover (setSecureClientEnforcementState({active:true,
   // ready:false, ...}), called unconditionally on every mount). That
@@ -1026,7 +1101,19 @@ export default function TakeExamPage({
     }
   }, [id]);
 
+  // Physical hang investigation follow-up, Part 4 — bounded attempt
+  // counters for the exam-open critical path, surfaced in
+  // logClientTetherDiagnostic and the Preview/dev-only diagnostic panel
+  // below. Refs, not state: purely observational, must never themselves
+  // trigger a re-render or influence a dependency array (that would risk
+  // becoming exactly the kind of effect loop this follow-up investigates).
+  const secureStatusFetchCountRef = useRef(0);
+  const loadSubmissionFetchCountRef = useRef(0);
+  const questionFetchCountRef = useRef(0);
+  const nativeBridgeQueryCountRef = useRef(0);
+
   const loadSubmission = useCallback(async () => {
+    loadSubmissionFetchCountRef.current += 1;
     try {
       const submissionFetchStartedAtMs = performance.now();
       const res = await fetchWithTimeoutAndRetry(`/api/submissions/${id}`, {}, EXAM_LOAD_FETCH_TIMEOUT_MS);
@@ -1154,6 +1241,7 @@ export default function TakeExamPage({
       };
       let statusBody: PreLoadStatusResponse | null = null;
       const statusFetchStartedAtMs = performance.now();
+      secureStatusFetchCountRef.current += 1;
       try {
         const res = await fetchWithTimeoutAndRetry(`/api/submissions/${id}/secure-client/status`, {}, EXAM_LOAD_FETCH_TIMEOUT_MS);
         if (res.ok) statusBody = await res.json().catch(() => null);
@@ -1196,10 +1284,29 @@ export default function TakeExamPage({
       const bridgeAvailable = typeof window.sesLockdown?.getSecureClientEnforcementState === "function";
       let nativeState: { active: boolean; ready: boolean; requireSingleDisplay: boolean } | null = null;
       if (bridgeAvailable) {
+        const bridgeQueryStartedAtMs = performance.now();
+        nativeBridgeQueryCountRef.current += 1;
         try {
-          nativeState = (await window.sesLockdown!.getSecureClientEnforcementState!()) ?? null;
-        } catch {
+          // Physical hang investigation follow-up — this is a plain
+          // Electron IPC Promise, NOT a fetch(); fetchWithTimeoutAndRetry
+          // above cannot bound it. A stuck main-process handler here was
+          // the confirmed root cause of exam-open hangs lasting minutes:
+          // contentGateState stayed "PENDING" (a plain "Loading..."
+          // screen) forever, since nothing downstream of this line ever
+          // ran. withTimeout bounds the WAIT only — it never cancels the
+          // underlying IPC call — and a timeout is deliberately treated
+          // identically to the existing catch below (nativeState stays
+          // null), which resolveNativeLockdownConfirmation already
+          // resolves to the same safe REACTIVATION_REQUIRED redirect as
+          // any other unavailable/failed native query. No bypass.
+          nativeState = (await withTimeout(window.sesLockdown!.getSecureClientEnforcementState!(), NATIVE_BRIDGE_TIMEOUT_MS)) ?? null;
+        } catch (err) {
           nativeState = null;
+          logClientTetherDiagnostic("native_bridge_query_failed", {
+            stage: "preLoadGate",
+            timedOut: err instanceof PromiseTimeoutError,
+            durationMs: Math.round(performance.now() - bridgeQueryStartedAtMs),
+          });
         }
       }
       if (cancelled) return;
@@ -1424,6 +1531,7 @@ export default function TakeExamPage({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setOneQuestion((prev) => ({ ...prev, loading: true, error: null }));
     const questionFetchStartedAtMs = performance.now();
+    questionFetchCountRef.current += 1;
     fetchWithTimeoutAndRetry(`/api/submissions/${id}/question`, {}, EXAM_LOAD_FETCH_TIMEOUT_MS)
       .then((res) => (res.ok ? (res.json() as Promise<OneQuestionPayload>) : Promise.reject(res)))
       .then((payload) => {
@@ -1877,10 +1985,20 @@ export default function TakeExamPage({
         const bridgeAvailable = typeof window.sesLockdown?.getSecureClientEnforcementState === "function";
         let nativeState: { active: boolean; ready: boolean; requireSingleDisplay: boolean } | null = null;
         if (gated && bridgeAvailable) {
+          const bridgeQueryStartedAtMs = performance.now();
+          nativeBridgeQueryCountRef.current += 1;
           try {
-            nativeState = (await window.sesLockdown!.getSecureClientEnforcementState!()) ?? null;
-          } catch {
+            // Physical hang investigation follow-up — same unbounded-IPC
+            // risk and same fail-closed treatment as the pre-load gate's
+            // native bridge query above; see that call site's comment.
+            nativeState = (await withTimeout(window.sesLockdown!.getSecureClientEnforcementState!(), NATIVE_BRIDGE_TIMEOUT_MS)) ?? null;
+          } catch (err) {
             nativeState = null;
+            logClientTetherDiagnostic("native_bridge_query_failed", {
+              stage: "postLoadReconciliation",
+              timedOut: err instanceof PromiseTimeoutError,
+              durationMs: Math.round(performance.now() - bridgeQueryStartedAtMs),
+            });
           }
         }
         if (cancelled) return;
@@ -4021,6 +4139,67 @@ export default function TakeExamPage({
     [secureModeEnabled, reportIntegrityEvent, oneQuestionAtATime, secureSettings?.showQuestionNavigator, loadNavigator, resilientAutosave.save],
   );
 
+  // Physical hang investigation follow-up, Part 3 — the three stages the
+  // exam-open critical path actually passes through, in order. Purely
+  // derived from state this render already has (never a fourth, hook-held
+  // copy that could drift from what's actually happening): "verifying"
+  // covers the native-lockdown/secure-client-status determination (the
+  // stage that was hanging before this fix); "session" covers
+  // loadSubmission's GET /api/submissions/[id]; "question" covers the
+  // one-question-at-a-time GET .../question fetch. Reused at every
+  // "still opening" render branch below so the diagnostic panel and the
+  // watchdog above stay in sync with exactly one source of truth.
+  const loadStage: "verifying" | "session" | "question" =
+    shouldBlockExamContentRendering(inLockdownBrowser, contentGateState) && contentGateState === "PENDING"
+      ? "verifying"
+      : !data
+        ? "session"
+        : "question";
+  const stillOpeningExam = loadStage !== "question" || (oneQuestionAtATime && oneQuestion.loading);
+
+  // Physical hang investigation follow-up, Part 3 — ticks once per second
+  // purely to drive the elapsed-seconds readout in the Preview/dev-only
+  // diagnostic panel below. SHOW_EXAM_LOAD_DIAGNOSTICS is a build-time-
+  // inlined constant, so this interval is never even created in
+  // Production — Production behaviour (a plain, silent "Loading..." with
+  // no timer) is unchanged.
+  const [elapsedLoadSeconds, setElapsedLoadSeconds] = useState(0);
+  useEffect(() => {
+    if (!SHOW_EXAM_LOAD_DIAGNOSTICS || !stillOpeningExam) return;
+    const startedAtMs = Date.now();
+    const interval = setInterval(() => {
+      setElapsedLoadSeconds(Math.round((Date.now() - startedAtMs) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [stillOpeningExam]);
+
+  // Physical hang investigation follow-up, Part 3 — Preview/dev-only.
+  // Never exposes a submission id, exam id, token, or any other internal
+  // identifier — only the fixed stage labels below and the elapsed-second
+  // counter. Returns null outright (no DOM at all) whenever
+  // SHOW_EXAM_LOAD_DIAGNOSTICS is false, i.e. always in Production.
+  function renderExamOpenDiagnostics() {
+    if (!SHOW_EXAM_LOAD_DIAGNOSTICS) return null;
+    const steps: { key: "verifying" | "session" | "question"; label: string }[] = [
+      { key: "verifying", label: "Verifying Tether Secure Browser" },
+      { key: "session", label: "Loading exam session" },
+      { key: "question", label: "Loading first question" },
+    ];
+    const currentIndex = steps.findIndex((step) => step.key === loadStage);
+    return (
+      <div className="mt-3 rounded border border-gray-200 bg-gray-50 p-3 text-left text-xs text-gray-600">
+        <p className="font-medium text-gray-700">Opening secure exam… ({elapsedLoadSeconds}s)</p>
+        <ol className="mt-1 space-y-0.5">
+          {steps.map((step, idx) => (
+            <li key={step.key}>
+              {idx + 1}. {step.label} {idx < currentIndex ? "✓" : idx === currentIndex ? "…" : ""}
+            </li>
+          ))}
+        </ol>
+      </div>
+    );
+  }
+
   function handleChange(questionId: string, value: string) {
     if (submitting || autoSubmitLocked || timerStopped) return;
     setResponses((prev) => ({ ...prev, [questionId]: value }));
@@ -4077,12 +4256,35 @@ export default function TakeExamPage({
         </div>
       );
     }
+    // Physical hang investigation follow-up, Part 7 — a required stage
+    // (native lockdown determination) has exceeded EXAM_OPEN_WATCHDOG_MS:
+    // never leave the student on an indefinite spinner. This is a safety
+    // net on top of, not a replacement for, the bounded fetch/bridge
+    // timeouts above (which normally resolve to CONFIRMED/
+    // REACTIVATION_REQUIRED/STATUS_UNAVAILABLE well before this fires) —
+    // see EXAM_OPEN_WATCHDOG_MS's own comment for the worst-case budget.
+    if (examOpenStalled) {
+      return (
+        <div className="mx-auto mt-16 max-w-md rounded border border-gray-200 p-6 text-center">
+          <h1 className="text-lg font-medium">Tether could not open this exam session.</h1>
+          <p className="mt-3 text-sm text-gray-700">Try again, or contact support if the problem continues.</p>
+          <button onClick={() => window.location.reload()} className="mt-4 rounded bg-black px-4 py-2 text-sm text-white">
+            Try again
+          </button>
+        </div>
+      );
+    }
     // PENDING (still determining) or REACTIVATION_REQUIRED (a redirect to
     // tether-launch is already in flight, issued by the effect above) —
     // both are brief, ordinary loading states; no overlay, no content,
     // and (for REACTIVATION_REQUIRED) no question-bearing request was
     // ever made in the first place.
-    return <p className="text-gray-500">Loading...</p>;
+    return (
+      <div>
+        <p className="text-gray-500">Loading...</p>
+        {renderExamOpenDiagnostics()}
+      </div>
+    );
   }
 
   if (!data && loadError) {
@@ -4097,7 +4299,14 @@ export default function TakeExamPage({
       </div>
     );
   }
-  if (!data) return <p className="text-gray-500">Loading...</p>;
+  if (!data) {
+    return (
+      <div>
+        <p className="text-gray-500">Loading...</p>
+        {renderExamOpenDiagnostics()}
+      </div>
+    );
+  }
 
   if (data.status !== "IN_PROGRESS") {
     return (
@@ -4950,7 +5159,12 @@ export default function TakeExamPage({
                   the viewport instead of wrapping. Harmless (a no-op) in
                   the single-column, no-navigator case. */}
               <div className="min-w-0">
-              {oneQuestion.loading && <p className="text-gray-500">Loading question...</p>}
+              {oneQuestion.loading && (
+                <div>
+                  <p className="text-gray-500">Loading question...</p>
+                  {renderExamOpenDiagnostics()}
+                </div>
+              )}
               {!oneQuestion.loading && oneQuestion.payload && (
                 // Exam layout stability follow-up — a floor, not a ceiling:
                 // short-answer/MCQ questions are otherwise much shorter than
