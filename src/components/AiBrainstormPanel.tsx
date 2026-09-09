@@ -357,7 +357,13 @@ export function AiBrainstormPanel(props: {
             ))}
           </div>
 
-          <div className="mt-2 flex gap-2">
+          <form
+            className="mt-2 flex gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void sendPrompt(customPrompt);
+            }}
+          >
             <label htmlFor={inputId} className="sr-only">
               Ask Tether Brainstorm a question
             </label>
@@ -373,14 +379,13 @@ export function AiBrainstormPanel(props: {
               className="flex-1 rounded border border-gray-300 px-2 py-1 text-xs disabled:opacity-50"
             />
             <button
-              type="button"
+              type="submit"
               disabled={disabled || !customPrompt.trim()}
-              onClick={() => sendPrompt(customPrompt)}
               className="rounded border border-teal-700 bg-teal-700 px-3 py-1 text-xs font-medium text-white hover:bg-teal-800 disabled:opacity-50"
             >
               {sending ? "Thinking..." : "Ask"}
             </button>
-          </div>
+          </form>
         </div>
       </div>
     </section>

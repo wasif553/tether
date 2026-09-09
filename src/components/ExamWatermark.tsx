@@ -15,9 +15,25 @@ export type ExamWatermarkProps = {
   refreshIntervalMs?: number;
 };
 
-// A grid of repeated tiles reads clearly across the whole question area in
-// a photo/screenshot without needing canvas or an image — plain CSS only.
-const WATERMARK_TILE_COUNT = 24;
+// Fixed positions deliberately avoid the visible vertical stripes a regular
+// grid creates. Six staggered top bands (10/28/46/62/78/93%), three tiles
+// each with a distinct left offset per band — no two bands share a left
+// value, so no column ever lines up top-to-bottom. The first eight entries
+// (two from each of bands A/B/D/F) cover narrow viewports; the remaining
+// ten complete the desktop distribution.
+const WATERMARK_TILE_POSITIONS = [
+  { left: 15, top: 10 }, { left: 85, top: 10 },
+  { left: 30, top: 28 }, { left: 95, top: 28 },
+  { left: 22, top: 62 }, { left: 90, top: 62 },
+  { left: 18, top: 93 }, { left: 87, top: 93 },
+  { left: 50, top: 10 },
+  { left: 65, top: 28 },
+  { left: 8, top: 46 }, { left: 42, top: 46 }, { left: 78, top: 46 },
+  { left: 57, top: 62 },
+  { left: 5, top: 78 }, { left: 38, top: 78 }, { left: 72, top: 78 },
+  { left: 52, top: 93 },
+] as const;
+const WATERMARK_TILE_COUNT = WATERMARK_TILE_POSITIONS.length;
 
 /**
  * Exam Watermark v1 — see docs/exam-watermark-v1.md. A visible,
@@ -44,9 +60,12 @@ export function ExamWatermark({ student, submissionId, refreshIntervalMs = 45_00
 
   return (
     <div aria-hidden="true" className="pointer-events-none absolute inset-0 select-none overflow-hidden">
-      <div className="grid h-full w-full grid-cols-2 gap-10 p-2 sm:grid-cols-3">
-        {Array.from({ length: WATERMARK_TILE_COUNT }, (_, i) => (
-          <div key={i} className="flex items-center justify-center" style={{ transform: "rotate(-28deg)" }}>
+      {WATERMARK_TILE_POSITIONS.slice(0, WATERMARK_TILE_COUNT).map((position, index) => (
+          <div
+            className={index < 8 ? "absolute" : "absolute hidden lg:block"}
+            key={`${position.left}-${position.top}`}
+            style={{ left: `${position.left}%`, top: `${position.top}%`, transform: "translate(-50%, -50%) rotate(-28deg)" }}
+          >
             <p
               className="whitespace-pre-line text-center text-[10px] font-medium leading-tight text-gray-900"
               // Final minor UX refinements v1 — restored to the
@@ -62,7 +81,6 @@ export function ExamWatermark({ student, submissionId, refreshIntervalMs = 45_00
             </p>
           </div>
         ))}
-      </div>
     </div>
   );
 }
