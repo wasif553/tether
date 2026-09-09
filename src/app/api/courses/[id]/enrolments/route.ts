@@ -8,6 +8,7 @@ import {
   assertSameInstitution,
   institutionErrorResponse,
 } from "@/lib/institutionScope";
+import { canAddLecturerToCourse } from "@/lib/courseTeachingTeam";
 
 const enrolSchema = z
   .object({
@@ -71,12 +72,31 @@ export async function POST(
       // institution-bound at creation (self-signup atomically creates
       // their own institution; platform-admin invites set it directly),
       // so there is no "null-institution lecturer" case to handle here.
-      if (!targetUser || targetUser.institutionId !== course.institutionId) {
+      const lecturerDecision = canAddLecturerToCourse(
+        targetUser
+          ? { role: targetUser.role, institutionId: targetUser.institutionId }
+          : null,
+        course.institutionId,
+      );
+      if (!lecturerDecision.ok) {
+        const status =
+          lecturerDecision.code === "NOT_FOUND"
+            ? 404
+            : lecturerDecision.code === "DIFFERENT_INSTITUTION"
+              ? 409
+              : 400;
         return NextResponse.json(
-          { error: "User does not belong to this institution" },
-          { status: 400 },
+          { error: lecturerDecision.message, code: lecturerDecision.code },
+          { status },
         );
       }
+      if (!targetUser) {
+        // Unreachable: canAddLecturerToCourse only returns ok:true when a
+        // non-null target was passed in. This guard exists solely so
+        // TypeScript can narrow targetUser below without a non-null assertion.
+        return NextResponse.json({ error: "Not found" }, { status: 404 });
+      }
+
       const enrollment = await prisma.courseEnrollment.upsert({
         where: { courseId_userId: { courseId, userId: targetUser.id } },
         update: { role: "LECTURER" },

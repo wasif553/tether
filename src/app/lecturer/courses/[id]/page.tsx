@@ -74,6 +74,9 @@ export default function CourseDetailPage({
   const [email, setEmail] = useState("");
   const [enrolling, setEnrolling] = useState(false);
   const [addState, setAddState] = useState<AddStudentState>({ kind: "idle" });
+  const [lecturerEmail, setLecturerEmail] = useState("");
+  const [addingLecturer, setAddingLecturer] = useState(false);
+  const [lecturerMessage, setLecturerMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
 
   const [invitations, setInvitations] = useState<InvitationRow[]>([]);
   const [creatingInviteFor, setCreatingInviteFor] = useState<string | null>(null);
@@ -145,6 +148,33 @@ export default function CourseDetailPage({
       kind: "error",
       message: typeof body?.error === "string" ? body.error : "Failed to add student.",
     });
+  }
+
+  async function addLecturer() {
+    const normalizedEmail = lecturerEmail.trim().toLowerCase();
+    if (!normalizedEmail) return;
+
+    setAddingLecturer(true);
+    setLecturerMessage(null);
+    const res = await fetch(`/api/courses/${id}/enrolments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: normalizedEmail, role: "LECTURER" }),
+    });
+    const body = await res.json().catch(() => null);
+    setAddingLecturer(false);
+
+    if (!res.ok) {
+      setLecturerMessage({
+        kind: "error",
+        text: typeof body?.error === "string" ? body.error : "Failed to add lecturer.",
+      });
+      return;
+    }
+
+    setLecturerEmail("");
+    setLecturerMessage({ kind: "success", text: "Lecturer added to this course." });
+    load();
   }
 
   async function createInvitation(studentEmail: string) {
@@ -357,16 +387,70 @@ export default function CourseDetailPage({
         )}
       </SectionCard>
 
-      <SectionCard title={`Lecturers (${lecturers.length})`}>
+      <SectionCard
+        title={`Teaching staff (${lecturers.length})`}
+        subtitle="Lecturers assigned to this course can manage its exams, students, marking, and integrity review."
+      >
         <div className="space-y-2">
           {lecturers.map((e) => (
-            <div key={e.id} className="rounded-lg border border-lecturer-border p-3 text-sm text-lecturer-text-primary">
-              {e.user.name} — {e.user.email}
+            <div
+              key={e.id}
+              className="flex items-center justify-between gap-3 rounded-lg border border-lecturer-border p-3 text-sm"
+            >
+              <div className="min-w-0">
+                <p className="truncate font-medium text-lecturer-text-primary">{e.user.name}</p>
+                <p className="truncate text-xs text-lecturer-text-secondary">{e.user.email}</p>
+              </div>
+              <StatusBadge tone="neutral">Lecturer</StatusBadge>
             </div>
           ))}
         </div>
-      </SectionCard>
 
+        <div className="mt-4 border-t border-lecturer-border pt-4">
+          <p className="mb-2 text-sm font-medium text-lecturer-text-primary">Add lecturer</p>
+          <div className="flex items-end gap-2">
+            <input
+              type="email"
+              placeholder="lecturer@example.com"
+              aria-label="Lecturer email"
+              className="flex-1 rounded-lg border border-lecturer-border px-3 py-2 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+              value={lecturerEmail}
+              onChange={(e) => {
+                setLecturerEmail(e.target.value);
+                if (lecturerMessage) setLecturerMessage(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !addingLecturer && lecturerEmail.trim()) {
+                  e.preventDefault();
+                  void addLecturer();
+                }
+              }}
+            />
+            <PrimaryButton
+              type="button"
+              onClick={addLecturer}
+              disabled={addingLecturer || !lecturerEmail.trim()}
+            >
+              {addingLecturer ? "Adding…" : "Add lecturer"}
+            </PrimaryButton>
+          </div>
+
+          <p className="mt-2 text-xs text-lecturer-text-secondary">
+            The lecturer must already have a Tether lecturer account in this institution.
+          </p>
+
+          {lecturerMessage && (
+            <p
+              className={`mt-2 text-sm ${
+                lecturerMessage.kind === "error" ? "text-[#B42318]" : "text-[#067647]"
+              }`}
+              role="status"
+            >
+              {lecturerMessage.text}
+            </p>
+          )}
+        </div>
+      </SectionCard>
       <SectionCard title={`Students (${students.length})`}>
         {students.length === 0 ? (
           <EmptyState title="No students enrolled yet" />

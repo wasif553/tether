@@ -7,6 +7,7 @@ import {
   assertSameInstitution,
   institutionErrorResponse,
 } from "@/lib/institutionScope";
+import { canRemoveCourseEnrollment } from "@/lib/courseTeachingTeam";
 
 async function getManageableCourse(courseId: string, session: Session) {
   const course = await prisma.course.findUnique({ where: { id: courseId } });
@@ -38,7 +39,25 @@ export async function DELETE(
     if (course === null) return NextResponse.json({ error: "Not found" }, { status: 404 });
     if (course === "forbidden") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-    await prisma.courseEnrollment.deleteMany({ where: { courseId, userId } });
+    const targetEnrollment = await prisma.courseEnrollment.findUnique({
+      where: { courseId_userId: { courseId, userId } },
+      select: { role: true },
+    });
+    if (!targetEnrollment) {
+      return NextResponse.json({ error: "Enrolment not found" }, { status: 404 });
+    }
+
+    const actorRole = isPlatformAdmin(session) ? "PLATFORM_ADMIN" : "LECTURER";
+    if (!canRemoveCourseEnrollment(actorRole, targetEnrollment.role)) {
+      return NextResponse.json(
+        { error: "Only a platform administrator can remove a lecturer from a course." },
+        { status: 403 },
+      );
+    }
+
+    await prisma.courseEnrollment.delete({
+      where: { courseId_userId: { courseId, userId } },
+    });
     return NextResponse.json({ ok: true });
   } catch (err) {
     const res = institutionErrorResponse(err);
