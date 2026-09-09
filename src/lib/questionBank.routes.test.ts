@@ -5,6 +5,7 @@ const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
 
 const { prisma } = await import("./prisma");
+const { getOrCreateTestInstitution } = await import("./testInstitution");
 const banksRoute = await import("../app/api/lecturer/question-banks/route");
 const bankRoute = await import("../app/api/lecturer/question-banks/[bankId]/route");
 const questionsRoute = await import("../app/api/lecturer/question-banks/[bankId]/questions/route");
@@ -13,8 +14,25 @@ const questionRoute = await import(
 );
 const importRoute = await import("../app/api/lecturer/exams/[examId]/import-bank-questions/route");
 
+// import-bank-questions now scopes exam ownership via institutionWhere
+// (Question Bank / Exam Pools redesign v1 — see
+// docs/question-bank-exam-pools-v1.md), so every mocked session below
+// needs a real institutionId or that route's institutionWhere() throws
+// MissingInstitutionError (-> 401) before it ever reaches the intended
+// assertion. Looked up by user id so existing sessionFor(...) call
+// sites below don't all need to be touched individually.
+const institutionByUserId = new Map<string, string>();
+
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT") {
-  return { user: { id: userId, role, email: `${userId}@test.local`, name: userId } };
+  return {
+    user: {
+      id: userId,
+      role,
+      email: `${userId}@test.local`,
+      name: userId,
+      institutionId: institutionByUserId.get(userId),
+    },
+  };
 }
 
 function jsonRequest(method: string, body?: unknown) {
@@ -31,18 +49,26 @@ let student: { id: string };
 let exam: { id: string };
 
 beforeAll(async () => {
+  const stamp = Date.now();
+  const instA = await getOrCreateTestInstitution(`qb-a-${stamp}`);
+  const instB = await getOrCreateTestInstitution(`qb-b-${stamp}`);
+
   const passwordHash = await bcrypt.hash("test-password", 4);
   lecturerA = await prisma.user.create({
-    data: { name: "QB Lecturer A", email: `qb-lect-a-${Date.now()}@test.local`, passwordHash, role: "LECTURER" },
+    data: { name: "QB Lecturer A", email: `qb-lect-a-${stamp}@test.local`, passwordHash, role: "LECTURER", institutionId: instA.id },
   });
   lecturerB = await prisma.user.create({
-    data: { name: "QB Lecturer B", email: `qb-lect-b-${Date.now()}@test.local`, passwordHash, role: "LECTURER" },
+    data: { name: "QB Lecturer B", email: `qb-lect-b-${stamp}@test.local`, passwordHash, role: "LECTURER", institutionId: instB.id },
   });
   student = await prisma.user.create({
-    data: { name: "QB Student", email: `qb-stud-${Date.now()}@test.local`, passwordHash, role: "STUDENT" },
+    data: { name: "QB Student", email: `qb-stud-${stamp}@test.local`, passwordHash, role: "STUDENT", institutionId: instA.id },
   });
+  institutionByUserId.set(lecturerA.id, instA.id);
+  institutionByUserId.set(lecturerB.id, instB.id);
+  institutionByUserId.set(student.id, instA.id);
+
   exam = await prisma.exam.create({
-    data: { title: "QB Test Exam", durationMins: 30, createdById: lecturerA.id },
+    data: { title: "QB Test Exam", durationMins: 30, createdById: lecturerA.id, institutionId: instA.id },
   });
 });
 

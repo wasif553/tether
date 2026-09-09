@@ -22,6 +22,8 @@ export default function QuestionBanksPage() {
   const [title, setTitle] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameTitle, setRenameTitle] = useState("");
 
   async function loadBanks() {
     setLoading(true);
@@ -56,6 +58,27 @@ export default function QuestionBanksPage() {
     setTitle("");
     setShowForm(false);
     await loadBanks();
+  }
+
+  async function handleRename(bankId: string) {
+    if (!renameTitle.trim()) return;
+    const res = await fetch(`/api/lecturer/question-banks/${bankId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: renameTitle.trim() }),
+    });
+    if (res.ok) {
+      setRenamingId(null);
+      await loadBanks();
+    }
+  }
+
+  async function handleDelete(bankId: string) {
+    if (!window.confirm("Delete this question bank? This cannot be undone. Questions already copied into exams are not affected.")) {
+      return;
+    }
+    const res = await fetch(`/api/lecturer/question-banks/${bankId}`, { method: "DELETE" });
+    if (res.ok) await loadBanks();
   }
 
   return (
@@ -97,20 +120,60 @@ export default function QuestionBanksPage() {
         {!loading && banks.length === 0 && <EmptyState title="No question banks yet" description="Create one to start building a reusable library of questions." />}
         {banks.map((bank) => (
           <div key={bank.id} className="flex items-center justify-between gap-3 rounded-xl border border-lecturer-border bg-lecturer-surface p-4">
-            <div className="min-w-0">
-              <p className="truncate text-sm font-semibold text-lecturer-text-primary">{bank.title}</p>
-              <p className="mt-0.5 truncate text-xs text-lecturer-text-secondary">
-                {[bank.subject, bank.courseCode].filter(Boolean).join(" · ")}
-                {bank.subject || bank.courseCode ? " · " : ""}
-                {bank._count.questions} question(s) · Updated {new Date(bank.updatedAt).toLocaleDateString()}
-              </p>
+            <div className="min-w-0 flex-1">
+              {renamingId === bank.id ? (
+                <div className="flex items-center gap-2">
+                  <input
+                    autoFocus
+                    className="w-full max-w-sm rounded-lg border border-lecturer-border px-2 py-1 text-sm text-lecturer-text-primary"
+                    value={renameTitle}
+                    onChange={(e) => setRenameTitle(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void handleRename(bank.id);
+                      if (e.key === "Escape") setRenamingId(null);
+                    }}
+                  />
+                  <button onClick={() => void handleRename(bank.id)} className="text-xs font-medium text-lecturer-accent underline">
+                    Save
+                  </button>
+                  <button onClick={() => setRenamingId(null)} className="text-xs text-lecturer-text-secondary underline">
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <p className="truncate text-sm font-semibold text-lecturer-text-primary">{bank.title}</p>
+                  <p className="mt-0.5 truncate text-xs text-lecturer-text-secondary">
+                    {[bank.subject, bank.courseCode].filter(Boolean).join(" · ")}
+                    {bank.subject || bank.courseCode ? " · " : ""}
+                    {bank._count.questions} question(s) · Updated {new Date(bank.updatedAt).toLocaleDateString()}
+                  </p>
+                </>
+              )}
             </div>
-            <Link
-              href={`/lecturer/question-banks/${bank.id}`}
-              className="shrink-0 rounded-lg border border-lecturer-border px-3 py-1.5 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
-            >
-              Open
-            </Link>
+            <div className="flex shrink-0 items-center gap-2">
+              <Link
+                href={`/lecturer/question-banks/${bank.id}`}
+                className="rounded-lg border border-lecturer-border px-3 py-1.5 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+              >
+                Open
+              </Link>
+              <button
+                onClick={() => {
+                  setRenamingId(bank.id);
+                  setRenameTitle(bank.title);
+                }}
+                className="rounded-lg border border-lecturer-border px-3 py-1.5 text-sm text-lecturer-text-primary hover:bg-lecturer-border-subtle"
+              >
+                Rename
+              </button>
+              <button
+                onClick={() => void handleDelete(bank.id)}
+                className="rounded-lg border border-lecturer-border px-3 py-1.5 text-sm text-[#B42318] hover:bg-lecturer-border-subtle"
+              >
+                Delete
+              </button>
+            </div>
           </div>
         ))}
       </div>

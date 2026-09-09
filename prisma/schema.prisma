@@ -212,34 +212,34 @@ model PlatformAuditLog {
 }
 
 model User {
-  id                   String             @id @default(cuid())
-  name                 String
-  email                String             @unique
-  passwordHash         String
-  role                 Role
-  createdAt            DateTime           @default(now())
-  examsCreated         Exam[]             @relation("ExamCreator")
-  submissions          Submission[]
-  integrityEvents      IntegrityEvent[]   @relation("IntegrityEventStudent")
-  resolvedEvents       IntegrityEvent[]   @relation("IntegrityEventResolver")
-  networkEvidence      NetworkEvidence[]  @relation("NetworkEvidenceStudent")
+  id                        String                       @id @default(cuid())
+  name                      String
+  email                     String                       @unique
+  passwordHash              String
+  role                      Role
+  createdAt                 DateTime                     @default(now())
+  examsCreated              Exam[]                       @relation("ExamCreator")
+  submissions               Submission[]
+  integrityEvents           IntegrityEvent[]             @relation("IntegrityEventStudent")
+  resolvedEvents            IntegrityEvent[]             @relation("IntegrityEventResolver")
+  networkEvidence           NetworkEvidence[]            @relation("NetworkEvidenceStudent")
   // canvasUserId is unique per institution, not globally — a self-hosted
   // Canvas instance at a different institution could otherwise collide
   // with another institution's user id. See docs/multi-tenant-migration.md.
-  canvasUserId         String?
-  canvasCourseIds      String[]           @default([])
-  questionBanks        QuestionBank[]
+  canvasUserId              String?
+  canvasCourseIds           String[]                     @default([])
+  questionBanks             QuestionBank[]
   // Multi-Tenant Architecture v1 (additive, nullable — see
   // docs/multi-tenant-migration.md). Nullable at the DB level; application
   // code treats it as required via src/lib/institutionScope.ts.
-  institutionId        String?
-  institution          Institution?       @relation(fields: [institutionId], references: [id])
+  institutionId             String?
+  institution               Institution?                 @relation(fields: [institutionId], references: [id])
   // Platform Admin Onboarding v2 — see docs/platform-admin-onboarding.md.
-  platformAuditLogs    PlatformAuditLog[]
+  platformAuditLogs         PlatformAuditLog[]
   // Course, Enrolment, Exam Assignment, Scheduling v1 — see
   // docs/course-enrolment-and-exam-assignment.md.
-  courseEnrollments    CourseEnrollment[]
-  examAssignments      ExamAssignment[]
+  courseEnrollments         CourseEnrollment[]
+  examAssignments           ExamAssignment[]
   // Tether Course Invitation + Acceptance v1 — see
   // docs/tether-course-invitation-acceptance-v1.md.
   courseInvitationsReceived CourseEnrollmentInvitation[] @relation("CourseInvitationStudent")
@@ -250,7 +250,7 @@ model User {
   // database id and never used as a login credential. Not unique-
   // constrained at the DB level in v1 — see that doc for why uniqueness
   // is deferred to a future release rather than enforced here.
-  institutionStudentId String?
+  institutionStudentId      String?
 
   // Answer Similarity Review + Oral Verification v1 (additive) — see
   // docs/answer-similarity-review-v1.md and
@@ -502,6 +502,27 @@ model Question {
   correctAnswer            String?
   points                   Int                         @default(1)
   order                    Int                         @default(0)
+  // Question Bank / Exam Pools redesign v1 (additive, nullable) — see
+  // docs/question-bank-exam-pools-v1.md. Provenance is only ever KNOWN
+  // for questions created after this feature — every existing Question
+  // row simply has both fields null (correctly: their real origin is
+  // genuinely unrecorded, never guessed/backfilled). A plain validated
+  // String, not a Prisma enum, matching this schema's own established
+  // convention for exactly this reason (see SubmissionSimilarityAnalysis.status/
+  // IntegrityEvidenceAsset — avoids enum-alteration migration risk);
+  // validated against QUESTION_SOURCES in src/lib/questionSource.ts.
+  source                   String?
+  // The BankQuestion this exam question was copied FROM, at copy time —
+  // never a live link. Copying always produces a fully independent
+  // Question row (see mapBankQuestionToQuestionData in
+  // src/lib/questionBank.ts); this column exists ONLY for provenance
+  // display and duplicate-add detection, and is intentionally
+  // SetNull-on-delete rather than Cascade — deleting the source
+  // BankQuestion (or the whole bank) must never delete/orphan an exam
+  // question that already has its own independent, submitted-against
+  // Question row; it only loses the "copied from" trail.
+  sourceBankQuestionId     String?
+  sourceBankQuestion       BankQuestion?               @relation(fields: [sourceBankQuestionId], references: [id], onDelete: SetNull)
   // Question Pools v1 (additive, opt-in, nullable) — see
   // docs/question-pools-v1.md. Null means "not in any pool" — always
   // included for every student regardless of pool settings.
@@ -529,6 +550,12 @@ model Question {
   developmentEvents    AnswerDevelopmentEvent[]
   developmentArtifacts AnswerDevelopmentArtifact[]
   codeExecutionEvents  CodeExecutionEvent[]
+
+  // Question Bank / Exam Pools redesign v1 — supports the "has this
+  // BankQuestion already been copied into this exam" duplicate-detection
+  // query (WHERE examId = ? AND sourceBankQuestionId IN (...)).
+  @@index([examId, sourceBankQuestionId])
+  @@index([sourceBankQuestionId])
 }
 
 // Answer Similarity Review v1 (additive) — see
@@ -1010,15 +1037,15 @@ model IntegrityReviewStatusHistory {
 // one Institution, and cross-institution access is still governed by
 // institutionScope.ts exactly as before.
 model Course {
-  id             String             @id @default(cuid())
+  id             String                       @id @default(cuid())
   institutionId  String
-  institution    Institution        @relation(fields: [institutionId], references: [id])
+  institution    Institution                  @relation(fields: [institutionId], references: [id])
   name           String
   code           String
   description    String?
-  active         Boolean            @default(true)
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
+  active         Boolean                      @default(true)
+  createdAt      DateTime                     @default(now())
+  updatedAt      DateTime                     @updatedAt
   enrollments    CourseEnrollment[]
   exams          Exam[]
   // Tether Course Invitation + Acceptance v1 — see
@@ -1083,11 +1110,11 @@ model ExamAssignment {
 // never deleted — acceptedAt/revokedAt are minimal lifecycle/audit
 // evidence, not just transient state.
 model CourseEnrollmentInvitation {
-  id        String  @id @default(cuid())
+  id        String @id @default(cuid())
   courseId  String
-  course    Course  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  course    Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
   studentId String
-  student   User    @relation("CourseInvitationStudent", fields: [studentId], references: [id], onDelete: Cascade)
+  student   User   @relation("CourseInvitationStudent", fields: [studentId], references: [id], onDelete: Cascade)
 
   // The lecturer/platform operator who created (or most recently
   // regenerated) this invitation. RESTRICT (not CASCADE) — matches the
@@ -1634,19 +1661,25 @@ model QuestionBank {
 }
 
 model BankQuestion {
-  id            String       @id @default(cuid())
-  bankId        String
-  type          String
-  text          String
-  optionsJson   String?
-  correctAnswer String?
-  sampleAnswer  String?
-  points        Int          @default(1)
-  difficulty    String?
-  topic         String?
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
-  bank          QuestionBank @relation(fields: [bankId], references: [id], onDelete: Cascade)
+  id                String       @id @default(cuid())
+  bankId            String
+  type              String
+  text              String
+  optionsJson       String?
+  correctAnswer     String?
+  sampleAnswer      String?
+  points            Int          @default(1)
+  difficulty        String?
+  topic             String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  bank              QuestionBank @relation(fields: [bankId], references: [id], onDelete: Cascade)
+  // Question Bank / Exam Pools redesign v1 — the reciprocal side of
+  // Question.sourceBankQuestion (see that field's own doc comment). Never
+  // used to propagate an edit here onto any exam question that already
+  // copied from this row — each copy is independent from the moment it
+  // is created.
+  copiedToQuestions Question[]
 
   @@index([bankId])
   @@index([type])
@@ -2860,7 +2893,6 @@ model TetherClientInstallation {
  * guessing, course-invitation token guessing, standalone-invite token
  * guessing, exam access-code guessing) — one small additive table rather
  * than one bespoke table per surface.
- *
  * `scope` names which control this bucket belongs to (e.g.
  * "auth.login.source_account") — see src/lib/security/rateLimitScopes.ts
  * for the fixed list. `keyHash` is an HMAC-SHA256 digest (never a raw
