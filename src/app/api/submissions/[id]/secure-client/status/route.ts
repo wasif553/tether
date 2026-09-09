@@ -24,7 +24,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const submission = await timeSpan(timing, "submissionLookupMs", () =>
     prisma.submission.findUnique({
       where: { id },
-      select: { studentId: true, secureClientPolicySnapshotJson: true, activatedAt: true, examId: true },
+      select: { studentId: true, secureClientPolicySnapshotJson: true, activatedAt: true, examId: true, status: true },
     }),
   );
   if (!submission || submission.studentId !== session.user.id) {
@@ -49,6 +49,19 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     // more sensitive than the submissionId already in the URL.
     examId: submission.examId,
     deliveryMode: policy.deliveryMode,
+    // Fix student completed-submission results flow — additive, and read
+    // by exactly one caller: the exam-taking page's pre-load Tether gate
+    // (src/app/student/exams/[id]/page.tsx). deliveryMode above reflects
+    // this ATTEMPT's frozen policy regardless of status (unchanged, still
+    // used verbatim by tether-launch/secure-client pages for a live
+    // attempt) — it does NOT mean "still needs Tether right now" once the
+    // attempt is finished. Without this, a finished Tether-required
+    // submission still read as deliveryMode: "TETHER_CLIENT_REQUIRED",
+    // sending a student who clicked a completed exam straight into the
+    // native-lockdown reactivation/tether-launch pipeline (and eventually
+    // a confusing start-attempt rejection) instead of the read-only
+    // results view.
+    submissionStatus: submission.status,
     studentPreflightRequired: policy.studentPreflightRequired,
     // Corrective pass v1.2.1, Task A — bounded, non-secret policy fields
     // the local diagnostic panel needs verbatim (never a token/cookie/

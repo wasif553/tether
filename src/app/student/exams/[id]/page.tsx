@@ -1238,6 +1238,7 @@ export default function TakeExamPage({
         deliveryMode?: unknown;
         displayRequirement?: { status?: unknown } | null;
         examId?: unknown;
+        submissionStatus?: unknown;
       };
       let statusBody: PreLoadStatusResponse | null = null;
       const statusFetchStartedAtMs = performance.now();
@@ -1272,7 +1273,18 @@ export default function TakeExamPage({
         return;
       }
 
-      const gated = statusBody.deliveryMode === "TETHER_CLIENT_REQUIRED";
+      // Fix student completed-submission results flow — a SUBMITTED/
+      // GRADED attempt is never "gated" by the native-lockdown
+      // reactivation flow, regardless of its frozen deliveryMode policy:
+      // that policy describes what a LIVE attempt requires, not a
+      // finished one, which has no content left to protect and must
+      // route to the read-only results view below instead. Fails closed
+      // the other way (missing/malformed submissionStatus is treated as
+      // still IN_PROGRESS, i.e. still gated) — this only ever RELAXES the
+      // gate for a status the server explicitly confirmed is finished.
+      const attemptFinished =
+        typeof statusBody.submissionStatus === "string" && statusBody.submissionStatus !== "IN_PROGRESS";
+      const gated = statusBody.deliveryMode === "TETHER_CLIENT_REQUIRED" && !attemptFinished;
       if (!gated) {
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setContentGateState("NOT_APPLICABLE");
@@ -1339,6 +1351,24 @@ export default function TakeExamPage({
       cancelled = true;
     };
   }, [id, loadSubmission, router]);
+
+  // Fix student completed-submission results flow — a fully-loaded
+  // submission that is no longer IN_PROGRESS is a historical record, not
+  // a page this component should keep rendering: redirect to the
+  // dedicated read-only results page (src/app/student/submissions/[id])
+  // rather than falling into the inline "submitted" branch further down.
+  // Skipped only for the one legitimate case where THIS component
+  // instance just performed the submission itself (terminalSubmitRef is
+  // set synchronously, with no batching/timing ambiguity, by every
+  // successful-submit path in handleSubmit) — that moment shows its own
+  // confirmation message and a link onward, exactly as before. Never
+  // fires for an IN_PROGRESS attempt, so this never interferes with a
+  // live exam session.
+  useEffect(() => {
+    if (!data || data.status === "IN_PROGRESS") return;
+    if (terminalSubmitRef.current) return;
+    router.replace(`/student/submissions/${id}`);
+  }, [data, id, router]);
 
   // Exam Session Binding v1 — see docs/exam-session-binding-v1.md. Sends
   // a lightweight heartbeat every 25s while the attempt is in progress.
@@ -4309,6 +4339,18 @@ export default function TakeExamPage({
   }
 
   if (data.status !== "IN_PROGRESS") {
+    // Fix student completed-submission results flow — a fresh page load
+    // of an already-finished submission is redirected away by the effect
+    // above; render nothing exam-related while that happens. Only a
+    // submission THIS component instance just finalized (terminalSubmitRef)
+    // reaches the confirmation view below.
+    if (!terminalSubmitRef.current) {
+      return (
+        <div className="mx-auto max-w-lg">
+          <p className="text-gray-500">Redirecting to your results...</p>
+        </div>
+      );
+    }
     return (
       <div className="mx-auto max-w-2xl">
         <h1 className="text-2xl font-semibold">{data.exam.title}</h1>
@@ -4324,6 +4366,17 @@ export default function TakeExamPage({
             scheduled. Uninstall it only after your final SES exam or when
             your institution/pilot operator instructs you to remove it.
           </p>
+        )}
+        {data.status === "SUBMITTED" && (
+          <p className="mt-4 text-gray-600">
+            Your exam has been submitted. Your marks will appear here after your lecturer releases them.
+          </p>
+        )}
+        {data.status === "GRADED" && !data.marksReleased && (
+          <p className="mt-4 text-gray-600">Submitted. Marks have not been released yet.</p>
+        )}
+        {data.status === "GRADED" && data.marksReleased && (
+          <p className="mt-4 text-gray-600">Your results are ready.</p>
         )}
         <div className="mt-4 flex gap-3">
           <button
@@ -4342,45 +4395,13 @@ export default function TakeExamPage({
               View uninstall instructions
             </button>
           )}
+          <a
+            href={`/student/submissions/${id}`}
+            className="rounded bg-black px-3 py-1.5 text-sm text-white"
+          >
+            {data.status === "GRADED" && data.marksReleased ? "View results" : "View submission"}
+          </a>
         </div>
-        {data.status === "SUBMITTED" && (
-          <p className="mt-4 text-gray-600">
-            Your exam has been submitted. Your marks will appear here after your lecturer releases them.
-          </p>
-        )}
-        {data.status === "GRADED" && !data.marksReleased && (
-          <p className="mt-4 text-gray-600">
-            Submitted. Marks have not been released yet.
-          </p>
-        )}
-        {data.status === "GRADED" && data.marksReleased && (
-          <div className="mt-4">
-            <p className="text-sm text-green-700">Marks released</p>
-            <p className="text-lg">
-              Score: <span className="font-semibold">{data.totalScore}</span>
-            </p>
-            <div className="mt-4 space-y-3">
-              {data.exam.questions.map((q) => {
-                const answer = data.answers.find((a) => a.questionId === q.id);
-                return (
-                  <div key={q.id} className="rounded border border-gray-200 p-3">
-                    <p className="text-sm text-gray-500">{q.points} pt(s)</p>
-                    <p>{q.text}</p>
-                    <p className="mt-1 text-sm text-gray-600">
-                      Your answer: {answer?.response ?? "(no answer)"}
-                    </p>
-                    {answer?.score != null && (
-                      <p className="text-sm text-green-700">Score: {answer.score}</p>
-                    )}
-                    {answer?.feedback && (
-                      <p className="text-sm text-gray-500">Feedback: {answer.feedback}</p>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
       </div>
     );
   }
