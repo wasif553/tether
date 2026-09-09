@@ -441,6 +441,12 @@ export default function LecturerExamPage({
   ]);
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
+  // AI question-generation schema follow-up, Part 7/8 — a partial-success
+  // notice ("18 of 20 questions were generated successfully. 2 could not
+  // be validated."), distinct from generateError (a hard failure with no
+  // usable questions at all). Never a raw schema/validation dump either
+  // way — see the generate-questions route's own doc comment.
+  const [generateWarning, setGenerateWarning] = useState<string | null>(null);
   const [generated, setGenerated] = useState<GeneratedQuestion[]>([]);
   const [included, setIncluded] = useState<boolean[]>([]);
   const [expandedExplanation, setExpandedExplanation] = useState<number | null>(null);
@@ -1149,6 +1155,7 @@ export default function LecturerExamPage({
 
   async function handleGenerate() {
     setGenerateError(null);
+    setGenerateWarning(null);
 
     if (difficultySum !== 100) {
       setGenerateError("Difficulty percentages must sum to 100%");
@@ -1193,6 +1200,7 @@ export default function LecturerExamPage({
 
     setGenerated(data.questions ?? []);
     setIncluded(new Array((data.questions ?? []).length).fill(true));
+    setGenerateWarning(typeof data.warning === "string" ? data.warning : null);
   }
 
   async function handleAddSelected() {
@@ -4009,10 +4017,17 @@ export default function LecturerExamPage({
           <textarea
             rows={5}
             className="mt-1 w-full rounded border border-lecturer-border px-3 py-2"
-            placeholder="Paste lecture notes, a textbook excerpt, or just describe a topic..."
+            placeholder="e.g. Python programming fundamentals, loops, functions and classes"
             value={sourceMaterial}
             onChange={(e) => setSourceMaterial(e.target.value)}
           />
+          {/* AI question-generation schema follow-up, Part 9 — the Count
+              field below is the ONLY thing that sets how many questions
+              are generated. A number mentioned here (e.g. "generate 20
+              questions about...") is never read as a quantity. */}
+          <p className="mt-1 text-xs text-lecturer-text-secondary">
+            Describe the topic here — use the Count field to choose how many questions to generate.
+          </p>
         </div>
         <div className="flex gap-3">
           <div className="flex-1">
@@ -4100,6 +4115,7 @@ export default function LecturerExamPage({
         </div>
 
         {generateError && <p className="text-sm text-[#B42318]">{generateError}</p>}
+        {generateWarning && <p className="text-sm text-[#B54708]">{generateWarning}</p>}
 
         <button
           onClick={handleGenerate}
@@ -4150,7 +4166,13 @@ export default function LecturerExamPage({
                       </span>
                     </div>
                     <p className="mt-1">{q.body}</p>
-                    {q.options && (
+                    {/* AI question-generation schema follow-up, Part 2/5 —
+                        the canonical contract now always sends a real
+                        (possibly empty) options array, never null/undefined,
+                        for SHORT_ANSWER/ESSAY questions — an empty array is
+                        truthy in JS, so the check must be on length, not
+                        mere presence. */}
+                    {q.options && q.options.length > 0 && (
                       <ul className="mt-1 space-y-0.5 text-sm">
                         {q.options.map((opt, optIndex) => {
                           const label = String.fromCharCode(65 + optIndex);
@@ -4166,7 +4188,7 @@ export default function LecturerExamPage({
                         })}
                       </ul>
                     )}
-                    {!q.options && q.correctAnswer && (
+                    {(!q.options || q.options.length === 0) && q.correctAnswer && (
                       <p className="mt-1 text-sm text-green-700">Model answer: {q.correctAnswer}</p>
                     )}
                     <button
