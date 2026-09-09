@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, use as usePromise } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { LecturerPageHeader, PrimaryButton, SecondaryButton } from "@/components/lecturer/LecturerPageHeader";
 import { SectionCard } from "@/components/lecturer/SectionCard";
 import { StatusBadge } from "@/components/lecturer/StatusBadge";
@@ -43,6 +43,7 @@ export default function QuestionBankDetailPage({
 }) {
   const { id } = usePromise(params);
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [bank, setBank] = useState<Bank | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,7 +66,13 @@ export default function QuestionBankDetailPage({
   // bank's own questions (client-side; the bank is already fully loaded).
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<BankQuestionType | "">("");
-  const [difficultyFilter, setDifficultyFilter] = useState<"easy" | "medium" | "hard" | "">("");
+  // Pool Selection Refinement v1 — supports a deep link from the exam
+  // page's automatic pool-building tab (?difficulty=unclassified) so a
+  // lecturer can jump straight to the questions that need a difficulty
+  // assigned before they're eligible for automatic selection.
+  const [difficultyFilter, setDifficultyFilter] = useState<"easy" | "medium" | "hard" | "unclassified" | "">(
+    () => (searchParams.get("difficulty") === "unclassified" ? "unclassified" : ""),
+  );
 
   // Inline edit of an existing bank question (PATCH /questions/[questionId]).
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -380,19 +387,20 @@ export default function QuestionBankDetailPage({
           <select
             className="rounded-lg border border-lecturer-border px-2 py-1.5 text-sm"
             value={difficultyFilter}
-            onChange={(e) => setDifficultyFilter(e.target.value as "easy" | "medium" | "hard" | "")}
+            onChange={(e) => setDifficultyFilter(e.target.value as "easy" | "medium" | "hard" | "unclassified" | "")}
           >
             <option value="">All difficulties</option>
             <option value="easy">Easy</option>
             <option value="medium">Medium</option>
             <option value="hard">Hard</option>
+            <option value="unclassified">Unclassified</option>
           </select>
         </div>
         <div className="space-y-3">
           {bank.questions.length === 0 && <EmptyState title="No questions yet" />}
           {bank.questions
             .filter((q) => !typeFilter || q.type === typeFilter)
-            .filter((q) => !difficultyFilter || q.difficulty === difficultyFilter)
+            .filter((q) => !difficultyFilter || (difficultyFilter === "unclassified" ? q.difficulty == null : q.difficulty === difficultyFilter))
             .filter((q) => !search || q.text.toLowerCase().includes(search.toLowerCase()))
             .map((q) => (
             <div key={q.id} className="rounded-lg border border-lecturer-border p-3">
