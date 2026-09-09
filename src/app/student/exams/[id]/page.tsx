@@ -126,6 +126,15 @@ import {
 } from "@/lib/lockdownClient";
 import { resolveNativeLockdownConfirmation, shouldBlockExamContentRendering, type ContentGateState } from "@/lib/secureExamNativeLockdown";
 import { buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
+import { fetchWithTimeoutAndRetry } from "@/lib/fetchWithTimeout";
+
+// Exam-load latency follow-up (physical acceptance review) — bounds how
+// long the exam-open critical-path fetches below (secure-client status,
+// the submission itself, the current question) will wait before failing
+// closed into their existing catch/error handling, instead of hanging
+// indefinitely on a stalled connection. One retry only — this is for the
+// latency-sensitive opening sequence, not a background sync queue.
+const EXAM_LOAD_FETCH_TIMEOUT_MS = 12_000;
 
 /**
  * Strengthened phone detection (Part 3/4) — converts raw detector output
@@ -1019,7 +1028,13 @@ export default function TakeExamPage({
 
   const loadSubmission = useCallback(async () => {
     try {
-      const res = await fetch(`/api/submissions/${id}`);
+      const submissionFetchStartedAtMs = performance.now();
+      const res = await fetchWithTimeoutAndRetry(`/api/submissions/${id}`, {}, EXAM_LOAD_FETCH_TIMEOUT_MS);
+      logClientTetherDiagnostic("EXAM_LOAD_TIMING", {
+        stage: "submissionLoad",
+        durationMs: Math.round(performance.now() - submissionFetchStartedAtMs),
+        status: res.status,
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         // Tether launch/install flow v1 — see secureClientStartGate.ts.
@@ -1138,11 +1153,20 @@ export default function TakeExamPage({
         examId?: unknown;
       };
       let statusBody: PreLoadStatusResponse | null = null;
+      const statusFetchStartedAtMs = performance.now();
       try {
-        const res = await fetch(`/api/submissions/${id}/secure-client/status`);
+        const res = await fetchWithTimeoutAndRetry(`/api/submissions/${id}/secure-client/status`, {}, EXAM_LOAD_FETCH_TIMEOUT_MS);
         if (res.ok) statusBody = await res.json().catch(() => null);
       } catch {
+        // Fails closed exactly as before — a timeout is treated the same
+        // as any other network error, never a bypass. See
+        // fetchWithTimeout.ts's own doc comment.
         statusBody = null;
+      } finally {
+        logClientTetherDiagnostic("EXAM_LOAD_TIMING", {
+          stage: "secureClientStatus",
+          durationMs: Math.round(performance.now() - statusFetchStartedAtMs),
+        });
       }
       if (cancelled) return;
 
@@ -1399,9 +1423,14 @@ export default function TakeExamPage({
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setOneQuestion((prev) => ({ ...prev, loading: true, error: null }));
-    fetch(`/api/submissions/${id}/question`)
+    const questionFetchStartedAtMs = performance.now();
+    fetchWithTimeoutAndRetry(`/api/submissions/${id}/question`, {}, EXAM_LOAD_FETCH_TIMEOUT_MS)
       .then((res) => (res.ok ? (res.json() as Promise<OneQuestionPayload>) : Promise.reject(res)))
       .then((payload) => {
+        logClientTetherDiagnostic("EXAM_LOAD_TIMING", {
+          stage: "firstQuestionVisible",
+          durationMs: Math.round(performance.now() - questionFetchStartedAtMs),
+        });
         if (cancelled) return;
         setOneQuestion({ loading: false, error: null, payload });
         if (payload.existingResponse != null) {
