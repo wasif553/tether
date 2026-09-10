@@ -64,6 +64,17 @@ export const LOCKDOWN_DETECTION_DISCLAIMER =
   "human review, not automatic misconduct decisions, and do not prove the application was " +
   "actually used against the exam.";
 
+// Evidence workspace v1 — compact, read-only summary of already-computed
+// answer-similarity/collusion analysis for THIS submission (never
+// recomputes or duplicates the analysis logic in similarityAnalysisRunner.ts
+// / cohortCollusionRunner.ts). Null when no similarity analysis has ever
+// run for this exam, or this submission has no matches/cluster
+// membership at all — never a fabricated zero-value summary.
+export const SIMILARITY_COLLUSION_DISCLAIMER =
+  "Answer similarity and collusion signals are indicators for human review, not automatic " +
+  "misconduct findings. Shared study material, template answers, or coincidental overlap can " +
+  "also produce similarity — see the full analysis for details.";
+
 export class EvidenceNotFoundError extends Error {}
 export class EvidenceForbiddenError extends Error {}
 
@@ -223,6 +234,20 @@ export type EvidenceReport = {
     reviewSignal: NetworkReviewSignal;
     networkEvidenceDisclaimer: string;
   };
+  // Evidence workspace v1 — see SIMILARITY_COLLUSION_DISCLAIMER above.
+  // Read-only summary of SubmissionSimilarityMatch/CollusionClusterMember
+  // rows already computed elsewhere; null when this exam has no
+  // similarity analysis and this submission has no cluster membership.
+  similarityCollusionSummary: {
+    highestSimilarityScore: number | null;
+    affectedQuestionCount: number;
+    comparedStudentCount: number;
+    matchReviewStatus: string | null;
+    collusionConcernLevel: string | null;
+    collusionReviewStatus: string | null;
+    examId: string;
+    disclaimer: string;
+  } | null;
   disclaimer: string;
 };
 
@@ -332,6 +357,42 @@ export async function buildEvidenceReport(
         disclaimer: LOCKDOWN_DETECTION_DISCLAIMER,
       }
     : null;
+
+  // Evidence workspace v1 — read-only, additive. Reuses whatever
+  // SubmissionSimilarityMatch/CollusionClusterMember rows already exist
+  // for this submission (written by similarityAnalysisRunner.ts /
+  // cohortCollusionRunner.ts elsewhere) rather than recomputing anything.
+  const [similarityMatches, collusionMembership] = await Promise.all([
+    prisma.submissionSimilarityMatch.findMany({
+      where: { OR: [{ sourceSubmissionId: submissionId }, { comparedSubmissionId: submissionId }] },
+      select: { score: true, questionId: true, reviewStatus: true, sourceSubmissionId: true, comparedSubmissionId: true },
+    }),
+    prisma.collusionClusterMember.findFirst({
+      where: { submissionId },
+      include: { cluster: { select: { concernLevel: true, reviewStatus: true } } },
+      orderBy: { memberScore: "desc" },
+    }),
+  ]);
+  const similarityCollusionSummary =
+    similarityMatches.length > 0 || collusionMembership
+      ? {
+          highestSimilarityScore: similarityMatches.length
+            ? Math.max(...similarityMatches.map((m) => m.score))
+            : null,
+          affectedQuestionCount: new Set(similarityMatches.map((m) => m.questionId).filter((q): q is string => q != null))
+            .size,
+          comparedStudentCount: new Set(
+            similarityMatches.map((m) => (m.sourceSubmissionId === submissionId ? m.comparedSubmissionId : m.sourceSubmissionId)),
+          ).size,
+          matchReviewStatus: similarityMatches.length
+            ? similarityMatches.find((m) => m.reviewStatus !== "REVIEWED_NO_CONCERN")?.reviewStatus ?? "REVIEWED_NO_CONCERN"
+            : null,
+          collusionConcernLevel: collusionMembership?.cluster.concernLevel ?? null,
+          collusionReviewStatus: collusionMembership?.cluster.reviewStatus ?? null,
+          examId: submission.exam.id,
+          disclaimer: SIMILARITY_COLLUSION_DISCLAIMER,
+        }
+      : null;
 
   return {
     submissionId: submission.id,
@@ -453,6 +514,7 @@ export async function buildEvidenceReport(
       ),
       networkEvidenceDisclaimer: NETWORK_EVIDENCE_DISCLAIMER,
     },
+    similarityCollusionSummary,
     disclaimer: EVIDENCE_DISCLAIMER,
   };
 }
