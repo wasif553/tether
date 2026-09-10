@@ -155,16 +155,34 @@ export async function GET(
       if (!exam.published) {
         return NextResponse.json({ error: "Forbidden" }, { status: 403 });
       }
+      // Question confidentiality v1 — see
+      // docs/post-submission-question-protection-v1.md. This route has NO
+      // current or legitimate student-facing caller: real question
+      // delivery for a student's own active attempt always goes through
+      // GET /api/submissions/[id] (full-paper mode) or
+      // GET/POST /api/submissions/[id]/question(-progress) (one-question-
+      // at-a-time mode) — both of which are scoped to ONE specific
+      // submission and (for one-question mode) ONE specific position, so
+      // they can never hand back the whole exam or future questions the
+      // way this bare exam-level route would. A STUDENT therefore NEVER
+      // receives question content through this route, in ANY attempt
+      // state (no attempt, IN_PROGRESS, a retry's IN_PROGRESS, SUBMITTED,
+      // or GRADED) — calling it directly must never become an alternate,
+      // unscoped delivery path or a way to see ahead in a one-question
+      // exam. Every other field (title, schedule, secureSettings,
+      // secureClientAvailability, etc.) is unaffected and always returned.
+      const examWithoutPools = { ...omitAccessCodeHash(exam) } as Partial<typeof exam>;
       // Question Pools v1 — a student must never see pool names, draw
       // counts, or which pool a question belongs to (see
-      // docs/question-pools-v1.md, "What students see").
-      const examWithoutPools = { ...omitAccessCodeHash(exam) } as Partial<typeof exam>;
+      // docs/question-pools-v1.md, "What students see"). Moot now that
+      // `questions` is always [] below, but left in place — this route's
+      // established, defense-in-depth convention for a student response.
       delete examWithoutPools.questionPools;
       const sanitized = {
         ...examWithoutPools,
         secureSettings,
         secureClientAvailability,
-        questions: exam.questions.map((q) => ({ ...q, correctAnswer: undefined, questionPoolId: undefined })),
+        questions: [],
       };
       return NextResponse.json(sanitized);
     }

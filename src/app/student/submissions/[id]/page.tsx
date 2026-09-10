@@ -13,6 +13,15 @@
  * GET /api/submissions/[id] (already ownership- and release-gated
  * server-side — see canStudentViewMarks in src/lib/assessmentLifecycle.ts)
  * and renders whatever that endpoint says is safe to show.
+ *
+ * Post-submission question protection — see
+ * docs/post-submission-question-protection-v1.md. This is a SUBMISSION
+ * SUMMARY, not an exam-review page: GET /api/submissions/[id] no longer
+ * sends question text/options/correct answers, or the student's own
+ * per-question answers/scores/feedback, for a finished attempt at all —
+ * enforced server-side, not by this component choosing not to render
+ * fields it still received. There is nothing question-shaped in the
+ * response for this page to show even if it tried.
  */
 import { useEffect, useState, use as usePromise } from "react";
 import { useRouter } from "next/navigation";
@@ -20,28 +29,21 @@ import { useRouter } from "next/navigation";
 type SubmissionResult = {
   id: string;
   status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
+  startedAt: string;
   submittedAt: string | null;
   totalScore: number | null;
   marksReleasedAt: string | null;
   marksReleased: boolean;
-  exam: {
-    title: string;
-    questions: Array<{
-      id: string;
-      type: "MULTIPLE_CHOICE" | "SHORT_ANSWER" | "ESSAY";
-      text: string;
-      options: string[] | null;
-      points?: number;
-      order: number;
-    }>;
-  };
-  answers: Array<{
-    questionId: string;
-    response: string | null;
-    score?: number;
-    feedback?: string;
-  }>;
+  exam: { title: string };
 };
+
+function formatDuration(startedAt: string, submittedAt: string | null): string | null {
+  if (!submittedAt) return null;
+  const ms = new Date(submittedAt).getTime() - new Date(startedAt).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const minutes = Math.round(ms / 60_000);
+  return minutes < 1 ? "Less than a minute" : `${minutes} min`;
+}
 
 export default function StudentSubmissionResultsPage({
   params,
@@ -115,86 +117,56 @@ export default function StudentSubmissionResultsPage({
     );
   }
 
-  const totalPoints = data.exam.questions.reduce((sum, q) => sum + (q.points ?? 0), 0);
-  const percentage =
-    data.marksReleased && data.totalScore != null && totalPoints > 0 ? Math.round((data.totalScore / totalPoints) * 1000) / 10 : null;
-  const sortedQuestions = [...data.exam.questions].sort((a, b) => a.order - b.order);
+  const duration = formatDuration(data.startedAt, data.submittedAt);
+  const gradingLabel =
+    data.status === "SUBMITTED" ? "Pending" : data.marksReleased ? "Released" : "Graded — not yet released";
 
   return (
     <div className="mx-auto max-w-2xl">
       <button onClick={() => router.push("/student")} className="text-sm text-gray-500 underline">
         ← Back to dashboard
       </button>
-      <h1 className="mt-2 text-2xl font-semibold">{data.exam.title}</h1>
+      <h1 className="mt-2 text-2xl font-semibold">Submission complete</h1>
+      <p className="mt-1 text-lg text-gray-700">{data.exam.title}</p>
 
-      {data.status === "SUBMITTED" && (
-        <div className="mt-4 rounded border border-gray-200 bg-gray-50 p-4">
-          <p className="font-medium">Submitted</p>
-          <p className="mt-1 text-sm text-gray-600">Results will be available when released by your lecturer.</p>
+      <dl className="mt-6 divide-y divide-gray-100 rounded border border-gray-200 text-sm">
+        <div className="flex items-center justify-between px-4 py-2.5">
+          <dt className="text-gray-500">Status</dt>
+          <dd className="font-medium">{data.status === "SUBMITTED" ? "Submitted" : "Graded"}</dd>
         </div>
-      )}
-
-      {data.status === "GRADED" && !data.marksReleased && (
-        <div className="mt-4 rounded border border-gray-200 bg-gray-50 p-4">
-          <p className="font-medium">Graded</p>
-          <p className="mt-1 text-sm text-gray-600">Results have not been released yet.</p>
+        {data.submittedAt && (
+          <div className="flex items-center justify-between px-4 py-2.5">
+            <dt className="text-gray-500">Submitted</dt>
+            <dd className="font-medium">{new Date(data.submittedAt).toLocaleString()}</dd>
+          </div>
+        )}
+        {duration && (
+          <div className="flex items-center justify-between px-4 py-2.5">
+            <dt className="text-gray-500">Duration</dt>
+            <dd className="font-medium">{duration}</dd>
+          </div>
+        )}
+        <div className="flex items-center justify-between px-4 py-2.5">
+          <dt className="text-gray-500">Grading</dt>
+          <dd className="font-medium">{gradingLabel}</dd>
         </div>
-      )}
+        {data.marksReleased && data.totalScore != null && (
+          <div className="flex items-center justify-between px-4 py-2.5">
+            <dt className="text-gray-500">Score</dt>
+            <dd className="font-medium">{data.totalScore}</dd>
+          </div>
+        )}
+      </dl>
 
-      {data.status === "GRADED" && data.marksReleased && (
-        <div className="mt-4 rounded border border-green-200 bg-green-50 p-4">
-          <p className="font-medium text-green-800">Results released</p>
-          <p className="mt-2 text-lg">
-            Score: <span className="font-semibold">{data.totalScore ?? 0}</span>
-            {totalPoints > 0 && <span> / {totalPoints}</span>}
-          </p>
-          {percentage != null && <p className="text-sm text-gray-600">Percentage: {percentage}%</p>}
-        </div>
-      )}
+      <p className="mt-6 text-gray-700">Your exam has been submitted successfully.</p>
+      <p className="mt-2 text-sm text-gray-500">Exam questions are not available after submission.</p>
 
-      <h2 className="mt-6 text-lg font-semibold">Your answers</h2>
-      <div className="mt-3 space-y-3">
-        {sortedQuestions.map((q, i) => {
-          const answer = data.answers.find((a) => a.questionId === q.id);
-          return (
-            <div key={q.id} className="rounded border border-gray-200 p-3">
-              <p className="text-sm text-gray-500">
-                Question {i + 1}
-                {q.points != null && ` · ${q.points} pt(s)`}
-              </p>
-              <p className="mt-1">{q.text}</p>
-
-              {q.type === "MULTIPLE_CHOICE" && q.options && (
-                <div className="mt-2 space-y-1">
-                  {q.options.map((opt) => (
-                    <p
-                      key={opt}
-                      className={
-                        opt === answer?.response
-                          ? "rounded border border-gray-400 bg-gray-100 px-2 py-1 text-sm font-medium"
-                          : "px-2 py-1 text-sm text-gray-500"
-                      }
-                    >
-                      {opt === answer?.response ? "● " : "○ "}
-                      {opt}
-                    </p>
-                  ))}
-                </div>
-              )}
-              {q.type !== "MULTIPLE_CHOICE" && (
-                <p className="mt-2 text-sm text-gray-700">Your answer: {answer?.response ?? "(no answer)"}</p>
-              )}
-
-              {data.marksReleased && (
-                <>
-                  {answer?.score != null && <p className="mt-1 text-sm text-green-700">Marks: {answer.score}{q.points != null ? ` / ${q.points}` : ""}</p>}
-                  {answer?.feedback && <p className="mt-1 text-sm text-gray-500">Feedback: {answer.feedback}</p>}
-                </>
-              )}
-            </div>
-          );
-        })}
-      </div>
+      <button
+        onClick={() => router.push("/student")}
+        className="mt-6 rounded border border-gray-300 px-3 py-1.5 text-sm"
+      >
+        Back to dashboard
+      </button>
     </div>
   );
 }

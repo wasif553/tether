@@ -565,9 +565,65 @@ describe("student cannot access another student's submission or lecturer-only in
 
     const res = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     const body = await res.json();
-    expect(body.answers[0].aiDraftScore).toBeUndefined();
-    expect(body.answers[0].aiReasoning).toBeUndefined();
+    // Post-submission question protection — a finished submission gets NO
+    // per-question answer data at all for the owning student, not just AI
+    // internals/passback (see docs/post-submission-question-protection-v1.md).
+    expect(body.answers).toEqual([]);
     expect(body.canvasPassback).toBeNull();
+  });
+
+  it("post-submission question protection: a finished submission never sends question text/options or per-question answer data to the owning student, only the aggregate score once released", async () => {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const exam = await prisma.exam.create({
+      data: { title: "Post-Submission Protection Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
+    });
+    const question = await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Sensitive question text", points: 5, correctAnswer: "sensitive answer" },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const submission = await prisma.submission.create({
+      data: { examId: exam.id, studentId: student.id, status: "SUBMITTED", submittedAt: new Date() },
+    });
+    await prisma.answer.create({
+      data: { submissionId: submission.id, questionId: question.id, response: "sensitive student response" },
+    });
+
+    const res = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect(res.status).toBe(200);
+    const raw = await res.text();
+    expect(raw).not.toMatch(/Sensitive question text|sensitive answer|sensitive student response/);
+    const body = JSON.parse(raw);
+    expect(body.exam.questions).toEqual([]);
+    expect(body.answers).toEqual([]);
+
+    // The lecturer's own grading view of the SAME submission is completely
+    // unaffected — full question text, options, correctAnswer, and the
+    // student's answer are all still there.
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const lecturerRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    const lecturerBody = await lecturerRes.json();
+    expect(lecturerBody.exam.questions[0].text).toBe("Sensitive question text");
+    expect(lecturerBody.exam.questions[0].correctAnswer).toBe("sensitive answer");
+    expect(lecturerBody.answers[0].response).toBe("sensitive student response");
+  });
+
+  it("post-submission question protection: a student's still-IN_PROGRESS attempt is unaffected (active exam flow never weakened)", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: "Still In Progress Exam", durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
+    });
+    await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Live question text", points: 5 },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submission = await startRes.json();
+
+    const res = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    const body = await res.json();
+    expect(body.status).toBe("IN_PROGRESS");
+    expect(body.exam.questions[0].text).toBe("Live question text");
   });
 });
 
@@ -625,9 +681,11 @@ describe("marks release gates student-visible scores", () => {
 
     expect(body.totalScore).toBeNull();
     expect(body.marksReleased).toBe(false);
-    expect(body.answers[0].score).toBeUndefined();
-    expect(body.answers[0].feedback).toBeUndefined();
-    expect(body.exam.questions[0].correctAnswer).toBeUndefined();
+    // Post-submission question protection — a finished submission gets no
+    // per-question answers/questions at all for the owning student, before
+    // OR after release (see docs/post-submission-question-protection-v1.md).
+    expect(body.answers).toEqual([]);
+    expect(body.exam.questions).toEqual([]);
   });
 
   it("lets the lecturer see marks before release", async () => {
@@ -661,10 +719,13 @@ describe("marks release gates student-visible scores", () => {
     const body = await studentRes.json();
 
     expect(body.marksReleased).toBe(true);
+    // The aggregate score is the one thing release intentionally still
+    // surfaces. Per-question score/feedback and question text/options
+    // remain withheld even after release — see
+    // docs/post-submission-question-protection-v1.md.
     expect(body.totalScore).toBe(4);
-    expect(body.answers[0].score).toBe(4);
-    expect(body.answers[0].feedback).toBe("Good work");
-    expect(body.exam.questions[0].correctAnswer).toBeUndefined();
+    expect(body.answers).toEqual([]);
+    expect(body.exam.questions).toEqual([]);
   });
 
   it("blocks students and non-owning lecturers from releasing marks", async () => {
@@ -1279,5 +1340,258 @@ describe("Question Pools v1", () => {
       await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
     ).json();
     expect(body.exam.questions).toHaveLength(2);
+  });
+});
+
+// Question confidentiality v1 — see
+// docs/post-submission-question-protection-v1.md. GET /api/exams/[id] has
+// no legitimate student-facing caller at all — real question delivery for
+// a student's own active attempt always goes through GET
+// /api/submissions/[id] (full-paper) or GET/POST
+// /api/submissions/[id]/question(-progress) (one-question-at-a-time),
+// both scoped to one specific submission (and, for one-question mode, one
+// specific position). A student therefore NEVER receives question content
+// through this bare exam-level route, in ANY attempt state — not
+// pre-start, not IN_PROGRESS, not a retry's IN_PROGRESS, not SUBMITTED,
+// not GRADED. Otherwise it would be an unscoped alternate delivery path
+// that could, for a one-question exam, reveal every future question at
+// once.
+describe("question confidentiality — GET /api/exams/[id] (alternate route) — always [] for students", () => {
+  it("blocks question text/options for a student who has not yet started this exam (pre-start)", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `Alt Route Not Started Exam ${Date.now()}`, durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
+    });
+    await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Pre-start sensitive text", points: 5 },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const res = await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(200);
+    const raw = await res.text();
+    expect(raw).not.toMatch(/Pre-start sensitive text/);
+    const body = JSON.parse(raw);
+    expect(body.questions).toEqual([]);
+    // Safe metadata is still returned — only question content is gated.
+    expect(body.title).toBe(exam.title);
+  });
+
+  it("blocks question text/options while this student's own attempt is IN_PROGRESS — legitimate delivery is GET /api/submissions/[id] only", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `Alt Route In Progress Exam ${Date.now()}`, durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
+    });
+    await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "In-progress sensitive text", points: 5 },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+
+    const res = await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(200);
+    const raw = await res.text();
+    expect(raw).not.toMatch(/In-progress sensitive text/);
+    const body = JSON.parse(raw);
+    expect(body.questions).toEqual([]);
+  });
+
+  it("blocks question text/options for a currently-active retry (attempt 2 IN_PROGRESS)", async () => {
+    const exam = await prisma.exam.create({
+      data: {
+        title: `Alt Route Retry Exam ${Date.now()}`,
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: { maxAttempts: 2 },
+      },
+    });
+    await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Retry sensitive text", points: 5 },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    await prisma.submission.create({
+      data: { examId: exam.id, studentId: student.id, status: "GRADED", attemptNumber: 1, submittedAt: new Date(), gradedAt: new Date(), totalScore: 0 },
+    });
+    await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+
+    const res = await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(200);
+    const raw = await res.text();
+    expect(raw).not.toMatch(/Retry sensitive text/);
+    const body = JSON.parse(raw);
+    expect(body.questions).toEqual([]);
+  });
+
+  it("blocks question text/options once this student's own attempt is finalized (SUBMITTED)", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `Alt Route Protection Exam ${Date.now()}`, durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
+    });
+    await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Alt route sensitive text", points: 5 },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    await prisma.submission.create({
+      data: { examId: exam.id, studentId: student.id, status: "SUBMITTED", submittedAt: new Date() },
+    });
+
+    const res = await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(200);
+    const raw = await res.text();
+    expect(raw).not.toMatch(/Alt route sensitive text/);
+    const body = JSON.parse(raw);
+    expect(body.questions).toEqual([]);
+  });
+
+  it("blocks question text/options once this student's own attempt is finalized (GRADED)", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `Alt Route Graded Exam ${Date.now()}`, durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
+    });
+    await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Graded sensitive text", points: 5 },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    await prisma.submission.create({
+      data: { examId: exam.id, studentId: student.id, status: "GRADED", submittedAt: new Date(), gradedAt: new Date(), totalScore: 5 },
+    });
+
+    const res = await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(200);
+    const raw = await res.text();
+    expect(raw).not.toMatch(/Graded sensitive text/);
+    const body = JSON.parse(raw);
+    expect(body.questions).toEqual([]);
+  });
+
+  it("the owning lecturer always sees full question text/options, regardless of any student's submission status", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `Alt Route Lecturer Exam ${Date.now()}`, durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id },
+    });
+    await prisma.question.create({
+      data: { examId: exam.id, type: "SHORT_ANSWER", text: "Lecturer-visible text", points: 5, correctAnswer: "the answer" },
+    });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    await prisma.submission.create({
+      data: { examId: exam.id, studentId: student.id, status: "GRADED", submittedAt: new Date(), gradedAt: new Date(), totalScore: 5 },
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER"));
+    const res = await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    const body = await res.json();
+    expect(body.questions[0].text).toBe("Lecturer-visible text");
+    expect(body.questions[0].correctAnswer).toBe("the answer");
+  });
+});
+
+// Locking GET /api/exams/[id] down to [] for every student state must not
+// regress the actual, legitimate student delivery paths. Each test below
+// proves the real route still works AND that the bare exam endpoint gives
+// nothing away alongside it.
+describe("legitimate student question delivery is unaffected by GET /api/exams/[id] confidentiality", () => {
+  it("multi-question IN_PROGRESS: the necessary questions still load through GET /api/submissions/[id], while GET /api/exams/[id] gives nothing away", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `Legit Multi-Question Exam ${Date.now()}`, durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id, secureSettings: { oneQuestionAtATime: false } },
+    });
+    await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Multi Q1", points: 1, order: 0 } });
+    await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Multi Q2", points: 1, order: 1 } });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submission = await startRes.json();
+
+    const submissionBody = await (
+      await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) })
+    ).json();
+    expect(submissionBody.exam.questions).toHaveLength(2);
+    expect(submissionBody.exam.questions.map((q: { text: string }) => q.text).sort()).toEqual(["Multi Q1", "Multi Q2"]);
+
+    const examBody = await (await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) })).json();
+    expect(examBody.questions).toEqual([]);
+  });
+
+  it("one-question-at-a-time IN_PROGRESS: the current question loads and navigation/save works via the legitimate routes, while GET /api/exams/[id] never exposes the complete set", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `Legit One-Question Exam ${Date.now()}`, durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id, secureSettings: { oneQuestionAtATime: true } },
+    });
+    const q1 = await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Sequential Q1", points: 1, order: 0 } });
+    const q2 = await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Sequential Q2", points: 1, order: 1 } });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submission = await startRes.json();
+
+    // Current question loads.
+    const firstRes = await questionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    const firstBody = await firstRes.json();
+    expect(firstBody.question.id).toBe(q1.id);
+    expect(firstBody.question.text).toBe("Sequential Q1");
+
+    // Navigation/save advances to the next question.
+    const navRes = await questionProgressRoute.POST(jsonRequest("POST", { currentIndex: 1 }), { params: Promise.resolve({ id: submission.id }) });
+    const navBody = await navRes.json();
+    expect(navBody.question.id).toBe(q2.id);
+    expect(navBody.question.text).toBe("Sequential Q2");
+
+    // The bare exam endpoint never hands back the complete question set —
+    // this is exactly the "see every future question at once" risk for a
+    // one-question exam that this lockdown closes.
+    const examBody = await (await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) })).json();
+    expect(examBody.questions).toEqual([]);
+  });
+
+  it("authorized retry: the new attempt's legitimate question route still works, while GET /api/exams/[id] gives nothing away", async () => {
+    const exam = await prisma.exam.create({
+      data: {
+        title: `Legit Retry Exam ${Date.now()}`,
+        durationMins: 30,
+        published: true,
+        createdById: lecturer.id,
+        institutionId: testInstitution.id,
+        secureSettings: { maxAttempts: 2 },
+      },
+    });
+    await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Retry-legit Q1", points: 1, order: 0 } });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    await prisma.submission.create({
+      data: { examId: exam.id, studentId: student.id, status: "GRADED", attemptNumber: 1, submittedAt: new Date(), gradedAt: new Date(), totalScore: 0 },
+    });
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const retrySubmission = await startRes.json();
+    expect(retrySubmission.attemptNumber).toBe(2);
+
+    const submissionBody = await (
+      await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: retrySubmission.id }) })
+    ).json();
+    expect(submissionBody.exam.questions[0].text).toBe("Retry-legit Q1");
+
+    const examBody = await (await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) })).json();
+    expect(examBody.questions).toEqual([]);
+  });
+
+  it("finalized submission: no student-accessible endpoint exposes question content, across every surface at once", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `Legit Finalized Exam ${Date.now()}`, durationMins: 30, published: true, createdById: lecturer.id, institutionId: testInstitution.id, secureSettings: { oneQuestionAtATime: true } },
+    });
+    await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Finalized sensitive Q", points: 1, order: 0 } });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT"));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submission = await startRes.json();
+    await prisma.submission.update({ where: { id: submission.id }, data: { status: "SUBMITTED", submittedAt: new Date() } });
+
+    const submissionRes = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    const submissionBody = await submissionRes.json();
+    expect(submissionBody.exam.questions).toEqual([]);
+    expect(submissionBody.answers).toEqual([]);
+
+    const examBody = await (await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) })).json();
+    expect(examBody.questions).toEqual([]);
+
+    const oneQuestionRes = await questionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    expect(oneQuestionRes.status).toBe(409);
   });
 });

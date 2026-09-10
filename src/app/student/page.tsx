@@ -139,7 +139,7 @@ export default function StudentDashboard() {
 
   // Fix student completed-submission results flow — the single resolver
   // (src/lib/studentSubmissionState.ts) both this status line and the
-  // "View submission"/"View results" link below are derived from, so
+  // "Submission details"/"View results" link below are derived from, so
   // they can never show a label inconsistent with what the link actually
   // points to.
   function completedStatusLine(exam: AvailableExam): string {
@@ -259,7 +259,7 @@ export default function StudentDashboard() {
                           docs/student-released-results-flow-v1.md. */}
                       {exam.submission && (state === "SUBMITTED_RESULTS_PENDING" || state === "GRADED_NOT_RELEASED" || state === "RESULTS_RELEASED") && (
                         <a href={`/student/submissions/${exam.submission.id}`} className="underline">
-                          {state === "RESULTS_RELEASED" ? "View results" : "View submission"}
+                          {state === "RESULTS_RELEASED" ? "View results" : "Submission details"}
                         </a>
                       )}
                       {exam.remainingAttempts > 0 && <p>You have {exam.remainingAttempts} attempt(s) remaining.</p>}
@@ -292,7 +292,7 @@ export default function StudentDashboard() {
                             <p>{completedStatusLine(exam)}</p>
                             {exam.submission && (state === "SUBMITTED_RESULTS_PENDING" || state === "GRADED_NOT_RELEASED" || state === "RESULTS_RELEASED") && (
                               <a href={`/student/submissions/${exam.submission.id}`} className="underline">
-                                {state === "RESULTS_RELEASED" ? "View results" : "View submission"}
+                                {state === "RESULTS_RELEASED" ? "View results" : "Submission details"}
                               </a>
                             )}
                           </div>

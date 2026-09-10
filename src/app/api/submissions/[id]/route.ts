@@ -221,6 +221,18 @@ export async function GET(
   const deliverOneQuestionAtATime =
     isOwner && !isExamOwner && settings.oneQuestionAtATime && submission.status === "IN_PROGRESS";
 
+  // Post-submission question protection — see
+  // docs/post-submission-question-protection-v1.md. Once the STUDENT's own
+  // attempt is no longer IN_PROGRESS (SUBMITTED or GRADED), this route must
+  // never send question text/options/answers to the browser again — the
+  // student-facing "View submission" page becomes a read-only summary, not
+  // an exam-review page. Only ever applies to the student's own finished
+  // view: isExamOwner (lecturer grading/review) is completely unaffected,
+  // and a student's still-IN_PROGRESS attempt (including a fresh retry
+  // after a prior finalized attempt) is completely unaffected.
+  const restrictQuestionContentForStudent =
+    isOwner && !isExamOwner && submission.status !== "IN_PROGRESS";
+
   // Question Pools v1 — see docs/question-pools-v1.md. Resolves to this
   // submission's persisted selected/ordered subset when pools are active
   // for this exam, otherwise the full exam question set unchanged
@@ -256,7 +268,7 @@ export async function GET(
   });
   const effectiveQuestionIdSet = new Set(effectiveQuestionIds);
 
-  const questions = deliverOneQuestionAtATime
+  const questions = deliverOneQuestionAtATime || restrictQuestionContentForStudent
     ? []
     : await (async () => {
         const effectiveOrderIndex = new Map(effectiveQuestionIds.map((qid, i) => [qid, i]));
@@ -324,14 +336,23 @@ export async function GET(
       totalQuestions: effectiveQuestionIds.length,
       secureSettings: settings,
     },
-    answers: submission.answers.map((a) => ({
-      questionId: a.questionId,
-      response: a.response,
-      score: canViewMarks ? a.score : undefined,
-      feedback: canViewMarks ? a.feedback : undefined,
-      aiDraftScore: isExamOwner ? a.aiDraftScore : undefined,
-      aiReasoning: isExamOwner ? a.aiReasoning : undefined,
-    })),
+    // Post-submission question protection — a student's own finished
+    // attempt gets NO per-question answer data at all, not even their own
+    // response text (a free-text response can itself restate/expose
+    // substantial question content) or per-question score/feedback (both
+    // are meaningless, and potentially content-revealing, without the
+    // question they're attached to). The lecturer grading view
+    // (isExamOwner) is completely unaffected.
+    answers: restrictQuestionContentForStudent
+      ? []
+      : submission.answers.map((a) => ({
+          questionId: a.questionId,
+          response: a.response,
+          score: canViewMarks ? a.score : undefined,
+          feedback: canViewMarks ? a.feedback : undefined,
+          aiDraftScore: isExamOwner ? a.aiDraftScore : undefined,
+          aiReasoning: isExamOwner ? a.aiReasoning : undefined,
+        })),
   });
 
   // Rolling lease renewal, from the SAME decision already computed above

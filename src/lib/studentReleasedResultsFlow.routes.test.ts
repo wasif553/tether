@@ -233,17 +233,21 @@ describe("GET /api/submissions/[id] — ownership (Part 10)", () => {
     const beforeRelease = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     const beforeBody = await beforeRelease.json();
     expect(beforeBody.totalScore).toBeNull();
-    expect(beforeBody.answers[0].score).toBeUndefined();
-    expect(beforeBody.answers[0].feedback).toBeUndefined();
+    // Post-submission question protection — a finished submission gets no
+    // per-question answers/questions at all for the owning student, before
+    // OR after release (see docs/post-submission-question-protection-v1.md).
+    expect(beforeBody.answers).toEqual([]);
+    expect(beforeBody.exam.questions).toEqual([]);
 
     await prisma.exam.update({ where: { id: exam.id }, data: { marksReleasedAt: new Date(), marksReleasedById: lecturerId } });
     const afterRelease = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
     const afterBody = await afterRelease.json();
+    // The aggregate score is the one thing release intentionally still
+    // surfaces. Per-question score/feedback and question text/options/
+    // correctAnswer remain withheld even after release.
     expect(afterBody.totalScore).toBe(8);
-    expect(afterBody.answers[0].score).toBe(8);
-    expect(afterBody.answers[0].feedback).toBe("Good work");
-    // Never exposed to a student, released or not.
-    expect(afterBody.exam.questions[0].correctAnswer).toBeUndefined();
+    expect(afterBody.answers).toEqual([]);
+    expect(afterBody.exam.questions).toEqual([]);
   });
 });
 
