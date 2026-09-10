@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, use as usePromise } from "react";
 import Link from "next/link";
-import { buildEvidenceFrameViewPath } from "@/lib/aiCameraEvidenceFrame";
+import { buildEvidenceFrameViewPath, isEvidenceCaptureEligibleEventType } from "@/lib/aiCameraEvidenceFrame";
 import {
   categoryForEventType,
   labelForEventType,
@@ -55,6 +55,7 @@ type EvidenceReport = {
       secureClientSessionId: string | null;
     } | null;
     evidenceFrame: { id: string; kind: string; contentType: string; byteSize: number; capturedAt: string } | null;
+    noEvidenceImageReason: "CAPTURE_DISABLED" | "CAPTURE_FAILED" | "UNKNOWN" | null;
   }>;
   evidenceFrames: Array<{
     id: string;
@@ -126,10 +127,18 @@ type EvidenceReport = {
     reviewSignal: "Normal" | "Needs review" | "High review signal";
     networkEvidenceDisclaimer: string;
   };
-  // Evidence workspace v1 — additive (see src/lib/evidenceReport.ts). Null
-  // when no similarity analysis has run for this exam, or this submission
-  // has no matches/cluster membership.
+  // Evidence-provenance fix — the exam's CURRENT setting only, never used
+  // to explain a past incident (no per-attempt snapshot exists). Shown
+  // as present-tense configuration context.
+  currentCaptureAiViolationEvidenceEnabled: boolean;
+  // Evidence workspace v1 — additive (see src/lib/evidenceReport.ts).
+  // Always present: analysisHasRun distinguishes "never run for this
+  // exam" from "run, but nothing for this student" from "run, with
+  // results" — see the page's rendering below.
   similarityCollusionSummary: {
+    analysisHasRun: boolean;
+    analysisStatus: "PENDING" | "PROCESSING" | "COMPLETE" | "FAILED" | null;
+    analysisSubmissionsAnalysed: number | null;
     highestSimilarityScore: number | null;
     affectedQuestionCount: number;
     comparedStudentCount: number;
@@ -138,7 +147,7 @@ type EvidenceReport = {
     collusionReviewStatus: string | null;
     examId: string;
     disclaimer: string;
-  } | null;
+  };
   disclaimer: string;
 };
 
@@ -258,6 +267,22 @@ function ReviewLevelBadge({ level }: { level: ReviewLevel }) {
   return <StatusBadge tone={REVIEW_LEVEL_TONES[level]}>{REVIEW_LEVEL_LABELS[level]}</StatusBadge>;
 }
 
+// Evidence-provenance fix — exact required wording, verbatim. Never
+// makes a historical claim from mutable current configuration: this
+// schema has no per-attempt snapshot of captureAiViolationEvidence, so
+// evidenceReport.ts's noEvidenceImageReason never emits CAPTURE_DISABLED
+// today (kept in the type/map only for forward-compatibility, if an
+// attempt-time snapshot is ever added — see that field's own doc
+// comment). CAPTURE_FAILED is similarly unreachable — this codebase has
+// no durable record of a failed upload attempt. Only UNKNOWN is ever
+// actually shown per-incident; see currentCaptureAiViolationEvidenceEnabled
+// for the SEPARATE, clearly-labelled-as-current configuration note.
+const NO_EVIDENCE_IMAGE_EXPLANATIONS: Record<"CAPTURE_DISABLED" | "CAPTURE_FAILED" | "UNKNOWN", string> = {
+  CAPTURE_DISABLED: "Phone signal recorded. No image was saved because evidence-frame capture was disabled for this exam.",
+  CAPTURE_FAILED: "Phone signal recorded, but the supporting evidence image could not be saved.",
+  UNKNOWN: "Phone signal recorded. No supporting evidence image is available.",
+};
+
 function formatByteSize(byteSize: number): string {
   if (byteSize < 1024) return `${byteSize} B`;
   return `${(byteSize / 1024).toFixed(1)} KB`;
@@ -343,6 +368,8 @@ type Incident = {
   controlRestored: boolean;
   reviewable: boolean;
   evidenceAssetId: string | null;
+  /** True only for POSSIBLE_PHONE_VISIBLE/POSSIBLE_SECOND_PERSON_VISIBLE — the only two event types evidence capture supports (see aiCameraEvidenceFrame.ts's EVIDENCE_CAPTURE_EVENT_TYPES). Other camera signals (no-person, blocked, dark) never have a frame by design, not by bug. */
+  hasCameraEvidenceCapability: boolean;
   /** Present only when this incident maps to exactly one IntegrityEvent — SecureClientEvent-sourced incidents (display/continuity) have no equivalent review-action row. */
   reviewEventId: string | null;
 };
@@ -437,6 +464,7 @@ function buildIncidents(timelineEvents: TimelineEvent[]): Incident[] {
         controlRestored: pair.end != null,
         reviewable: isReviewableTimelineEvent(pair.start),
         evidenceAssetId: pair.start.evidenceAssets[0]?.id ?? null,
+        hasCameraEvidenceCapability: isEvidenceCaptureEligibleEventType(pair.start.technicalEventType ?? ""),
         reviewEventId: integrityEventIdFromTimelineId(pair.start.id),
       });
     }
@@ -461,6 +489,7 @@ function buildIncidents(timelineEvents: TimelineEvent[]): Incident[] {
       controlRestored: false,
       reviewable: true,
       evidenceAssetId: event.evidenceAssets[0]?.id ?? null,
+      hasCameraEvidenceCapability: isEvidenceCaptureEligibleEventType(event.technicalEventType ?? ""),
       reviewEventId: integrityEventIdFromTimelineId(event.id),
     });
   }
@@ -593,6 +622,12 @@ export default function EvidenceReportPage({ params }: { params: Promise<{ id: s
 
   const events = useMemo(() => data?.events ?? [], [data]);
   const reviewEventsById = useMemo(() => new Map((review?.events ?? []).map((e) => [e.id, e])), [review]);
+  // Preview QA fix — noEvidenceImageReason lives on data.events (the
+  // /evidence route), not on timeline events, so incident cards (built
+  // from the /timeline route) look it up by the underlying IntegrityEvent
+  // id, which matches incident.reviewEventId for camera-evidence-eligible
+  // event types.
+  const noEvidenceImageReasonById = useMemo(() => new Map(events.map((e) => [e.id, e.noEvidenceImageReason])), [events]);
 
   const incidents = useMemo(() => buildIncidents(timeline?.events ?? []), [timeline]);
   const reviewableIncidents = useMemo(() => incidents.filter((i) => i.reviewable), [incidents]);
@@ -699,6 +734,7 @@ export default function EvidenceReportPage({ params }: { params: Promise<{ id: s
                 onSubmitComment={() => incident.reviewEventId && submitComment(incident.reviewEventId)}
                 bulkSelected={incident.reviewEventId ? bulkSelection.has(incident.reviewEventId) : false}
                 onToggleBulkSelected={() => incident.reviewEventId && toggleBulkSelection(incident.reviewEventId)}
+                noEvidenceImageReason={incident.reviewEventId ? (noEvidenceImageReasonById.get(incident.reviewEventId) ?? null) : null}
               />
             ))}
           </div>
@@ -749,6 +785,17 @@ export default function EvidenceReportPage({ params }: { params: Promise<{ id: s
           {data.aiCameraIntegritySummary && (
             <p className="mt-3 rounded-lg border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">{data.aiCameraIntegritySummary.disclaimer}</p>
           )}
+          {/* Evidence-provenance fix — present-tense configuration
+              context only. This exam has no per-attempt snapshot of this
+              setting, so it is deliberately never used to explain why any
+              specific past incident above does or doesn't have an image —
+              see noEvidenceImageReason on each incident instead. */}
+          <p className="mt-3 text-xs text-lecturer-text-muted">
+            Currently, evidence-frame capture for phone/second-person signals is{" "}
+            <strong>{data.currentCaptureAiViolationEvidenceEnabled ? "enabled" : "disabled"}</strong> for this exam. This
+            reflects the exam&apos;s present configuration only — it does not describe the setting at the time of this
+            attempt.
+          </p>
         </SectionCard>
 
         {/* Section 2 — Display / screen integrity */}
@@ -800,36 +847,14 @@ export default function EvidenceReportPage({ params }: { params: Promise<{ id: s
         </SectionCard>
 
         {/* Section 7 — Answer similarity / collusion */}
-        {data.similarityCollusionSummary && (
-          <SectionCard title="Answer similarity & collusion" subtitle="Compact summary of already-computed cohort analysis.">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <CompactStat
-                value={data.similarityCollusionSummary.highestSimilarityScore != null ? `${Math.round(data.similarityCollusionSummary.highestSimilarityScore * 100)}%` : "—"}
-                label="Highest similarity"
-              />
-              <CompactStat value={data.similarityCollusionSummary.affectedQuestionCount} label="Affected questions" />
-              <CompactStat value={data.similarityCollusionSummary.comparedStudentCount} label="Compared students" />
-              <CompactStat
-                value={data.similarityCollusionSummary.collusionConcernLevel ?? data.similarityCollusionSummary.matchReviewStatus?.replace(/_/g, " ") ?? "—"}
-                label="Review level"
-              />
-            </div>
-            <p className="mt-3 rounded-lg border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">{data.similarityCollusionSummary.disclaimer}</p>
-            <Link
-              href={`/lecturer/exams/${data.similarityCollusionSummary.examId}/similarity`}
-              className="mt-3 inline-block rounded text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover"
-            >
-              Open similarity analysis →
-            </Link>
-          </SectionCard>
-        )}
-        {!data.similarityCollusionSummary && (
-          <SectionCard title="Answer similarity & collusion" subtitle="No similarity or collusion analysis has flagged this submission.">
-            <Link href={`/lecturer/exams/${data.exam.id}/similarity`} className="text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover">
-              Open similarity analysis →
-            </Link>
-          </SectionCard>
-        )}
+        <SimilarityCollusionSection
+          summary={data.similarityCollusionSummary}
+          examId={data.exam.id}
+          onAnalysisRun={async () => {
+            const res = await fetch(`/api/lecturer/submissions/${id}/evidence`);
+            if (res.ok) setData(await res.json());
+          }}
+        />
 
         {/* Section 8 — Tether Brainstorm / AI safeguards */}
         {brainstormEvents.length > 0 && (
@@ -1059,6 +1084,114 @@ function CompactStat({ value, label }: { value: string | number; label: string }
   );
 }
 
+const ANALYSIS_STATUS_LABELS: Record<string, string> = {
+  PENDING: "Pending",
+  PROCESSING: "Running",
+  COMPLETE: "Complete",
+  FAILED: "Failed",
+};
+
+/**
+ * Issue 2 (Preview QA) — the exam-wide similarity page previously
+ * required a lecturer to leave student evidence review, open that
+ * separate page, and manually check every student. This surfaces the
+ * SAME already-computed data (SubmissionSimilarityMatch/
+ * CollusionClusterMember, read via evidenceReport.ts's
+ * similarityCollusionSummary — never a new computation) directly here,
+ * distinguishing "never run" from "run, nothing for this student" from
+ * "run, with results." "Run exam similarity analysis" POSTs to the
+ * existing exam-wide endpoint (the same one the similarity page's own
+ * button calls) — this is a real, full-cohort run, not a per-student
+ * shortcut, so it can take a moment for a large cohort.
+ */
+function SimilarityCollusionSection({
+  summary,
+  examId,
+  onAnalysisRun,
+}: {
+  summary: EvidenceReport["similarityCollusionSummary"];
+  examId: string;
+  onAnalysisRun: () => Promise<void>;
+}) {
+  const [running, setRunning] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+
+  async function runAnalysis() {
+    setRunning(true);
+    setRunError(null);
+    try {
+      const res = await fetch(`/api/lecturer/exams/${examId}/similarity-analysis`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setRunError(body?.error ?? "Similarity analysis failed. Try again.");
+        return;
+      }
+      await onAnalysisRun();
+    } catch {
+      setRunError("Could not reach the server. Try again.");
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  if (!summary.analysisHasRun) {
+    return (
+      <SectionCard title="Answer similarity & collusion" subtitle="Similarity analysis has not yet been run for this exam.">
+        <button
+          type="button"
+          onClick={runAnalysis}
+          disabled={running}
+          className="rounded-lg bg-lecturer-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-lecturer-accent-hover disabled:opacity-50"
+        >
+          {running ? "Running…" : "Run exam similarity analysis"}
+        </button>
+        {runError && <p className="mt-2 text-sm text-[#B42318]">{runError}</p>}
+      </SectionCard>
+    );
+  }
+
+  const hasResultsForStudent = summary.highestSimilarityScore != null || summary.collusionConcernLevel != null;
+  const zeroEligibleSubmissions = summary.analysisStatus === "COMPLETE" && summary.analysisSubmissionsAnalysed === 0;
+
+  return (
+    <SectionCard
+      title="Answer similarity & collusion"
+      subtitle={
+        hasResultsForStudent
+          ? "Compact summary of already-computed cohort analysis for this student."
+          : zeroEligibleSubmissions
+            ? "The exam-wide analysis completed, but no submitted/graded attempts were eligible to compare yet."
+            : "The exam-wide analysis has run and found no similarity or collusion signal for this student."
+      }
+    >
+      {hasResultsForStudent && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <CompactStat value={summary.highestSimilarityScore != null ? `${Math.round(summary.highestSimilarityScore * 100)}%` : "—"} label="Highest similarity" />
+          <CompactStat value={summary.affectedQuestionCount} label="Affected questions" />
+          <CompactStat value={summary.comparedStudentCount} label="Compared students" />
+          <CompactStat value={summary.collusionConcernLevel ?? summary.matchReviewStatus?.replace(/_/g, " ") ?? "—"} label="Review level" />
+        </div>
+      )}
+      <p className="mt-3 text-xs text-lecturer-text-secondary">
+        Analysis status: {summary.analysisStatus ? (ANALYSIS_STATUS_LABELS[summary.analysisStatus] ?? summary.analysisStatus) : "—"}
+        {summary.analysisSubmissionsAnalysed != null && ` · ${summary.analysisSubmissionsAnalysed} submission(s) analysed`}
+      </p>
+      {hasResultsForStudent && (
+        <p className="mt-2 rounded-lg border border-amber-100 bg-amber-50 p-3 text-xs text-amber-800">{summary.disclaimer}</p>
+      )}
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <Link href={`/lecturer/exams/${examId}/similarity`} className="text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover">
+          Open similarity analysis →
+        </Link>
+        <button type="button" onClick={runAnalysis} disabled={running} className="rounded border border-lecturer-border px-2 py-1 text-xs disabled:opacity-50">
+          {running ? "Running…" : "Re-run exam similarity analysis"}
+        </button>
+      </div>
+      {runError && <p className="mt-2 text-sm text-[#B42318]">{runError}</p>}
+    </SectionCard>
+  );
+}
+
 function NetworkEvidenceSection({ networkEvidence: ne }: { networkEvidence: EvidenceReport["networkEvidence"] }) {
   const signalTone: Record<string, StatusTone> = { Normal: "neutral", "Needs review": "warning", "High review signal": "critical" };
   const loc = (e: { country: string | null; region: string | null; city: string | null; locationAccuracy: string } | null) => {
@@ -1111,6 +1244,61 @@ function NetworkEvidenceSection({ networkEvidence: ne }: { networkEvidence: Evid
   );
 }
 
+/**
+ * Issue 1 (Preview QA) — a reviewable camera incident's evidence frame
+ * previously required an extra click ("View evidence" -> modal) before a
+ * lecturer could see anything. Auto-loads a small preview using the
+ * SAME authenticated route/audit trail as the full-size viewer
+ * (GET /api/integrity-evidence/[id] — see that route's own doc comment:
+ * every successful view is recorded) rather than a raw <img src>, so
+ * this never bypasses the existing access control or audit logging.
+ * Only ever rendered for POSSIBLE_PHONE_VISIBLE/POSSIBLE_SECOND_PERSON_VISIBLE
+ * incidents that already have an evidenceAssetId — never fabricates an
+ * image for event types evidence capture doesn't support (no-person,
+ * blocked, dark — see aiCameraEvidenceFrame.ts's own doc comment on why
+ * those are deliberately excluded from capture in v1).
+ */
+function IncidentEvidenceThumbnail({ evidenceAssetId, onOpenFull }: { evidenceAssetId: string; onOpenFull: () => void }) {
+  const [state, setState] = useState<{ objectUrl: string | null; loading: boolean; error: boolean }>({
+    objectUrl: null,
+    loading: true,
+    error: false,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setState({ objectUrl: null, loading: true, error: false });
+    fetch(buildEvidenceFrameViewPath(evidenceAssetId))
+      .then((res) => (res.ok ? res.blob() : Promise.reject(res)))
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setState({ objectUrl, loading: false, error: false });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ objectUrl: null, loading: false, error: true });
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [evidenceAssetId]);
+
+  if (state.error) return null;
+
+  return (
+    <button type="button" onClick={onOpenFull} className="mt-2 block overflow-hidden rounded-lg border border-lecturer-border" aria-label="View full evidence frame">
+      {state.loading && <div className="flex h-24 w-36 items-center justify-center bg-lecturer-border-subtle text-xs text-lecturer-text-secondary">Loading…</div>}
+      {state.objectUrl && (
+        // eslint-disable-next-line @next/next/no-img-element -- authenticated blob: URL, not a static asset
+        <img src={state.objectUrl} alt="Camera evidence frame preview" className="h-24 w-36 object-cover" />
+      )}
+    </button>
+  );
+}
+
 function IncidentCard({
   incident,
   reviewEvent,
@@ -1125,6 +1313,7 @@ function IncidentCard({
   onSubmitComment,
   bulkSelected,
   onToggleBulkSelected,
+  noEvidenceImageReason,
 }: {
   incident: Incident;
   reviewEvent: ReviewEvent | null;
@@ -1139,6 +1328,7 @@ function IncidentCard({
   onSubmitComment: () => void;
   bulkSelected: boolean;
   onToggleBulkSelected: () => void;
+  noEvidenceImageReason: "CAPTURE_DISABLED" | "CAPTURE_FAILED" | "UNKNOWN" | null;
 }) {
   const reviewed = reviewEvent && reviewEvent.reviewStatus !== "NEEDS_REVIEW";
 
@@ -1160,6 +1350,13 @@ function IncidentCard({
       <p className="mt-2 text-sm font-semibold text-lecturer-text-primary">{incident.title}</p>
       <p className="mt-1 text-sm text-lecturer-text-secondary">{incident.observation}</p>
       {incident.controlRestored && <p className="mt-1 text-xs text-green-700">Control restored.</p>}
+
+      {incident.hasCameraEvidenceCapability && incident.evidenceAssetId && (
+        <IncidentEvidenceThumbnail evidenceAssetId={incident.evidenceAssetId} onOpenFull={onViewEvidence} />
+      )}
+      {incident.hasCameraEvidenceCapability && !incident.evidenceAssetId && noEvidenceImageReason && (
+        <p className="mt-2 text-xs text-lecturer-text-secondary">{NO_EVIDENCE_IMAGE_EXPLANATIONS[noEvidenceImageReason]}</p>
+      )}
 
       {reviewEvent?.policyInterpretation && (
         <p className="mt-2 text-xs text-lecturer-text-secondary">

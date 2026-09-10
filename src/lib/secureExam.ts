@@ -55,12 +55,15 @@ export const secureExamSettingsSchema = z.object({
 
   // --- On-Device AI Camera Integrity Detection v1 — Evidence Frames
   // (additive, opt-in) — see docs/on-device-ai-integrity-detection-v1.md.
-  // Defaults to false — never silently enabled for existing exams. When
-  // true, a single low-resolution webcam still frame is captured only for
-  // a backend-logged POSSIBLE_PHONE_VISIBLE or
-  // POSSIBLE_SECOND_PERSON_VISIBLE event (never for no-person/blocked/
-  // dark/unavailable in v1, never a video, never the exam screen). Has no
-  // effect at all unless enableAiCameraIntegrityChecks is also true.
+  // SCHEMA default is false and MUST stay false — see
+  // NEW_EXAM_SECURE_SETTINGS_DEFAULTS below for why the "evidence-first"
+  // default-ON behaviour for brand-new exams is applied at exam-creation
+  // time instead of here. When true, a single low-resolution webcam
+  // still frame is captured only for a backend-logged
+  // POSSIBLE_PHONE_VISIBLE or POSSIBLE_SECOND_PERSON_VISIBLE event (never
+  // for no-person/blocked/dark/unavailable in v1, never a video, never
+  // the exam screen). Has no effect at all unless
+  // enableAiCameraIntegrityChecks is also true.
   captureAiViolationEvidence: z.boolean().default(false),
 
   // --- Exam Watermark v1 (additive, opt-in) — see
@@ -300,6 +303,32 @@ export function questionPoolsActive(
 }
 
 export const DEFAULT_SECURE_SETTINGS: SecureExamSettings = secureExamSettingsSchema.parse({});
+
+// Preview QA follow-up — "Tether is evidence-first": new exams should
+// default to saving an evidence frame for POSSIBLE_PHONE_VISIBLE/
+// POSSIBLE_SECOND_PERSON_VISIBLE, without retroactively changing any
+// EXISTING exam's behaviour.
+//
+// This deliberately does NOT change captureAiViolationEvidence's own
+// schema default above (still `false`). parseSecureSettings() merges
+// DEFAULT_SECURE_SETTINGS with whatever is actually stored — it cannot
+// tell a brand-new exam apart from a pre-existing one whose
+// secureSettings JSON simply never included this key (created before
+// this field existed, and never re-saved since). Flipping the SCHEMA
+// default to `true` would silently turn evidence capture on for every
+// such untouched legacy exam the next time anyone reads its settings —
+// exactly the "silently change existing exam configurations" outcome
+// this must avoid. See enableExamWatermark's own comment above for the
+// identical reasoning applied to a different field, which explicitly
+// punted on a creation-time default for lack of "exam-creation-specific
+// logic this schema/merge pattern doesn't have" — this constant is that
+// logic, applied at the ONE place it's actually safe: POST /api/exams's
+// prisma.exam.create() call, which only ever runs for a genuinely new
+// exam and never touches any existing row. A lecturer can still turn
+// this off per exam (the checkbox is never forced/disabled by this).
+export const NEW_EXAM_SECURE_SETTINGS_DEFAULTS: Pick<SecureExamSettings, "captureAiViolationEvidence"> = {
+  captureAiViolationEvidence: true,
+};
 
 /** Merges stored settings (possibly partial/legacy) with current defaults. */
 export function parseSecureSettings(raw: unknown): SecureExamSettings {

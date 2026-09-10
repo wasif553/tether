@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { institutionWhere, requireInstitutionId, institutionErrorResponse } from "@/lib/institutionScope";
 import { assertCanAssignExamToCourse, assertStudentsInCourse, CourseAssignmentError } from "@/lib/courseAssignment";
 import { isLecturerClosedHistoryItem } from "@/lib/lecturerDashboardGrouping";
+import { NEW_EXAM_SECURE_SETTINGS_DEFAULTS } from "@/lib/secureExam";
 
 const createExamSchema = z
   .object({
@@ -286,6 +287,14 @@ export async function POST(req: Request) {
         assignmentMode: assignmentMode ?? undefined,
         availableFrom: availableFrom ? new Date(availableFrom) : undefined,
         availableUntil: availableUntil ? new Date(availableUntil) : undefined,
+        // Preview QA follow-up — "evidence-first" default for brand-new
+        // exams only, applied here (the one and only exam-creation
+        // pathway) rather than as a schema default, so no EXISTING exam
+        // is ever retroactively affected — see
+        // NEW_EXAM_SECURE_SETTINGS_DEFAULTS's own doc comment in
+        // secureExam.ts. A lecturer can still turn this off; every other
+        // secure setting keeps its normal schema default (unset here).
+        secureSettings: NEW_EXAM_SECURE_SETTINGS_DEFAULTS,
         ...(assignmentMode === "SELECTED_STUDENTS" && selectedStudentIds?.length
           ? { assignments: { create: selectedStudentIds.map((studentId) => ({ studentId })) } }
           : {}),

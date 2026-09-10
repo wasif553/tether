@@ -188,6 +188,20 @@ export default function SimilarityReviewPage({ params }: { params: Promise<{ id:
         </div>
       </div>
 
+      {/* Preview QA fix — "COMPLETE" with 0 submissions analysed used to
+          read as "we checked everything and it's fine" when in fact
+          there was nothing eligible to compare yet (only SUBMITTED/
+          GRADED attempts are analysable — see similarityAnalysisRunner.ts).
+          This does not change status/summary values themselves, only
+          clarifies what a COMPLETE-with-zero result actually means. */}
+      {data?.status === "COMPLETE" && (data.summary?.submissionsAnalysed ?? 0) === 0 && (
+        <p className="mt-3 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          The analysis completed, but no submitted or graded attempts were available to compare — this is not a
+          finding of &quot;no similarity,&quot; there was simply nothing eligible yet. Re-run this once students have
+          submitted.
+        </p>
+      )}
+
       <div className="mt-4">
         <button
           onClick={runAnalysis}

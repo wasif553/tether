@@ -4,6 +4,8 @@ import { labelForEventType } from "@/lib/integrityEventLabels";
 import { isPlatformAdmin, requireInstitutionId } from "@/lib/institutionScope";
 import { networkReviewSignal, type NetworkReviewSignal } from "@/lib/networkEvidence";
 import { parseScreenSharePolicy, isScreenShareRequired } from "@/lib/screenSharePolicy";
+import { parseSecureSettings } from "@/lib/secureExam";
+import { isEvidenceCaptureEligibleEventType } from "@/lib/aiCameraEvidenceFrame";
 import type { Session } from "next-auth";
 
 export const EVIDENCE_DISCLAIMER =
@@ -144,6 +146,19 @@ export type EvidenceReport = {
     // image bytes are resolved separately via the authenticated, audited
     // GET /api/integrity-evidence/[id] route, using evidenceFrame.id.
     evidenceFrame: EvidenceReportEventEvidenceFrame;
+    // Preview QA fix — only set for POSSIBLE_PHONE_VISIBLE/
+    // POSSIBLE_SECOND_PERSON_VISIBLE events with no evidenceFrame above.
+    // Explains WHY, from real exam configuration only — never invented:
+    // "CAPTURE_DISABLED" when the exam's current captureAiViolationEvidence
+    // setting is off (the same setting the real upload attempt checked —
+    // see POST .../evidence-frame/route.ts); "UNKNOWN" when capture is
+    // enabled but no frame exists and this codebase has no durable record
+    // of a failed upload attempt to point to (the upload route only
+    // console.errors on failure — nothing is persisted to distinguish
+    // "never attempted" from "attempted and failed"). "CAPTURE_FAILED" is
+    // reserved for if/when a real failure signal is ever added — it is
+    // never emitted today.
+    noEvidenceImageReason: "CAPTURE_DISABLED" | "CAPTURE_FAILED" | "UNKNOWN" | null;
   }>;
   // Top-level, denormalized list of every saved camera evidence frame for
   // this submission — lets the lecturer evidence report page surface a
@@ -234,11 +249,26 @@ export type EvidenceReport = {
     reviewSignal: NetworkReviewSignal;
     networkEvidenceDisclaimer: string;
   };
+  // Evidence-provenance fix — the exam's CURRENT captureAiViolationEvidence
+  // setting, exposed ONLY as present-tense configuration context (e.g.
+  // "Evidence-frame capture is currently enabled/disabled for this exam").
+  // This schema has no per-attempt snapshot of this field, so it must
+  // NEVER be used to explain why a PAST event has no image — see
+  // events[].noEvidenceImageReason above, which deliberately does not
+  // read this value.
+  currentCaptureAiViolationEvidenceEnabled: boolean;
   // Evidence workspace v1 — see SIMILARITY_COLLUSION_DISCLAIMER above.
-  // Read-only summary of SubmissionSimilarityMatch/CollusionClusterMember
-  // rows already computed elsewhere; null when this exam has no
-  // similarity analysis and this submission has no cluster membership.
+  // Read-only summary of SubmissionSimilarityAnalysis/
+  // SubmissionSimilarityMatch/CollusionClusterMember rows already computed
+  // elsewhere (never recomputed or duplicated here). Always present (never
+  // null) so the lecturer evidence page can distinguish three states:
+  // analysis never run for this exam (analysisHasRun: false), run but no
+  // matches/cluster membership for THIS submission (analysisHasRun: true,
+  // highestSimilarityScore: null), or run with results for this student.
   similarityCollusionSummary: {
+    analysisHasRun: boolean;
+    analysisStatus: "PENDING" | "PROCESSING" | "COMPLETE" | "FAILED" | null;
+    analysisSubmissionsAnalysed: number | null;
     highestSimilarityScore: number | null;
     affectedQuestionCount: number;
     comparedStudentCount: number;
@@ -247,7 +277,7 @@ export type EvidenceReport = {
     collusionReviewStatus: string | null;
     examId: string;
     disclaimer: string;
-  } | null;
+  };
   disclaimer: string;
 };
 
@@ -260,7 +290,7 @@ export async function buildEvidenceReport(
     where: { id: submissionId },
     include: {
       student: { select: { name: true, email: true } },
-      exam: { select: { id: true, title: true, createdById: true, institutionId: true } },
+      exam: { select: { id: true, title: true, createdById: true, institutionId: true, secureSettings: true } },
       integrityEvents: {
         include: {
           resolvedBy: { select: { name: true } },
@@ -291,6 +321,22 @@ export async function buildEvidenceReport(
 
   const riskScore = computeRiskScore(submission.integrityEvents);
   const riskLevel = riskLevelForScore(riskScore);
+
+  // Evidence-provenance fix — captureAiViolationEvidence has NO per-
+  // attempt snapshot anywhere in this schema (confirmed: not in
+  // ExamPolicySnapshot/RelevantSecureSettings, not in
+  // secureClientPolicySnapshotJson, not in screenSharePolicySnapshotJson,
+  // not in any other Submission.*PolicySnapshotJson column, not
+  // recoverable from SecureClientSession.policyHash — that's a one-way
+  // hash for drift detection, not a stored value). A lecturer can change
+  // this setting after the attempt, so reading the exam's CURRENT value
+  // must never be used to explain what happened during a specific past
+  // attempt — that would be an unproven historical claim from mutable
+  // current configuration. It is still exposed below, but ONLY as
+  // clearly-labelled current configuration context, never wired into
+  // noEvidenceImageReason. See docs note in the returned object.
+  const currentSecureSettings = parseSecureSettings(submission.exam.secureSettings);
+  const currentCaptureAiViolationEvidenceEnabled = currentSecureSettings.captureAiViolationEvidence;
 
   const essayAnswers = submission.answers.filter((a) => a.question.type === "ESSAY");
   const aiMarking = essayAnswers.length
@@ -359,10 +405,20 @@ export async function buildEvidenceReport(
     : null;
 
   // Evidence workspace v1 — read-only, additive. Reuses whatever
-  // SubmissionSimilarityMatch/CollusionClusterMember rows already exist
-  // for this submission (written by similarityAnalysisRunner.ts /
-  // cohortCollusionRunner.ts elsewhere) rather than recomputing anything.
-  const [similarityMatches, collusionMembership] = await Promise.all([
+  // SubmissionSimilarityAnalysis/SubmissionSimilarityMatch/
+  // CollusionClusterMember rows already exist (written by
+  // similarityAnalysisRunner.ts / cohortCollusionRunner.ts elsewhere)
+  // rather than recomputing anything. The exam-level analysis row is
+  // queried separately from the per-submission matches so the lecturer
+  // page can tell "never run for this exam" apart from "run, but this
+  // student has no matches" — both currently read as "no matches" if we
+  // only looked at this submission's own rows.
+  const [examAnalysis, similarityMatches, collusionMembership] = await Promise.all([
+    prisma.submissionSimilarityAnalysis.findFirst({
+      where: { examId: submission.examId },
+      orderBy: { createdAt: "asc" },
+      select: { status: true, summaryJson: true },
+    }),
     prisma.submissionSimilarityMatch.findMany({
       where: { OR: [{ sourceSubmissionId: submissionId }, { comparedSubmissionId: submissionId }] },
       select: { score: true, questionId: true, reviewStatus: true, sourceSubmissionId: true, comparedSubmissionId: true },
@@ -373,26 +429,24 @@ export async function buildEvidenceReport(
       orderBy: { memberScore: "desc" },
     }),
   ]);
-  const similarityCollusionSummary =
-    similarityMatches.length > 0 || collusionMembership
-      ? {
-          highestSimilarityScore: similarityMatches.length
-            ? Math.max(...similarityMatches.map((m) => m.score))
-            : null,
-          affectedQuestionCount: new Set(similarityMatches.map((m) => m.questionId).filter((q): q is string => q != null))
-            .size,
-          comparedStudentCount: new Set(
-            similarityMatches.map((m) => (m.sourceSubmissionId === submissionId ? m.comparedSubmissionId : m.sourceSubmissionId)),
-          ).size,
-          matchReviewStatus: similarityMatches.length
-            ? similarityMatches.find((m) => m.reviewStatus !== "REVIEWED_NO_CONCERN")?.reviewStatus ?? "REVIEWED_NO_CONCERN"
-            : null,
-          collusionConcernLevel: collusionMembership?.cluster.concernLevel ?? null,
-          collusionReviewStatus: collusionMembership?.cluster.reviewStatus ?? null,
-          examId: submission.exam.id,
-          disclaimer: SIMILARITY_COLLUSION_DISCLAIMER,
-        }
-      : null;
+  const analysisSummary = examAnalysis?.summaryJson as { submissionsAnalysed?: number } | null;
+  const similarityCollusionSummary = {
+    analysisHasRun: examAnalysis != null,
+    analysisStatus: (examAnalysis?.status as "PENDING" | "PROCESSING" | "COMPLETE" | "FAILED" | undefined) ?? null,
+    analysisSubmissionsAnalysed: analysisSummary?.submissionsAnalysed ?? null,
+    highestSimilarityScore: similarityMatches.length ? Math.max(...similarityMatches.map((m) => m.score)) : null,
+    affectedQuestionCount: new Set(similarityMatches.map((m) => m.questionId).filter((q): q is string => q != null)).size,
+    comparedStudentCount: new Set(
+      similarityMatches.map((m) => (m.sourceSubmissionId === submissionId ? m.comparedSubmissionId : m.sourceSubmissionId)),
+    ).size,
+    matchReviewStatus: similarityMatches.length
+      ? similarityMatches.find((m) => m.reviewStatus !== "REVIEWED_NO_CONCERN")?.reviewStatus ?? "REVIEWED_NO_CONCERN"
+      : null,
+    collusionConcernLevel: collusionMembership?.cluster.concernLevel ?? null,
+    collusionReviewStatus: collusionMembership?.cluster.reviewStatus ?? null,
+    examId: submission.exam.id,
+    disclaimer: SIMILARITY_COLLUSION_DISCLAIMER,
+  };
 
   return {
     submissionId: submission.id,
@@ -442,6 +496,13 @@ export async function buildEvidenceReport(
               capturedAt: e.evidenceAsset.capturedAt.toISOString(),
             }
           : null,
+        // Evidence-provenance fix — never "CAPTURE_DISABLED" here: that
+        // would be a historical claim from the exam's mutable CURRENT
+        // setting, which this schema has no attempt-time snapshot to
+        // actually prove (see currentCaptureAiViolationEvidenceEnabled's
+        // own comment above). Always the neutral, provably-true fallback.
+        noEvidenceImageReason:
+          e.evidenceAsset || !isEvidenceCaptureEligibleEventType(e.eventType) ? null : "UNKNOWN",
       };
     }),
     evidenceFrames: submission.integrityEvents
@@ -514,6 +575,7 @@ export async function buildEvidenceReport(
       ),
       networkEvidenceDisclaimer: NETWORK_EVIDENCE_DISCLAIMER,
     },
+    currentCaptureAiViolationEvidenceEnabled,
     similarityCollusionSummary,
     disclaimer: EVIDENCE_DISCLAIMER,
   };
