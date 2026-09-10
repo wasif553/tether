@@ -366,7 +366,7 @@ export default function ExamIntegrityPage({ params }: { params: Promise<{ id: st
           <SectionHeading
             title="Review queue"
             badge={countLabel(reviewQueue.length, "student")}
-            subtitle="Students are prioritised from the integrity signals already recorded by Tether. Open a student to inspect the evidence and record a human decision."
+            subtitle="Students are prioritised from the integrity signals already recorded by Tether — a deterministic point score, not AI. It is evidence for human review, not a misconduct determination."
           />
           <div className="mt-3 space-y-2">
             {reviewQueue.length === 0 && (
