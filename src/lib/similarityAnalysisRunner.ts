@@ -37,6 +37,18 @@ import {
  */
 export const MAX_ANALYSIS_SUBMISSIONS = 100;
 
+/**
+ * The exact submission statuses eligible for similarity comparison —
+ * exported so callers that need to know eligibility WITHOUT running a
+ * full analysis (e.g. the lecturer evidence page's "not enough eligible
+ * submissions yet" state) reuse this same definition rather than
+ * duplicating the literal status list.
+ */
+export const SIMILARITY_ELIGIBLE_SUBMISSION_STATUSES = ["SUBMITTED", "GRADED"] as const;
+
+/** A pairwise comparison needs at least two analysable submissions to ever produce a match. */
+export const MIN_ELIGIBLE_SUBMISSIONS_FOR_SIMILARITY = 2;
+
 export class SimilarityCohortTooLargeError extends Error {
   constructor(count: number) {
     super(
@@ -85,7 +97,7 @@ export async function runSimilarityAnalysisForExam(examId: string): Promise<stri
   try {
     // --- Load the analysable cohort: SUBMITTED/GRADED only, this exam only.
     const submissions = await prisma.submission.findMany({
-      where: { examId, status: { in: ["SUBMITTED", "GRADED"] } },
+      where: { examId, status: { in: [...SIMILARITY_ELIGIBLE_SUBMISSION_STATUSES] } },
       select: {
         id: true,
         studentId: true,

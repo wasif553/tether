@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, use as usePromise } from "react";
+import { useCallback, useEffect, useMemo, useState, use as usePromise, type ReactNode } from "react";
 import Link from "next/link";
 import { buildEvidenceFrameViewPath, isEvidenceCaptureEligibleEventType } from "@/lib/aiCameraEvidenceFrame";
 import {
@@ -132,10 +132,14 @@ type EvidenceReport = {
   // as present-tense configuration context.
   currentCaptureAiViolationEvidenceEnabled: boolean;
   // Evidence workspace v1 — additive (see src/lib/evidenceReport.ts).
-  // Always present: analysisHasRun distinguishes "never run for this
-  // exam" from "run, but nothing for this student" from "run, with
-  // results" — see the page's rendering below.
+  // Always present: eligibleSubmissionCount vs. minEligibleSubmissions
+  // distinguishes "not enough eligible submissions yet" from
+  // analysisHasRun distinguishing "never run for this exam" from "run,
+  // but nothing for this student" from "run, with results" — see the
+  // page's rendering below.
   similarityCollusionSummary: {
+    eligibleSubmissionCount: number;
+    minEligibleSubmissions: number;
     analysisHasRun: boolean;
     analysisStatus: "PENDING" | "PROCESSING" | "COMPLETE" | "FAILED" | null;
     analysisSubmissionsAnalysed: number | null;
@@ -527,6 +531,7 @@ export default function EvidenceReportPage({ params }: { params: Promise<{ id: s
   const [bulkConfirming, setBulkConfirming] = useState(false);
   const [showFullLog, setShowFullLog] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState<IntegrityEventCategory | "all">("all");
+  const [windowFocusGroupExpanded, setWindowFocusGroupExpanded] = useState(false);
 
   const loadReview = useCallback(async () => {
     const res = await fetch(`/api/lecturer/submissions/${id}/integrity-review`);
@@ -633,6 +638,30 @@ export default function EvidenceReportPage({ params }: { params: Promise<{ id: s
   const reviewableIncidents = useMemo(() => incidents.filter((i) => i.reviewable), [incidents]);
   const highPriorityIncidents = useMemo(() => reviewableIncidents.filter((i) => i.reviewLevel === "HIGH"), [reviewableIncidents]);
 
+  // Repeated window-focus grouping — only WINDOW_BLUR/WINDOW_FOCUS_RETURN
+  // pairs are aggregated here; every other incident title (phone,
+  // second-person, HDMI/display, secure-client, lockdown, etc.) keeps its
+  // own individual card. Grouping only kicks in with >1 such incident so a
+  // single focus-loss still reads as a normal incident.
+  const windowFocusIncidents = useMemo(() => reviewableIncidents.filter((i) => i.title === "Window focus lost"), [reviewableIncidents]);
+  const shouldGroupWindowFocus = windowFocusIncidents.length > 1;
+  const incidentDisplayItems = useMemo(() => {
+    if (!shouldGroupWindowFocus) return reviewableIncidents.map((incident) => ({ kind: "incident" as const, incident }));
+    const items: Array<{ kind: "incident"; incident: Incident } | { kind: "windowFocusGroup"; incidents: Incident[] }> = [];
+    let grouped = false;
+    for (const incident of reviewableIncidents) {
+      if (incident.title === "Window focus lost") {
+        if (!grouped) {
+          items.push({ kind: "windowFocusGroup", incidents: windowFocusIncidents });
+          grouped = true;
+        }
+        continue;
+      }
+      items.push({ kind: "incident", incident });
+    }
+    return items;
+  }, [reviewableIncidents, shouldGroupWindowFocus, windowFocusIncidents]);
+
   const categoryCounts = useMemo(() => {
     const counts: Record<IntegrityEventCategory, number> = { evidence: 0, camera: 0, screen: 0, lockdown: 0, window: 0, info: 0 };
     for (const e of events) counts[categoryForEventType(e.eventType)]++;
@@ -718,25 +747,53 @@ export default function EvidenceReportPage({ params }: { params: Promise<{ id: s
             </p>
           )}
           <div className="space-y-3">
-            {reviewableIncidents.map((incident) => (
-              <IncidentCard
-                key={incident.id}
-                incident={incident}
-                reviewEvent={incident.reviewEventId ? (reviewEventsById.get(incident.reviewEventId) ?? null) : null}
-                noteText={reviewNoteDrafts[incident.reviewEventId ?? ""] ?? ""}
-                onNoteChange={(value) => incident.reviewEventId && setReviewNoteDrafts((prev) => ({ ...prev, [incident.reviewEventId!]: value }))}
-                onReviewAction={(status) => incident.reviewEventId && submitEventReview(incident.reviewEventId, status)}
-                onViewEvidence={() => incident.evidenceAssetId && openEvidenceFrame(incident.evidenceAssetId, incident.title, incident.occurredAt)}
-                expanded={expandedEventId === incident.reviewEventId}
-                onToggleExpanded={() => setExpandedEventId(expandedEventId === incident.reviewEventId ? null : incident.reviewEventId)}
-                commentDraft={commentDrafts[incident.reviewEventId ?? ""] ?? ""}
-                onCommentChange={(value) => incident.reviewEventId && setCommentDrafts((prev) => ({ ...prev, [incident.reviewEventId!]: value }))}
-                onSubmitComment={() => incident.reviewEventId && submitComment(incident.reviewEventId)}
-                bulkSelected={incident.reviewEventId ? bulkSelection.has(incident.reviewEventId) : false}
-                onToggleBulkSelected={() => incident.reviewEventId && toggleBulkSelection(incident.reviewEventId)}
-                noEvidenceImageReason={incident.reviewEventId ? (noEvidenceImageReasonById.get(incident.reviewEventId) ?? null) : null}
-              />
-            ))}
+            {incidentDisplayItems.map((item) =>
+              item.kind === "windowFocusGroup" ? (
+                <WindowFocusGroupCard
+                  key="window-focus-group"
+                  incidents={item.incidents}
+                  expanded={windowFocusGroupExpanded}
+                  onToggleExpanded={() => setWindowFocusGroupExpanded((prev) => !prev)}
+                  renderIncident={(incident) => (
+                    <IncidentCard
+                      key={incident.id}
+                      incident={incident}
+                      reviewEvent={incident.reviewEventId ? (reviewEventsById.get(incident.reviewEventId) ?? null) : null}
+                      noteText={reviewNoteDrafts[incident.reviewEventId ?? ""] ?? ""}
+                      onNoteChange={(value) => incident.reviewEventId && setReviewNoteDrafts((prev) => ({ ...prev, [incident.reviewEventId!]: value }))}
+                      onReviewAction={(status) => incident.reviewEventId && submitEventReview(incident.reviewEventId, status)}
+                      onViewEvidence={() => incident.evidenceAssetId && openEvidenceFrame(incident.evidenceAssetId, incident.title, incident.occurredAt)}
+                      expanded={expandedEventId === incident.reviewEventId}
+                      onToggleExpanded={() => setExpandedEventId(expandedEventId === incident.reviewEventId ? null : incident.reviewEventId)}
+                      commentDraft={commentDrafts[incident.reviewEventId ?? ""] ?? ""}
+                      onCommentChange={(value) => incident.reviewEventId && setCommentDrafts((prev) => ({ ...prev, [incident.reviewEventId!]: value }))}
+                      onSubmitComment={() => incident.reviewEventId && submitComment(incident.reviewEventId)}
+                      bulkSelected={incident.reviewEventId ? bulkSelection.has(incident.reviewEventId) : false}
+                      onToggleBulkSelected={() => incident.reviewEventId && toggleBulkSelection(incident.reviewEventId)}
+                      noEvidenceImageReason={incident.reviewEventId ? (noEvidenceImageReasonById.get(incident.reviewEventId) ?? null) : null}
+                    />
+                  )}
+                />
+              ) : (
+                <IncidentCard
+                  key={item.incident.id}
+                  incident={item.incident}
+                  reviewEvent={item.incident.reviewEventId ? (reviewEventsById.get(item.incident.reviewEventId) ?? null) : null}
+                  noteText={reviewNoteDrafts[item.incident.reviewEventId ?? ""] ?? ""}
+                  onNoteChange={(value) => item.incident.reviewEventId && setReviewNoteDrafts((prev) => ({ ...prev, [item.incident.reviewEventId!]: value }))}
+                  onReviewAction={(status) => item.incident.reviewEventId && submitEventReview(item.incident.reviewEventId, status)}
+                  onViewEvidence={() => item.incident.evidenceAssetId && openEvidenceFrame(item.incident.evidenceAssetId, item.incident.title, item.incident.occurredAt)}
+                  expanded={expandedEventId === item.incident.reviewEventId}
+                  onToggleExpanded={() => setExpandedEventId(expandedEventId === item.incident.reviewEventId ? null : item.incident.reviewEventId)}
+                  commentDraft={commentDrafts[item.incident.reviewEventId ?? ""] ?? ""}
+                  onCommentChange={(value) => item.incident.reviewEventId && setCommentDrafts((prev) => ({ ...prev, [item.incident.reviewEventId!]: value }))}
+                  onSubmitComment={() => item.incident.reviewEventId && submitComment(item.incident.reviewEventId)}
+                  bulkSelected={item.incident.reviewEventId ? bulkSelection.has(item.incident.reviewEventId) : false}
+                  onToggleBulkSelected={() => item.incident.reviewEventId && toggleBulkSelection(item.incident.reviewEventId)}
+                  noEvidenceImageReason={item.incident.reviewEventId ? (noEvidenceImageReasonById.get(item.incident.reviewEventId) ?? null) : null}
+                />
+              ),
+            )}
           </div>
         </SectionCard>
 
@@ -857,20 +914,7 @@ export default function EvidenceReportPage({ params }: { params: Promise<{ id: s
         />
 
         {/* Section 8 — Tether Brainstorm / AI safeguards */}
-        {brainstormEvents.length > 0 && (
-          <SectionCard title="Tether Brainstorm safeguards" subtitle="System-control evidence — not an integrity violation.">
-            <div className="flex flex-wrap gap-2">
-              {brainstormEvents.map((e) => (
-                <StatusBadge key={e.id} tone="success">
-                  {e.label}
-                </StatusBadge>
-              ))}
-            </div>
-            <p className="mt-3 text-xs text-lecturer-text-secondary">
-              Brainstorm safeguard applied — system safeguard, not an integrity violation. Guidance shown, regenerated, or declined under this attempt&apos;s policy is expected, permitted behaviour.
-            </p>
-          </SectionCard>
-        )}
+        {brainstormEvents.length > 0 && <BrainstormSafeguardsSection submissionId={id} />}
 
         {/* Score / grading context, kept compact */}
         <SectionCard title="Attempt summary">
@@ -1134,6 +1178,19 @@ function SimilarityCollusionSection({
     }
   }
 
+  const notEnoughEligibleSubmissions = summary.eligibleSubmissionCount < summary.minEligibleSubmissions;
+
+  if (!summary.analysisHasRun && notEnoughEligibleSubmissions) {
+    return (
+      <SectionCard
+        title="Answer similarity & collusion"
+        subtitle="Similarity analysis becomes available when at least two eligible submissions have been submitted or graded."
+      >
+        <p className="text-sm text-lecturer-text-secondary">Eligible submissions: {summary.eligibleSubmissionCount}</p>
+      </SectionCard>
+    );
+  }
+
   if (!summary.analysisHasRun) {
     return (
       <SectionCard title="Answer similarity & collusion" subtitle="Similarity analysis has not yet been run for this exam.">
@@ -1188,6 +1245,108 @@ function SimilarityCollusionSection({
         </button>
       </div>
       {runError && <p className="mt-2 text-sm text-[#B42318]">{runError}</p>}
+    </SectionCard>
+  );
+}
+
+const BRAINSTORM_OUTCOME_LABELS: Record<string, string> = {
+  APPROVED: "Guidance allowed",
+  FALLBACK: "Guidance allowed",
+  BLOCKED: "Blocked by Tether safeguard",
+  FAILED: "Could not be completed",
+};
+
+const BRAINSTORM_RESPONSE_COLLAPSE_THRESHOLD = 220;
+const BRAINSTORM_COMPACT_HISTORY_LIMIT = 3;
+
+type BrainstormInteraction = {
+  id: string;
+  studentPrompt: string;
+  response: string | null;
+  status: string;
+  createdAt: string;
+};
+
+/**
+ * Item 3 (Brainstorm question history) — reuses the SAME ownership-scoped
+ * read-only endpoint (/api/lecturer/submissions/[id]/ai-assistance, backed
+ * by src/lib/aiAssistanceReview.ts's buildAiAssistanceReview) that already
+ * powers the dedicated full-transcript page at
+ * /lecturer/submissions/[id]/ai-assistance — no new query logic, no
+ * frozen-file changes, and the exact same institution/ownership check
+ * already gates who can see a given submission's Brainstorm activity.
+ * Shows the actual persisted student question and stored response (never
+ * reconstructed or invented) so a lecturer can see what was asked, not
+ * just that "guidance was shown."
+ */
+function BrainstormSafeguardsSection({ submissionId }: { submissionId: string }) {
+  const [interactions, setInteractions] = useState<BrainstormInteraction[] | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/lecturer/submissions/${submissionId}/ai-assistance`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(res)))
+      .then((body: { interactions: BrainstormInteraction[] }) => {
+        if (!cancelled) setInteractions(body.interactions);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [submissionId]);
+
+  if (error || !interactions || interactions.length === 0) return null;
+
+  const sorted = [...interactions].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  const visible = sorted.slice(0, BRAINSTORM_COMPACT_HISTORY_LIMIT);
+
+  return (
+    <SectionCard title="Tether Brainstorm safeguards" subtitle="System/audit evidence — permitted Brainstorm use is not an integrity violation.">
+      <div className="space-y-3">
+        {visible.map((interaction) => {
+          const outcome = BRAINSTORM_OUTCOME_LABELS[interaction.status] ?? interaction.status;
+          const showResponse = interaction.response && (interaction.status === "APPROVED" || interaction.status === "FALLBACK");
+          const responseIsLong = (interaction.response?.length ?? 0) > BRAINSTORM_RESPONSE_COLLAPSE_THRESHOLD;
+          return (
+            <div key={interaction.id} className="rounded-xl border border-lecturer-border p-4">
+              <p className="text-xs font-medium uppercase text-lecturer-text-secondary">Student question</p>
+              <p className="mt-1 text-sm text-lecturer-text-primary">&quot;{interaction.studentPrompt}&quot;</p>
+              {showResponse && (
+                <>
+                  <p className="mt-3 text-xs font-medium uppercase text-lecturer-text-secondary">Tether response</p>
+                  {responseIsLong ? (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer text-sm text-lecturer-accent">Show response</summary>
+                      <p className="mt-1 text-sm text-lecturer-text-primary">{interaction.response}</p>
+                    </details>
+                  ) : (
+                    <p className="mt-1 text-sm text-lecturer-text-primary">{interaction.response}</p>
+                  )}
+                </>
+              )}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <StatusBadge tone={interaction.status === "BLOCKED" ? "warning" : interaction.status === "FAILED" ? "neutral" : "success"}>
+                  {outcome}
+                </StatusBadge>
+                <span className="text-xs text-lecturer-text-secondary">
+                  {new Date(interaction.createdAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-3 flex items-center justify-between">
+        <p className="text-xs text-lecturer-text-secondary">
+          Guidance shown, regenerated, or declined under this attempt&apos;s policy is expected, permitted behaviour.
+        </p>
+        <Link href={`/lecturer/submissions/${submissionId}/ai-assistance`} className="shrink-0 text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover">
+          View all Brainstorm activity →
+        </Link>
+      </div>
     </SectionCard>
   );
 }
@@ -1296,6 +1455,48 @@ function IncidentEvidenceThumbnail({ evidenceAssetId, onOpenFull }: { evidenceAs
         <img src={state.objectUrl} alt="Camera evidence frame preview" className="h-24 w-36 object-cover" />
       )}
     </button>
+  );
+}
+
+/**
+ * Item 2 (window-focus grouping) — WINDOW_BLUR/WINDOW_FOCUS_RETURN pairs
+ * are the noisiest incident type on a long exam, so >1 of them collapses
+ * into one compact summary card instead of a long stack of near-identical
+ * cards. Expanding renders the EXACT same IncidentCard used everywhere
+ * else (via renderIncident, supplied by the caller with all its existing
+ * review-action/history wiring) — nothing about the underlying incidents,
+ * their raw events, or reviewer history is summarized away or duplicated.
+ */
+function WindowFocusGroupCard({
+  incidents,
+  expanded,
+  onToggleExpanded,
+  renderIncident,
+}: {
+  incidents: Incident[];
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  renderIncident: (incident: Incident) => ReactNode;
+}) {
+  const restoredCount = incidents.filter((i) => i.controlRestored).length;
+  const noReturnCount = incidents.length - restoredCount;
+  const confirmedDurations = incidents.map((i) => i.durationMs).filter((d): d is number => d != null);
+  const longestConfirmedAbsenceMs = confirmedDurations.length ? Math.max(...confirmedDurations) : null;
+
+  return (
+    <div className="rounded-xl border border-lecturer-border p-4">
+      <p className="text-sm font-semibold text-lecturer-text-primary">Window focus interruptions</p>
+      <p className="mt-1 text-sm text-lecturer-text-secondary">{incidents.length} incidents</p>
+      <ul className="mt-2 space-y-0.5 text-xs text-lecturer-text-secondary">
+        {longestConfirmedAbsenceMs != null && <li>Longest confirmed absence: {formatDuration(longestConfirmedAbsenceMs)}</li>}
+        {restoredCount > 0 && <li>{restoredCount} restored normally</li>}
+        {noReturnCount > 0 && <li>{noReturnCount} has no return event recorded</li>}
+      </ul>
+      <button type="button" onClick={onToggleExpanded} className="mt-3 rounded border border-lecturer-border px-2 py-1 text-xs">
+        {expanded ? "Hide incidents" : "View incidents"}
+      </button>
+      {expanded && <div className="mt-3 space-y-3">{incidents.map(renderIncident)}</div>}
+    </div>
   );
 }
 

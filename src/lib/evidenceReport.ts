@@ -6,6 +6,10 @@ import { networkReviewSignal, type NetworkReviewSignal } from "@/lib/networkEvid
 import { parseScreenSharePolicy, isScreenShareRequired } from "@/lib/screenSharePolicy";
 import { parseSecureSettings } from "@/lib/secureExam";
 import { isEvidenceCaptureEligibleEventType } from "@/lib/aiCameraEvidenceFrame";
+import {
+  SIMILARITY_ELIGIBLE_SUBMISSION_STATUSES,
+  MIN_ELIGIBLE_SUBMISSIONS_FOR_SIMILARITY,
+} from "@/lib/similarityAnalysisRunner";
 import type { Session } from "next-auth";
 
 export const EVIDENCE_DISCLAIMER =
@@ -261,11 +265,18 @@ export type EvidenceReport = {
   // Read-only summary of SubmissionSimilarityAnalysis/
   // SubmissionSimilarityMatch/CollusionClusterMember rows already computed
   // elsewhere (never recomputed or duplicated here). Always present (never
-  // null) so the lecturer evidence page can distinguish three states:
-  // analysis never run for this exam (analysisHasRun: false), run but no
-  // matches/cluster membership for THIS submission (analysisHasRun: true,
+  // null) so the lecturer evidence page can distinguish four states:
+  // not enough eligible submissions yet (eligibleSubmissionCount below
+  // MIN_ELIGIBLE_SUBMISSIONS_FOR_SIMILARITY), enough eligible submissions
+  // but analysis never run (analysisHasRun: false), run but no matches/
+  // cluster membership for THIS submission (analysisHasRun: true,
   // highestSimilarityScore: null), or run with results for this student.
   similarityCollusionSummary: {
+    // Reuses similarityAnalysisRunner.ts's own eligibility definition
+    // (SIMILARITY_ELIGIBLE_SUBMISSION_STATUSES) — never a separately
+    // invented count.
+    eligibleSubmissionCount: number;
+    minEligibleSubmissions: number;
     analysisHasRun: boolean;
     analysisStatus: "PENDING" | "PROCESSING" | "COMPLETE" | "FAILED" | null;
     analysisSubmissionsAnalysed: number | null;
@@ -413,7 +424,7 @@ export async function buildEvidenceReport(
   // page can tell "never run for this exam" apart from "run, but this
   // student has no matches" — both currently read as "no matches" if we
   // only looked at this submission's own rows.
-  const [examAnalysis, similarityMatches, collusionMembership] = await Promise.all([
+  const [examAnalysis, similarityMatches, collusionMembership, eligibleSubmissionCount] = await Promise.all([
     prisma.submissionSimilarityAnalysis.findFirst({
       where: { examId: submission.examId },
       orderBy: { createdAt: "asc" },
@@ -428,9 +439,17 @@ export async function buildEvidenceReport(
       include: { cluster: { select: { concernLevel: true, reviewStatus: true } } },
       orderBy: { memberScore: "desc" },
     }),
+    // Reuses similarityAnalysisRunner.ts's own eligibility definition so the
+    // "not enough eligible submissions yet" state on the evidence page never
+    // drifts from the runner's actual eligibility/query logic.
+    prisma.submission.count({
+      where: { examId: submission.examId, status: { in: [...SIMILARITY_ELIGIBLE_SUBMISSION_STATUSES] } },
+    }),
   ]);
   const analysisSummary = examAnalysis?.summaryJson as { submissionsAnalysed?: number } | null;
   const similarityCollusionSummary = {
+    eligibleSubmissionCount,
+    minEligibleSubmissions: MIN_ELIGIBLE_SUBMISSIONS_FOR_SIMILARITY,
     analysisHasRun: examAnalysis != null,
     analysisStatus: (examAnalysis?.status as "PENDING" | "PROCESSING" | "COMPLETE" | "FAILED" | undefined) ?? null,
     analysisSubmissionsAnalysed: analysisSummary?.submissionsAnalysed ?? null,
