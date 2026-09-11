@@ -574,9 +574,6 @@ export default function GradeSubmissionPage({
         description={`Status: ${data.status} · Attempt ${data.attemptNumber}`}
         actions={
           <>
-            <SecondaryLinkButton href={`/lecturer/submissions/${submissionId}/ai-assistance`} className="px-3 py-1.5">
-              AI assistance
-            </SecondaryLinkButton>
             <SecondaryLinkButton href={`/lecturer/submissions/${submissionId}/evidence`} className="px-3 py-1.5">
               Evidence report
             </SecondaryLinkButton>
@@ -590,9 +587,9 @@ export default function GradeSubmissionPage({
       {aiAssistanceSummary?.aiAssistanceEnabled && (
         <SectionCard>
           <div className="flex items-center justify-between gap-3">
-            <p className="font-medium text-lecturer-text-primary">Controlled AI activity</p>
+            <p className="font-medium text-lecturer-text-primary">Student Brainstorm Activity</p>
             <Link href={`/lecturer/submissions/${submissionId}/ai-assistance`} className="shrink-0 text-sm text-lecturer-accent hover:underline">
-              View AI activity →
+              View Student AI Activity →
             </Link>
           </div>
           {aiAssistanceSummary.summary.totalRequests === 0 ? (

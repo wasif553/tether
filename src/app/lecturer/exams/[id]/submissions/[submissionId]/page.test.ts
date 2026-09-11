@@ -12,7 +12,7 @@ import path from "node:path";
 
 const pageSource = fs.readFileSync(path.join(__dirname, "page.tsx"), "utf8");
 
-describe("submission review page — Controlled AI activity summary card (Section 6)", () => {
+describe("submission review page — Student Brainstorm Activity summary card (Section 6)", () => {
   it("fetches the summary from the EXISTING lecturer AI-assistance review endpoint — no new endpoint added", () => {
     expect(pageSource).toMatch(
       /fetch\(`\/api\/lecturer\/submissions\/\$\{submissionId\}\/ai-assistance`\)/,
@@ -28,13 +28,13 @@ describe("submission review page — Controlled AI activity summary card (Sectio
     expect(loaderBlock).toMatch(/setAiAssistanceSummaryError\(true\)/);
   });
 
-  it("renders 'Controlled AI activity' with the enabled+unused wording 'Enabled — no requests made.' — never implies anything negative", () => {
-    expect(pageSource).toMatch(/Controlled AI activity/);
+  it("renders 'Student Brainstorm Activity' with the enabled+unused wording 'Enabled — no requests made.' — never implies anything negative", () => {
+    expect(pageSource).toMatch(/Student Brainstorm Activity/);
     expect(pageSource).toMatch(/Enabled — no requests made\./);
   });
 
   it("when enabled with activity, shows requests / guidance shown / declined / questions used counts derived from the same summary object", () => {
-    const cardStart = pageSource.indexOf("Controlled AI activity");
+    const cardStart = pageSource.indexOf("Student Brainstorm Activity");
     const cardEnd = pageSource.indexOf("</div>", pageSource.indexOf("Enabled for attempt"));
     const cardBlock = pageSource.slice(cardStart, cardEnd);
     expect(cardBlock).toMatch(/aiAssistanceSummary\.summary\.totalRequests/);
@@ -43,10 +43,13 @@ describe("submission review page — Controlled AI activity summary card (Sectio
     expect(cardBlock).toMatch(/aiAssistanceSummary\.summary\.questionsUsedCount/);
   });
 
-  it("links to the existing full AI review route, not a new one", () => {
+  it("links to the existing full AI review route, not a new one, labeled 'View Student AI Activity' — no separate/duplicate top-level button pointing at the same route", () => {
     expect(pageSource).toMatch(
       /href=\{`\/lecturer\/submissions\/\$\{submissionId\}\/ai-assistance`\}/,
     );
+    expect(pageSource).toMatch(/View Student AI Activity →/);
+    const occurrences = pageSource.split("/ai-assistance`").length - 1;
+    expect(occurrences).toBe(2); // the fetch() call + the one Link href — never a second nav button to the same place
   });
 
   it("shows a compact 'not enabled' state instead of a large empty card when Controlled AI was off for this attempt", () => {
@@ -58,7 +61,7 @@ describe("submission review page — Controlled AI activity summary card (Sectio
   });
 
   it("never derives or displays an AI risk/misconduct score from this summary", () => {
-    const cardStart = pageSource.indexOf("Controlled AI activity");
+    const cardStart = pageSource.indexOf("Student Brainstorm Activity");
     const cardEnd = pageSource.indexOf("<div className=\"space-y-4\">");
     const cardBlock = pageSource.slice(cardStart, cardEnd);
     expect(cardBlock.toLowerCase()).not.toMatch(/risk score|misconduct|suspicion|dependency/);
