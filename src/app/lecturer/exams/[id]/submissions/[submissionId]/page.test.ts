@@ -99,3 +99,73 @@ describe("submission review page — Integrity evidence timeline compact card (S
     expect(pageSource).toMatch(/Integrity timeline unavailable\./);
   });
 });
+
+// AI Marking Assistance v1 — see docs/ai-marking-assistance-v1.md. Distinct
+// from the "Student Brainstorm Activity" section tested above: this is the
+// lecturer-facing essay-marking helper, never the Tether Brainstorm
+// transcript.
+describe("submission review page — AI Marking Assistance (per-question)", () => {
+  it("calls the single-answer endpoint, never the exam-wide bulk endpoint, from the per-question handler", () => {
+    const fnStart = pageSource.indexOf("async function handleGetAiMarkingSuggestion(");
+    const fnEnd = pageSource.indexOf('if (!data) return <LoadingState', fnStart);
+    const fnBlock = pageSource.slice(fnStart, fnEnd);
+    expect(fnBlock).toMatch(/fetch\(`\/api\/lecturer\/submissions\/\$\{submissionId\}\/answers\/\$\{questionId\}\/ai-mark`/);
+    expect(fnBlock).not.toMatch(/ai-mark-essays/);
+  });
+
+  it("shows the 'AI Marking Assistance' guide form only for an ESSAY question with no draft yet, never for MCQ", () => {
+    expect(pageSource).toMatch(/q\.type === "ESSAY" && !hasAiDraft/);
+    expect(pageSource).toMatch(/Optional: paste or describe your marking guide, rubric, expected points, or assessment criteria\./);
+    expect(pageSource).toMatch(/Get AI marking suggestion/);
+  });
+
+  it("uses the required terminology for the result display — Suggested score, Criterion breakdown, Strengths, Areas to improve", () => {
+    expect(pageSource).toMatch(/Suggested score: \{answer\?\.aiDraftScore\}/);
+    expect(pageSource).toMatch(/Criterion breakdown/);
+    expect(pageSource).toMatch(/>Strengths</);
+    expect(pageSource).toMatch(/Areas to improve/);
+  });
+
+  it("distinguishes a lecturer-supplied guide from the default rubric, with a 'View guide' toggle only for the lecturer-guide case", () => {
+    expect(pageSource).toMatch(/Based on lecturer marking guide/);
+    expect(pageSource).toMatch(/Based on Tether default rubric/);
+    expect(pageSource).toMatch(/View guide/);
+    expect(pageSource).toMatch(/aiResult\?\.rubricSource === "LECTURER"/);
+  });
+
+  it("offers 'Regenerate suggestion' next to the existing 'Accept AI draft' and 'Show details' actions, reusing the same single-answer endpoint", () => {
+    const draftBlockStart = pageSource.indexOf('{hasAiDraft && (');
+    const draftBlockEnd = pageSource.indexOf('{q.type === "ESSAY" && !hasAiDraft && (');
+    const draftBlock = pageSource.slice(draftBlockStart, draftBlockEnd);
+    expect(draftBlock).toMatch(/Accept AI draft/);
+    expect(draftBlock).toMatch(/Show details/);
+    expect(draftBlock).toMatch(/Regenerate suggestion/);
+  });
+
+  it("Accept AI draft only pre-fills the editable score — it never calls a save/finalize endpoint itself", () => {
+    const fnStart = pageSource.indexOf("function handleAcceptAiDraft(");
+    const fnEnd = pageSource.indexOf("AI Marking Assistance v1 — requests", fnStart);
+    const fnBlock = pageSource.slice(fnStart, fnEnd);
+    expect(fnBlock).toMatch(/setScores/);
+    expect(fnBlock).not.toMatch(/fetch\(/);
+  });
+
+  it("never uses wording implying the AI awarded or finalized the grade", () => {
+    const start = pageSource.indexOf("AI Marking Assistance");
+    const end = pageSource.indexOf("Finalize grade");
+    const section = pageSource.slice(start, end).toLowerCase();
+    expect(section).not.toMatch(/ai awarded|ai finalized|ai graded the|automatically graded|final grade has been set by ai/);
+  });
+
+  it("the new single-answer route enforces lecturer ownership, institution scope, ESSAY-only eligibility, and never touches Submission.status/totalScore", () => {
+    const routeSource = fs.readFileSync(
+      path.join(__dirname, "../../../../../api/lecturer/submissions/[id]/answers/[questionId]/ai-mark/route.ts"),
+      "utf8",
+    );
+    expect(routeSource).toMatch(/role !== "LECTURER"/);
+    expect(routeSource).toMatch(/assertSameInstitution/);
+    expect(routeSource).toMatch(/question\.type !== "ESSAY"/);
+    expect(routeSource).not.toMatch(/submission\.update/);
+    expect(routeSource).not.toMatch(/status: "GRADED"/);
+  });
+});

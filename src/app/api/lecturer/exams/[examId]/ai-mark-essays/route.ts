@@ -1,23 +1,8 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { markEssay, type RubricCriterion } from "@/lib/ai/essayMarker";
+import { markEssay, buildDefaultRubric, type AiMarkingRecord } from "@/lib/ai/essayMarker";
 import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
-
-function buildDefaultRubric(points: number): RubricCriterion[] {
-  return [
-    {
-      criterion: "Content & accuracy",
-      description: "Response demonstrates understanding and accuracy",
-      maxMarks: Math.ceil(points * 0.6),
-    },
-    {
-      criterion: "Clarity & structure",
-      description: "Response is well-organised and clearly expressed",
-      maxMarks: Math.floor(points * 0.4),
-    },
-  ];
-}
 
 export async function POST(
   _req: Request,
@@ -78,11 +63,19 @@ export async function POST(
         studentResponse: answer.response,
       });
 
+      // AI Marking Assistance — stores the same enriched record shape the
+      // single-answer endpoint uses, so the grading page's "Based on
+      // Tether default rubric" / "Based on lecturer marking guide" line
+      // renders correctly regardless of which path produced the draft.
+      // Never a lecturer guide here — this bulk action has no per-answer
+      // input surface.
+      const stored: AiMarkingRecord = { ...result, rubricSource: "DEFAULT", rubric, lecturerGuideText: null };
+
       await prisma.answer.update({
         where: { id: answer.id },
         data: {
           aiDraftScore: result.totalScore,
-          aiReasoning: JSON.stringify(result),
+          aiReasoning: JSON.stringify(stored),
           aiGradedAt: new Date(),
         },
       });

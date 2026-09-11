@@ -34,6 +34,55 @@ export interface EssayMarkingResult {
 
 export class EssayMarkingError extends Error {}
 
+/**
+ * AI Marking Assistance — lecturer marking-guide support. The default,
+ * auto-generated two-part rubric (unchanged from the original "Mark
+ * essays with AI" bulk action) — used whenever a lecturer does not supply
+ * their own marking guide. Moved here (from the bulk route) so the new
+ * single-answer marking endpoint uses the exact same default, never a
+ * second, independently-drifting copy.
+ */
+export function buildDefaultRubric(points: number): RubricCriterion[] {
+  return [
+    {
+      criterion: "Content & accuracy",
+      description: "Response demonstrates understanding and accuracy",
+      maxMarks: Math.ceil(points * 0.6),
+    },
+    {
+      criterion: "Clarity & structure",
+      description: "Response is well-organised and clearly expressed",
+      maxMarks: Math.floor(points * 0.4),
+    },
+  ];
+}
+
+/**
+ * A lecturer-supplied marking guide is passed to markEssay() as a SINGLE
+ * rubric criterion whose description is the lecturer's own text, verbatim
+ * — never split, reinterpreted, or supplemented with invented criteria.
+ * maxMarks is always the question's own total points, so the AI's
+ * criteriaScores/totalScore stay within the question's real mark range
+ * regardless of what the lecturer wrote.
+ */
+export function buildLecturerGuideRubric(guideText: string, points: number): RubricCriterion[] {
+  return [{ criterion: "Lecturer marking guide", description: guideText, maxMarks: points }];
+}
+
+/**
+ * The exact record persisted into Answer.aiReasoning (still a plain JSON
+ * string — no schema change; see docs/ai-marking-assistance-v1.md).
+ * Additive over the original EssayMarkingResult shape: a row written
+ * before this change simply has rubricSource/rubric/lecturerGuideText
+ * all absent, which every reader below treats as "DEFAULT, no guide" —
+ * never a required field, never a migration/backfill.
+ */
+export type AiMarkingRecord = EssayMarkingResult & {
+  rubricSource: "LECTURER" | "DEFAULT";
+  rubric: RubricCriterion[];
+  lecturerGuideText: string | null;
+};
+
 const TOTAL_SCORE_TOLERANCE = 0.01;
 
 const criterionScoreSchema = z

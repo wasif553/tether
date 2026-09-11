@@ -11,7 +11,7 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: MockAnthropic };
 });
 
-const { markEssay, EssayMarkingError } = await import("./essayMarker");
+const { markEssay, EssayMarkingError, buildDefaultRubric, buildLecturerGuideRubric } = await import("./essayMarker");
 
 function textResponse(text: string) {
   return { content: [{ type: "text", text }] };
@@ -128,5 +128,31 @@ describe("markEssay", () => {
 
     expect(result.confidence).toBe("LOW");
     expect(result.totalScore).toBe(0);
+  });
+});
+
+// AI Marking Assistance v1 — see docs/ai-marking-assistance-v1.md.
+describe("buildDefaultRubric", () => {
+  it("splits points 60% content/accuracy, 40% clarity/structure — unchanged from the original bulk-marking default", () => {
+    const rubric = buildDefaultRubric(10);
+    expect(rubric).toEqual([
+      { criterion: "Content & accuracy", description: "Response demonstrates understanding and accuracy", maxMarks: 6 },
+      { criterion: "Clarity & structure", description: "Response is well-organised and clearly expressed", maxMarks: 4 },
+    ]);
+  });
+
+  it("rounds so the two criteria always sum to the exact total points, even when 60/40 doesn't divide evenly", () => {
+    const rubric = buildDefaultRubric(5);
+    const sum = rubric.reduce((acc, r) => acc + r.maxMarks, 0);
+    expect(sum).toBe(5);
+  });
+});
+
+describe("buildLecturerGuideRubric", () => {
+  it("wraps the lecturer's guide text verbatim as a single criterion capped at the question's total points — never split or supplemented", () => {
+    const rubric = buildLecturerGuideRubric("Award full marks only if the student mentions chlorophyll.", 8);
+    expect(rubric).toEqual([
+      { criterion: "Lecturer marking guide", description: "Award full marks only if the student mentions chlorophyll.", maxMarks: 8 },
+    ]);
   });
 });

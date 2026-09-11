@@ -67,6 +67,12 @@ type EssayMarkingResult = {
   strengths: string[];
   areasForImprovement: string[];
   confidence: "HIGH" | "MEDIUM" | "LOW";
+  // AI Marking Assistance — additive over the original shape (see
+  // docs/ai-marking-assistance-v1.md). Both absent on any draft produced
+  // before this feature existed — always read with a "DEFAULT, no guide"
+  // fallback, never assumed present.
+  rubricSource?: "LECTURER" | "DEFAULT";
+  lecturerGuideText?: string | null;
 };
 
 function parseAiReasoning(raw: string | null | undefined): EssayMarkingResult | null {
@@ -79,6 +85,48 @@ function parseAiReasoning(raw: string | null | undefined): EssayMarkingResult | 
 }
 
 const CONFIDENCE_TONES: Record<EssayMarkingResult["confidence"], StatusTone> = { HIGH: "success", MEDIUM: "warning", LOW: "critical" };
+
+/**
+ * AI Marking Assistance — the shared "supply a guide and request a
+ * suggestion" form, used both for a question with no draft yet and for
+ * "Regenerate suggestion" on a question that already has one. A single
+ * definition so the two call sites can never drift.
+ */
+function AiMarkingGuideForm({
+  guide,
+  onGuideChange,
+  onSubmit,
+  loading,
+  error,
+  submitLabel,
+}: {
+  guide: string;
+  onGuideChange: (value: string) => void;
+  onSubmit: () => void;
+  loading: boolean;
+  error?: string;
+  submitLabel: string;
+}) {
+  return (
+    <div>
+      <textarea
+        placeholder="Optional: paste or describe your marking guide, rubric, expected points, or assessment criteria."
+        rows={3}
+        className={FIELD_CLASS}
+        value={guide}
+        onChange={(e) => onGuideChange(e.target.value)}
+      />
+      <button
+        onClick={onSubmit}
+        disabled={loading}
+        className="mt-2 rounded-lg bg-lecturer-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-lecturer-accent-hover disabled:opacity-50"
+      >
+        {loading ? "Getting suggestion…" : submitLabel}
+      </button>
+      {error && <p className="mt-2 text-xs text-[#B42318]">{error}</p>}
+    </div>
+  );
+}
 
 // Oral Verification Workflow v1 — see docs/oral-verification-workflow-v1.md.
 // Lecturer-controlled: an OralVerification record is only ever created by
@@ -229,6 +277,18 @@ export default function GradeSubmissionPage({
   const [pushingGrade, setPushingGrade] = useState(false);
   const [pushGradeMessage, setPushGradeMessage] = useState<string | null>(null);
   const [expandedAiDraft, setExpandedAiDraft] = useState<string | null>(null);
+
+  // AI Marking Assistance v1 state — see docs/ai-marking-assistance-v1.md.
+  // Per-question: the lecturer's in-progress (optional) marking-guide
+  // text, whether a request is currently in flight, any error to show,
+  // whether the "Regenerate suggestion" form is expanded (only relevant
+  // once a draft already exists), and whether the stored guide text is
+  // currently shown ("View guide").
+  const [aiMarkGuideDrafts, setAiMarkGuideDrafts] = useState<Record<string, string>>({});
+  const [aiMarkingQuestionId, setAiMarkingQuestionId] = useState<string | null>(null);
+  const [aiMarkErrors, setAiMarkErrors] = useState<Record<string, string>>({});
+  const [aiMarkRegenerateOpen, setAiMarkRegenerateOpen] = useState<Record<string, boolean>>({});
+  const [aiMarkGuideVisible, setAiMarkGuideVisible] = useState<Record<string, boolean>>({});
 
   // Oral Verification Workflow v1 state — see
   // docs/oral-verification-workflow-v1.md.
@@ -564,6 +624,49 @@ export default function GradeSubmissionPage({
     setScores((prev) => ({ ...prev, [questionId]: Math.round(aiDraftScore) }));
   }
 
+  // AI Marking Assistance v1 — requests (or re-requests) an AI marking
+  // suggestion for exactly ONE essay answer. Never calls the exam-wide
+  // bulk endpoint. Only ever writes a DRAFT (Answer.aiDraftScore/
+  // aiReasoning) — Accept AI draft above is still the only thing that
+  // touches the lecturer's editable score, and Finalize grade (unchanged)
+  // is still the only thing that actually saves/submits it.
+  async function handleGetAiMarkingSuggestion(questionId: string) {
+    setAiMarkingQuestionId(questionId);
+    setAiMarkErrors((prev) => ({ ...prev, [questionId]: "" }));
+    try {
+      const guide = aiMarkGuideDrafts[questionId]?.trim();
+      const res = await fetch(`/api/lecturer/submissions/${submissionId}/answers/${questionId}/ai-mark`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(guide ? { lecturerGuide: guide } : {}),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setAiMarkErrors((prev) => ({
+          ...prev,
+          [questionId]: typeof body?.error === "string" ? body.error : "AI marking failed. Try again.",
+        }));
+        return;
+      }
+      const result: { questionId: string; aiDraftScore: number; aiReasoning: string } = await res.json();
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              answers: prev.answers.map((a) =>
+                a.questionId === questionId ? { ...a, aiDraftScore: result.aiDraftScore, aiReasoning: result.aiReasoning } : a,
+              ),
+            }
+          : prev,
+      );
+      setAiMarkRegenerateOpen((prev) => ({ ...prev, [questionId]: false }));
+    } catch {
+      setAiMarkErrors((prev) => ({ ...prev, [questionId]: "Could not reach the server. Try again." }));
+    } finally {
+      setAiMarkingQuestionId(null);
+    }
+  }
+
   if (!data) return <LoadingState label="Loading submission…" />;
 
   return (
@@ -638,25 +741,57 @@ export default function GradeSubmissionPage({
 
               {hasAiDraft && (
                 <div className="mt-3 rounded-lg border border-lecturer-accent-subtle bg-lecturer-accent-subtle p-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-medium text-lecturer-text-primary">
-                      AI draft: {answer?.aiDraftScore} / {q.points}
+                  <p className="text-sm font-medium text-lecturer-text-primary">AI Marking Assistance</p>
+                  <div className="mt-1 flex items-center justify-between">
+                    <p className="text-sm text-lecturer-text-primary">
+                      Suggested score: {answer?.aiDraftScore} / {q.points}
                     </p>
                     {aiResult && <StatusBadge tone={CONFIDENCE_TONES[aiResult.confidence]}>{aiResult.confidence}</StatusBadge>}
                   </div>
-                  <div className="mt-2 flex gap-2">
+                  <p className="mt-1 text-xs text-lecturer-text-secondary">
+                    {aiResult?.rubricSource === "LECTURER" ? (
+                      <>
+                        Based on lecturer marking guide ·{" "}
+                        <button onClick={() => setAiMarkGuideVisible((prev) => ({ ...prev, [q.id]: !prev[q.id] }))} className="underline hover:text-lecturer-text-primary">
+                          {aiMarkGuideVisible[q.id] ? "Hide guide" : "View guide"}
+                        </button>
+                      </>
+                    ) : (
+                      "Based on Tether default rubric"
+                    )}
+                  </p>
+                  {aiMarkGuideVisible[q.id] && aiResult?.lecturerGuideText && (
+                    <p className="mt-1 rounded-lg bg-lecturer-border-subtle p-2 text-xs text-lecturer-text-primary">{aiResult.lecturerGuideText}</p>
+                  )}
+                  <div className="mt-2 flex flex-wrap gap-2">
                     <button onClick={() => handleAcceptAiDraft(q.id, answer!.aiDraftScore!)} className="rounded-lg bg-lecturer-accent px-3 py-1 text-xs font-semibold text-white hover:bg-lecturer-accent-hover">
                       Accept AI draft
                     </button>
                     <button onClick={() => setExpandedAiDraft(expandedAiDraft === q.id ? null : q.id)} className={CHIP_BUTTON_CLASS}>
                       {expandedAiDraft === q.id ? "Hide details" : "Show details"}
                     </button>
+                    <button onClick={() => setAiMarkRegenerateOpen((prev) => ({ ...prev, [q.id]: !prev[q.id] }))} className={CHIP_BUTTON_CLASS}>
+                      {aiMarkRegenerateOpen[q.id] ? "Cancel regenerate" : "Regenerate suggestion"}
+                    </button>
                   </div>
+
+                  {aiMarkRegenerateOpen[q.id] && (
+                    <div className="mt-3 border-t border-lecturer-border pt-3">
+                      <AiMarkingGuideForm
+                        guide={aiMarkGuideDrafts[q.id] ?? aiResult?.lecturerGuideText ?? ""}
+                        onGuideChange={(value) => setAiMarkGuideDrafts((prev) => ({ ...prev, [q.id]: value }))}
+                        onSubmit={() => handleGetAiMarkingSuggestion(q.id)}
+                        loading={aiMarkingQuestionId === q.id}
+                        error={aiMarkErrors[q.id]}
+                        submitLabel="Regenerate suggestion"
+                      />
+                    </div>
+                  )}
 
                   {expandedAiDraft === q.id && aiResult && (
                     <div className="mt-3 space-y-3 border-t border-lecturer-border pt-3 text-sm">
                       <div>
-                        <p className="font-medium text-lecturer-text-primary">Per-criterion breakdown</p>
+                        <p className="font-medium text-lecturer-text-primary">Criterion breakdown</p>
                         <ul className="mt-1 space-y-1">
                           {aiResult.criteriaScores.map((c) => (
                             <li key={c.criterion} className="text-lecturer-text-secondary">
@@ -680,7 +815,7 @@ export default function GradeSubmissionPage({
                       )}
                       {aiResult.areasForImprovement.length > 0 && (
                         <div>
-                          <p className="font-medium text-lecturer-text-primary">Areas for improvement</p>
+                          <p className="font-medium text-lecturer-text-primary">Areas to improve</p>
                           <ul className="mt-1 list-disc pl-5 text-lecturer-text-secondary">
                             {aiResult.areasForImprovement.map((s, idx) => (
                               <li key={idx}>{s}</li>
@@ -694,6 +829,22 @@ export default function GradeSubmissionPage({
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {q.type === "ESSAY" && !hasAiDraft && (
+                <div className="mt-3 rounded-lg border border-lecturer-border p-3">
+                  <p className="text-sm font-medium text-lecturer-text-primary">AI Marking Assistance</p>
+                  <div className="mt-2">
+                    <AiMarkingGuideForm
+                      guide={aiMarkGuideDrafts[q.id] ?? ""}
+                      onGuideChange={(value) => setAiMarkGuideDrafts((prev) => ({ ...prev, [q.id]: value }))}
+                      onSubmit={() => handleGetAiMarkingSuggestion(q.id)}
+                      loading={aiMarkingQuestionId === q.id}
+                      error={aiMarkErrors[q.id]}
+                      submitLabel="Get AI marking suggestion"
+                    />
+                  </div>
                 </div>
               )}
 
