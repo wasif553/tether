@@ -285,6 +285,11 @@ export async function GET(
             points: canViewQuestionPoints ? q.points : undefined,
             order: q.order,
             correctAnswer: isExamOwner ? q.correctAnswer : undefined,
+            // AI Marking Assistance v1 — see docs/ai-marking-assistance-v1.md.
+            // Lecturer-only, same gate as correctAnswer above — a STUDENT
+            // (including their own IN_PROGRESS full-paper delivery) must
+            // never receive the marking guide.
+            aiMarkingGuide: isExamOwner ? q.aiMarkingGuide : undefined,
           }));
       })();
 

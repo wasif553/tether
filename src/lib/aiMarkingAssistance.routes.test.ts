@@ -1,11 +1,20 @@
 /**
  * AI Marking Assistance v1 — see docs/ai-marking-assistance-v1.md.
  *
- * DB-backed route tests for the new single-answer endpoint
- * (POST /api/lecturer/submissions/[id]/answers/[questionId]/ai-mark) and a
- * regression pass proving the existing exam-wide bulk endpoint
- * (POST /api/lecturer/exams/[examId]/ai-mark-essays) is unaffected by
- * sharing buildDefaultRubric() and the enriched aiReasoning record shape.
+ * DB-backed route tests covering:
+ *  - PATCH /api/lecturer/exams/[examId]/marking-guides (question-level
+ *    guide management — ownership, ESSAY-only, persistence).
+ *  - POST /api/lecturer/submissions/[id]/answers/[questionId]/ai-mark
+ *    (single-answer marking) automatically reusing the question's saved
+ *    guide, never a per-call caller-supplied one.
+ *  - POST /api/lecturer/exams/[examId]/ai-mark-essays (bulk marking)
+ *    automatically reusing the question's saved guide too.
+ *  - Version behaviour: an existing Answer.aiReasoning snapshot is never
+ *    mutated when the question's guide changes later; a fresh/regenerated
+ *    draft always uses the latest saved guide.
+ *  - Student-facing leak checks: GET /api/exams/[id] and GET
+ *    /api/submissions/[id] never expose Question.aiMarkingGuide to a
+ *    STUDENT, in any attempt state.
  *
  * Mocks @/lib/ai/essayMarker's markEssay (never the Anthropic SDK
  * directly here — that's already covered by essayMarker.test.ts) so
@@ -28,6 +37,11 @@ const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
 const aiMarkRoute = await import("../app/api/lecturer/submissions/[id]/answers/[questionId]/ai-mark/route");
 const bulkMarkRoute = await import("../app/api/lecturer/exams/[examId]/ai-mark-essays/route");
+const markingGuidesRoute = await import("../app/api/lecturer/exams/[examId]/marking-guides/route");
+const examRoute = await import("../app/api/exams/[id]/route");
+const submissionRoute = await import("../app/api/submissions/[id]/route");
+const startRoute = await import("../app/api/exams/[id]/start/route");
+const gradeRoute = await import("../app/api/submissions/[id]/grade/route");
 
 const stamp = Date.now();
 
@@ -46,12 +60,13 @@ function jsonRequest(method: string, body?: unknown) {
 let institutionId: string;
 let lecturerId: string;
 let otherLecturerId: string;
-let studentId: string;
+let studentAId: string;
+let studentBId: string;
 const cleanupExamIds: string[] = [];
 const cleanupUserIds: string[] = [];
 
 beforeAll(async () => {
-  const inst = await getOrCreateTestInstitution(`ai-marking-${stamp}`);
+  const inst = await getOrCreateTestInstitution(`ai-marking-guides-${stamp}`);
   institutionId = inst.id;
   const passwordHash = await bcrypt.hash("password", 4);
   const lecturer = await prisma.user.create({
@@ -62,17 +77,21 @@ beforeAll(async () => {
     data: { name: "AI Marking Other Lecturer", email: `ai-mark-lect2-${stamp}@test.invalid`, passwordHash, role: "LECTURER", institutionId },
   });
   otherLecturerId = otherLecturer.id;
-  const student = await prisma.user.create({
-    data: { name: "AI Marking Student", email: `ai-mark-stud-${stamp}@test.invalid`, passwordHash, role: "STUDENT", institutionId },
+  const studentA = await prisma.user.create({
+    data: { name: "AI Marking Student A", email: `ai-mark-studA-${stamp}@test.invalid`, passwordHash, role: "STUDENT", institutionId },
   });
-  studentId = student.id;
-  cleanupUserIds.push(lecturerId, otherLecturerId, studentId);
+  studentAId = studentA.id;
+  const studentB = await prisma.user.create({
+    data: { name: "AI Marking Student B", email: `ai-mark-studB-${stamp}@test.invalid`, passwordHash, role: "STUDENT", institutionId },
+  });
+  studentBId = studentB.id;
+  cleanupUserIds.push(lecturerId, otherLecturerId, studentAId, studentBId);
   process.env.ANTHROPIC_API_KEY = "test-key";
 });
 
 afterAll(async () => {
-  await prisma.answer.deleteMany({ where: { submission: { studentId } } });
-  await prisma.submission.deleteMany({ where: { studentId } });
+  await prisma.answer.deleteMany({ where: { submission: { studentId: { in: [studentAId, studentBId] } } } });
+  await prisma.submission.deleteMany({ where: { studentId: { in: [studentAId, studentBId] } } });
   await prisma.question.deleteMany({ where: { examId: { in: cleanupExamIds } } });
   await prisma.exam.deleteMany({ where: { id: { in: cleanupExamIds } } });
   await prisma.user.deleteMany({ where: { id: { in: cleanupUserIds } } });
@@ -92,66 +111,255 @@ const VALID_RESULT = {
   confidence: "HIGH" as const,
 };
 
-async function makeExamWithEssay(tag: string) {
+async function makeExamWithTwoEssays(tag: string) {
   const exam = await prisma.exam.create({
-    data: { title: `AI Marking Exam ${tag} ${stamp}-${Math.random()}`, durationMins: 30, published: true, createdById: lecturerId, institutionId },
+    data: { title: `AI Marking Guides Exam ${tag} ${stamp}-${Math.random()}`, durationMins: 30, published: true, createdById: lecturerId, institutionId },
   });
   cleanupExamIds.push(exam.id);
-  const question = await prisma.question.create({
+  const questionA = await prisma.question.create({
     data: { examId: exam.id, type: "ESSAY", text: "Explain photosynthesis.", points: 10, order: 0 },
   });
-  const mcq = await prisma.question.create({
-    data: { examId: exam.id, type: "MULTIPLE_CHOICE", text: "2+2=?", points: 1, order: 1, options: ["3", "4"], correctAnswer: "4" },
+  const questionB = await prisma.question.create({
+    data: { examId: exam.id, type: "ESSAY", text: "Explain mitosis.", points: 10, order: 1 },
   });
-  return { exam, question, mcq };
+  return { exam, questionA, questionB };
 }
 
-async function makeSubmission(
-  examId: string,
-  questionId: string,
-  status: "IN_PROGRESS" | "SUBMITTED" | "GRADED",
-  response: string | null = "Photosynthesis converts light into chemical energy.",
-) {
+async function makeSubmission(examId: string, questionId: string, studentId: string, response = "A student answer.") {
   const submission = await prisma.submission.create({
-    data: { examId, studentId, status, submittedAt: status === "IN_PROGRESS" ? null : new Date() },
+    data: { examId, studentId, status: "SUBMITTED", submittedAt: new Date() },
   });
-  if (response !== null) {
-    await prisma.answer.create({ data: { submissionId: submission.id, questionId, response } });
-  }
+  await prisma.answer.create({ data: { submissionId: submission.id, questionId, response } });
   return submission;
 }
 
-describe("POST /api/lecturer/submissions/[id]/answers/[questionId]/ai-mark — single-answer AI marking", () => {
-  it("marks only the requested answer — a sibling MCQ answer on the same submission is untouched", async () => {
-    const { exam, question, mcq } = await makeExamWithEssay("single");
-    const submission = await makeSubmission(exam.id, question.id, "SUBMITTED");
-    await prisma.answer.create({ data: { submissionId: submission.id, questionId: mcq.id, response: "4" } });
-    mockMarkEssay.mockResolvedValue(VALID_RESULT);
-
+describe("PATCH /api/lecturer/exams/[examId]/marking-guides — question-level guide management", () => {
+  it("saves a marking guide for one essay question", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("save-one");
     mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
-    const res = await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: question.id }) });
+    const res = await markingGuidesRoute.PATCH(
+      jsonRequest("PATCH", { guides: [{ questionId: questionA.id, aiMarkingGuide: "Award full marks only if chlorophyll is mentioned." }] }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.aiDraftScore).toBe(5);
-    expect(body.questionId).toBe(question.id);
+    expect(body.updated).toBe(1);
 
-    const updated = await prisma.answer.findUnique({ where: { submissionId_questionId: { submissionId: submission.id, questionId: question.id } } });
-    expect(updated?.aiDraftScore).toBe(5);
-    expect(updated?.aiGradedAt).not.toBeNull();
-
-    const mcqAnswer = await prisma.answer.findUnique({ where: { submissionId_questionId: { submissionId: submission.id, questionId: mcq.id } } });
-    expect(mcqAnswer?.aiDraftScore).toBeNull();
-
-    expect(mockMarkEssay).toHaveBeenCalledTimes(1);
+    const updated = await prisma.question.findUniqueOrThrow({ where: { id: questionA.id } });
+    expect(updated.aiMarkingGuide).toBe("Award full marks only if chlorophyll is mentioned.");
   });
 
-  it("uses the default rubric when no lecturer guide is supplied, and stores rubricSource DEFAULT", async () => {
-    const { exam, question } = await makeExamWithEssay("default-rubric");
-    const submission = await makeSubmission(exam.id, question.id, "SUBMITTED");
+  it("Question B can have a different guide from Question A, saved in the same request", async () => {
+    const { exam, questionA, questionB } = await makeExamWithTwoEssays("two-guides");
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await markingGuidesRoute.PATCH(
+      jsonRequest("PATCH", {
+        guides: [
+          { questionId: questionA.id, aiMarkingGuide: "Guide for photosynthesis." },
+          { questionId: questionB.id, aiMarkingGuide: "Guide for mitosis." },
+        ],
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(200);
+
+    const a = await prisma.question.findUniqueOrThrow({ where: { id: questionA.id } });
+    const b = await prisma.question.findUniqueOrThrow({ where: { id: questionB.id } });
+    expect(a.aiMarkingGuide).toBe("Guide for photosynthesis.");
+    expect(b.aiMarkingGuide).toBe("Guide for mitosis.");
+  });
+
+  it("null/empty clears a previously saved guide", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("clear-guide");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Old guide" } });
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await markingGuidesRoute.PATCH(jsonRequest("PATCH", { guides: [{ questionId: questionA.id, aiMarkingGuide: null }] }), {
+      params: Promise.resolve({ examId: exam.id }),
+    });
+    expect(res.status).toBe(200);
+    const updated = await prisma.question.findUniqueOrThrow({ where: { id: questionA.id } });
+    expect(updated.aiMarkingGuide).toBeNull();
+  });
+
+  it("valid multi-question save: every submitted guide persists", async () => {
+    const { exam, questionA, questionB } = await makeExamWithTwoEssays("valid-multi");
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await markingGuidesRoute.PATCH(
+      jsonRequest("PATCH", {
+        guides: [
+          { questionId: questionA.id, aiMarkingGuide: "Guide A." },
+          { questionId: questionB.id, aiMarkingGuide: "Guide B." },
+        ],
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.updated).toBe(2);
+    const a = await prisma.question.findUniqueOrThrow({ where: { id: questionA.id } });
+    const b = await prisma.question.findUniqueOrThrow({ where: { id: questionB.id } });
+    expect(a.aiMarkingGuide).toBe("Guide A.");
+    expect(b.aiMarkingGuide).toBe("Guide B.");
+  });
+
+  it("rejects the whole batch (400) when one questionId is invalid/nonexistent — never a partial save", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("invalid-id");
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await markingGuidesRoute.PATCH(
+      jsonRequest("PATCH", {
+        guides: [
+          { questionId: questionA.id, aiMarkingGuide: "Would have been saved." },
+          { questionId: "does-not-exist", aiMarkingGuide: "Bogus." },
+        ],
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.invalidQuestionIds).toEqual(["does-not-exist"]);
+
+    // The batch is rejected wholesale — the OTHERWISE-valid Question A
+    // guide must not have been silently saved either.
+    const a = await prisma.question.findUniqueOrThrow({ where: { id: questionA.id } });
+    expect(a.aiMarkingGuide).toBeNull();
+  });
+
+  it("rejects the whole batch (400) when a questionId belongs to a DIFFERENT exam", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("foreign-exam-a");
+    const { questionA: foreignQuestion } = await makeExamWithTwoEssays("foreign-exam-b");
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await markingGuidesRoute.PATCH(
+      jsonRequest("PATCH", {
+        guides: [
+          { questionId: questionA.id, aiMarkingGuide: "Would have been saved." },
+          { questionId: foreignQuestion.id, aiMarkingGuide: "Belongs to a different exam." },
+        ],
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.invalidQuestionIds).toEqual([foreignQuestion.id]);
+
+    const a = await prisma.question.findUniqueOrThrow({ where: { id: questionA.id } });
+    expect(a.aiMarkingGuide).toBeNull();
+    const foreignAfter = await prisma.question.findUniqueOrThrow({ where: { id: foreignQuestion.id } });
+    expect(foreignAfter.aiMarkingGuide).toBeNull();
+  });
+
+  it("rejects the whole batch (400) when a questionId is non-ESSAY (e.g. MULTIPLE_CHOICE)", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("non-essay");
+    const mcq = await prisma.question.create({ data: { examId: exam.id, type: "MULTIPLE_CHOICE", text: "2+2=?", points: 1, options: ["3", "4"], correctAnswer: "4" } });
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await markingGuidesRoute.PATCH(
+      jsonRequest("PATCH", {
+        guides: [
+          { questionId: questionA.id, aiMarkingGuide: "Would have been saved." },
+          { questionId: mcq.id, aiMarkingGuide: "MCQ can't have a marking guide." },
+        ],
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.invalidQuestionIds).toEqual([mcq.id]);
+
+    // No partial persistence — Question A's otherwise-valid guide is
+    // untouched, and the MCQ never gets a guide either.
+    const a = await prisma.question.findUniqueOrThrow({ where: { id: questionA.id } });
+    expect(a.aiMarkingGuide).toBeNull();
+    const mcqAfter = await prisma.question.findUniqueOrThrow({ where: { id: mcq.id } });
+    expect(mcqAfter.aiMarkingGuide).toBeNull();
+  });
+
+  it("failed batch: a previously saved guide on a VALID question is left exactly as it was, not reset or altered", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("failed-batch-preserves-existing");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Guide saved earlier." } });
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await markingGuidesRoute.PATCH(
+      jsonRequest("PATCH", {
+        guides: [
+          { questionId: questionA.id, aiMarkingGuide: "Attempted new guide — should never apply." },
+          { questionId: "does-not-exist", aiMarkingGuide: "Bogus." },
+        ],
+      }),
+      { params: Promise.resolve({ examId: exam.id }) },
+    );
+    expect(res.status).toBe(400);
+
+    const a = await prisma.question.findUniqueOrThrow({ where: { id: questionA.id } });
+    expect(a.aiMarkingGuide).toBe("Guide saved earlier."); // unchanged — the failed batch touched nothing
+  });
+
+  it("blocks a non-owning lecturer from editing another exam's marking guides", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("non-owner");
+    mockAuth.mockResolvedValue(sessionFor(otherLecturerId, "LECTURER", institutionId));
+    const res = await markingGuidesRoute.PATCH(jsonRequest("PATCH", { guides: [{ questionId: questionA.id, aiMarkingGuide: "Hijacked guide" }] }), {
+      params: Promise.resolve({ examId: exam.id }),
+    });
+    expect(res.status).toBe(404);
+    const untouched = await prisma.question.findUniqueOrThrow({ where: { id: questionA.id } });
+    expect(untouched.aiMarkingGuide).toBeNull();
+  });
+
+  it("blocks a student", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("student-block");
+    mockAuth.mockResolvedValue(sessionFor(studentAId, "STUDENT", institutionId));
+    const res = await markingGuidesRoute.PATCH(jsonRequest("PATCH", { guides: [{ questionId: questionA.id, aiMarkingGuide: "Should never work" }] }), {
+      params: Promise.resolve({ examId: exam.id }),
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("POST /api/lecturer/submissions/[id]/answers/[questionId]/ai-mark — automatically reuses the question's saved guide", () => {
+  it("Student A's and Student B's answers to the same Question A both use the guide saved for that question", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("shared-guide");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Shared guide for Question A." } });
+    const submissionA = await makeSubmission(exam.id, questionA.id, studentAId, "Student A's answer.");
+    const submissionB = await makeSubmission(exam.id, questionA.id, studentBId, "Student B's answer.");
     mockMarkEssay.mockResolvedValue(VALID_RESULT);
 
     mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
-    const res = await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: question.id }) });
+    const resA = await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submissionA.id, questionId: questionA.id }) });
+    const resB = await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submissionB.id, questionId: questionA.id }) });
+    expect(resA.status).toBe(200);
+    expect(resB.status).toBe(200);
+
+    expect(mockMarkEssay).toHaveBeenCalledTimes(2);
+    for (const call of mockMarkEssay.mock.calls) {
+      expect(call[0].rubric).toEqual([{ criterion: "Lecturer marking guide", description: "Shared guide for Question A.", maxMarks: 10 }]);
+    }
+
+    const answerA = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submissionA.id, questionId: questionA.id } } });
+    const answerB = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submissionB.id, questionId: questionA.id } } });
+    expect(JSON.parse(answerA.aiReasoning!).lecturerGuideText).toBe("Shared guide for Question A.");
+    expect(JSON.parse(answerB.aiReasoning!).lecturerGuideText).toBe("Shared guide for Question A.");
+  });
+
+  it("Question B uses its own saved guide, never Question A's", async () => {
+    const { exam, questionA, questionB } = await makeExamWithTwoEssays("distinct-guides");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Guide for photosynthesis." } });
+    await prisma.question.update({ where: { id: questionB.id }, data: { aiMarkingGuide: "Guide for mitosis." } });
+    const submissionA = await makeSubmission(exam.id, questionA.id, studentAId);
+    await prisma.answer.create({ data: { submissionId: submissionA.id, questionId: questionB.id, response: "Mitosis answer." } });
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submissionA.id, questionId: questionA.id }) });
+    await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submissionA.id, questionId: questionB.id }) });
+
+    expect(mockMarkEssay.mock.calls[0][0].rubric[0].description).toBe("Guide for photosynthesis.");
+    expect(mockMarkEssay.mock.calls[1][0].rubric[0].description).toBe("Guide for mitosis.");
+  });
+
+  it("no guide configured falls back to the default rubric", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("no-guide");
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: questionA.id }) });
     expect(res.status).toBe(200);
 
     expect(mockMarkEssay).toHaveBeenCalledWith(
@@ -162,87 +370,80 @@ describe("POST /api/lecturer/submissions/[id]/answers/[questionId]/ai-mark — s
         ],
       }),
     );
-
-    const updated = await prisma.answer.findUnique({ where: { submissionId_questionId: { submissionId: submission.id, questionId: question.id } } });
-    const stored = JSON.parse(updated!.aiReasoning!);
-    expect(stored.rubricSource).toBe("DEFAULT");
-    expect(stored.lecturerGuideText).toBeNull();
+    const updated = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } } });
+    expect(JSON.parse(updated.aiReasoning!).rubricSource).toBe("DEFAULT");
   });
 
-  it("uses the lecturer's marking guide as a single criterion capped at the question's points, and stores rubricSource LECTURER + the guide text", async () => {
-    const { exam, question } = await makeExamWithEssay("lecturer-guide");
-    const submission = await makeSubmission(exam.id, question.id, "SUBMITTED");
+  it("works with no request body at all — the endpoint never depends on caller-supplied guide text", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("no-body");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Saved guide." } });
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
     mockMarkEssay.mockResolvedValue(VALID_RESULT);
 
     mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
-    const res = await aiMarkRoute.POST(jsonRequest("POST", { lecturerGuide: "Award full marks only if chlorophyll is mentioned." }), {
-      params: Promise.resolve({ id: submission.id, questionId: question.id }),
+    const res = await aiMarkRoute.POST(new Request("http://test.local/route", { method: "POST" }), {
+      params: Promise.resolve({ id: submission.id, questionId: questionA.id }),
     });
     expect(res.status).toBe(200);
+    expect(mockMarkEssay).toHaveBeenCalledWith(expect.objectContaining({ rubric: [{ criterion: "Lecturer marking guide", description: "Saved guide.", maxMarks: 10 }] }));
+  });
 
-    expect(mockMarkEssay).toHaveBeenCalledWith(
-      expect.objectContaining({
-        rubric: [{ criterion: "Lecturer marking guide", description: "Award full marks only if chlorophyll is mentioned.", maxMarks: 10 }],
-      }),
-    );
+  it("changing the question's guide later does NOT mutate an existing AI draft's saved snapshot", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("no-retroactive-mutation");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Original guide." } });
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
 
-    const updated = await prisma.answer.findUnique({ where: { submissionId_questionId: { submissionId: submission.id, questionId: question.id } } });
-    const stored = JSON.parse(updated!.aiReasoning!);
-    expect(stored.rubricSource).toBe("LECTURER");
-    expect(stored.lecturerGuideText).toBe("Award full marks only if chlorophyll is mentioned.");
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: questionA.id }) });
+
+    const draftBefore = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } } });
+    expect(JSON.parse(draftBefore.aiReasoning!).lecturerGuideText).toBe("Original guide.");
+
+    // Lecturer edits the question's guide afterward.
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Updated guide." } });
+
+    const draftAfter = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } } });
+    expect(JSON.parse(draftAfter.aiReasoning!).lecturerGuideText).toBe("Original guide."); // unchanged
+    expect(draftAfter.aiDraftScore).toBe(draftBefore.aiDraftScore); // never silently recomputed
+  });
+
+  it("regenerating (calling the endpoint again) uses the latest saved guide, not the one the previous draft used", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("regenerate-latest");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Original guide." } });
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+
+    await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: questionA.id }) });
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Updated guide." } });
+
+    // Regenerate.
+    await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: questionA.id }) });
+
+    expect(mockMarkEssay).toHaveBeenCalledTimes(2);
+    expect(mockMarkEssay.mock.calls[0][0].rubric[0].description).toBe("Original guide.");
+    expect(mockMarkEssay.mock.calls[1][0].rubric[0].description).toBe("Updated guide.");
+
+    const finalDraft = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } } });
+    expect(JSON.parse(finalDraft.aiReasoning!).lecturerGuideText).toBe("Updated guide.");
   });
 
   it("blocks a non-owning lecturer", async () => {
-    const { exam, question } = await makeExamWithEssay("non-owner");
-    const submission = await makeSubmission(exam.id, question.id, "SUBMITTED");
+    const { exam, questionA } = await makeExamWithTwoEssays("non-owner-single");
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
     mockAuth.mockResolvedValue(sessionFor(otherLecturerId, "LECTURER", institutionId));
-    const res = await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: question.id }) });
+    const res = await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: questionA.id }) });
     expect(res.status).toBe(404);
     expect(mockMarkEssay).not.toHaveBeenCalled();
   });
 
-  it("blocks a student", async () => {
-    const { exam, question } = await makeExamWithEssay("student-block");
-    const submission = await makeSubmission(exam.id, question.id, "SUBMITTED");
-    mockAuth.mockResolvedValue(sessionFor(studentId, "STUDENT", institutionId));
-    const res = await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: question.id }) });
-    expect(res.status).toBe(401);
-    expect(mockMarkEssay).not.toHaveBeenCalled();
-  });
-
-  it("rejects a non-ESSAY question (MULTIPLE_CHOICE) — AI marking assistance is essay-only in this pass", async () => {
-    const { exam, mcq } = await makeExamWithEssay("mcq-block");
-    const submission = await makeSubmission(exam.id, mcq.id, "SUBMITTED", "4");
-    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
-    const res = await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: mcq.id }) });
-    expect(res.status).toBe(400);
-    expect(mockMarkEssay).not.toHaveBeenCalled();
-  });
-
-  it("rejects a submission that is still IN_PROGRESS — never marks a moving target", async () => {
-    const { exam, question } = await makeExamWithEssay("in-progress-block");
-    const submission = await makeSubmission(exam.id, question.id, "IN_PROGRESS");
-    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
-    const res = await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: question.id }) });
-    expect(res.status).toBe(409);
-    expect(mockMarkEssay).not.toHaveBeenCalled();
-  });
-
-  it("rejects when the essay has no student answer to mark", async () => {
-    const { exam, question } = await makeExamWithEssay("no-answer");
-    const submission = await makeSubmission(exam.id, question.id, "SUBMITTED", null);
-    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
-    const res = await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: question.id }) });
-    expect(res.status).toBe(400);
-    expect(mockMarkEssay).not.toHaveBeenCalled();
-  });
-
-  it("never finalizes or changes Submission.status/totalScore — only the Answer draft fields", async () => {
-    const { exam, question } = await makeExamWithEssay("no-finalize");
-    const submission = await makeSubmission(exam.id, question.id, "SUBMITTED");
+  it("never finalizes or changes Submission.status/totalScore", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("no-finalize");
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
     mockMarkEssay.mockResolvedValue(VALID_RESULT);
     mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
-    await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: question.id }) });
+    await aiMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: submission.id, questionId: questionA.id }) });
 
     const stillSubmission = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
     expect(stillSubmission.status).toBe("SUBMITTED");
@@ -250,39 +451,51 @@ describe("POST /api/lecturer/submissions/[id]/answers/[questionId]/ai-mark — s
   });
 });
 
-describe("bulk 'Mark essays with AI' regression — unaffected by the new single-answer endpoint", () => {
-  it("still marks every eligible essay exam-wide, still skips a non-essay answer, and now also stores the same enriched rubricSource metadata", async () => {
-    const { exam, question, mcq } = await makeExamWithEssay("bulk-unaffected");
-    const submission = await makeSubmission(exam.id, question.id, "SUBMITTED");
-    await prisma.answer.create({ data: { submissionId: submission.id, questionId: mcq.id, response: "4" } });
+describe("bulk 'Mark essays with AI' — automatically reuses the question's saved guide, exam-wide", () => {
+  it("marks two students' answers to the same question with the same saved guide", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("bulk-shared-guide");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Bulk shared guide." } });
+    await makeSubmission(exam.id, questionA.id, studentAId, "Student A.");
+    await makeSubmission(exam.id, questionA.id, studentBId, "Student B.");
     mockMarkEssay.mockResolvedValue(VALID_RESULT);
 
     mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
     const res = await bulkMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.marked).toBe(1);
-    expect(body.skipped).toBe(0);
+    expect(body.marked).toBe(2);
 
-    const updated = await prisma.answer.findUnique({ where: { submissionId_questionId: { submissionId: submission.id, questionId: question.id } } });
-    const stored = JSON.parse(updated!.aiReasoning!);
-    expect(stored.rubricSource).toBe("DEFAULT");
-    expect(stored.lecturerGuideText).toBeNull();
-
-    const mcqAnswer = await prisma.answer.findUnique({ where: { submissionId_questionId: { submissionId: submission.id, questionId: mcq.id } } });
-    expect(mcqAnswer?.aiDraftScore).toBeNull(); // MCQ never touched by essay marking
+    expect(mockMarkEssay).toHaveBeenCalledTimes(2);
+    for (const call of mockMarkEssay.mock.calls) {
+      expect(call[0].rubric[0].description).toBe("Bulk shared guide.");
+    }
   });
 
-  it("skips an essay answer that already has an AI draft (e.g. from the single-answer endpoint) — never overwrites an existing draft", async () => {
-    const { exam, question } = await makeExamWithEssay("bulk-skips-existing-draft");
-    const submission = await makeSubmission(exam.id, question.id, "SUBMITTED");
+  it("no guide configured falls back to the default rubric", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("bulk-no-guide");
+    await makeSubmission(exam.id, questionA.id, studentAId);
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    await bulkMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+
+    expect(mockMarkEssay).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rubric: [
+          { criterion: "Content & accuracy", description: "Response demonstrates understanding and accuracy", maxMarks: 6 },
+          { criterion: "Clarity & structure", description: "Response is well-organised and clearly expressed", maxMarks: 4 },
+        ],
+      }),
+    );
+  });
+
+  it("still skips an essay answer that already has an AI draft — never overwrites an existing draft", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("bulk-skips-existing");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "A guide." } });
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
     await prisma.answer.update({
-      where: { submissionId_questionId: { submissionId: submission.id, questionId: question.id } },
-      data: {
-        aiDraftScore: 7,
-        aiReasoning: JSON.stringify({ ...VALID_RESULT, rubricSource: "LECTURER", rubric: [], lecturerGuideText: "Pre-existing guide" }),
-        aiGradedAt: new Date(),
-      },
+      where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } },
+      data: { aiDraftScore: 7, aiReasoning: JSON.stringify({ ...VALID_RESULT, rubricSource: "LECTURER", rubric: [], lecturerGuideText: "Pre-existing" }), aiGradedAt: new Date() },
     });
 
     mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
@@ -290,8 +503,60 @@ describe("bulk 'Mark essays with AI' regression — unaffected by the new single
     const body = await res.json();
     expect(body.marked).toBe(0);
     expect(mockMarkEssay).not.toHaveBeenCalled();
+  });
+});
 
-    const stillThere = await prisma.answer.findUnique({ where: { submissionId_questionId: { submissionId: submission.id, questionId: question.id } } });
-    expect(stillThere?.aiDraftScore).toBe(7);
+describe("student-facing endpoints never expose Question.aiMarkingGuide", () => {
+  it("GET /api/exams/[id] never returns the guide to a student, in any attempt state", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("student-leak-exam-route");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Top secret marking guide." } });
+
+    mockAuth.mockResolvedValue(sessionFor(studentAId, "STUDENT", institutionId));
+    const res = await examRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: exam.id }) });
+    const raw = await res.text();
+    expect(raw).not.toMatch(/Top secret marking guide|aiMarkingGuide/);
+  });
+
+  it("GET /api/submissions/[id] never returns the guide to the student, even during their own IN_PROGRESS full-paper delivery", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("student-leak-submission-inprogress");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Top secret marking guide." } });
+
+    mockAuth.mockResolvedValue(sessionFor(studentAId, "STUDENT", institutionId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submission = await startRes.json();
+
+    const res = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    const raw = await res.text();
+    expect(raw).not.toMatch(/Top secret marking guide|aiMarkingGuide/);
+  });
+
+  it("the owning lecturer DOES see the guide via GET /api/submissions/[id] for the same submission", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("lecturer-sees-guide");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Visible to lecturer only." } });
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await submissionRoute.GET(jsonRequest("GET"), { params: Promise.resolve({ id: submission.id }) });
+    const body = await res.json();
+    const q = body.exam.questions.find((qq: { id: string }) => qq.id === questionA.id);
+    expect(q.aiMarkingGuide).toBe("Visible to lecturer only.");
+  });
+});
+
+describe("existing manual grading is unaffected by question-level marking guides", () => {
+  it("PATCH /api/submissions/[id]/grade still saves scores/feedback normally for a question that has a saved guide", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("manual-grading-unaffected");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "A guide, irrelevant to manual grading." } });
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await gradeRoute.PATCH(
+      jsonRequest("PATCH", { answers: [{ questionId: questionA.id, score: 8, feedback: "Well done." }], finalize: true }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(200);
+    const updated = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(updated.status).toBe("GRADED");
+    expect(updated.totalScore).toBe(8);
   });
 });

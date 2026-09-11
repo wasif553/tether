@@ -518,6 +518,18 @@ model Question {
   correctAnswer            String?
   points                   Int                         @default(1)
   order                    Int                         @default(0)
+  // AI Marking Assistance v1 (additive, nullable) — see
+  // docs/ai-marking-assistance-v1.md. Optional, lecturer-authored marking
+  // guide, owned by the QUESTION — reused automatically for every
+  // student's answer to this question by both the single-answer and
+  // exam-wide bulk AI-marking endpoints. Null means "no guide
+  // configured", which falls back to the auto-generated default rubric
+  // (buildDefaultRubric in src/lib/ai/essayMarker.ts). NEVER serialized
+  // to a STUDENT-facing response — see the route audit in that doc.
+  // Editing this later never mutates any existing Answer.aiReasoning
+  // snapshot (historical evidence of exactly what was used for that
+  // draft) — only a future or regenerated draft picks up the change.
+  aiMarkingGuide           String?
   // Question Bank / Exam Pools redesign v1 (additive, nullable) — see
   // docs/question-bank-exam-pools-v1.md. Provenance is only ever KNOWN
   // for questions created after this feature — every existing Question

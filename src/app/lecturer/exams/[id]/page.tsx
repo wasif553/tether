@@ -1743,6 +1743,14 @@ export default function LecturerExamPage({
           <p className="mt-1 text-sm text-lecturer-text-secondary">{workspaceAvailabilityLine}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {!exam.archivedAt && exam.questions.some((q) => q.type === "ESSAY") && (
+            <Link
+              href={`/lecturer/exams/${exam.id}/marking-guides`}
+              className="rounded-lg border border-lecturer-border bg-lecturer-surface px-4 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
+            >
+              AI Marking Guides
+            </Link>
+          )}
           {!exam.archivedAt && exam.questions.some((q) => q.type === "ESSAY") && hasUngradedSubmissions && (
             <button
               onClick={handleMarkEssays}

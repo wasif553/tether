@@ -203,3 +203,28 @@ describe("lecturer exam page — Controlled AI commercial completion pass (Secti
     expect(pageSource).not.toMatch(/Enable AI brainstorming assistance/);
   });
 });
+
+// AI Marking Assistance v1 — see docs/ai-marking-assistance-v1.md. The
+// exam-level entry point for configuring per-question marking guides,
+// distinct from "Mark essays with AI" (the bulk trigger, kept unchanged)
+// and from the Tether Controlled AI Brainstorm settings tested above.
+describe("lecturer exam page — AI Marking Guides entry point", () => {
+  it("links to the dedicated marking-guides page whenever the exam has an essay question, independent of ungraded-submission state", () => {
+    const linkStart = pageSource.indexOf("AI Marking Guides");
+    const linkBlockStart = pageSource.lastIndexOf("{!exam.archivedAt", linkStart);
+    const linkBlock = pageSource.slice(linkBlockStart, linkStart);
+    expect(linkBlock).toMatch(/exam\.questions\.some\(\(q\) => q\.type === "ESSAY"\)/);
+    expect(linkBlock).not.toMatch(/hasUngradedSubmissions/);
+    expect(pageSource).toMatch(/href=\{`\/lecturer\/exams\/\$\{exam\.id\}\/marking-guides`\}/);
+  });
+
+  it("keeps the existing 'Mark essays with AI' bulk button unchanged (still gated on essay questions AND ungraded submissions)", () => {
+    expect(pageSource).toMatch(/Mark essays with AI/);
+    const bulkButtonStart = pageSource.indexOf("Mark essays with AI");
+    const bulkBlockStart = pageSource.lastIndexOf("{!exam.archivedAt", bulkButtonStart);
+    const bulkBlock = pageSource.slice(bulkBlockStart, bulkButtonStart);
+    expect(bulkBlock).toMatch(/exam\.questions\.some\(\(q\) => q\.type === "ESSAY"\)/);
+    expect(bulkBlock).toMatch(/hasUngradedSubmissions/);
+    expect(pageSource).toMatch(/handleMarkEssays/);
+  });
+});

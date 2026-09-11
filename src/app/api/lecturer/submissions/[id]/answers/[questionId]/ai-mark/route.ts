@@ -6,16 +6,25 @@
  *
  * The per-question counterpart to the existing exam-wide
  * POST /api/lecturer/exams/[examId]/ai-mark-essays (unchanged, still the
- * only bulk trigger): marks exactly ONE essay answer, optionally against a
- * lecturer-supplied marking guide, and never touches any other answer in
- * the exam. Reuses the same markEssay() engine and the same
- * Answer.aiDraftScore/aiReasoning/aiGradedAt fields the bulk action
+ * only bulk trigger): marks exactly ONE essay answer and never touches any
+ * other answer in the exam. Reuses the same markEssay() engine and the
+ * same Answer.aiDraftScore/aiReasoning/aiGradedAt fields the bulk action
  * already writes — never a new/parallel storage mechanism, never a
- * schema change. The lecturer remains the decision-maker: this only ever
- * writes a DRAFT suggestion, never Submission.status or Submission.totalScore.
+ * schema change to Answer. The lecturer remains the decision-maker: this
+ * only ever writes a DRAFT suggestion, never Submission.status or
+ * Submission.totalScore.
+ *
+ * Takes NO request body. The marking guide always comes from the
+ * question's own saved Question.aiMarkingGuide (configured once, on the
+ * exam-level "AI Marking Guides" page — see
+ * /lecturer/exams/[id]/marking-guides) — never from the caller, so a
+ * "Regenerate suggestion" here always reflects whatever the lecturer has
+ * most recently saved for this question, and every student's answer to
+ * the same question is marked against the exact same criteria. Falls
+ * back to the existing auto-generated default rubric when no guide is
+ * configured.
  */
 import { NextResponse } from "next/server";
-import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import {
@@ -27,16 +36,8 @@ import {
 } from "@/lib/ai/essayMarker";
 import { isPlatformAdmin, assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 
-const bodySchema = z.object({
-  // Optional — an empty/omitted guide falls back to the existing default
-  // rubric, exactly like the bulk action. Capped defensively (this is a
-  // free-text field sent straight into the marking prompt); well above
-  // any real marking guide's expected length.
-  lecturerGuide: z.string().trim().max(4000).optional(),
-});
-
 export async function POST(
-  req: Request,
+  _req: Request,
   { params }: { params: Promise<{ id: string; questionId: string }> },
 ) {
   const session = await auth();
@@ -95,19 +96,11 @@ export async function POST(
     return NextResponse.json({ error: "Anthropic API key not configured" }, { status: 502 });
   }
 
-  const body = await req.json().catch(() => ({}));
-  const parsed = bodySchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-  }
-
-  const guideText = parsed.data.lecturerGuide?.trim() || null;
-  // A lecturer-supplied guide is passed through as ONE criterion, its
-  // description the lecturer's own text verbatim — never split,
-  // reinterpreted, or supplemented with invented criteria (see
-  // buildLecturerGuideRubric's own doc comment). maxMarks is always the
-  // question's real points, so the guide can never push scoring outside
-  // the question's actual mark range.
+  // Question-level guide (configured once, reused for every student —
+  // see docs/ai-marking-assistance-v1.md). Read fresh on every call, so
+  // this always reflects the lecturer's latest saved guide, never a
+  // stale value the caller might otherwise supply.
+  const guideText = question.aiMarkingGuide?.trim() || null;
   const rubric = guideText ? buildLecturerGuideRubric(guideText, question.points) : buildDefaultRubric(question.points);
   const rubricSource: AiMarkingRecord["rubricSource"] = guideText ? "LECTURER" : "DEFAULT";
 
@@ -127,6 +120,9 @@ export async function POST(
     throw err;
   }
 
+  // Snapshot the exact guide used — historical evidence of what this
+  // particular draft was based on. Never retroactively changed if the
+  // lecturer edits Question.aiMarkingGuide afterward.
   const stored: AiMarkingRecord = { ...result, rubricSource, rubric, lecturerGuideText: guideText };
   const aiReasoning = JSON.stringify(stored);
   const aiGradedAt = new Date();

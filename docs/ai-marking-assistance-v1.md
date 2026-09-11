@@ -1,132 +1,191 @@
-# AI Marking Assistance — Single-Answer Entry Point
+# AI Marking Assistance
 
-## The problem
+## v2 — Question-Level Marking Guides
 
-"Mark essays with AI" already existed (see `0cdcb38 Add AI essay marking
-assistant`), but only as an exam-wide bulk action on the exam overview page,
-with results only ever displayed — never requested — from the per-submission
-grading page. A lecturer looking at one student's submission had no way to
-discover or trigger AI marking without first navigating away to the exam
-page and running it for every essay answer in the exam at once.
+### The problem
 
-## What this adds
+The first pass (below, "v1 — Single-Answer Entry Point") let a lecturer type
+a marking guide directly on one student's grading page — but that guide was
+never saved anywhere beyond that one AI draft's snapshot, so the lecturer
+had to retype the identical guide for every other student's answer to the
+same question. A marking guide is a property of the *question*, not of any
+one student's answer.
 
-A per-question "AI Marking Assistance" entry point directly on the grading
-page (`/lecturer/exams/[id]/submissions/[submissionId]`), for **ESSAY
-questions only** — MULTIPLE_CHOICE and SHORT_ANSWER are unaffected and
-unchanged.
+### Data model — schema change required
 
-- If no AI draft exists yet for an essay answer: a compact form —
-  "AI Marking Assistance", an optional marking-guide textarea, and
-  "Get AI marking suggestion".
-- Once a draft exists: "Suggested score", a confidence badge, "Criterion
-  breakdown", "Strengths", "Areas to improve", "Accept AI draft" (still only
-  ever pre-fills the lecturer's editable score field — never saves or
-  finalizes anything), "Show details"/"Hide details", and "Regenerate
-  suggestion" (re-opens the same guide form, pre-filled with whatever guide
-  was last used, and simply overwrites the draft on submit).
-- A line showing whether the suggestion is "Based on lecturer marking guide"
-  (with a "View guide" toggle showing the exact text used) or "Based on
-  Tether default rubric".
+No existing `Question` field could safely hold this (`options` is
+already-serialized MCQ content; `correctAnswer` has an established,
+different meaning). Added one nullable column:
 
-The lecturer remains the sole decision-maker throughout: nothing here ever
-writes `Submission.status` or `Submission.totalScore` — only
-`Answer.aiDraftScore`/`aiReasoning`/`aiGradedAt`, exactly the same fields
-the pre-existing bulk action already wrote. Saving/finalizing still only
-ever happens through the existing, unmodified `PATCH
-/api/submissions/[id]/grade` → "Finalize grade" flow.
+```prisma
+model Question {
+  ...
+  correctAnswer  String?
+  // AI Marking Assistance v1 (additive, nullable). Optional, lecturer-
+  // authored marking guide, owned by the QUESTION — reused automatically
+  // for every student's answer to this question by both the single-
+  // answer and exam-wide bulk AI-marking endpoints. Null means "no guide
+  // configured", falling back to the auto-generated default rubric.
+  // NEVER serialized to a STUDENT-facing response. Editing this later
+  // never mutates any existing Answer.aiReasoning snapshot.
+  aiMarkingGuide String?
+  ...
+}
+```
 
-## Marking-guide persistence — no schema change
+This project has no `prisma/migrations` folder — schema changes are applied
+via `prisma db push` (see the original AI-marking commit's own message);
+there is no separate SQL migration file. Additive and nullable: existing
+rows simply read as "no guide configured", no backfill needed.
 
-`Answer.aiReasoning` was already a plain `String?` column storing
-`JSON.stringify(EssayMarkingResult)`. This is purely additive: the stored
-JSON shape gained three more fields — `rubricSource: "LECTURER" | "DEFAULT"`,
-`rubric` (the exact `RubricCriterion[]` sent to the marking engine), and
-`lecturerGuideText` (the raw guide text, or `null`) — see `AiMarkingRecord`
-in `src/lib/ai/essayMarker.ts`. A row written before this change simply has
-none of these three fields; every reader treats their absence as "DEFAULT,
-no guide" (never a required field, never a migration/backfill). No Prisma
-schema change, no migration.
+### Two distinct kinds of "guide" — never confused
 
-## How a lecturer-supplied guide is used
+- **`Question.aiMarkingGuide`** — the current, live, editable assessment
+  configuration. One value per question, shared by every student.
+- **`Answer.aiReasoning`'s stored `lecturerGuideText`/`rubric`/
+  `rubricSource`** — a frozen historical snapshot of exactly what was used
+  to produce *that one* AI draft. Never retroactively changed when the
+  lecturer edits `Question.aiMarkingGuide` afterward. A "Regenerate
+  suggestion" or a fresh single/bulk marking call always re-reads the
+  question's *current* guide at that moment and writes a *new* snapshot —
+  it never edits an old one in place, and never silently re-marks a
+  student's already-graded work.
 
-A lecturer's free-text marking guide is passed to the existing `markEssay()`
-engine as a **single rubric criterion** whose description is the lecturer's
-own text, verbatim (`buildLecturerGuideRubric`) — never split into multiple
-criteria, never reinterpreted, never supplemented with invented criteria.
-`maxMarks` is always the question's own total points, so the AI's
-`criteriaScores`/`totalScore` can never fall outside the question's real
-mark range regardless of what the lecturer wrote. `markEssay()` itself
-(prompt-building, response validation) is completely unchanged.
+### Exam-level management UI
 
-When no guide is supplied, `buildDefaultRubric()` — the exact same 60%
-content/accuracy + 40% clarity/structure split the bulk action always
-used — is reused unchanged, and is now the single shared source for both
-code paths (moved from the bulk route into `essayMarker.ts` itself).
+A dedicated page, `/lecturer/exams/[id]/marking-guides` (matching this
+app's established pattern of focused sub-pages — evidence, timeline,
+answer-development, ai-assistance — rather than growing the already-huge
+exam page further), linked via a new "AI Marking Guides" button on the exam
+page next to the existing "Mark essays with AI" bulk button (kept, gated
+the same as before). Lists every ESSAY question with its text/points and a
+textarea, pre-filled from the question's current guide; one "Save marking
+guides" button persists every textarea shown in a single request. An
+optional "Copy this guide to all essay questions" button per question is a
+pure client-side convenience (copies the current textarea's value into
+every other textarea in local state) — it does not auto-apply one guide to
+every question without the lecturer explicitly choosing to. Reads via the
+existing `GET /api/exams/[id]` (the lecturer branch already returns every
+Question field, unfiltered, for the owning lecturer) — no new GET route was
+needed, only the new `PATCH /api/lecturer/exams/[examId]/marking-guides`
+for saving.
 
-## Single-answer endpoint
+### Single-answer and bulk endpoints — both now guide-aware automatically
 
-`POST /api/lecturer/submissions/[id]/answers/[questionId]/ai-mark`
-(`src/app/api/lecturer/submissions/[id]/answers/[questionId]/ai-mark/route.ts`)
+`POST /api/lecturer/submissions/[id]/answers/[questionId]/ai-mark` no
+longer accepts (or needs) a request body at all — it reads
+`question.aiMarkingGuide` fresh from the database on every call. This is
+also what makes "Regenerate suggestion" on the grading page always reflect
+the lecturer's latest saved guide with zero extra plumbing.
 
-- LECTURER-role only; ownership (`exam.createdById`) and institution
-  (`assertSameInstitution`) checks, mirroring the existing sibling routes
-  under `/api/lecturer/submissions/[id]/` (e.g. `push-grade`).
-- 404 if the question doesn't belong to this submission's exam; 400 if it
-  isn't `ESSAY`.
-- 409 if the submission is still `IN_PROGRESS` (never marks a moving
-  target — mirrors `PATCH /grade`'s own "Student has not submitted yet"
-  check).
-- 400 if the answer has no response text to mark.
-- 502 if `ANTHROPIC_API_KEY` is unset, or if `markEssay()` itself fails
-  (mirrors the bulk route's own handling) — nothing is written on failure.
-- On success: calls the unmodified `markEssay()`, persists the enriched
-  record into that one `Answer` row, and returns
-  `{ questionId, aiDraftScore, aiReasoning, aiGradedAt }` directly to the
-  page — no full-page refetch needed.
+`POST /api/lecturer/exams/[examId]/ai-mark-essays` (the bulk action) reads
+each answer's own `question.aiMarkingGuide` the same way — its eligibility
+filter, sequential loop, and `{marked, skipped}` response shape are
+otherwise unchanged.
 
-**Never touches any other answer.** This is the key difference from the
-bulk endpoint: it looks up and updates exactly one `Answer` row
-(`submissionId_questionId` compound key), never `findMany` across the exam.
+### Individual grading page
 
-## Bulk endpoint — unaffected
+No longer shows a textarea. For an essay answer with no draft yet:
 
-`POST /api/lecturer/exams/[examId]/ai-mark-essays` keeps its exact existing
-eligibility filter (`question.type === "ESSAY"`, `submission.status ===
-"SUBMITTED"`, `aiDraftScore: null`), its exact existing sequential
-marking loop, and its exact existing `{ marked, skipped }` response shape —
-completely unchanged. It now stores the same enriched `AiMarkingRecord`
-shape (`rubricSource: "DEFAULT"`, the rubric used, `lecturerGuideText:
-null`) purely so the grading page's "Based on Tether default rubric" line
-renders correctly for bulk-marked answers too — this does not change
-eligibility, marking outcomes, or the response shape. Because the filter
-already excludes any answer with a non-null `aiDraftScore`, an answer
-already marked via the new single-answer endpoint (with or without a
-lecturer guide) is correctly skipped by a later bulk run, rather than
-silently overwritten.
+```
+AI Marking Assistance
 
-## Orphaned endpoint — left untouched
+Marking guide: Lecturer marking guide · View guide
+[Get AI marking suggestion]
+```
+
+or, when the question has no guide configured:
+
+```
+AI Marking Assistance
+
+Marking guide: Tether default rubric
+[Get AI marking suggestion]
+```
+
+`AiMarkingGuideStatus` (shared component) shows this status and an
+optional "View guide" toggle for the *current* saved guide — never an
+input. Once a draft exists, "Regenerate suggestion" is a single button
+with no confirmation form (the guide is centrally managed, so there is
+nothing left to configure per click).
+
+### Permissions and student-facing audit
+
+Only an authorised lecturer (exam owner, or platform admin) can save
+guides — `PATCH /api/lecturer/exams/[examId]/marking-guides` mirrors the
+same `role !== "LECTURER"` + ownership + `assertSameInstitution` checks
+every sibling route in this family already uses, and silently skips (never
+errors the whole batch on) any `questionId` that doesn't genuinely belong
+to this exam or isn't `ESSAY`.
+
+Re-audited every student-facing route after adding the column:
+
+- `GET /api/exams/[id]` (STUDENT branch) — already unconditionally returns
+  `questions: []` for every student, in every attempt state (from the
+  post-submission question-protection pass) — safe by construction, no
+  code change needed.
+- `GET /api/submissions/[id]` — the one route that DOES serialize
+  `Question` fields to the submission's own student during their
+  `IN_PROGRESS` attempt. `aiMarkingGuide` is now gated with the exact same
+  `isExamOwner ? q.aiMarkingGuide : undefined` pattern the route already
+  used for `correctAnswer` — verified with a DB-backed test that
+  configures a guide and asserts the raw JSON response text never
+  contains it for a student, while the owning lecturer's view of the same
+  submission does.
+- One-question-at-a-time delivery (`buildOneQuestionPayload`) and the
+  question-navigator payload both construct their response objects from an
+  explicit field whitelist (never `...question` spread) — confirmed no new
+  field leaks through either, unchanged by this pass.
+- `POST /api/lecturer/exams/[examId]/generate-questions` and other
+  question-content-touching routes are unrelated (LECTURER-role-gated,
+  confirmed in an earlier audit pass) and untouched here.
+
+---
+
+## v1 — Single-Answer Entry Point (superseded above for guide storage)
+
+The original problem this solved: "Mark essays with AI" existed only as an
+exam-wide bulk action on the exam overview page, with results only ever
+displayed (never requested) from the per-submission grading page.
+
+- New `POST /api/lecturer/submissions/[id]/answers/[questionId]/ai-mark`:
+  marks exactly one essay answer. Reuses the same
+  `Answer.aiDraftScore`/`aiReasoning`/`aiGradedAt` fields and
+  ownership/institution checks the rest of this route family already uses;
+  never writes `Submission.status`/`totalScore`.
+- `buildDefaultRubric` moved into `essayMarker.ts` (shared, not
+  duplicated) so both the bulk and single-answer paths use the identical
+  default rubric.
+- Grading page: an essay answer with no draft yet showed a compact form
+  (originally with a per-call guide textarea — removed in v2 above); an
+  existing draft shows "Suggested score", confidence, criterion breakdown,
+  strengths/areas to improve, and "Based on lecturer marking
+  guide"/"Based on Tether default rubric". "Accept AI draft" only
+  pre-fills the lecturer's editable score — Finalize grade remains the
+  only way to actually save/submit.
+- MCQ and SHORT_ANSWER questions are unaffected — this feature is ESSAY
+  only.
+
+### Orphaned endpoint — left untouched
 
 `POST /api/lecturer/submissions/[id]/approve-ai-grade` was built in the
 same original commit as the bulk action, to let a lecturer "finalize" a
 submission with an AI-vs-human audit log line and Canvas passback — but it
 has **zero callers anywhere in the client code**; the grading page has
-always used the plain `PATCH /api/submissions/[id]/grade` instead. It was
-not wired up for this change: doing so was not needed for a working
-lecturer-controlled grading flow (the existing `Finalize grade` button
-already does the finalize + passback job), and wiring up an unused,
-untested endpoint "because it's there" would have been scope creep with no
-clear benefit. Left as technical debt for a future pass to either adopt
-deliberately or remove.
+always used the plain `PATCH /api/submissions/[id]/grade` instead. Still
+not wired up: the existing `Finalize grade` button already does the
+finalize + passback job, and wiring up an unused, untested endpoint
+"because it's there" would be scope creep with no clear benefit. Left as
+documented technical debt for a future pass to either adopt deliberately
+or remove.
 
-## What is unaffected
+### What is unaffected (both passes)
 
 - Student Brainstorm Activity — untouched.
 - `aiAssistanceGenerator.ts`, `aiAssistanceVerifier.ts`,
   `aiAssistanceRunner.ts`, `aiAssistancePolicy.ts`, `aiAssistanceReview.ts`,
   `aiAssistanceClassifier.ts` — untouched.
-- Secure Browser controls, integrity evidence, `ExamWatermark.tsx`, student
-  exam delivery — untouched.
-- SHORT_ANSWER and MULTIPLE_CHOICE questions — no AI marking path added or
-  changed for either.
-- No Prisma schema change, no migration.
+- Secure Browser controls, integrity evidence, `ExamWatermark.tsx`,
+  student exam delivery, post-submission question protection — untouched.
+- No migration beyond the one additive `Question.aiMarkingGuide` column
+  described above (v1 needed none at all).

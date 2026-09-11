@@ -14,6 +14,11 @@ type Question = {
   text: string;
   points: number;
   correctAnswer?: string | null;
+  // AI Marking Assistance v1 — see docs/ai-marking-assistance-v1.md.
+  // Configured once on the exam-level "AI Marking Guides" page, reused
+  // automatically for every student. Lecturer-only, same visibility as
+  // correctAnswer above.
+  aiMarkingGuide?: string | null;
 };
 
 type Answer = {
@@ -87,43 +92,28 @@ function parseAiReasoning(raw: string | null | undefined): EssayMarkingResult | 
 const CONFIDENCE_TONES: Record<EssayMarkingResult["confidence"], StatusTone> = { HIGH: "success", MEDIUM: "warning", LOW: "critical" };
 
 /**
- * AI Marking Assistance — the shared "supply a guide and request a
- * suggestion" form, used both for a question with no draft yet and for
- * "Regenerate suggestion" on a question that already has one. A single
- * definition so the two call sites can never drift.
+ * AI Marking Assistance — shows which marking guide will be used before
+ * the lecturer requests a suggestion. The guide itself is configured
+ * once, exam-wide, on the "AI Marking Guides" page — never re-entered
+ * per student here (see docs/ai-marking-assistance-v1.md).
  */
-function AiMarkingGuideForm({
-  guide,
-  onGuideChange,
-  onSubmit,
-  loading,
-  error,
-  submitLabel,
-}: {
-  guide: string;
-  onGuideChange: (value: string) => void;
-  onSubmit: () => void;
-  loading: boolean;
-  error?: string;
-  submitLabel: string;
-}) {
+function AiMarkingGuideStatus({ guideText }: { guideText: string | null }) {
+  const [showGuide, setShowGuide] = useState(false);
+  const hasGuide = Boolean(guideText);
   return (
     <div>
-      <textarea
-        placeholder="Optional: paste or describe your marking guide, rubric, expected points, or assessment criteria."
-        rows={3}
-        className={FIELD_CLASS}
-        value={guide}
-        onChange={(e) => onGuideChange(e.target.value)}
-      />
-      <button
-        onClick={onSubmit}
-        disabled={loading}
-        className="mt-2 rounded-lg bg-lecturer-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-lecturer-accent-hover disabled:opacity-50"
-      >
-        {loading ? "Getting suggestion…" : submitLabel}
-      </button>
-      {error && <p className="mt-2 text-xs text-[#B42318]">{error}</p>}
+      <p className="text-xs text-lecturer-text-secondary">
+        Marking guide: <span className="font-medium text-lecturer-text-primary">{hasGuide ? "Lecturer marking guide" : "Tether default rubric"}</span>
+        {hasGuide && (
+          <>
+            {" · "}
+            <button onClick={() => setShowGuide((v) => !v)} className="underline hover:text-lecturer-text-primary">
+              {showGuide ? "Hide guide" : "View guide"}
+            </button>
+          </>
+        )}
+      </p>
+      {showGuide && guideText && <p className="mt-1 rounded-lg bg-lecturer-border-subtle p-2 text-xs text-lecturer-text-primary">{guideText}</p>}
     </div>
   );
 }
@@ -279,15 +269,12 @@ export default function GradeSubmissionPage({
   const [expandedAiDraft, setExpandedAiDraft] = useState<string | null>(null);
 
   // AI Marking Assistance v1 state — see docs/ai-marking-assistance-v1.md.
-  // Per-question: the lecturer's in-progress (optional) marking-guide
-  // text, whether a request is currently in flight, any error to show,
-  // whether the "Regenerate suggestion" form is expanded (only relevant
-  // once a draft already exists), and whether the stored guide text is
-  // currently shown ("View guide").
-  const [aiMarkGuideDrafts, setAiMarkGuideDrafts] = useState<Record<string, string>>({});
+  // The marking guide itself is configured once, exam-wide, on the "AI
+  // Marking Guides" page — this page only tracks whether a request is
+  // currently in flight, any error to show, and whether an existing
+  // draft's stored guide snapshot is currently shown ("View guide").
   const [aiMarkingQuestionId, setAiMarkingQuestionId] = useState<string | null>(null);
   const [aiMarkErrors, setAiMarkErrors] = useState<Record<string, string>>({});
-  const [aiMarkRegenerateOpen, setAiMarkRegenerateOpen] = useState<Record<string, boolean>>({});
   const [aiMarkGuideVisible, setAiMarkGuideVisible] = useState<Record<string, boolean>>({});
 
   // Oral Verification Workflow v1 state — see
@@ -634,11 +621,13 @@ export default function GradeSubmissionPage({
     setAiMarkingQuestionId(questionId);
     setAiMarkErrors((prev) => ({ ...prev, [questionId]: "" }));
     try {
-      const guide = aiMarkGuideDrafts[questionId]?.trim();
+      // No request body — the marking guide always comes from the
+      // question's own saved Question.aiMarkingGuide, read fresh by the
+      // route on every call (configured once, exam-wide, on the "AI
+      // Marking Guides" page). This is also what makes "Regenerate
+      // suggestion" always reflect the latest saved guide.
       const res = await fetch(`/api/lecturer/submissions/${submissionId}/answers/${questionId}/ai-mark`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(guide ? { lecturerGuide: guide } : {}),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
@@ -659,7 +648,6 @@ export default function GradeSubmissionPage({
             }
           : prev,
       );
-      setAiMarkRegenerateOpen((prev) => ({ ...prev, [questionId]: false }));
     } catch {
       setAiMarkErrors((prev) => ({ ...prev, [questionId]: "Could not reach the server. Try again." }));
     } finally {
@@ -770,23 +758,11 @@ export default function GradeSubmissionPage({
                     <button onClick={() => setExpandedAiDraft(expandedAiDraft === q.id ? null : q.id)} className={CHIP_BUTTON_CLASS}>
                       {expandedAiDraft === q.id ? "Hide details" : "Show details"}
                     </button>
-                    <button onClick={() => setAiMarkRegenerateOpen((prev) => ({ ...prev, [q.id]: !prev[q.id] }))} className={CHIP_BUTTON_CLASS}>
-                      {aiMarkRegenerateOpen[q.id] ? "Cancel regenerate" : "Regenerate suggestion"}
+                    <button onClick={() => handleGetAiMarkingSuggestion(q.id)} disabled={aiMarkingQuestionId === q.id} className={CHIP_BUTTON_CLASS}>
+                      {aiMarkingQuestionId === q.id ? "Regenerating…" : "Regenerate suggestion"}
                     </button>
                   </div>
-
-                  {aiMarkRegenerateOpen[q.id] && (
-                    <div className="mt-3 border-t border-lecturer-border pt-3">
-                      <AiMarkingGuideForm
-                        guide={aiMarkGuideDrafts[q.id] ?? aiResult?.lecturerGuideText ?? ""}
-                        onGuideChange={(value) => setAiMarkGuideDrafts((prev) => ({ ...prev, [q.id]: value }))}
-                        onSubmit={() => handleGetAiMarkingSuggestion(q.id)}
-                        loading={aiMarkingQuestionId === q.id}
-                        error={aiMarkErrors[q.id]}
-                        submitLabel="Regenerate suggestion"
-                      />
-                    </div>
-                  )}
+                  {aiMarkErrors[q.id] && <p className="mt-2 text-xs text-[#B42318]">{aiMarkErrors[q.id]}</p>}
 
                   {expandedAiDraft === q.id && aiResult && (
                     <div className="mt-3 space-y-3 border-t border-lecturer-border pt-3 text-sm">
@@ -836,14 +812,15 @@ export default function GradeSubmissionPage({
                 <div className="mt-3 rounded-lg border border-lecturer-border p-3">
                   <p className="text-sm font-medium text-lecturer-text-primary">AI Marking Assistance</p>
                   <div className="mt-2">
-                    <AiMarkingGuideForm
-                      guide={aiMarkGuideDrafts[q.id] ?? ""}
-                      onGuideChange={(value) => setAiMarkGuideDrafts((prev) => ({ ...prev, [q.id]: value }))}
-                      onSubmit={() => handleGetAiMarkingSuggestion(q.id)}
-                      loading={aiMarkingQuestionId === q.id}
-                      error={aiMarkErrors[q.id]}
-                      submitLabel="Get AI marking suggestion"
-                    />
+                    <AiMarkingGuideStatus guideText={q.aiMarkingGuide ?? null} />
+                    <button
+                      onClick={() => handleGetAiMarkingSuggestion(q.id)}
+                      disabled={aiMarkingQuestionId === q.id}
+                      className="mt-2 rounded-lg bg-lecturer-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-lecturer-accent-hover disabled:opacity-50"
+                    >
+                      {aiMarkingQuestionId === q.id ? "Getting suggestion…" : "Get AI marking suggestion"}
+                    </button>
+                    {aiMarkErrors[q.id] && <p className="mt-2 text-xs text-[#B42318]">{aiMarkErrors[q.id]}</p>}
                   </div>
                 </div>
               )}

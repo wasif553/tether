@@ -47,6 +47,16 @@ idempotency note) at best, or silently duplicate rows at worst if a
 statement happens to be re-runnable — always re-run the relevant
 pre-check query first if there is ever any doubt.
 
+**Confirmed present, origin unknown — do not re-apply.** Unlike the list
+above (a known application event with a date), the following column was
+found already present when its own migration file was about to be
+applied for the first time — the actual application date/session is not
+recorded anywhere in this ledger or elsewhere in the repository:
+
+- `docs/ai-marking-assistance-v1-migration.sql` — required schema
+  confirmed present in shared Preview/Production database on 2026-09-11;
+  original application date unknown; do not re-apply.
+
 ## Migration convention
 
 - **Base schema** (initial launch): applied with `npx prisma db push`, a

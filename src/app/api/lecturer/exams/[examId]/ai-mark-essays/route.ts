@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { markEssay, buildDefaultRubric, type AiMarkingRecord } from "@/lib/ai/essayMarker";
+import { markEssay, buildDefaultRubric, buildLecturerGuideRubric, type AiMarkingRecord } from "@/lib/ai/essayMarker";
 import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
 
 export async function POST(
@@ -54,7 +54,15 @@ export async function POST(
     }
 
     try {
-      const rubric = buildDefaultRubric(answer.question.points);
+      // Question-level guide (configured once on the "AI Marking Guides"
+      // page — see docs/ai-marking-assistance-v1.md) is used automatically
+      // for every eligible answer to this question, exam-wide. Falls back
+      // to the existing default rubric when no guide is configured.
+      const guideText = answer.question.aiMarkingGuide?.trim() || null;
+      const rubric = guideText
+        ? buildLecturerGuideRubric(guideText, answer.question.points)
+        : buildDefaultRubric(answer.question.points);
+      const rubricSource: AiMarkingRecord["rubricSource"] = guideText ? "LECTURER" : "DEFAULT";
       const result = await markEssay({
         subject: exam.title,
         question: answer.question.text,
@@ -63,13 +71,11 @@ export async function POST(
         studentResponse: answer.response,
       });
 
-      // AI Marking Assistance — stores the same enriched record shape the
-      // single-answer endpoint uses, so the grading page's "Based on
-      // Tether default rubric" / "Based on lecturer marking guide" line
-      // renders correctly regardless of which path produced the draft.
-      // Never a lecturer guide here — this bulk action has no per-answer
-      // input surface.
-      const stored: AiMarkingRecord = { ...result, rubricSource: "DEFAULT", rubric, lecturerGuideText: null };
+      // Stores the same enriched record shape the single-answer endpoint
+      // uses, so the grading page's "Based on Tether default rubric" /
+      // "Based on lecturer marking guide" line renders correctly
+      // regardless of which path produced the draft.
+      const stored: AiMarkingRecord = { ...result, rubricSource, rubric, lecturerGuideText: guideText };
 
       await prisma.answer.update({
         where: { id: answer.id },

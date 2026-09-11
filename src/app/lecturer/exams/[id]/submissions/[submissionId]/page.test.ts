@@ -105,18 +105,34 @@ describe("submission review page — Integrity evidence timeline compact card (S
 // lecturer-facing essay-marking helper, never the Tether Brainstorm
 // transcript.
 describe("submission review page — AI Marking Assistance (per-question)", () => {
-  it("calls the single-answer endpoint, never the exam-wide bulk endpoint, from the per-question handler", () => {
+  it("calls the single-answer endpoint with NO request body — the marking guide always comes from the saved question, never typed on this page", () => {
     const fnStart = pageSource.indexOf("async function handleGetAiMarkingSuggestion(");
     const fnEnd = pageSource.indexOf('if (!data) return <LoadingState', fnStart);
     const fnBlock = pageSource.slice(fnStart, fnEnd);
     expect(fnBlock).toMatch(/fetch\(`\/api\/lecturer\/submissions\/\$\{submissionId\}\/answers\/\$\{questionId\}\/ai-mark`/);
     expect(fnBlock).not.toMatch(/ai-mark-essays/);
+    expect(fnBlock).not.toMatch(/lecturerGuide/);
+    expect(fnBlock).not.toMatch(/body:\s*JSON\.stringify/);
   });
 
-  it("shows the 'AI Marking Assistance' guide form only for an ESSAY question with no draft yet, never for MCQ", () => {
-    expect(pageSource).toMatch(/q\.type === "ESSAY" && !hasAiDraft/);
-    expect(pageSource).toMatch(/Optional: paste or describe your marking guide, rubric, expected points, or assessment criteria\./);
-    expect(pageSource).toMatch(/Get AI marking suggestion/);
+  it("shows the 'AI Marking Assistance' guide-status panel only for an ESSAY question with no draft yet, never for MCQ, and never a textarea to type a guide", () => {
+    const blockStart = pageSource.indexOf('{q.type === "ESSAY" && !hasAiDraft && (');
+    const blockEnd = pageSource.indexOf('<div className="mt-2 flex items-center gap-3">', blockStart);
+    const block = pageSource.slice(blockStart, blockEnd);
+    expect(block).toMatch(/<AiMarkingGuideStatus guideText=\{q\.aiMarkingGuide \?\? null\} \/>/);
+    expect(block).toMatch(/Get AI marking suggestion/);
+    expect(block).not.toMatch(/<textarea/);
+    expect(block).not.toMatch(/Optional: paste or describe your marking guide/);
+  });
+
+  it("the guide-status panel reads Marking guide: Lecturer marking guide / Tether default rubric from the question's own saved field", () => {
+    const cStart = pageSource.indexOf("function AiMarkingGuideStatus(");
+    const cEnd = pageSource.indexOf("Oral Verification Workflow v1", cStart);
+    const cBlock = pageSource.slice(cStart, cEnd);
+    expect(cBlock).toMatch(/Marking guide:/);
+    expect(cBlock).toMatch(/Lecturer marking guide/);
+    expect(cBlock).toMatch(/Tether default rubric/);
+    expect(cBlock).toMatch(/View guide/);
   });
 
   it("uses the required terminology for the result display — Suggested score, Criterion breakdown, Strengths, Areas to improve", () => {
