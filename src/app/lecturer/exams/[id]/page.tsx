@@ -613,8 +613,16 @@ export default function LecturerExamPage({
   const [importing, setImporting] = useState(false);
 
   const [hasUngradedSubmissions, setHasUngradedSubmissions] = useState(false);
+  // AI Marking Assistance v1 — see docs/ai-marking-assistance-v1.md.
+  // Two DISTINCT exam-wide actions, deliberately separate state: the
+  // normal "Generate missing AI suggestions" (never overwrites an
+  // existing draft) and the explicit, confirmed "Regenerate AI
+  // suggestions" (always overwrites, using each question's CURRENT
+  // saved marking guide).
   const [markingEssays, setMarkingEssays] = useState(false);
   const [markEssaysMessage, setMarkEssaysMessage] = useState<string | null>(null);
+  const [regeneratingEssays, setRegeneratingEssays] = useState(false);
+  const [regenerateMessage, setRegenerateMessage] = useState<string | null>(null);
   const [savingMarksRelease, setSavingMarksRelease] = useState(false);
   const [marksReleaseMessage, setMarksReleaseMessage] = useState<string | null>(null);
 
@@ -1492,7 +1500,13 @@ export default function LecturerExamPage({
     }
   }
 
-  async function handleMarkEssays() {
+  // AI Marking Assistance v1 — "Generate missing AI suggestions": only
+  // ever fills in a draft for an essay answer that doesn't already have
+  // one. Always reports a full, honest breakdown — never a silent
+  // no-op — so a lecturer who already has drafts for every eligible
+  // answer sees exactly why nothing new was generated, rather than an
+  // ambiguous "0 marked, 0 skipped".
+  async function handleGenerateMissingAiSuggestions() {
     setMarkingEssays(true);
     setMarkEssaysMessage(null);
 
@@ -1506,16 +1520,71 @@ export default function LecturerExamPage({
     }
 
     if (!res.ok) {
-      setMarkEssaysMessage("Failed to mark essays with AI");
+      setMarkEssaysMessage("Failed to generate AI suggestions");
       return;
     }
 
-    const result: { marked: number; skipped: number } = await res.json();
-    setMarkEssaysMessage(
-      result.marked > 0
-        ? `${result.marked} essay(s) marked — review drafts below`
-        : `No essays were marked (${result.skipped} skipped)`,
-    );
+    const result: { eligible: number; generated: number; alreadySuggested: number; failed: number } = await res.json();
+    let message: string;
+    if (result.eligible === 0) {
+      message = "No eligible essay answers to mark yet.";
+    } else if (result.generated > 0) {
+      message = `AI marking complete — ${result.generated} suggestion(s) generated, ${result.alreadySuggested} existing suggestion(s) skipped.`;
+      if (result.failed > 0) message += ` ${result.failed} failed.`;
+    } else if (result.alreadySuggested === result.eligible) {
+      message = "Nothing to generate — all eligible essay answers already have AI suggestions.";
+    } else {
+      message = `No new suggestions generated. ${result.failed} failed.`;
+    }
+    setMarkEssaysMessage(message);
+    await loadSubmissionStatus();
+  }
+
+  // AI Marking Assistance v1 — "Regenerate AI suggestions": explicit,
+  // confirmed, cohort-wide overwrite of every eligible essay answer's
+  // existing AI draft using each question's CURRENT saved marking guide
+  // — the tool for "I just added/changed a marking guide after drafts
+  // already existed". Never touches manual scores/feedback, finalized
+  // grades, student answers, or non-essay questions — see
+  // docs/ai-marking-assistance-v1.md.
+  async function handleRegenerateAiSuggestions() {
+    if (
+      !confirm(
+        "Regenerate AI marking suggestions for all eligible essay answers?\n\n" +
+          "Existing AI suggestions will be replaced using the latest saved marking guides. " +
+          "Lecturer-entered scores and finalized grades will not be changed.",
+      )
+    ) {
+      return;
+    }
+
+    setRegeneratingEssays(true);
+    setRegenerateMessage(null);
+
+    const res = await fetch(`/api/lecturer/exams/${id}/ai-mark-essays/regenerate`, { method: "POST" });
+
+    setRegeneratingEssays(false);
+
+    if (res.status === 502) {
+      setRegenerateMessage("Anthropic API key not configured");
+      return;
+    }
+
+    if (!res.ok) {
+      setRegenerateMessage("Failed to regenerate AI suggestions");
+      return;
+    }
+
+    const result: { eligible: number; regenerated: number; failed: number; skipped: number; defaultRubricQuestionCount: number } =
+      await res.json();
+    let message =
+      result.eligible === 0
+        ? "No eligible essay answers to regenerate."
+        : `AI suggestions regenerated: ${result.regenerated}. Skipped: ${result.skipped}. Failed: ${result.failed}.`;
+    if (result.defaultRubricQuestionCount > 0) {
+      message += ` ${result.defaultRubricQuestionCount} question(s) used Tether default rubric.`;
+    }
+    setRegenerateMessage(message);
     await loadSubmissionStatus();
   }
 
@@ -1753,14 +1822,28 @@ export default function LecturerExamPage({
           )}
           {!exam.archivedAt && exam.questions.some((q) => q.type === "ESSAY") && hasUngradedSubmissions && (
             <button
-              onClick={handleMarkEssays}
+              onClick={handleGenerateMissingAiSuggestions}
               disabled={markingEssays}
+              title="Generates an AI marking suggestion only for essay answers that don't already have one."
               className="flex items-center gap-2 rounded-lg border border-lecturer-border bg-lecturer-surface px-4 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2 disabled:opacity-50"
             >
               {markingEssays && (
                 <span className="h-3 w-3 animate-spin rounded-full border-2 border-lecturer-text-muted border-t-transparent" />
               )}
-              {markingEssays ? "Marking..." : "Mark essays with AI"}
+              {markingEssays ? "Generating…" : "Generate missing AI suggestions"}
+            </button>
+          )}
+          {!exam.archivedAt && exam.questions.some((q) => q.type === "ESSAY") && hasUngradedSubmissions && (
+            <button
+              onClick={handleRegenerateAiSuggestions}
+              disabled={regeneratingEssays}
+              title="Replaces every eligible essay answer's existing AI suggestion using each question's current marking guide."
+              className="flex items-center gap-2 rounded-lg border border-lecturer-border bg-lecturer-surface px-4 py-2 text-sm font-medium text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2 disabled:opacity-50"
+            >
+              {regeneratingEssays && (
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-lecturer-text-muted border-t-transparent" />
+              )}
+              {regeneratingEssays ? "Regenerating…" : "Regenerate AI suggestions"}
             </button>
           )}
           {!exam.archivedAt && (
@@ -1786,6 +1869,7 @@ export default function LecturerExamPage({
         </div>
       </div>
       {markEssaysMessage && <p className="mt-2 text-sm text-lecturer-text-secondary">{markEssaysMessage}</p>}
+      {regenerateMessage && <p className="mt-2 text-sm text-lecturer-text-secondary">{regenerateMessage}</p>}
 
       {exam.archivedAt && (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-lecturer-border bg-lecturer-border-subtle/60 p-4">

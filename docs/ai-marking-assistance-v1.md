@@ -1,5 +1,59 @@
 # AI Marking Assistance
 
+## v3 — Missing-Only vs. Regenerate (exam-wide bulk UX)
+
+### The problem
+
+After v2 (below) let a lecturer save a marking guide for a question with
+existing AI drafts, clicking the exam-wide bulk button appeared to do
+nothing. Root cause: the bulk endpoint's `WHERE aiDraftScore: null` filter
+meant an answer that already had a draft was excluded from the query
+entirely — never even counted as "skipped". In an exam where every eligible
+essay answer already had a draft (generated with the Tether default rubric,
+before any guide existed), the response was `{marked: 0, skipped: 0}` and
+the UI showed *"No essays were marked (0 skipped)"* — technically accurate,
+but indistinguishable from a genuine failure, and the newly-saved guide had
+no visible way to actually take effect on those existing drafts.
+
+### Two distinct exam-wide actions
+
+- **"Generate missing AI suggestions"** (`POST
+  /api/lecturer/exams/[examId]/ai-mark-essays`) — unchanged skip behaviour
+  (never overwrites an existing draft), but now queries every eligible
+  essay answer regardless of draft state and returns a full breakdown:
+  `{ eligible, generated, alreadySuggested, failed }`. The UI always shows
+  one of: "AI marking complete — N generated, M skipped" / "Nothing to
+  generate — all eligible essay answers already have AI suggestions" / "No
+  eligible essay answers to mark yet" — never a silent, ambiguous "0, 0".
+- **"Regenerate AI suggestions"** (new: `POST
+  /api/lecturer/exams/[examId]/ai-mark-essays/regenerate`) — the tool for
+  "I just added/changed a marking guide and want existing drafts to reflect
+  it". Deliberately overwrites every eligible essay answer's existing
+  `Answer.aiDraftScore`/`aiReasoning`/`aiGradedAt` using each question's
+  *current* `Question.aiMarkingGuide` (or the default rubric). Requires an
+  explicit browser `confirm()` dialog before calling the endpoint — this is
+  the one action in this feature that intentionally replaces existing AI
+  drafts, and it must never fire without the lecturer's explicit
+  confirmation. Returns `{ eligible, regenerated, failed, skipped,
+  defaultRubricQuestionCount }`; the UI surfaces all four counts plus, when
+  relevant, "N question(s) used Tether default rubric."
+
+Both routes share the exact same eligibility query (`question.type ===
+"ESSAY"`, `submission.status === "SUBMITTED"`) and the exact same
+rubric-selection logic (`Question.aiMarkingGuide` if set, else
+`buildDefaultRubric`) — only the "skip vs. overwrite" behaviour on an
+already-drafted answer differs between them. Neither route ever reads or
+writes `Answer.score`/`feedback`/`response` or
+`Submission.status`/`totalScore` — verified by dedicated tests, including
+one that regenerates while a *different* submission in the same exam is
+already `GRADED`, confirming that finalized submission is left completely
+untouched (and is not even eligible, since eligibility requires `SUBMITTED`).
+
+The existing per-answer "Regenerate suggestion" (single-answer endpoint,
+see v2 below) already read `Question.aiMarkingGuide` fresh on every call
+before this pass — no change was needed there for it to already do the
+right thing.
+
 ## v2 — Question-Level Marking Guides
 
 ### The problem
@@ -57,8 +111,8 @@ A dedicated page, `/lecturer/exams/[id]/marking-guides` (matching this
 app's established pattern of focused sub-pages — evidence, timeline,
 answer-development, ai-assistance — rather than growing the already-huge
 exam page further), linked via a new "AI Marking Guides" button on the exam
-page next to the existing "Mark essays with AI" bulk button (kept, gated
-the same as before). Lists every ESSAY question with its text/points and a
+page next to the two bulk-marking buttons (see "v3" above). Lists every
+ESSAY question with its text/points and a
 textarea, pre-filled from the question's current guide; one "Save marking
 guides" button persists every textarea shown in a single request. An
 optional "Copy this guide to all essay questions" button per question is a

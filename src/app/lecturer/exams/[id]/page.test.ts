@@ -206,8 +206,8 @@ describe("lecturer exam page — Controlled AI commercial completion pass (Secti
 
 // AI Marking Assistance v1 — see docs/ai-marking-assistance-v1.md. The
 // exam-level entry point for configuring per-question marking guides,
-// distinct from "Mark essays with AI" (the bulk trigger, kept unchanged)
-// and from the Tether Controlled AI Brainstorm settings tested above.
+// distinct from the two bulk trigger buttons and from the Tether
+// Controlled AI Brainstorm settings tested above.
 describe("lecturer exam page — AI Marking Guides entry point", () => {
   it("links to the dedicated marking-guides page whenever the exam has an essay question, independent of ungraded-submission state", () => {
     const linkStart = pageSource.indexOf("AI Marking Guides");
@@ -217,14 +217,62 @@ describe("lecturer exam page — AI Marking Guides entry point", () => {
     expect(linkBlock).not.toMatch(/hasUngradedSubmissions/);
     expect(pageSource).toMatch(/href=\{`\/lecturer\/exams\/\$\{exam\.id\}\/marking-guides`\}/);
   });
+});
 
-  it("keeps the existing 'Mark essays with AI' bulk button unchanged (still gated on essay questions AND ungraded submissions)", () => {
-    expect(pageSource).toMatch(/Mark essays with AI/);
-    const bulkButtonStart = pageSource.indexOf("Mark essays with AI");
+// AI Marking Assistance v1 — the two exam-wide bulk actions, deliberately
+// distinct. "Generate missing AI suggestions" never overwrites an
+// existing draft; "Regenerate AI suggestions" always does, and requires
+// an explicit confirmation. See docs/ai-marking-assistance-v1.md.
+describe("lecturer exam page — bulk AI marking actions (missing-only vs. regenerate)", () => {
+  it("'Generate missing AI suggestions' button is gated on essay questions AND ungraded submissions, calls the missing-only endpoint", () => {
+    expect(pageSource).toMatch(/Generate missing AI suggestions/);
+    expect(pageSource).not.toMatch(/>Mark essays with AI</);
+    // lastIndexOf, not indexOf — an explanatory comment near the state
+    // declarations also names this button; the JSX itself is the LAST
+    // occurrence in the file.
+    const bulkButtonStart = pageSource.lastIndexOf("Generate missing AI suggestions");
     const bulkBlockStart = pageSource.lastIndexOf("{!exam.archivedAt", bulkButtonStart);
     const bulkBlock = pageSource.slice(bulkBlockStart, bulkButtonStart);
     expect(bulkBlock).toMatch(/exam\.questions\.some\(\(q\) => q\.type === "ESSAY"\)/);
     expect(bulkBlock).toMatch(/hasUngradedSubmissions/);
-    expect(pageSource).toMatch(/handleMarkEssays/);
+    expect(pageSource).toMatch(/handleGenerateMissingAiSuggestions/);
+  });
+
+  it("the missing-only handler never shows a silent 'nothing happened' result — it always distinguishes eligible/generated/already-suggested", () => {
+    const fnStart = pageSource.indexOf("async function handleGenerateMissingAiSuggestions(");
+    const fnEnd = pageSource.indexOf("async function handleRegenerateAiSuggestions(", fnStart);
+    const fnBlock = pageSource.slice(fnStart, fnEnd);
+    expect(fnBlock).toMatch(/result\.eligible === 0/);
+    expect(fnBlock).toMatch(/result\.generated > 0/);
+    expect(fnBlock).toMatch(/result\.alreadySuggested/);
+    expect(fnBlock).toMatch(/Nothing to generate/);
+  });
+
+  it("'Regenerate AI suggestions' is a separate button, requires confirmation, and calls the dedicated regenerate endpoint", () => {
+    expect(pageSource).toMatch(/Regenerate AI suggestions/);
+    const fnStart = pageSource.indexOf("async function handleRegenerateAiSuggestions(");
+    const fnEnd = pageSource.indexOf("async function handleReleaseMarks(", fnStart);
+    const fnBlock = pageSource.slice(fnStart, fnEnd);
+    expect(fnBlock).toMatch(/confirm\(/);
+    expect(fnBlock).toMatch(/Existing AI suggestions will be replaced/);
+    expect(fnBlock).toMatch(/Lecturer-entered scores and finalized grades will not be changed/);
+    expect(fnBlock).toMatch(/fetch\(`\/api\/lecturer\/exams\/\$\{id\}\/ai-mark-essays\/regenerate`/);
+
+    const regenButtonStart = pageSource.lastIndexOf("Regenerate AI suggestions");
+    const regenBlockStart = pageSource.lastIndexOf("{!exam.archivedAt", regenButtonStart);
+    const regenBlock = pageSource.slice(regenBlockStart, regenButtonStart);
+    expect(regenBlock).toMatch(/exam\.questions\.some\(\(q\) => q\.type === "ESSAY"\)/);
+    expect(regenBlock).toMatch(/hasUngradedSubmissions/);
+  });
+
+  it("the regenerate handler surfaces regenerated/skipped/failed and the default-rubric question count", () => {
+    const fnStart = pageSource.indexOf("async function handleRegenerateAiSuggestions(");
+    const fnEnd = pageSource.indexOf("async function handleReleaseMarks(", fnStart);
+    const fnBlock = pageSource.slice(fnStart, fnEnd);
+    expect(fnBlock).toMatch(/result\.regenerated/);
+    expect(fnBlock).toMatch(/result\.skipped/);
+    expect(fnBlock).toMatch(/result\.failed/);
+    expect(fnBlock).toMatch(/result\.defaultRubricQuestionCount/);
+    expect(fnBlock).toMatch(/Tether default rubric/);
   });
 });

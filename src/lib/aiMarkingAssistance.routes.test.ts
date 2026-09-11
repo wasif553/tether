@@ -7,8 +7,15 @@
  *  - POST /api/lecturer/submissions/[id]/answers/[questionId]/ai-mark
  *    (single-answer marking) automatically reusing the question's saved
  *    guide, never a per-call caller-supplied one.
- *  - POST /api/lecturer/exams/[examId]/ai-mark-essays (bulk marking)
- *    automatically reusing the question's saved guide too.
+ *  - POST /api/lecturer/exams/[examId]/ai-mark-essays ("generate missing
+ *    AI suggestions" — never overwrites an existing draft) automatically
+ *    reusing the question's saved guide too, and always reporting a
+ *    full eligible/generated/alreadySuggested/failed breakdown.
+ *  - POST /api/lecturer/exams/[examId]/ai-mark-essays/regenerate
+ *    ("regenerate AI suggestions" — deliberately overwrites every
+ *    eligible essay answer's existing draft using each question's
+ *    CURRENT saved guide), and that it never touches manual scores,
+ *    finalized grades, student answers, or non-essay questions.
  *  - Version behaviour: an existing Answer.aiReasoning snapshot is never
  *    mutated when the question's guide changes later; a fresh/regenerated
  *    draft always uses the latest saved guide.
@@ -37,6 +44,7 @@ const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
 const aiMarkRoute = await import("../app/api/lecturer/submissions/[id]/answers/[questionId]/ai-mark/route");
 const bulkMarkRoute = await import("../app/api/lecturer/exams/[examId]/ai-mark-essays/route");
+const regenerateRoute = await import("../app/api/lecturer/exams/[examId]/ai-mark-essays/regenerate/route");
 const markingGuidesRoute = await import("../app/api/lecturer/exams/[examId]/marking-guides/route");
 const examRoute = await import("../app/api/exams/[id]/route");
 const submissionRoute = await import("../app/api/submissions/[id]/route");
@@ -451,7 +459,7 @@ describe("POST /api/lecturer/submissions/[id]/answers/[questionId]/ai-mark — a
   });
 });
 
-describe("bulk 'Mark essays with AI' — automatically reuses the question's saved guide, exam-wide", () => {
+describe("bulk 'Generate missing AI suggestions' — automatically reuses the question's saved guide, exam-wide, never overwrites an existing draft", () => {
   it("marks two students' answers to the same question with the same saved guide", async () => {
     const { exam, questionA } = await makeExamWithTwoEssays("bulk-shared-guide");
     await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Bulk shared guide." } });
@@ -463,7 +471,10 @@ describe("bulk 'Mark essays with AI' — automatically reuses the question's sav
     const res = await bulkMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.marked).toBe(2);
+    expect(body.eligible).toBe(2);
+    expect(body.generated).toBe(2);
+    expect(body.alreadySuggested).toBe(0);
+    expect(body.failed).toBe(0);
 
     expect(mockMarkEssay).toHaveBeenCalledTimes(2);
     for (const call of mockMarkEssay.mock.calls) {
@@ -489,7 +500,7 @@ describe("bulk 'Mark essays with AI' — automatically reuses the question's sav
     );
   });
 
-  it("still skips an essay answer that already has an AI draft — never overwrites an existing draft", async () => {
+  it("still skips an essay answer that already has an AI draft — never overwrites it — and reports it clearly instead of silently omitting it", async () => {
     const { exam, questionA } = await makeExamWithTwoEssays("bulk-skips-existing");
     await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "A guide." } });
     const submission = await makeSubmission(exam.id, questionA.id, studentAId);
@@ -501,8 +512,230 @@ describe("bulk 'Mark essays with AI' — automatically reuses the question's sav
     mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
     const res = await bulkMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
     const body = await res.json();
-    expect(body.marked).toBe(0);
+    // Never "0, 0" with no explanation — the pre-existing draft is
+    // explicitly counted, not silently excluded from every number.
+    expect(body.eligible).toBe(1);
+    expect(body.generated).toBe(0);
+    expect(body.alreadySuggested).toBe(1);
     expect(mockMarkEssay).not.toHaveBeenCalled();
+
+    const unchanged = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } } });
+    expect(unchanged.aiDraftScore).toBe(7);
+    expect(JSON.parse(unchanged.aiReasoning!).lecturerGuideText).toBe("Pre-existing");
+  });
+
+  it("reports failed and requires LECTURER authorization", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("bulk-partial-failure");
+    await makeSubmission(exam.id, questionA.id, studentAId, "Answer that fails.");
+    mockMarkEssay.mockRejectedValue(new Error("Anthropic API request failed: timeout"));
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await bulkMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    const body = await res.json();
+    expect(body.failed).toBe(1);
+    expect(body.generated).toBe(0);
+
+    mockAuth.mockResolvedValue(sessionFor(studentAId, "STUDENT", institutionId));
+    const studentRes = await bulkMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    expect(studentRes.status).toBe(401);
+  });
+});
+
+describe("bulk 'Regenerate AI suggestions' — deliberately overwrites every eligible essay answer's existing draft using the CURRENT saved guide", () => {
+  it("replaces an existing AI draft (unlike the missing-only action) — this is the whole point of regeneration", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("regen-replaces-existing");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "New guide added after the draft existed." } });
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
+    await prisma.answer.update({
+      where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } },
+      data: { aiDraftScore: 3, aiReasoning: JSON.stringify({ ...VALID_RESULT, rubricSource: "DEFAULT", rubric: [], lecturerGuideText: null }), aiGradedAt: new Date(0) },
+    });
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await regenerateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.eligible).toBe(1);
+    expect(body.regenerated).toBe(1);
+    expect(mockMarkEssay).toHaveBeenCalledTimes(1);
+
+    const updated = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } } });
+    const stored = JSON.parse(updated.aiReasoning!);
+    expect(stored.rubricSource).toBe("LECTURER");
+    expect(stored.lecturerGuideText).toBe("New guide added after the draft existed.");
+    // The stale timestamp is genuinely replaced, not preserved.
+    expect(updated.aiGradedAt!.getTime()).toBeGreaterThan(0);
+  });
+
+  it("regenerated draft uses the LATEST Question.aiMarkingGuide, not whatever the stale draft used", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("regen-latest-guide");
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
+    await prisma.answer.update({
+      where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } },
+      data: { aiDraftScore: 3, aiReasoning: JSON.stringify({ ...VALID_RESULT, rubricSource: "LECTURER", rubric: [], lecturerGuideText: "Old guide, no longer current." }), aiGradedAt: new Date() },
+    });
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Brand new current guide." } });
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    await regenerateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+
+    expect(mockMarkEssay).toHaveBeenCalledWith(expect.objectContaining({ rubric: [{ criterion: "Lecturer marking guide", description: "Brand new current guide.", maxMarks: 10 }] }));
+  });
+
+  it("different questions use different guides during the same regeneration run", async () => {
+    const { exam, questionA, questionB } = await makeExamWithTwoEssays("regen-distinct-guides");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Guide A." } });
+    await prisma.question.update({ where: { id: questionB.id }, data: { aiMarkingGuide: "Guide B." } });
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
+    await prisma.answer.create({ data: { submissionId: submission.id, questionId: questionB.id, response: "Answer B." } });
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    await regenerateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+
+    const descriptions = mockMarkEssay.mock.calls.map((c) => c[0].rubric[0].description).sort();
+    expect(descriptions).toEqual(["Guide A.", "Guide B."]);
+  });
+
+  it("no guide configured falls back to the default rubric, and reports the affected question count", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("regen-no-guide");
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
+    await prisma.answer.update({
+      where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } },
+      data: { aiDraftScore: 3, aiReasoning: JSON.stringify(VALID_RESULT), aiGradedAt: new Date() },
+    });
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await regenerateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    const body = await res.json();
+    expect(body.defaultRubricQuestionCount).toBe(1);
+    expect(mockMarkEssay).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rubric: [
+          { criterion: "Content & accuracy", description: "Response demonstrates understanding and accuracy", maxMarks: 6 },
+          { criterion: "Clarity & structure", description: "Response is well-organised and clearly expressed", maxMarks: 4 },
+        ],
+      }),
+    );
+  });
+
+  it("never touches the lecturer's manual score/feedback or the student's answer text, even on an eligible (still-SUBMITTED) answer", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("regen-preserves-manual-score");
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId, "The student's original answer text.");
+    // A lecturer who jotted down a manual score/feedback before also
+    // requesting an AI opinion — the submission itself is still
+    // SUBMITTED (eligible), so this exercises the real overwrite path,
+    // not just "wasn't eligible anyway".
+    await prisma.answer.update({
+      where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } },
+      data: { score: 9, feedback: "Lecturer's own manual feedback." },
+    });
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await regenerateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    const body = await res.json();
+    expect(body.regenerated).toBe(1); // confirms the answer WAS processed
+
+    const answer = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } } });
+    expect(answer.score).toBe(9);
+    expect(answer.feedback).toBe("Lecturer's own manual feedback.");
+    expect(answer.response).toBe("The student's original answer text.");
+    expect(answer.aiDraftScore).toBe(VALID_RESULT.totalScore); // the AI field DID get written
+
+    const stillSubmission = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(stillSubmission.status).toBe("SUBMITTED");
+    expect(stillSubmission.totalScore).toBeNull();
+  });
+
+  it("never finalizes a submission or changes Submission.status/totalScore, even when a manually-graded submission exists elsewhere in the exam", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("regen-does-not-finalize");
+    const eligibleSubmission = await makeSubmission(exam.id, questionA.id, studentAId);
+    const gradedSubmission = await makeSubmission(exam.id, questionA.id, studentBId, "Already graded.");
+    await prisma.submission.update({ where: { id: gradedSubmission.id }, data: { status: "GRADED", totalScore: 9, gradedAt: new Date() } });
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    await regenerateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+
+    // The already-GRADED submission is untouched — not eligible, and
+    // never finalized/mutated by this route regardless.
+    const stillGraded = await prisma.submission.findUniqueOrThrow({ where: { id: gradedSubmission.id } });
+    expect(stillGraded.status).toBe("GRADED");
+    expect(stillGraded.totalScore).toBe(9);
+    // The eligible one gets a fresh AI draft but is never finalized.
+    const stillEligible = await prisma.submission.findUniqueOrThrow({ where: { id: eligibleSubmission.id } });
+    expect(stillEligible.status).toBe("SUBMITTED");
+    expect(stillEligible.totalScore).toBeNull();
+  });
+
+  it("never affects a non-ESSAY answer on the same submission", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("regen-mcq-untouched");
+    const mcq = await prisma.question.create({ data: { examId: exam.id, type: "MULTIPLE_CHOICE", text: "2+2=?", points: 1, options: ["3", "4"], correctAnswer: "4" } });
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
+    await prisma.answer.create({ data: { submissionId: submission.id, questionId: mcq.id, response: "4", score: 1, isCorrect: true } });
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    await regenerateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+
+    const mcqAnswer = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submission.id, questionId: mcq.id } } });
+    expect(mcqAnswer.aiDraftScore).toBeNull();
+    expect(mcqAnswer.score).toBe(1);
+    expect(mcqAnswer.response).toBe("4");
+  });
+
+  it("reports failed clearly on a partial regeneration failure, without aborting the rest of the batch", async () => {
+    const { exam, questionA, questionB } = await makeExamWithTwoEssays("regen-partial-failure");
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId, "Answer A.");
+    await prisma.answer.create({ data: { submissionId: submission.id, questionId: questionB.id, response: "Answer B." } });
+    mockMarkEssay.mockRejectedValueOnce(new Error("Anthropic API request failed: timeout")).mockResolvedValueOnce(VALID_RESULT);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+    const res = await regenerateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    const body = await res.json();
+    expect(body.eligible).toBe(2);
+    expect(body.regenerated).toBe(1);
+    expect(body.failed).toBe(1);
+  });
+
+  it("requires LECTURER authorization for the owning exam", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("regen-auth");
+    await makeSubmission(exam.id, questionA.id, studentAId);
+
+    mockAuth.mockResolvedValue(sessionFor(otherLecturerId, "LECTURER", institutionId));
+    const otherLecturerRes = await regenerateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    expect(otherLecturerRes.status).toBe(404);
+    expect(mockMarkEssay).not.toHaveBeenCalled();
+
+    mockAuth.mockResolvedValue(sessionFor(studentAId, "STUDENT", institutionId));
+    const studentRes = await regenerateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    expect(studentRes.status).toBe(401);
+  });
+
+  it("only regenerates because the lecturer explicitly called this dedicated route — the missing-only route never mutates the same existing snapshot", async () => {
+    const { exam, questionA } = await makeExamWithTwoEssays("regen-vs-missing-only-contrast");
+    await prisma.question.update({ where: { id: questionA.id }, data: { aiMarkingGuide: "Current guide." } });
+    const submission = await makeSubmission(exam.id, questionA.id, studentAId);
+    await prisma.answer.update({
+      where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } },
+      data: { aiDraftScore: 3, aiReasoning: JSON.stringify({ ...VALID_RESULT, rubricSource: "DEFAULT", rubric: [], lecturerGuideText: null }), aiGradedAt: new Date() },
+    });
+    mockMarkEssay.mockResolvedValue(VALID_RESULT);
+    mockAuth.mockResolvedValue(sessionFor(lecturerId, "LECTURER", institutionId));
+
+    // The missing-only action leaves the existing (now stale) snapshot untouched.
+    await bulkMarkRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    const afterMissingOnly = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } } });
+    expect(JSON.parse(afterMissingOnly.aiReasoning!).rubricSource).toBe("DEFAULT");
+
+    // Only the explicit regenerate call replaces it.
+    await regenerateRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ examId: exam.id }) });
+    const afterRegenerate = await prisma.answer.findUniqueOrThrow({ where: { submissionId_questionId: { submissionId: submission.id, questionId: questionA.id } } });
+    expect(JSON.parse(afterRegenerate.aiReasoning!).rubricSource).toBe("LECTURER");
   });
 });
 
