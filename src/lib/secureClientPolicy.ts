@@ -319,6 +319,55 @@ export function isTetherRequiredDeliveryUnavailable(mode: DeliveryMode, availabi
   return mode === "TETHER_CLIENT_REQUIRED" && !availability.tetherClientRequiredAvailable;
 }
 
+/**
+ * VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+ *
+ * True only when a FROZEN policy (parsed via parseSecureClientPolicy —
+ * always call that first; this function never touches raw JSON itself)
+ * genuinely, consistently represents Tether-required secure delivery.
+ * Deliberately checks all three fields buildSecureClientPolicySnapshot
+ * derives together for a real TETHER_CLIENT_REQUIRED attempt — never just
+ * requireVerifiedClient alone, which on its own cannot distinguish a
+ * correctly-built policy from a malformed/tampered/partially-legacy one
+ * that happens to have that one field set but not the others (e.g. an
+ * allowedClientTypes that doesn't actually include the Tether client, so
+ * no genuine secure-client launch could ever be accepted for it anyway).
+ *
+ * This is the ONE shared eligibility check for both:
+ *   - POST /api/exams/[id]/start's existingInProgress branch (detects the
+ *     "cannot securely resume" condition and returns
+ *     SECURE_POLICY_MISMATCH_RESTART_REQUIRED instead of redirecting to a
+ *     Tether launch that can only fail).
+ *   - POST /api/lecturer/submissions/[id]/void's own eligibility gate
+ *     (the exact inverse: a submission may only be voided under this
+ *     narrow, proven, technical-mismatch condition, never as a generic
+ *     "void any in-progress attempt" capability).
+ * Never mutates the policy it's given.
+ */
+export function isFrozenPolicyTetherSecure(policy: Pick<SecureClientPolicy, "deliveryMode" | "requireVerifiedClient" | "allowedClientTypes">): boolean {
+  return (
+    policy.deliveryMode === "TETHER_CLIENT_REQUIRED" &&
+    policy.requireVerifiedClient === true &&
+    policy.allowedClientTypes.includes("TETHER_SECURE_CLIENT")
+  );
+}
+
+/**
+ * The exact "cannot securely resume" condition this whole feature exists
+ * to detect: the exam's CURRENT, live, lecturer-configured setting demands
+ * TETHER_CLIENT_REQUIRED, but this attempt's own FROZEN policy (captured
+ * once, at attempt creation, and never rewritten — see
+ * buildSecureClientPolicySnapshot's own immutable-snapshot doc comment)
+ * cannot satisfy that requirement. Takes the RAW current exam deliveryMode
+ * (never resolveEffectiveDeliveryMode's availability-resolved output) —
+ * this is about a genuine data-consistency defect between the exam's own
+ * configuration and one specific attempt's frozen policy, orthogonal to
+ * whether Tether happens to be available right now.
+ */
+export function isSecurePolicyMismatchForResume(params: { currentExamDeliveryMode: DeliveryMode; frozenPolicy: SecureClientPolicy }): boolean {
+  return params.currentExamDeliveryMode === "TETHER_CLIENT_REQUIRED" && !isFrozenPolicyTetherSecure(params.frozenPolicy);
+}
+
 function defaultAllowedClientTypesFor(mode: DeliveryMode): ClientType[] {
   if (mode === "SEB_OPTIONAL" || mode === "SEB_REQUIRED") return ["SAFE_EXAM_BROWSER"];
   if (mode === "TETHER_CLIENT_OPTIONAL" || mode === "TETHER_CLIENT_REQUIRED") return ["TETHER_SECURE_CLIENT"];

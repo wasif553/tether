@@ -4,6 +4,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
 import { isPlatformAdmin, assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
+import { isSubmittedSubmission } from "@/lib/assessmentLifecycle";
 
 const approveSchema = z.object({
   finalScore: z.number().min(0),
@@ -37,6 +38,14 @@ export async function POST(
     const res = institutionErrorResponse(err);
     if (res) return res;
     throw err;
+  }
+
+  // VOIDED-attempt recovery v1 — a voided attempt never contributes a
+  // score. isSubmittedSubmission allowlists SUBMITTED/GRADED only, so
+  // this also blocks an IN_PROGRESS submission (previously unchecked
+  // here), matching every other grading route's guard.
+  if (!isSubmittedSubmission(submission.status)) {
+    return NextResponse.json({ error: "This submission cannot be graded.", code: "SUBMISSION_NOT_GRADABLE" }, { status: 409 });
   }
 
   const body = await req.json();

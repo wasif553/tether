@@ -41,7 +41,7 @@ type CanvasPassback = {
 
 type SubmissionData = {
   id: string;
-  status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
+  status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" | "VOIDED";
   attemptNumber: number;
   totalScore: number | null;
   exam: { title: string; questions: Question[] };

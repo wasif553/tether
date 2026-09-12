@@ -4,6 +4,8 @@ import {
   parseSecureClientPolicy,
   resolveEffectiveDeliveryMode,
   isTetherRequiredDeliveryUnavailable,
+  isFrozenPolicyTetherSecure,
+  isSecurePolicyMismatchForResume,
   deliveryModeRequiresSecureClient,
   deliveryModeOffersSecureClient,
   isValidDeliveryMode,
@@ -872,5 +874,107 @@ describe("isDisplayPolicySaveBlocked", () => {
         tetherClientOptionalAvailable: true,
       }),
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+// isFrozenPolicyTetherSecure / isSecurePolicyMismatchForResume are the ONE
+// shared eligibility check used by both POST /api/exams/[id]/start (detect
+// "cannot securely resume") and POST /api/lecturer/submissions/[id]/void
+// (the exact inverse — is this row eligible to be voided). Deliberately
+// checks THREE fields, never requireVerifiedClient alone (test item C —
+// a malformed/internally-inconsistent policy that has requireVerifiedClient
+// true but is otherwise wrong must still be detected as unsafe).
+// ---------------------------------------------------------------------------
+describe("isFrozenPolicyTetherSecure / isSecurePolicyMismatchForResume — VOIDED-attempt recovery v1", () => {
+  const genuineTetherSecurePolicy = buildSecureClientPolicySnapshot(
+    { ...baseSettings, deliveryMode: "TETHER_CLIENT_REQUIRED" },
+    { ...DEFAULT_SECURE_CLIENT_AVAILABILITY, tetherClientRequiredAvailable: true },
+  );
+
+  it("a genuinely-built TETHER_CLIENT_REQUIRED policy (via the real buildSecureClientPolicySnapshot) is recognised as secure", () => {
+    expect(genuineTetherSecurePolicy.deliveryMode).toBe("TETHER_CLIENT_REQUIRED");
+    expect(genuineTetherSecurePolicy.requireVerifiedClient).toBe(true);
+    expect(genuineTetherSecurePolicy.allowedClientTypes).toEqual(["TETHER_SECURE_CLIENT"]);
+    expect(isFrozenPolicyTetherSecure(genuineTetherSecurePolicy)).toBe(true);
+  });
+
+  it("the exact confirmed-incident shape (a legacy STANDARD_WEB-downgraded snapshot) is rejected", () => {
+    const legacyDowngradedPolicy = buildSecureClientPolicySnapshot(
+      { ...baseSettings, deliveryMode: "TETHER_CLIENT_REQUIRED" },
+      DEFAULT_SECURE_CLIENT_AVAILABILITY, // tetherClientRequiredAvailable: false
+    );
+    expect(legacyDowngradedPolicy.deliveryMode).toBe("STANDARD_WEB");
+    expect(legacyDowngradedPolicy.requireVerifiedClient).toBe(false);
+    expect(isFrozenPolicyTetherSecure(legacyDowngradedPolicy)).toBe(false);
+  });
+
+  it("C: requireVerifiedClient=true ALONE is not sufficient — deliveryMode wrong is still rejected (malformed/inconsistent policy detected safely)", () => {
+    expect(
+      isFrozenPolicyTetherSecure({
+        ...genuineTetherSecurePolicy,
+        deliveryMode: "STANDARD_WEB",
+      }),
+    ).toBe(false);
+  });
+
+  it("C: requireVerifiedClient=true and deliveryMode correct, but allowedClientTypes missing the Tether client, is still rejected", () => {
+    expect(
+      isFrozenPolicyTetherSecure({
+        ...genuineTetherSecurePolicy,
+        allowedClientTypes: [],
+      }),
+    ).toBe(false);
+  });
+
+  it("C: deliveryMode/allowedClientTypes correct but requireVerifiedClient false is still rejected", () => {
+    expect(
+      isFrozenPolicyTetherSecure({
+        ...genuineTetherSecurePolicy,
+        requireVerifiedClient: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("a null/missing snapshot parses to STANDARD_WEB (parseSecureClientPolicy's own fail-safe default) and is correctly rejected as not Tether-secure", () => {
+    const parsed = parseSecureClientPolicy(null);
+    expect(isFrozenPolicyTetherSecure(parsed)).toBe(false);
+  });
+
+  describe("isSecurePolicyMismatchForResume", () => {
+    it("true when the exam currently requires Tether but the frozen policy cannot satisfy it", () => {
+      expect(
+        isSecurePolicyMismatchForResume({
+          currentExamDeliveryMode: "TETHER_CLIENT_REQUIRED",
+          frozenPolicy: parseSecureClientPolicy(null),
+        }),
+      ).toBe(true);
+    });
+
+    it("false when the frozen policy genuinely is Tether-secure", () => {
+      expect(
+        isSecurePolicyMismatchForResume({
+          currentExamDeliveryMode: "TETHER_CLIENT_REQUIRED",
+          frozenPolicy: genuineTetherSecurePolicy,
+        }),
+      ).toBe(false);
+    });
+
+    it("false when the exam's current mode isn't TETHER_CLIENT_REQUIRED at all — never mutates or second-guesses a STANDARD_WEB exam's own STANDARD_WEB snapshot", () => {
+      expect(
+        isSecurePolicyMismatchForResume({
+          currentExamDeliveryMode: "STANDARD_WEB",
+          frozenPolicy: parseSecureClientPolicy(null),
+        }),
+      ).toBe(false);
+    });
+
+    it("never mutates the policy object it is given", () => {
+      const policy = { ...genuineTetherSecurePolicy };
+      const snapshotBefore = JSON.stringify(policy);
+      isSecurePolicyMismatchForResume({ currentExamDeliveryMode: "TETHER_CLIENT_REQUIRED", frozenPolicy: policy });
+      expect(JSON.stringify(policy)).toBe(snapshotBefore);
+    });
   });
 });

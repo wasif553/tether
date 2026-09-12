@@ -385,7 +385,7 @@ type SecureSettings = {
 
 type SubmissionData = {
   id: string;
-  status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
+  status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" | "VOIDED";
   attemptNumber: number;
   deadline: string;
   totalScore: number | null;

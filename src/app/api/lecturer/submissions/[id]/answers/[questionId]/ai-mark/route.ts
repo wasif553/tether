@@ -35,6 +35,7 @@ import {
   type AiMarkingRecord,
 } from "@/lib/ai/essayMarker";
 import { isPlatformAdmin, assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
+import { isSubmittedSubmission } from "@/lib/assessmentLifecycle";
 
 export async function POST(
   _req: Request,
@@ -71,6 +72,12 @@ export async function POST(
   // (SUBMITTED or GRADED) attempt's stored response.
   if (submission.status === "IN_PROGRESS") {
     return NextResponse.json({ error: "Student has not submitted yet" }, { status: 409 });
+  }
+  // VOIDED-attempt recovery v1 — a voided attempt must never be
+  // AI-marked (isSubmittedSubmission allowlists SUBMITTED/GRADED only,
+  // so VOIDED is excluded here exactly like IN_PROGRESS is above).
+  if (!isSubmittedSubmission(submission.status)) {
+    return NextResponse.json({ error: "This submission cannot be AI-marked.", code: "SUBMISSION_NOT_GRADABLE" }, { status: 409 });
   }
 
   const question = await prisma.question.findUnique({ where: { id: questionId } });

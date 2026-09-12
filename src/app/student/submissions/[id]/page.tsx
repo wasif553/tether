@@ -28,7 +28,7 @@ import { useRouter } from "next/navigation";
 
 type SubmissionResult = {
   id: string;
-  status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
+  status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" | "VOIDED";
   startedAt: string;
   submittedAt: string | null;
   totalScore: number | null;
@@ -113,6 +113,31 @@ export default function StudentSubmissionResultsPage({
         <button onClick={() => router.push("/student")} className="mt-4 text-sm underline">
           Return to student dashboard
         </button>
+      </div>
+    );
+  }
+
+  // VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+  // This page's whole framing ("Submission complete") and status label
+  // (Submitted/Graded) assume a genuine finished result — never render
+  // either for a voided attempt, which was never really completed and
+  // never received a score. A student can only reach a VOIDED submission
+  // here via a stale link/bookmark (the dashboard itself never links to
+  // one — see studentSubmissionState.ts's hasReadOnlySubmissionView),
+  // so this stays a plain, honest, dedicated view rather than a redirect.
+  if (data.status === "VOIDED") {
+    return (
+      <div className="mx-auto max-w-2xl">
+        <button onClick={() => router.push("/student")} className="text-sm text-gray-500 underline">
+          ← Back to dashboard
+        </button>
+        <h1 className="mt-2 text-2xl font-semibold">Attempt voided</h1>
+        <p className="mt-1 text-lg text-gray-700">{data.exam.title}</p>
+        <div className="mt-6 rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+          This attempt was voided by your institution due to a technical issue. It does not count toward your
+          attempt limit and has no score. Your prior activity has been preserved for record-keeping. Return to your
+          dashboard to start a new attempt if one is available.
+        </div>
       </div>
     );
   }

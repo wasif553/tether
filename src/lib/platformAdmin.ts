@@ -25,15 +25,34 @@ export function requirePlatformAdmin(session: SessionLike): NextResponse | null 
   return null;
 }
 
-export async function createPlatformAuditLog(entry: {
-  actorId: string | null;
-  action: string;
-  targetType: string;
-  targetId?: string | null;
-  institutionId?: string | null;
-  metadata?: Record<string, unknown> | null;
-}) {
-  return prisma.platformAuditLog.create({
+/** Accepts either the global client (every existing best-effort call site) or a `tx` from prisma.$transaction — same DbClient pattern already used in secureClientRunner.ts. */
+type AuditLogDbClient = Prisma.TransactionClient | typeof prisma;
+
+/**
+ * VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+ *
+ * The optional `client` parameter is what makes this function usable
+ * from INSIDE an existing prisma.$transaction(async (tx) => {...}) block
+ * (pass `tx`) so the audit write commits or rolls back atomically with
+ * whatever it's recording — see POST /api/lecturer/submissions/[id]/void,
+ * which needs exactly that guarantee (never a voided-but-unaudited, or
+ * audited-but-not-voided, row). Every EXISTING call site in this codebase
+ * omits it and gets the exact same best-effort, standalone-write
+ * behaviour as before — this is purely additive, not a behaviour change
+ * for anything already calling this function.
+ */
+export async function createPlatformAuditLog(
+  entry: {
+    actorId: string | null;
+    action: string;
+    targetType: string;
+    targetId?: string | null;
+    institutionId?: string | null;
+    metadata?: Record<string, unknown> | null;
+  },
+  client: AuditLogDbClient = prisma,
+) {
+  return client.platformAuditLog.create({
     data: {
       actorId: entry.actorId,
       action: entry.action,

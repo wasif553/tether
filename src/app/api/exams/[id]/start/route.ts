@@ -5,7 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 import { captureNetworkEvidence } from "@/lib/networkEvidence";
-import { canCreateAttempt, nextAttemptNumber } from "@/lib/assessmentLifecycle";
+import { canCreateAttempt, nextAttemptNumber, countsTowardAttemptLimit } from "@/lib/assessmentLifecycle";
 import { parseSecureSettings, questionPoolsActive } from "@/lib/secureExam";
 import {
   buildOptionOrders,
@@ -23,6 +23,8 @@ import {
   buildSecureClientPolicySnapshot,
   resolveEffectiveDeliveryMode,
   isTetherRequiredDeliveryUnavailable,
+  parseSecureClientPolicy,
+  isSecurePolicyMismatchForResume,
   DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
   DEFAULT_HEARTBEAT_GRACE_SECONDS,
   type DeliveryMode,
@@ -219,6 +221,37 @@ export async function POST(
     orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
   });
   if (existingInProgress) {
+    // VOIDED-attempt recovery v1 — see
+    // docs/voided-submission-recovery-v1.md and
+    // isSecurePolicyMismatchForResume's own doc comment
+    // (secureClientPolicy.ts). Detects the exact "cannot securely
+    // resume" condition BEFORE ever computing a Tether-launch redirect
+    // for it: the exam's CURRENT configuration demands
+    // TETHER_CLIENT_REQUIRED, but THIS attempt's own frozen policy
+    // (captured once, at creation, and never rewritten) cannot satisfy
+    // that requirement — most commonly a legacy row created while a
+    // Tether-required exam had been silently (pre-fail-closed-fix)
+    // downgraded to STANDARD_WEB. Without this check, the student would
+    // be redirected to the Tether launch page every time (live settings
+    // say "go to Tether"), which would then reject the manifest every
+    // time (this attempt's own frozen policy says otherwise) — an
+    // infinite retry loop with no distinguishable failure state. This
+    // is read-only: it never mutates the snapshot, never voids the
+    // attempt automatically, and never issues a Tether launch against a
+    // STANDARD_WEB-flavoured snapshot. Recovery requires an explicit
+    // lecturer/admin action (POST /api/lecturer/submissions/[id]/void).
+    const frozenPolicy = parseSecureClientPolicy(existingInProgress.secureClientPolicySnapshotJson);
+    if (isSecurePolicyMismatchForResume({ currentExamDeliveryMode: settings.deliveryMode, frozenPolicy })) {
+      return NextResponse.json(
+        {
+          error:
+            "This exam attempt cannot be securely resumed because its security settings no longer match this exam's current requirements. Your existing answers and activity are preserved and have not been lost. Please contact your lecturer or institution administrator to restart this attempt.",
+          code: "SECURE_POLICY_MISMATCH_RESTART_REQUIRED",
+        },
+        { status: 409 },
+      );
+    }
+
     const secureClientLaunch = await resolveSecureClientLaunchField({
       deliveryMode: settings.deliveryMode,
       availability: secureClientAvailabilityForExam,
@@ -234,7 +267,12 @@ export async function POST(
     select: { attemptNumber: true, status: true },
     orderBy: { attemptNumber: "desc" },
   });
-  const finalizedAttemptCount = attempts.filter((attempt) => attempt.status !== "IN_PROGRESS").length;
+  // VOIDED-attempt recovery v1 — countsTowardAttemptLimit (SUBMITTED or
+  // GRADED only) replaces the old `status !== "IN_PROGRESS"` check here:
+  // a VOIDED attempt must never consume one of the student's maxAttempts
+  // slots. See assessmentLifecycle.ts's own doc comment on why this was
+  // previously conflated with isFinalizedSubmissionStatus.
+  const finalizedAttemptCount = attempts.filter((attempt) => countsTowardAttemptLimit(attempt.status)).length;
   if (!canCreateAttempt({ finalizedAttemptCount, maxAttempts: settings.maxAttempts })) {
     return NextResponse.json({ error: "No attempts remaining for this exam." }, { status: 409 });
   }
