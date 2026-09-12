@@ -22,6 +22,7 @@ import { buildAnswerProvenancePolicySnapshot } from "@/lib/answerProvenancePolic
 import {
   buildSecureClientPolicySnapshot,
   resolveEffectiveDeliveryMode,
+  isTetherRequiredDeliveryUnavailable,
   DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
   DEFAULT_HEARTBEAT_GRACE_SECONDS,
   type DeliveryMode,
@@ -227,6 +228,7 @@ export async function POST(
     });
     return NextResponse.json({ ...existingInProgress, secureClientLaunch });
   }
+
   const attempts = await prisma.submission.findMany({
     where: { examId: id, studentId: session.user.id },
     select: { attemptNumber: true, status: true },
@@ -534,6 +536,39 @@ export async function POST(
       {
         error: "This final examination requires Tether Secure Browser, which is not currently available. Contact your lecturer or institution administrator.",
         code: "FINAL_EXAMINATION_TETHER_UNAVAILABLE",
+      },
+      { status: 409 },
+    );
+  }
+
+  // Tether-required fail-closed security fix — see
+  // isTetherRequiredDeliveryUnavailable's own doc comment
+  // (secureClientPolicy.ts) for the full incident this closes. The gate
+  // above only ever fires for assessmentType === FINAL_EXAMINATION (and,
+  // for that case, effectiveDeliveryMode has already been downgraded away
+  // from TETHER_CLIENT_REQUIRED by the time it's checked here, so it
+  // fires FIRST and keeps its own existing, unchanged error code for that
+  // case — no compatibility break for anything already asserting
+  // FINAL_EXAMINATION_TETHER_UNAVAILABLE). This second gate closes the
+  // remaining, previously-uncovered gap: ANY exam where a lecturer
+  // directly configured deliveryMode === TETHER_CLIENT_REQUIRED
+  // (regardless of assessmentType — a quiz, practice test, or manually
+  // Tether-configured exam that was never classified as a final
+  // examination) must fail exactly the same way when unavailable, never
+  // silently proceed as an ordinary STANDARD_WEB attempt. Checked against
+  // the RAW, lecturer-configured settings.deliveryMode (never the
+  // already-resolved effectiveDeliveryMode), still well before
+  // buildSecureClientPolicySnapshot/submission creation — no content,
+  // activation, or SecureClientEvent/session can exist for a request this
+  // returns from. Stateless and synchronous: recomputed fresh on every
+  // request, so repeated retries while unavailable fail closed
+  // identically every time.
+  if (isTetherRequiredDeliveryUnavailable(settings.deliveryMode, secureClientAvailabilityForExam)) {
+    return NextResponse.json(
+      {
+        error:
+          "This examination requires Tether Secure Browser, but secure delivery is temporarily unavailable. Your examination has not started.",
+        code: "TETHER_REQUIRED_UNAVAILABLE",
       },
       { status: 409 },
     );

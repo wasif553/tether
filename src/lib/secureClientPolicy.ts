@@ -277,6 +277,48 @@ export function resolveEffectiveDeliveryMode(mode: DeliveryMode, availability: S
   return mode;
 }
 
+/**
+ * Fail-closed check for the ONE case where resolveEffectiveDeliveryMode's
+ * STANDARD_WEB downgrade is a security defect rather than an accepted
+ * graceful degrade.
+ *
+ * SEB_OPTIONAL/SEB_REQUIRED/TETHER_CLIENT_OPTIONAL falling back to
+ * STANDARD_WEB when unavailable is intentional and remains completely
+ * unchanged by this function — those modes are, by design, either
+ * genuinely optional (a student may always take the exam over an
+ * ordinary browser) or not-yet-available features that were never
+ * offered as a lecturer-visible choice in Production in the first place
+ * (see secureClientAvailability.ts). TETHER_CLIENT_REQUIRED is different:
+ * a lecturer explicitly chose it, the platform's ENTIRE promise for that
+ * exam is "this only ever runs inside Tether Secure Browser", and
+ * resolveEffectiveDeliveryMode returning STANDARD_WEB for it is
+ * indistinguishable, to any caller not specifically checking for this,
+ * from an exam that was always ordinary-web — silently releasing exam
+ * content with zero of the lecturer's configured protections.
+ *
+ * Confirmed root cause of a real incident: a physically-tested exam
+ * configured TETHER_CLIENT_REQUIRED resolved to STANDARD_WEB (because
+ * TETHER_CLIENT_REQUIRED_DISABLED was set in Production), and
+ * buildSecureClientPolicySnapshot then happily froze a fully-disabled,
+ * ordinary-web policy snapshot onto the student's submission — no
+ * SecureClientEvent/session was ever created, and exam content was
+ * reachable over a plain browser tab. The kill switch worked as an
+ * "emergency rollback of the requirement" when it must instead work as
+ * an "emergency block on affected exams" (task requirement 10).
+ *
+ * The caller (POST /api/exams/[id]/start, the only place a NEW
+ * TETHER_CLIENT_REQUIRED submission's policy snapshot is ever built) must
+ * check this BEFORE calling buildSecureClientPolicySnapshot/creating a
+ * submission at all, and fail closed with a typed, student-facing error
+ * instead — never create a Submission row, never expose questions, never
+ * stamp activatedAt. Deliberately takes the RAW, lecturer-configured mode
+ * (never resolveEffectiveDeliveryMode's own output) so it can be checked
+ * independently of, and prior to, any other use of that resolved value.
+ */
+export function isTetherRequiredDeliveryUnavailable(mode: DeliveryMode, availability: SecureClientAvailability): boolean {
+  return mode === "TETHER_CLIENT_REQUIRED" && !availability.tetherClientRequiredAvailable;
+}
+
 function defaultAllowedClientTypesFor(mode: DeliveryMode): ClientType[] {
   if (mode === "SEB_OPTIONAL" || mode === "SEB_REQUIRED") return ["SAFE_EXAM_BROWSER"];
   if (mode === "TETHER_CLIENT_OPTIONAL" || mode === "TETHER_CLIENT_REQUIRED") return ["TETHER_SECURE_CLIENT"];

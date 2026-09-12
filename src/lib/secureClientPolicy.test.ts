@@ -3,6 +3,7 @@ import {
   buildSecureClientPolicySnapshot,
   parseSecureClientPolicy,
   resolveEffectiveDeliveryMode,
+  isTetherRequiredDeliveryUnavailable,
   deliveryModeRequiresSecureClient,
   deliveryModeOffersSecureClient,
   isValidDeliveryMode,
@@ -118,6 +119,32 @@ describe("resolveEffectiveDeliveryMode", () => {
     // secureClientAvailability.ts, which is always false in Production) —
     // this is the snapshot-building side of that guarantee.
     expect(resolveEffectiveDeliveryMode("SEB_REQUIRED", DEFAULT_SECURE_CLIENT_AVAILABILITY)).not.toBe("SEB_REQUIRED");
+  });
+});
+
+describe("isTetherRequiredDeliveryUnavailable — Tether-required fail-closed security fix", () => {
+  it("is true for TETHER_CLIENT_REQUIRED when unavailable — the exact case resolveEffectiveDeliveryMode silently downgraded before this fix", () => {
+    expect(isTetherRequiredDeliveryUnavailable("TETHER_CLIENT_REQUIRED", DEFAULT_SECURE_CLIENT_AVAILABILITY)).toBe(true);
+  });
+
+  it("is false for TETHER_CLIENT_REQUIRED when available", () => {
+    expect(
+      isTetherRequiredDeliveryUnavailable("TETHER_CLIENT_REQUIRED", { ...DEFAULT_SECURE_CLIENT_AVAILABILITY, tetherClientRequiredAvailable: true }),
+    ).toBe(false);
+  });
+
+  it("is false for every other delivery mode regardless of availability — this fix is scoped exactly to TETHER_CLIENT_REQUIRED, never touching the intentional STANDARD_WEB degrade for SEB_*/TETHER_CLIENT_OPTIONAL", () => {
+    expect(isTetherRequiredDeliveryUnavailable("STANDARD_WEB", DEFAULT_SECURE_CLIENT_AVAILABILITY)).toBe(false);
+    expect(isTetherRequiredDeliveryUnavailable("MONITORED_WEB", DEFAULT_SECURE_CLIENT_AVAILABILITY)).toBe(false);
+    expect(isTetherRequiredDeliveryUnavailable("SEB_OPTIONAL", DEFAULT_SECURE_CLIENT_AVAILABILITY)).toBe(false);
+    expect(isTetherRequiredDeliveryUnavailable("SEB_REQUIRED", DEFAULT_SECURE_CLIENT_AVAILABILITY)).toBe(false);
+    expect(isTetherRequiredDeliveryUnavailable("TETHER_CLIENT_OPTIONAL", DEFAULT_SECURE_CLIENT_AVAILABILITY)).toBe(false);
+  });
+
+  it("the TETHER_CLIENT_REQUIRED_DISABLED kill switch (surfaced here as tetherClientRequiredAvailable: false) is detected as unavailable, never as 'safe to serve as STANDARD_WEB' — the kill switch must BLOCK secure exams, never weaken them", () => {
+    expect(isTetherRequiredDeliveryUnavailable("TETHER_CLIENT_REQUIRED", { ...DEFAULT_SECURE_CLIENT_AVAILABILITY, tetherClientRequiredAvailable: false })).toBe(
+      true,
+    );
   });
 });
 
