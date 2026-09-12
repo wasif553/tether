@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Tether Windows Hardening v1.8.0, Phase A+B — the native keyboard-
+    hardening helper. Deliberately the smallest practical Windows-native
+    program: no UI, no admin manifest (standard user, no
+    requestedExecutionLevel override — the NSIS installer itself already
+    installs per-user/unelevated, see apps/lockdown/electron-builder.yml),
+    spawned and owned by the Electron main process, exists only for the
+    duration of an active secure exam.
+
+    win-x64 only, matching this package's existing win-x64-only packaging
+    (see embedWindowsIcon.ts/verifyPackagedRelease.ts). Self-contained so
+    a student's machine never needs a separately-installed .NET runtime —
+    the published output is one standalone .exe.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- The OS-specific TFM (rather than plain net8.0) is what actually
+         suppresses CA1416 on the Windows-only pipe-ACL/WindowsIdentity
+         APIs PipeServer.cs uses — the SDK treats an -windows TFM as an
+         implicit [SupportedOSPlatform("windows")] for the whole
+         assembly. This project only ever runs on Windows regardless. -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>TetherKeyboardHelper</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- No UI framework reference (no WinForms/WPF) — the Win32 message
+         loop is implemented directly via P/Invoke in NativeMethods.cs,
+         keeping the published output small and dependency-free. The SDK's
+         own default generated manifest requests execution level
+         "asInvoker" (standard user, no elevation) — left at that default
+         deliberately; do not add a requireAdministrator manifest. -->
+    <UseWindowsForms>false</UseWindowsForms>
+  </PropertyGroup>
+
+  <!-- The SDK's implicit **/*.cs glob would otherwise also pick up the
+       nested TetherKeyboardHelper.Tests/ project's own .cs files,
+       double-compiling them into THIS project too. -->
+  <ItemGroup>
+    <Compile Remove="TetherKeyboardHelper.Tests/**/*.cs" />
+  </ItemGroup>
+
+</Project>

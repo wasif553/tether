@@ -59,6 +59,8 @@ import { consumeLockdownFault } from "./lockdownFaultInjection";
 import { diagnosticLog } from "./diagnosticLog";
 import { isWindowUsable, runOnWindowBestEffort } from "./windowLifecycleGuard";
 import { performLockdownRestoration, type RestorationController, type RestorationOutcome } from "./lockdownRestorationController";
+import { KeyboardHookHelperManager } from "./keyboardHookHelperManager";
+import { shouldPreventOrdinaryClose } from "./windowCloseGuard";
 
 export const DIAGNOSTIC_LOG_FILE_NAME = "tether-secure-browser-diagnostics.log";
 
@@ -174,6 +176,46 @@ const remoteSessionMonitor = new RemoteSessionMonitor({
   },
 });
 
+// Windows Hardening v1.8.0, Phase A+B — the native keyboard-hardening
+// helper manager. Only ever ARMED from inside
+// lockdown:activate-secure-exam-lockdown below, after every fresh
+// precheck has already passed — see that handler's own doc comment.
+// CRITICAL CORRECTION: losing the helper's heartbeat while ARMED must
+// NEVER trigger the ordinary full lockdown restore — see
+// keyboardHookHelperManager.ts's own doc comment on why onHardeningDegraded/
+// onHardeningRecoveryFailed only ever report a signal here, never call
+// restoreLockdownControls. Reuses EXISTING, already server-accepted
+// event/action vocabulary rather than inventing new ones this pass would
+// otherwise need to add to the main web repo's own allow-lists: a
+// degraded/recovery-failed signal is reported as the existing generic
+// MANUAL_WARNING IntegrityEvent (mirroring monitorNetworkRequests' own
+// use of it below for "a notable technical signal with no dedicated
+// type"), and an activation-time arm failure is reported as the existing
+// TETHER_LOCKDOWN_DETECTION_SERVICE_FAILURE audit action (mirroring
+// processDetection's own onScanUnavailable use of it for "a Tether-owned
+// detection/hardening mechanism could not do its job").
+const keyboardHelperManager = new KeyboardHookHelperManager({
+  onHardeningDegraded: () => {
+    if (examContext.submissionId) {
+      recordEvent("MANUAL_WARNING", "Secure exam mode: a Windows-level security control was temporarily interrupted. This has been recorded.", "keyboard-hardening-degraded", {
+        signal: "KEYBOARD_HARDENING_DEGRADED",
+      });
+    }
+    reportAuditFactBestEffort("TETHER_LOCKDOWN_DETECTION_SERVICE_FAILURE", { reason: "KEYBOARD_HARDENING_HEARTBEAT_LOST" });
+  },
+  onHardeningRecovered: () => {
+    reportAuditFactBestEffort("TETHER_LOCKDOWN_DETECTION_SERVICE_FAILURE", { reason: "KEYBOARD_HARDENING_RECOVERED" });
+  },
+  onHardeningRecoveryFailed: () => {
+    if (examContext.submissionId) {
+      recordEvent("MANUAL_WARNING", "Secure exam mode: a Windows-level security control could not be restored. This has been recorded.", "keyboard-hardening-recovery-failed", {
+        signal: "KEYBOARD_HARDENING_RECOVERY_FAILED",
+      });
+    }
+    reportAuditFactBestEffort("TETHER_LOCKDOWN_DETECTION_SERVICE_FAILURE", { reason: "KEYBOARD_HARDENING_RECOVERY_EXHAUSTED" });
+  },
+});
+
 // Tether Windows Lockdown Hardening v1, Part 10 — the idempotent
 // restoration lifecycle. Tether never modifies any permanent OS-level
 // setting, so every registered action here is pure in-process teardown
@@ -186,6 +228,11 @@ lockdownLifecycle.registerRestoreAction("remoteSessionMonitor.setExamActive(fals
 lockdownLifecycle.registerRestoreAction("displayEnforcement.setEnforcementState(inactive)", () =>
   displayEnforcement.setEnforcementState({ active: false, ready: false, requireSingleDisplay: false }),
 );
+// Windows Hardening v1.8.0, Phase A+B — the ONLY path that ever cleanly
+// disarms the keyboard-hardening helper, exactly like the other three
+// restore actions above (see keyboardHookHelperManager.ts's own doc
+// comment on disarm() being registered here specifically).
+lockdownLifecycle.registerRestoreAction("keyboardHelperManager.disarm()", () => keyboardHelperManager.disarm());
 
 // Destroyed-window crash fix v1.7.1 — restoreLockdownControls delegates
 // the actual orchestration to performLockdownRestoration
@@ -595,8 +642,28 @@ function createWindow(examId: string | null) {
     }
   });
 
+  // Windows Hardening v1.8.0, Phase A+B — ordinary window-close
+  // interception. Gated on the SAME lockdownLifecycle "ACTIVE" state as
+  // the before-input-event handler just above — see
+  // windowCloseGuard.ts's own doc comment for why: a student must never
+  // be able to reach a state where Alt+F4 is blocked but the taskbar's
+  // own "Close window" (or any other path that fires this event) is
+  // not, or vice versa. While NOT ACTIVE (precheck, a finished exam,
+  // etc.) this is a complete no-op — closing the window is always
+  // allowed, exactly as before this change.
+  mainWindow.on("close", (event) => {
+    if (!shouldPreventOrdinaryClose(lockdownLifecycle.getState())) return;
+    event.preventDefault();
+    // Reuses the existing CLOSE_WINDOW shortcut-reason vocabulary
+    // (already used for Alt+F4/Ctrl+W above) rather than inventing a new
+    // one — a low-noise, already-server-accepted signal; never shown to
+    // the student as a warning dialog, and never restores lockdown.
+    recordEvent("KEYBOARD_SHORTCUT_BLOCKED", "An attempt to close the secure exam window was blocked.", "window-close-blocked", { shortcutReason: "CLOSE_WINDOW" });
+  });
+
   processDetection.attachTargetWindow(mainWindow);
   remoteSessionMonitor.attachTargetWindow(mainWindow);
+  keyboardHelperManager.attachTargetWindow(mainWindow);
   lockdownLifecycle.prepare();
 
   // Best-effort only — does not guarantee screenshots/recordings are
@@ -1092,6 +1159,21 @@ export type SecureExamLockdownActivationFailureReason =
   | "PROCESS_CHECK_UNAVAILABLE"
   | "REMOTE_SESSION_DETECTED"
   | "REMOTE_SESSION_CHECK_UNAVAILABLE"
+  // Windows Hardening v1.8.0, Phase A+B — the native keyboard-hardening
+  // helper could not be spawned, could not complete its handshake, or
+  // could not install its hook. This is a PRE-EXAM failure, exactly like
+  // every other reason in this union: the page must refuse to enter
+  // secure content, Windows remains normally usable, and this is never
+  // treated as an integrity event (nothing was ever armed).
+  | "KEYBOARD_HARDENING_UNAVAILABLE"
+  // Final activation-failure safety audit (post-v1.8.0) — a thrown
+  // exception from one of the post-ARM activation steps, or the
+  // renderer/window disappearing while this handler was still in
+  // flight. See the try/catch and isWindowUsable check below this
+  // union's own call site for the full rationale — either case rolls
+  // back to a fully torn-down state (helper disarmed, nothing left
+  // ACTIVE) before this is ever returned.
+  | "ACTIVATION_INTERNAL_ERROR"
   | DisplayBlockingReason;
 
 export type SecureExamLockdownActivationResult =
@@ -1131,16 +1213,80 @@ ipcMain.handle("lockdown:activate-secure-exam-lockdown", async (_event, rawParam
     if (decision.state === "BLOCKED") return { ok: false, reason: decision.reason };
   }
 
-  // Every fresh check passed — activate the real, live native controls
-  // atomically. displayEnforcement's own evaluate() (triggered by
-  // setEnforcementState below) will immediately re-derive the same OK
-  // decision this handler just confirmed — no overlay should appear from
-  // this call.
-  displayEnforcement.setEnforcementState({ active: true, ready: true, requireSingleDisplay: params.requireSingleDisplay });
-  processDetection.setExamActive(true);
-  remoteSessionMonitor.setExamActive(true);
-  lockdownLifecycle.activate();
-  maybeEmitDiagnostics();
+  // Windows Hardening v1.8.0, Phase A+B — the native keyboard-hardening
+  // helper is armed HERE, after every fresh precheck above has already
+  // passed and BEFORE any of display/process/remote-session/lifecycle
+  // state is flipped below. This ordering is mandatory: a helper that
+  // cannot start or cannot install its hook must fail the WHOLE
+  // activation — the exam must not enter secure content, and Windows
+  // must remain exactly as usable as it already was during precheck.
+  // Never the reverse (return success first, arm afterwards) — see
+  // keyboardHookHelperManager.ts's own doc comment.
+  const armResult = await keyboardHelperManager.ensureArmedForActivation();
+  if (!armResult.ok) {
+    reportAuditFactBestEffort("TETHER_LOCKDOWN_DETECTION_SERVICE_FAILURE", { reason: "KEYBOARD_HARDENING_ARM_FAILED", detail: armResult.reason });
+    return { ok: false, reason: "KEYBOARD_HARDENING_UNAVAILABLE" };
+  }
+
+  // Final activation-failure safety audit (post-v1.8.0) — every step
+  // from here to the final `return { ok: true, ... }` below is one
+  // transactional unit. The helper is now ARMED (its keyboard hook is
+  // live), so ANY failure past this point must roll back to a fully
+  // torn-down state — never leave the helper (or any other partially-
+  // activated control) armed with nothing left ACTIVE and no live
+  // renderer to ever call restore. Two distinct failure shapes are
+  // covered:
+  //  1. One of the four calls below throws synchronously. None of them
+  //     can today (each is a plain, already-audited synchronous state
+  //     setter/timer restart — see keyboardHookHelperManager.ts's own
+  //     activation-boundary doc comment for the equivalent reasoning
+  //     applied to the helper itself), but this is now a structural
+  //     guarantee rather than an implicit property of their current
+  //     bodies, so a future change to any of them can never silently
+  //     reopen this gap.
+  //  2. The renderer/window disappears (crash, close, app quit) while
+  //     THIS async handler was still in flight on an earlier `await`
+  //     above — render-process-gone/window-closed/before-quit's own
+  //     restoreLockdownControls call may already have run concurrently
+  //     in that case (a harmless, idempotent no-op restore against
+  //     nothing armed yet), and this handler must never go on to arm/
+  //     activate anything afterward for a renderer that is already gone
+  //     and can never itself call restore.
+  // restoreLockdownControls() is safe to call unconditionally in both
+  // branches below: it is idempotent from ANY lockdownLifecycle state
+  // (including PREPARING, if lockdownLifecycle.activate() itself never
+  // ran) and never throws — see lockdownLifecycle.ts's own doc comment.
+  try {
+    // displayEnforcement's own evaluate() (triggered by setEnforcementState
+    // below) will immediately re-derive the same OK decision this handler
+    // just confirmed — no overlay should appear from this call.
+    displayEnforcement.setEnforcementState({ active: true, ready: true, requireSingleDisplay: params.requireSingleDisplay });
+    processDetection.setExamActive(true);
+    remoteSessionMonitor.setExamActive(true);
+    lockdownLifecycle.activate();
+    // Physical-test diagnosis follow-up — the final required evidence
+    // line: "lifecycle ACTIVE", completing the sequence
+    // spawned -> pipe connected -> HELLO accepted -> ARM sent -> ARMED
+    // received (implies the helper's own hook-install succeeded, since
+    // ARMED is only ever sent after Install() returns true) -> lifecycle
+    // ACTIVE. If this line is ever missing from a physical test's log
+    // while the exam nonetheless appeared to enter, activation did not
+    // go through this handler at all.
+    diagnosticLog("activate-secure-exam-lockdown: lifecycle ACTIVE", {});
+    maybeEmitDiagnostics();
+  } catch (err) {
+    diagnosticLog("activate-secure-exam-lockdown: an activation step threw after the helper was already ARMED — rolling back", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    restoreLockdownControls("activation-step-threw-after-arm");
+    reportAuditFactBestEffort("TETHER_LOCKDOWN_DETECTION_SERVICE_FAILURE", { reason: "ACTIVATION_STEP_THREW" });
+    return { ok: false, reason: "ACTIVATION_INTERNAL_ERROR" };
+  }
+
+  if (!isWindowUsable(mainWindow)) {
+    restoreLockdownControls("activation-window-gone");
+    return { ok: false, reason: "ACTIVATION_INTERNAL_ERROR" };
+  }
 
   return { ok: true, displayDecision: "OK", processDecision: "CLEAN" };
 });
@@ -1151,6 +1297,9 @@ ipcMain.on("lockdown:restore-lockdown-controls", (_event, trigger: unknown) => {
 });
 
 ipcMain.handle("lockdown:get-lockdown-lifecycle-state", () => lockdownLifecycle.getState());
+
+/** Windows Hardening v1.8.0, Phase A+B — bounded diagnostic snapshot only (state name/attempt count/whether the overlay is currently visible/the packaged-relative helper path) — never a raw process handle, PID, or pipe name. */
+ipcMain.handle("lockdown:get-keyboard-hardening-status", () => keyboardHelperManager.getStatusSnapshot());
 
 /** Bounded, public capability metadata (id/category/displayName only — never executable names, detection methods, or internal notes) so the page can render a human-readable list from the capability ids main reports over lockdown:capability-transition. */
 ipcMain.handle("lockdown:get-lockdown-capability-info", () =>

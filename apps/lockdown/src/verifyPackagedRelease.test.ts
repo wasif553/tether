@@ -38,6 +38,19 @@ function buildPngRenamedToIcoBuffer(): Buffer {
   return Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 }
 
+// Windows Hardening v1.8.0, Phase A+B — a structurally-real-enough "MZ"
+// PE header followed by filler bytes, sized past the minimum-bytes
+// check, so VALID_INPUT reflects a genuine self-contained single-file
+// helper build without needing the actual multi-megabyte published .exe
+// in this test.
+function buildFakeExeBuffer(totalBytes: number): Buffer {
+  const buffer = Buffer.alloc(totalBytes);
+  buffer.writeUInt8(0x4d, 0); // 'M'
+  buffer.writeUInt8(0x5a, 1); // 'Z'
+  return buffer;
+}
+const VALID_KEYBOARD_HELPER_EXE_BUFFER = buildFakeExeBuffer(1_100_000);
+
 const VALID_ELECTRON_BUILDER_YML = `
 win:
   icon: assets/icon.ico
@@ -54,7 +67,7 @@ const VALID_INPUT = {
   packagedPackageJsonContent: JSON.stringify({ version: "1.2.1" }),
   packagedSharedJsContent: 'exports.LOCKDOWN_VERSION = "1.2.1"; exports.TETHER_APP_USER_MODEL_ID = "com.tether.securebrowser";',
   packagedMainJsContent:
-    'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger); app.setAppUserModelId(shared_1.TETHER_APP_USER_MODEL_ID); const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico"); const remoteSessionMonitor = new remoteSessionMonitor_1.RemoteSessionMonitor({...}); ipcMain.on("lockdown:set-lockdown-exam-active", (_e, active) => { processDetection.setExamActive(active); remoteSessionMonitor.setExamActive(active); }); mainWindow.on("closed", () => { processDetection.stop(); remoteSessionMonitor.stop(); }); mainWindow.webContents.session.setDisplayMediaRequestHandler((_request, callback) => { void (0, screenShareRequestHandler_1.handleDisplayMediaRequest)(() => electron_1.desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 } }), ...); }); const initialExamId = (0, lockdownStartupRouting_1.resolveInitialExamIdFromArgv)(process.argv); ipcMain.handle("lockdown:get-display-enforcement-status", () => displayEnforcement.getFreshDisplayEnforcementStatus()); onDisplayStateChanged: (status) => { window.webContents.send("lockdown:display-enforcement-state-changed", status); },',
+    'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger); app.setAppUserModelId(shared_1.TETHER_APP_USER_MODEL_ID); const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico"); const remoteSessionMonitor = new remoteSessionMonitor_1.RemoteSessionMonitor({...}); ipcMain.on("lockdown:set-lockdown-exam-active", (_e, active) => { processDetection.setExamActive(active); remoteSessionMonitor.setExamActive(active); }); mainWindow.on("closed", () => { processDetection.stop(); remoteSessionMonitor.stop(); }); mainWindow.webContents.session.setDisplayMediaRequestHandler((_request, callback) => { void (0, screenShareRequestHandler_1.handleDisplayMediaRequest)(() => electron_1.desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 0, height: 0 } }), ...); }); const initialExamId = (0, lockdownStartupRouting_1.resolveInitialExamIdFromArgv)(process.argv); ipcMain.handle("lockdown:get-display-enforcement-status", () => displayEnforcement.getFreshDisplayEnforcementStatus()); onDisplayStateChanged: (status) => { window.webContents.send("lockdown:display-enforcement-state-changed", status); }, const armResult = await keyboardHelperManager.ensureArmedForActivation(); if (!armResult.ok) { return { ok: false, reason: "KEYBOARD_HARDENING_UNAVAILABLE" }; } lockdownLifecycle.registerRestoreAction("keyboardHelperManager.disarm()", () => keyboardHelperManager.disarm()); mainWindow.on("close", (event) => { if (!(0, windowCloseGuard_1.shouldPreventOrdinaryClose)(lockdownLifecycle.getState())) return; event.preventDefault(); }); try { } catch (err) { restoreLockdownControls("activation-step-threw-after-arm"); return { ok: false, reason: "ACTIVATION_INTERNAL_ERROR" }; } if (!(0, windowLifecycleGuard_1.isWindowUsable)(mainWindow)) { restoreLockdownControls("activation-window-gone"); return { ok: false, reason: "ACTIVATION_INTERNAL_ERROR" }; }',
   packagedDisplayEnforcementJsContent:
     "setEnforcementState(state) { ... } resolveReadinessGatedDisplayDecision(...) evaluate() { ... const run = this.evaluateNow(); this.evaluateInFlight = run; ... } getDisplayEnforcementStatus() { ... } getFreshDisplayEnforcementStatus() { ... } toDisplayEnforcementStatus(nextDecision, displayCount); evaluateNow() { ... this.callbacks.onDisplayStateChanged?.(nextStatus); ... }",
   packagedProcessDetectionJsContent: "runPreflightScan() { ... } setExamActive(active) { ... } pollOnce() { ... this.scanInFlight = this.pollOnceNow(); ... }",
@@ -74,6 +87,7 @@ const VALID_INPUT = {
   electronBuilderYmlContent: VALID_ELECTRON_BUILDER_YML,
   packagedIconIcoBuffer: buildIcoBuffer(FULL_ICON_RESOLUTIONS),
   packagedExeIconResolutions: FULL_ICON_RESOLUTIONS,
+  packagedKeyboardHelperExeBuffer: VALID_KEYBOARD_HELPER_EXE_BUFFER,
 };
 
 describe("verifyPackagedReleaseContents", () => {
@@ -133,6 +147,50 @@ describe("verifyPackagedReleaseContents", () => {
     expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("lockdown:run-preflight-scan"))).toBe(true);
     expect(result.errors.some((e) => e.includes("findUnsafeCommandLineSwitch"))).toBe(true);
+  });
+
+  it("fails when dist/main.js does not contain the Windows Hardening v1.8.0 keyboard-helper activation/restoration/close-interception wiring (a pre-v1.8.0 stale build)", () => {
+    const result = verifyPackagedReleaseContents({
+      ...VALID_INPUT,
+      packagedMainJsContent:
+        'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger); app.setAppUserModelId(shared_1.TETHER_APP_USER_MODEL_ID); const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico"); const remoteSessionMonitor = new remoteSessionMonitor_1.RemoteSessionMonitor({...}); ipcMain.on("lockdown:set-lockdown-exam-active", (_e, active) => {}); mainWindow.on("closed", () => {}); mainWindow.webContents.session.setDisplayMediaRequestHandler((_request, callback) => { void (0, screenShareRequestHandler_1.handleDisplayMediaRequest)(() => electron_1.desktopCapturer.getSources({ types: ["screen"] }), ...); }); const initialExamId = (0, lockdownStartupRouting_1.resolveInitialExamIdFromArgv)(process.argv); ipcMain.handle("lockdown:get-display-enforcement-status", () => displayEnforcement.getFreshDisplayEnforcementStatus()); onDisplayStateChanged: (status) => { window.webContents.send("lockdown:display-enforcement-state-changed", status); },',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("keyboardHelperManager.ensureArmedForActivation()"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("KEYBOARD_HARDENING_UNAVAILABLE"))).toBe(true);
+    expect(result.errors.some((e) => e.includes('registerRestoreAction("keyboardHelperManager.disarm()"'))).toBe(true);
+    expect(result.errors.some((e) => e.includes("shouldPreventOrdinaryClose"))).toBe(true);
+  });
+
+  it("fails when dist/main.js does not contain the final activation-failure safety-audit rollback wiring (a pre-safety-audit stale build that could leave the helper armed after a post-ARM failure)", () => {
+    const result = verifyPackagedReleaseContents({
+      ...VALID_INPUT,
+      packagedMainJsContent:
+        'ipcMain.on("lockdown:set-secure-client-enforcement-state", ...); ipcMain.handle("lockdown:get-diagnostics-snapshot", ...); ipcMain.handle("lockdown:run-preflight-scan", ...); findUnsafeCommandLineSwitch(process.argv); performLockdownRestoration(lockdownLifecycle, restorationController, trigger); app.setAppUserModelId(shared_1.TETHER_APP_USER_MODEL_ID); const LOCKDOWN_ICON_PATH = path.join(__dirname, "..", "assets", "icon.ico"); const remoteSessionMonitor = new remoteSessionMonitor_1.RemoteSessionMonitor({...}); ipcMain.on("lockdown:set-lockdown-exam-active", (_e, active) => {}); mainWindow.on("closed", () => {}); mainWindow.webContents.session.setDisplayMediaRequestHandler((_request, callback) => { void (0, screenShareRequestHandler_1.handleDisplayMediaRequest)(() => electron_1.desktopCapturer.getSources({ types: ["screen"] }), ...); }); const initialExamId = (0, lockdownStartupRouting_1.resolveInitialExamIdFromArgv)(process.argv); ipcMain.handle("lockdown:get-display-enforcement-status", () => displayEnforcement.getFreshDisplayEnforcementStatus()); onDisplayStateChanged: (status) => { window.webContents.send("lockdown:display-enforcement-state-changed", status); }, const armResult = await keyboardHelperManager.ensureArmedForActivation(); if (!armResult.ok) { return { ok: false, reason: "KEYBOARD_HARDENING_UNAVAILABLE" }; } lockdownLifecycle.registerRestoreAction("keyboardHelperManager.disarm()", () => keyboardHelperManager.disarm()); mainWindow.on("close", (event) => { if (!(0, windowCloseGuard_1.shouldPreventOrdinaryClose)(lockdownLifecycle.getState())) return; event.preventDefault(); });',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("ACTIVATION_INTERNAL_ERROR"))).toBe(true);
+    expect(result.errors.some((e) => e.includes('restoreLockdownControls("activation-step-threw-after-arm")'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('restoreLockdownControls("activation-window-gone")'))).toBe(true);
+    expect(result.errors.some((e) => e.includes("isWindowUsable)(mainWindow)"))).toBe(true);
+  });
+
+  it("fails when the packaged native keyboard-hardening helper .exe is missing", () => {
+    const result = verifyPackagedReleaseContents({ ...VALID_INPUT, packagedKeyboardHelperExeBuffer: null });
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("TetherKeyboardHelper.exe") && e.includes("was not found"))).toBe(true);
+  });
+
+  it("fails when the packaged helper file is not a valid Windows executable (missing the MZ PE header)", () => {
+    const result = verifyPackagedReleaseContents({ ...VALID_INPUT, packagedKeyboardHelperExeBuffer: Buffer.from("not an exe, just a placeholder text file") });
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("not a valid Windows executable"))).toBe(true);
+  });
+
+  it("fails when the packaged helper .exe is far smaller than a real self-contained single-file build (likely truncated)", () => {
+    const result = verifyPackagedReleaseContents({ ...VALID_INPUT, packagedKeyboardHelperExeBuffer: buildFakeExeBuffer(1000) });
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("far smaller than the expected"))).toBe(true);
   });
 
   it("fails when dist/main.js does not contain performLockdownRestoration (a pre-v1.7.1 stale build predating the destroyed-window crash fix)", () => {

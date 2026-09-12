@@ -68,6 +68,17 @@ export type PackagedReleaseVerificationInput = {
    * `files` glob, could in principle diverge from what was just built).
    */
   packagedPreloadJsContent: string | null;
+  /**
+   * Windows Hardening v1.8.0, Phase A+B — the packaged native keyboard-
+   * hardening helper executable's own bytes (resources/app/native-
+   * helper/bin/win-x64/TetherKeyboardHelper.exe for an unpacked --dir
+   * build). `null` means the file could not be found/read at all — a
+   * release missing this file would silently degrade every future exam
+   * activation to KEYBOARD_HARDENING_UNAVAILABLE (see main.ts's
+   * activation handler), so this must fail the build loudly rather than
+   * only being discovered physically.
+   */
+  packagedKeyboardHelperExeBuffer: Buffer | null;
 };
 
 export type PackagedReleaseVerificationResult = {
@@ -138,6 +149,31 @@ const REQUIRED_MAIN_JS_MARKERS = [
   "lockdown:get-display-enforcement-status",
   "getFreshDisplayEnforcementStatus",
   "lockdown:display-enforcement-state-changed",
+  // Windows Hardening v1.8.0, Phase A+B — fails loudly on a stale
+  // pre-1.8.0 build that predates the keyboard-hardening helper being
+  // armed as part of the activation handshake, the ordinary window-close
+  // interception, or the helper being registered in the restoration
+  // lifecycle.
+  "keyboardHelperManager.ensureArmedForActivation()",
+  "KEYBOARD_HARDENING_UNAVAILABLE",
+  'lockdownLifecycle.registerRestoreAction("keyboardHelperManager.disarm()"',
+  // tsc's CommonJS emit aliases an imported function call through its
+  // module namespace object (e.g. `(0, windowCloseGuard_1.shouldPreventOrdinaryClose)(...)`
+  // — see the `.RemoteSessionMonitor(` marker above for the identical
+  // convention with an imported class instead of a function) — anchored
+  // on the aliased form actually present in the compiled bundle, not the
+  // bare source-level call expression.
+  "windowCloseGuard_1.shouldPreventOrdinaryClose)(lockdownLifecycle.getState())",
+  // Final activation-failure safety audit (post-v1.8.0) — fails loudly
+  // on a build that predates the transactional rollback around the
+  // post-ARM activation steps: without it, a thrown exception or a
+  // vanished renderer/window between ARM succeeding and activation
+  // completing could leave the keyboard-hardening helper armed with
+  // nothing left to ever call restore.
+  "ACTIVATION_INTERNAL_ERROR",
+  'restoreLockdownControls("activation-step-threw-after-arm")',
+  'restoreLockdownControls("activation-window-gone")',
+  "windowLifecycleGuard_1.isWindowUsable)(mainWindow)",
 ];
 /**
  * URGENT startup-routing fix — this EXACT fragment only ever appears in
@@ -314,6 +350,36 @@ function checkResolutionList(resolutions: number[] | null, label: string, errors
   const missing = REQUIRED_ICON_RESOLUTIONS.filter((size) => !normalized.includes(size));
   if (missing.length > 0) {
     errors.push(`${label} is missing required resolution(s): ${missing.join(", ")} (found: ${normalized.join(", ")}).`);
+  }
+}
+
+/**
+ * Windows Hardening v1.8.0, Phase A+B — the packaged native keyboard-
+ * hardening helper must actually be present and be a real, non-trivial
+ * Windows PE executable, not a zero-byte placeholder or a stray text
+ * file at the expected path. Checks the PE magic ("MZ", the DOS/PE
+ * header every valid Windows .exe begins with) and a generous minimum
+ * size (the real self-contained single-file publish is tens of
+ * megabytes — this bound only needs to catch an obviously-wrong/
+ * truncated file, not verify an exact size).
+ */
+const MIN_KEYBOARD_HELPER_EXE_BYTES = 1_000_000;
+
+function checkKeyboardHelperExeBuffer(buffer: Buffer | null, errors: string[]): void {
+  const label = "Packaged native-helper/bin/win-x64/TetherKeyboardHelper.exe";
+  if (!buffer) {
+    errors.push(
+      `${label} was not found — a release missing this file would silently degrade every future exam activation to KEYBOARD_HARDENING_UNAVAILABLE. ` +
+        "Has `npm run build:helper` been run before packaging (it is part of npm run dist:win/pack/dist)?",
+    );
+    return;
+  }
+  if (buffer.length < 2 || buffer.readUInt8(0) !== 0x4d || buffer.readUInt8(1) !== 0x5a) {
+    errors.push(`${label} is not a valid Windows executable (missing the "MZ" PE header) — it may be a stray placeholder file at the expected path.`);
+    return;
+  }
+  if (buffer.length < MIN_KEYBOARD_HELPER_EXE_BYTES) {
+    errors.push(`${label} is only ${buffer.length} bytes — far smaller than the expected self-contained single-file build; it is likely truncated or built without --self-contained.`);
   }
 }
 
@@ -516,6 +582,10 @@ export function verifyPackagedReleaseContents(input: PackagedReleaseVerification
     "Packaged app .exe was not found or contained no icon group (RT_GROUP_ICON) — has npm run embed:icon been run (it is part of npm run dist:win)?",
   );
 
+  // Windows Hardening v1.8.0, Phase A+B — the native keyboard-hardening
+  // helper executable itself must be present in the packaged output.
+  checkKeyboardHelperExeBuffer(input.packagedKeyboardHelperExeBuffer, errors);
+
   return { ok: errors.length === 0, errors };
 }
 
@@ -588,6 +658,7 @@ if (require.main === module) {
     electronBuilderYmlContent: readIfExists(path.join(__dirname, "..", "electron-builder.yml")),
     packagedIconIcoBuffer: readBufferIfExists(path.join(appDir, "assets", "icon.ico")),
     packagedExeIconResolutions: readPackagedExeIconResolutions(releaseDirArg),
+    packagedKeyboardHelperExeBuffer: readBufferIfExists(path.join(appDir, "native-helper", "bin", "win-x64", "TetherKeyboardHelper.exe")),
   });
 
   if (!result.ok) {

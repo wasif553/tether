@@ -30,6 +30,15 @@ files:
   # mac.icon, ...) — it does not, on its own, copy anything into
   # resources/app, hence this explicit entry.
   - assets/icon.ico
+  # Windows Hardening v1.8.0, Phase A+B — the native keyboard-hardening
+  # helper (see keyboardHookHelperManager.ts's resolveHelperExecutablePath,
+  # which resolves this exact packaged-relative path the same way as
+  # icon.ico above). Built by `npm run build:helper` (native-helper/,
+  # dotnet publish, self-contained single-file) BEFORE electron-builder
+  # runs — never built by electron-builder itself. Only the .exe is
+  # shipped; the .pdb debug-symbol file published alongside it is
+  # deliberately excluded.
+  - native-helper/bin/win-x64/TetherKeyboardHelper.exe
 
 # Disabled because electron-builder's Windows asar-integrity step requires
 # extracting a macOS cross-signing tool archive (winCodeSign) that contains

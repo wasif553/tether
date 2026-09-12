@@ -447,6 +447,11 @@ contextBridge.exposeInMainWorld("sesLockdown", {
     return ipcRenderer.invoke("lockdown:get-lockdown-lifecycle-state");
   },
 
+  /** Windows Hardening v1.8.0, Phase A+B — bounded diagnostic snapshot of the native keyboard-hardening helper (state name/recovery-attempt count/overlay-visible boolean/the packaged-relative helper path) — never a raw process handle, PID, or pipe name. */
+  async getKeyboardHardeningStatus(): Promise<{ state: string; recoveryAttemptsUsed: number; overlayVisible: boolean; helperExecutablePath: string; appPackaged: boolean }> {
+    return ipcRenderer.invoke("lockdown:get-keyboard-hardening-status");
+  },
+
   async getLockdownCapabilityInfo(): Promise<Array<{ id: string; category: string; displayName: string }>> {
     return ipcRenderer.invoke("lockdown:get-lockdown-capability-info");
   },

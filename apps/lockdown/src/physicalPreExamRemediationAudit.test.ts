@@ -209,8 +209,23 @@ describe("Required test 4 — TOPOLOGY_CHECK_UNAVAILABLE produces a neutral tech
   });
 });
 
-describe("Required test 5 — a fresh activation race failure leaves every native enforcement mechanism inactive (no partial activation, nothing to roll back)", () => {
-  it("main.ts's activate-secure-exam-lockdown handler only ever calls setEnforcementState/setExamActive AFTER every fresh check already returned — every failure branch is an early return with no partial mutation", () => {
+describe("Required test 5 — a fresh activation race failure leaves every native enforcement mechanism inactive (no partial activation ever left un-rolled-back)", () => {
+  // Final activation-failure safety audit (post-v1.8.0) — this test's
+  // ORIGINAL invariant ("no failure branch can even textually appear
+  // after the activation calls begin") was true only because, before the
+  // Windows Hardening work, nothing COULD fail once activation started
+  // (every remaining step was a plain synchronous state setter with no
+  // further precheck). That is no longer the whole story: the keyboard-
+  // hardening helper is now armed as part of this same handshake, and an
+  // explicit try/catch + isWindowUsable check now exist specifically to
+  // catch a failure AFTER activation begins and roll it back (see
+  // keyboardHardeningIpcChain.test.ts's own "transactional rollback"
+  // tests for the detailed ordering proof). This test is updated to
+  // check the STRONGER, still-true replacement invariant: any failure
+  // return that appears at or after that point is never a bare early
+  // exit — it is always preceded, in the same branch, by a call to
+  // restoreLockdownControls(...) that tears everything back down first.
+  it("every failure return BEFORE activation begins is a bare early exit (nothing to roll back yet); every failure return AT OR AFTER activation begins is preceded by restoreLockdownControls(...)", () => {
     const mainSource = fs.readFileSync(path.join(__dirname, "main.ts"), "utf8");
     const handlerBody = mainSource.slice(
       mainSource.indexOf('ipcMain.handle("lockdown:activate-secure-exam-lockdown"'),
@@ -219,21 +234,35 @@ describe("Required test 5 — a fresh activation race failure leaves every nativ
     const activationIdx = handlerBody.indexOf("displayEnforcement.setEnforcementState({ active: true");
     expect(activationIdx).toBeGreaterThan(-1);
 
-    // Every `return { ok: false, ...}` early-exit must textually precede
-    // the one activation call — a failure branch appearing AFTER it would
-    // mean a check could fail post-activation, leaving native controls
-    // partially engaged.
     const failureReturnPattern = /return \{ ok: false,/g;
     let match: RegExpExecArray | null;
-    let failureCount = 0;
+    let beforeCount = 0;
+    let afterCount = 0;
     while ((match = failureReturnPattern.exec(handlerBody)) !== null) {
-      failureCount += 1;
-      expect(match.index).toBeLessThan(activationIdx);
+      if (match.index < activationIdx) {
+        beforeCount += 1;
+        continue;
+      }
+      afterCount += 1;
+      // The nearest restoreLockdownControls(...) call before this return
+      // must be textually AFTER activationIdx too (i.e. it belongs to
+      // THIS failure's own rollback, not some unrelated earlier code) —
+      // and there must be no OTHER failure return in between, which
+      // would mean this rollback was skipped for some other branch.
+      const precedingRestoreIdx = handlerBody.lastIndexOf("restoreLockdownControls(", match.index);
+      expect(precedingRestoreIdx).toBeGreaterThan(activationIdx);
+      expect(precedingRestoreIdx).toBeLessThan(match.index);
     }
+
     // INVALID_PARAMS, PROCESS scan (BLOCKED/UNAVAILABLE), remote session
-    // (check-unavailable/detected), display (BLOCKED) — at least 5 early
-    // failure exits, all preceding activation.
-    expect(failureCount).toBeGreaterThanOrEqual(5);
+    // (check-unavailable/detected), display (BLOCKED), KEYBOARD_HARDENING_UNAVAILABLE
+    // — at least 6 early failure exits, all preceding activation, none
+    // needing a rollback (nothing was ever turned on for them to undo).
+    expect(beforeCount).toBeGreaterThanOrEqual(6);
+    // ACTIVATION_STEP_THREW (catch block) + activation-window-gone check
+    // — exactly 2 failure returns now exist at/after activation, each
+    // rollback-guarded.
+    expect(afterCount).toBe(2);
   });
 
   it("simulating the same check-then-set sequence directly: a BLOCKED preflight scan followed by never calling setExamActive/setEnforcementState leaves both mechanisms fully inactive", async () => {

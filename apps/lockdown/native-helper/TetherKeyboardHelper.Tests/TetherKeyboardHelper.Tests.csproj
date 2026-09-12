@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Tether Windows Hardening v1.8.0, Phase A+B — unit tests for the pure
+    parts of the native keyboard-hardening helper (key classification,
+    IPC message parse/serialize). Deliberately does NOT test the actual
+    Win32 hook install/uninstall, the real named-pipe I/O, or the parent-
+    liveness watch — those require a live Windows session and are
+    covered by the physical test plan instead, mirroring the TypeScript
+    side's own convention (pure logic gets unit tests; OS-touching glue
+    gets a physical/manual test pass).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TetherKeyboardHelper.csproj" />
+  </ItemGroup>
+
+</Project>

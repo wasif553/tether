@@ -9,6 +9,10 @@ apps/*/out
 apps/*/.env
 apps/*/.env.*
 !apps/*/.env.example
+
+# Windows Hardening v1.8.0 — native keyboard-hardening helper (.NET build output, including the nested test project's own bin/obj)
+apps/lockdown/native-helper/**/bin
+apps/lockdown/native-helper/**/obj
 /.pnp
 .pnp.*
 .yarn/*

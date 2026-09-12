@@ -108,3 +108,50 @@ export function resolveRemoteSessionMonitorIntervalSeconds(): number {
     DEFAULT_REMOTE_SESSION_MONITOR_INTERVAL_SECONDS,
   );
 }
+
+// ---------------------------------------------------------------------------
+// TETHER_KEYBOARD_HELPER_HEARTBEAT_INTERVAL_SECONDS — Windows Hardening
+// v1.8.0, Phase A+B. How often keyboardHookHelperManager.ts sends PING to
+// the native keyboard-hardening helper once ARMED, and (halved, floored
+// at 1s) the bound it waits for the matching PONG before counting a
+// miss. Deliberately fast (default 2s) relative to every other poll in
+// this package: an undetected dead hook directly means Windows-key/
+// Ctrl+Esc silently work again while the page still believes hardening
+// is active, so responsiveness matters far more here than for process/
+// display/remote-session polling. Clamped to [1, 10] seconds.
+// ---------------------------------------------------------------------------
+const DEFAULT_KEYBOARD_HELPER_HEARTBEAT_INTERVAL_SECONDS = 2;
+const MIN_KEYBOARD_HELPER_HEARTBEAT_INTERVAL_SECONDS = 1;
+const MAX_KEYBOARD_HELPER_HEARTBEAT_INTERVAL_SECONDS = 10;
+
+export function resolveKeyboardHelperHeartbeatIntervalSeconds(): number {
+  return clampIntEnv(
+    process.env.TETHER_KEYBOARD_HELPER_HEARTBEAT_INTERVAL_SECONDS,
+    MIN_KEYBOARD_HELPER_HEARTBEAT_INTERVAL_SECONDS,
+    MAX_KEYBOARD_HELPER_HEARTBEAT_INTERVAL_SECONDS,
+    DEFAULT_KEYBOARD_HELPER_HEARTBEAT_INTERVAL_SECONDS,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// TETHER_KEYBOARD_HELPER_ARM_TIMEOUT_SECONDS — Windows Hardening v1.8.0,
+// Phase A+B. How long keyboardHookHelperManager.ts waits for the helper
+// to report ARMED (or ARM_FAILED) after spawning it and sending ARM,
+// both during the initial activate-secure-exam-lockdown handshake and
+// during each bounded recovery attempt. Conservative default (5s):
+// comfortably above ordinary process-spawn + named-pipe-connect latency,
+// short enough that a genuinely stuck/hung helper cannot silently delay
+// exam entry or a recovery attempt for long. Clamped to [2, 15] seconds.
+// ---------------------------------------------------------------------------
+const DEFAULT_KEYBOARD_HELPER_ARM_TIMEOUT_SECONDS = 5;
+const MIN_KEYBOARD_HELPER_ARM_TIMEOUT_SECONDS = 2;
+const MAX_KEYBOARD_HELPER_ARM_TIMEOUT_SECONDS = 15;
+
+export function resolveKeyboardHelperArmTimeoutSeconds(): number {
+  return clampIntEnv(
+    process.env.TETHER_KEYBOARD_HELPER_ARM_TIMEOUT_SECONDS,
+    MIN_KEYBOARD_HELPER_ARM_TIMEOUT_SECONDS,
+    MAX_KEYBOARD_HELPER_ARM_TIMEOUT_SECONDS,
+    DEFAULT_KEYBOARD_HELPER_ARM_TIMEOUT_SECONDS,
+  );
+}
