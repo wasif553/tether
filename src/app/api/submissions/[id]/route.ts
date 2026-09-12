@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { parseSecureSettings, questionPoolsActive } from "@/lib/secureExam";
 import { canStudentViewMarks, resolveSubmissionTimingPolicy, submissionDeadline } from "@/lib/assessmentLifecycle";
 import { resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
-import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import { parseSecureClientPolicy, isSecurePolicyMismatchForResume } from "@/lib/secureClientPolicy";
 import { getCurrentSessionForSubmission, resolvePriorSessionTrust } from "@/lib/secureClientRunner";
 import { isTetherSecureClientBypassAllowed } from "@/lib/secureClientAvailability";
 import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
@@ -305,10 +305,28 @@ export async function GET(
         }
       : null;
 
+  // VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+  // The lecturer submission-detail page's "Void technical attempt and
+  // allow restart" action must show/hide itself using this SAME canonical
+  // eligibility check /start and /void already use — never a weaker,
+  // re-implemented client-side interpretation of the frozen policy JSON.
+  // Computed and exposed ONLY for the exam owner/staff view; a student
+  // has no use for it and never sees it (always false in their own
+  // response), matching every other lecturer-only field already gated on
+  // isExamOwner in this route (correctAnswer, aiMarkingGuide, canvasPassback).
+  const voidRecoveryEligible =
+    isExamOwner &&
+    submission.status === "IN_PROGRESS" &&
+    isSecurePolicyMismatchForResume({
+      currentExamDeliveryMode: settings.deliveryMode,
+      frozenPolicy: parseSecureClientPolicy(submission.secureClientPolicySnapshotJson),
+    });
+
   const response = NextResponse.json({
     id: submission.id,
     status: submission.status,
     attemptNumber: submission.attemptNumber,
+    voidRecoveryEligible,
     startedAt: submission.startedAt,
     submittedAt: submission.submittedAt,
     totalScore: canViewMarks ? submission.totalScore : null,

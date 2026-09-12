@@ -10,6 +10,8 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import bcrypt from "bcryptjs";
+import fs from "node:fs";
+import path from "node:path";
 
 const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
 vi.mock("@/auth", () => ({ auth: mockAuth }));
@@ -23,6 +25,7 @@ const examRoute = await import("../app/api/exams/[id]/route");
 const startRoute = await import("../app/api/exams/[id]/start/route");
 const submitRoute = await import("../app/api/submissions/[id]/submit/route");
 const voidRoute = await import("../app/api/lecturer/submissions/[id]/void/route");
+const submissionDetailRoute = await import("../app/api/submissions/[id]/route");
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT", institutionId: string) {
   return {
@@ -467,3 +470,113 @@ describe("Analytics/export metric semantics (test items 9/H) — technical start
     expect(voidedRow?.totalScore).toBeNull();
   });
 });
+
+describe("GET /api/submissions/[id] — voidRecoveryEligible (UI recovery-action test items A-F, I, K)", () => {
+  async function fetchAsLecturer(submissionId: string) {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const res = await submissionDetailRoute.GET(new Request("http://test.local"), { params: Promise.resolve({ id: submissionId }) });
+    expect(res.status).toBe(200);
+    return res.json();
+  }
+
+  it("A: an eligible stale Tether-mismatch IN_PROGRESS attempt reports voidRecoveryEligible: true", async () => {
+    const exam = await createTetherRequiredExam("ui-eligible-stale-mismatch");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    const body = await fetchAsLecturer(stale.id);
+    expect(body.voidRecoveryEligible).toBe(true);
+  });
+
+  it("B: a healthy Tether IN_PROGRESS attempt (consistent snapshot) reports voidRecoveryEligible: false", async () => {
+    const exam = await createTetherRequiredExam("ui-healthy-tether-not-eligible");
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submissionId = (await startRes.json()).id as string;
+    const body = await fetchAsLecturer(submissionId);
+    expect(body.voidRecoveryEligible).toBe(false);
+  });
+
+  it("C: a STANDARD_WEB IN_PROGRESS attempt (on a STANDARD_WEB exam) reports voidRecoveryEligible: false — never eligible when the exam itself isn't Tether-required", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `ui-standard-web-not-eligible ${stamp}-${Math.random()}`, durationMins: 30, createdById: lecturer.id, institutionId: instId, published: false },
+    });
+    cleanup.exams.push(exam.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { assessmentType: "QUIZ_OR_TEST", deliveryMode: "STANDARD_WEB" }, published: true }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submissionId = (await startRes.json()).id as string;
+    const body = await fetchAsLecturer(submissionId);
+    expect(body.voidRecoveryEligible).toBe(false);
+  });
+
+  it("D: a SUBMITTED attempt reports voidRecoveryEligible: false — status alone excludes it regardless of snapshot shape", async () => {
+    const exam = await createTetherRequiredExam("ui-submitted-not-eligible");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    await prisma.submission.update({ where: { id: stale.id }, data: { status: "SUBMITTED", submittedAt: new Date() } });
+    const body = await fetchAsLecturer(stale.id);
+    expect(body.voidRecoveryEligible).toBe(false);
+  });
+
+  it("E: a GRADED attempt reports voidRecoveryEligible: false", async () => {
+    const exam = await createTetherRequiredExam("ui-graded-not-eligible");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    await prisma.submission.update({ where: { id: stale.id }, data: { status: "GRADED", submittedAt: new Date(), gradedAt: new Date(), totalScore: 0 } });
+    const body = await fetchAsLecturer(stale.id);
+    expect(body.voidRecoveryEligible).toBe(false);
+  });
+
+  it("F: an already-VOIDED attempt reports voidRecoveryEligible: false — the action never re-offers itself on an already-voided row", async () => {
+    const exam = await createTetherRequiredExam("ui-voided-not-eligible");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const voidRes = await voidRoute.POST(jsonRequest("POST", { reason: "F", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(voidRes.status).toBe(200);
+    const body = await fetchAsLecturer(stale.id);
+    expect(body.status).toBe("VOIDED");
+    expect(body.voidRecoveryEligible).toBe(false);
+  });
+
+  it("voidRecoveryEligible is never exposed as true to the STUDENT's own view, even for an eligible row — the action is staff-only", async () => {
+    const exam = await createTetherRequiredExam("ui-student-never-sees-eligible-true");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const res = await submissionDetailRoute.GET(new Request("http://test.local"), { params: Promise.resolve({ id: stale.id }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.voidRecoveryEligible).toBe(false);
+  });
+
+  it("uses the canonical shared helper (isSecurePolicyMismatchForResume), never a re-implemented weaker check", () => {
+    const routeSource = fs.readFileSync(path.join(__dirname, "../app/api/submissions/[id]/route.ts"), "utf8");
+    expect(routeSource).toMatch(/isSecurePolicyMismatchForResume/);
+  });
+
+  it("I: after a successful void, Answer and IntegrityEvent row counts for the submission are unchanged (evidence untouched)", async () => {
+    const exam = await createTetherRequiredExam("ui-evidence-unchanged");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    await prisma.integrityEvent.create({
+      data: { submissionId: stale.id, examId: exam.id, studentId: student.id, eventType: "WINDOW_BLUR", severity: "LOW", message: "test evidence", occurredAt: new Date() },
+    });
+    const beforeAnswers = await prisma.answer.count({ where: { submissionId: stale.id } });
+    const beforeEvents = await prisma.integrityEvent.count({ where: { submissionId: stale.id } });
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const voidRes = await voidRoute.POST(jsonRequest("POST", { reason: "I", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(voidRes.status).toBe(200);
+
+    const afterAnswers = await prisma.answer.count({ where: { submissionId: stale.id } });
+    const afterEvents = await prisma.integrityEvent.count({ where: { submissionId: stale.id } });
+    expect(afterAnswers).toBe(beforeAnswers);
+    expect(afterEvents).toBe(beforeEvents);
+    expect(afterEvents).toBeGreaterThan(0); // sanity: the evidence genuinely existed and genuinely survived
+  });
+});
+
+// K: "unauthorized lecturer cannot use the endpoint even if UI is bypassed"
+// is already fully covered above by the "STUDENT cannot void" and
+// "non-owning lecturer cannot void" tests in the eligibility/authorization
+// describe block — those call voidRoute.POST directly, exactly as a UI
+// bypass would, with no reliance on the client ever checking eligibility
+// first.

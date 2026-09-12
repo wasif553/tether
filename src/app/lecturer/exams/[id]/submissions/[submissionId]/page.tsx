@@ -47,6 +47,22 @@ type SubmissionData = {
   exam: { title: string; questions: Question[] };
   answers: Answer[];
   canvasPassback: CanvasPassback | null;
+  // VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+  // Computed SERVER-SIDE by GET /api/submissions/[id] using the exact
+  // same canonical eligibility check (isSecurePolicyMismatchForResume)
+  // POST /start and POST /void both use — this page never re-implements
+  // or second-guesses that logic client-side. Only ever true for the
+  // exam owner's own view.
+  voidRecoveryEligible: boolean;
+};
+
+// VOIDED-attempt recovery v1 — a clear, neutral label per status. VOIDED
+// must never render as "Submitted"/"Graded"/anything score-shaped.
+const SUBMISSION_STATUS_LABELS: Record<SubmissionData["status"], string> = {
+  IN_PROGRESS: "In progress",
+  SUBMITTED: "Submitted",
+  GRADED: "Graded",
+  VOIDED: "Voided",
 };
 
 const CANVAS_STATUS_LABELS: Record<CanvasPassback["status"], string> = {
@@ -267,6 +283,18 @@ export default function GradeSubmissionPage({
   const [pushingGrade, setPushingGrade] = useState(false);
   const [pushGradeMessage, setPushGradeMessage] = useState<string | null>(null);
   const [expandedAiDraft, setExpandedAiDraft] = useState<string | null>(null);
+
+  // VOIDED-attempt recovery v1 state — see
+  // docs/voided-submission-recovery-v1.md. The confirmation dialog is
+  // only ever shown/usable when the server has already told us
+  // (data.voidRecoveryEligible) this exact submission qualifies — the
+  // dialog itself never re-derives eligibility, and POST /void re-checks
+  // it authoritatively regardless of what this page believes.
+  const [voidDialogOpen, setVoidDialogOpen] = useState(false);
+  const [voidReason, setVoidReason] = useState("");
+  const [voidSubmitting, setVoidSubmitting] = useState(false);
+  const [voidError, setVoidError] = useState<string | null>(null);
+  const [voidSuccessMessage, setVoidSuccessMessage] = useState<string | null>(null);
 
   // AI Marking Assistance v1 state — see docs/ai-marking-assistance-v1.md.
   // The marking guide itself is configured once, exam-wide, on the "AI
@@ -554,8 +582,14 @@ export default function GradeSubmissionPage({
     }
   }
 
-  useEffect(() => {
-    fetch(`/api/submissions/${submissionId}`)
+  // VOIDED-attempt recovery v1 — extracted from the original inline
+  // effect below so the void-recovery action can re-fetch this same,
+  // real, server-authoritative submission state after acting (both on
+  // success, so status/voidRecoveryEligible reflect VOIDED immediately,
+  // and on a 409, so a state that changed between page load and
+  // confirmation is reflected truthfully rather than assumed).
+  const loadSubmission = useCallback(() => {
+    return fetch(`/api/submissions/${submissionId}`)
       .then((res) => res.json())
       .then((d: SubmissionData) => {
         setData(d);
@@ -569,6 +603,52 @@ export default function GradeSubmissionPage({
         setFeedback(initialFeedback);
       });
   }, [submissionId]);
+
+  useEffect(() => {
+    loadSubmission();
+  }, [loadSubmission]);
+
+  // VOIDED-attempt recovery v1 — the UI is only ever a convenience.
+  // POST /api/lecturer/submissions/[id]/void re-checks authentication,
+  // role, exam ownership/institution boundary, current status, and the
+  // canonical technical-eligibility condition itself, independent of
+  // whatever this page currently believes. A 409 here means state moved
+  // between page load and confirmation (e.g. someone else already voided
+  // or submitted it) — that is surfaced honestly, never treated as a
+  // silent success.
+  async function handleVoidAttempt() {
+    if (!voidReason.trim()) return;
+    setVoidSubmitting(true);
+    setVoidError(null);
+    try {
+      const res = await fetch(`/api/lecturer/submissions/${submissionId}/void`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: voidReason.trim(), confirm: true }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        setVoidError(
+          typeof body?.error === "string"
+            ? body.error
+            : "This attempt could not be voided. Its state may have changed — reload and check the current status.",
+        );
+        // Re-fetch regardless of the exact failure reason, so the page
+        // (and the dialog's own eligibility) reflects whatever actually
+        // happened server-side, never a stale assumption.
+        await loadSubmission();
+        return;
+      }
+      setVoidDialogOpen(false);
+      setVoidReason("");
+      setVoidSuccessMessage("This attempt has been voided. The historical record is preserved, and the student may now start a fresh attempt.");
+      await loadSubmission();
+    } catch {
+      setVoidError("Could not reach the server. Try again.");
+    } finally {
+      setVoidSubmitting(false);
+    }
+  }
 
   async function handleFinalize() {
     if (!data) return;
@@ -662,7 +742,7 @@ export default function GradeSubmissionPage({
       <LecturerPageHeader
         breadcrumbs={[{ label: "Dashboard", href: "/lecturer" }, { label: data.exam.title, href: `/lecturer/exams/${examId}` }, { label: "Grade" }]}
         title={data.exam.title}
-        description={`Status: ${data.status} · Attempt ${data.attemptNumber}`}
+        description={`Status: ${SUBMISSION_STATUS_LABELS[data.status]} · Attempt ${data.attemptNumber}`}
         actions={
           <>
             <SecondaryLinkButton href={`/lecturer/submissions/${submissionId}/evidence`} className="px-3 py-1.5">
@@ -674,6 +754,88 @@ export default function GradeSubmissionPage({
           </>
         }
       />
+
+      {voidSuccessMessage && (
+        <SectionCard>
+          <p className="text-sm text-lecturer-text-primary">{voidSuccessMessage}</p>
+        </SectionCard>
+      )}
+
+      {/* VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+          Shown ONLY when the server itself (voidRecoveryEligible, computed
+          via the exact same canonical check /start and /void use) says
+          this submission qualifies — never a client-side re-interpretation
+          of the frozen policy. A narrowly-scoped technical/security
+          recovery action, never a generic reset/delete/void control. */}
+      {data.voidRecoveryEligible && (
+        <SectionCard>
+          <p className="text-sm font-medium text-lecturer-text-primary">Secure delivery mismatch detected</p>
+          <p className="mt-1 text-sm text-lecturer-text-secondary">
+            This attempt&apos;s recorded security settings no longer match this exam&apos;s current Tether Secure Browser
+            requirement, so it cannot be securely resumed by the student.
+          </p>
+          <button
+            type="button"
+            onClick={() => setVoidDialogOpen(true)}
+            className="mt-3 rounded-lg border border-lecturer-border px-4 py-2 text-sm font-semibold text-lecturer-text-primary hover:bg-lecturer-border-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+          >
+            Void technical attempt and allow restart
+          </button>
+        </SectionCard>
+      )}
+
+      {voidDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="presentation">
+          <div role="dialog" aria-modal="true" aria-labelledby="void-dialog-title" className="w-full max-w-md rounded-xl border border-lecturer-border bg-lecturer-surface p-5 shadow-xl">
+            <h2 id="void-dialog-title" className="text-base font-semibold text-lecturer-text-primary">
+              Void technical attempt and allow restart?
+            </h2>
+            <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-lecturer-text-secondary">
+              <li>This attempt cannot be securely resumed by the student.</li>
+              <li>Existing answers and evidence will be preserved — nothing is deleted.</li>
+              <li>The attempt will be marked Voided.</li>
+              <li>It will not generate a score.</li>
+              <li>It will not count against the student&apos;s permitted number of attempts.</li>
+              <li>The student will be able to start a fresh, correctly-secured attempt.</li>
+            </ul>
+            <label className="mt-4 block text-xs font-medium text-lecturer-text-secondary" htmlFor="void-reason">
+              Reason (required)
+            </label>
+            <textarea
+              id="void-reason"
+              rows={3}
+              autoFocus
+              className="mt-1 w-full rounded-lg border border-lecturer-border px-3 py-2 text-sm text-lecturer-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+              value={voidReason}
+              onChange={(e) => setVoidReason(e.target.value)}
+              placeholder="e.g. Secure delivery configuration changed after this attempt started."
+            />
+            {voidError && <p className="mt-2 text-sm text-[#B42318]">{voidError}</p>}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setVoidDialogOpen(false);
+                  setVoidReason("");
+                  setVoidError(null);
+                }}
+                disabled={voidSubmitting}
+                className="rounded-lg border border-lecturer-border px-4 py-2 text-sm font-medium text-lecturer-text-secondary hover:bg-lecturer-border-subtle disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleVoidAttempt}
+                disabled={voidSubmitting || !voidReason.trim()}
+                className="rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-semibold text-white hover:bg-lecturer-accent-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
+              >
+                {voidSubmitting ? "Voiding…" : "Void attempt and allow restart"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {aiAssistanceSummary?.aiAssistanceEnabled && (
         <SectionCard>
@@ -848,15 +1010,20 @@ export default function GradeSubmissionPage({
         })}
       </div>
 
-      <div>
-        <button
-          onClick={handleFinalize}
-          disabled={saving}
-          className="rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-semibold text-white hover:bg-lecturer-accent-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
-        >
-          {saving ? "Saving…" : "Finalize grade"}
-        </button>
-      </div>
+      {/* VOIDED-attempt recovery v1 — a voided attempt can never be
+          graded (the server already rejects it); the action is hidden
+          here rather than left to fail on click. */}
+      {data.status !== "VOIDED" && (
+        <div>
+          <button
+            onClick={handleFinalize}
+            disabled={saving}
+            className="rounded-lg bg-lecturer-accent px-4 py-2 text-sm font-semibold text-white hover:bg-lecturer-accent-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent focus-visible:ring-offset-2"
+          >
+            {saving ? "Saving…" : "Finalize grade"}
+          </button>
+        </div>
+      )}
 
       {data.status === "GRADED" && (
         <SectionCard>
