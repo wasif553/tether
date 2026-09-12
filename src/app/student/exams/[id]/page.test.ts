@@ -1233,3 +1233,176 @@ describe("Final minor UX refinements v1 — Submit exam moved into the centre qu
     expect(block).toContain("disabled={submitting || autoSubmitLocked || timerStopped}");
   });
 });
+
+describe("Manual-submit answer flush fix — handleSubmit flushes pending autosaves BEFORE the /submit request, on every submit path, exactly once", () => {
+  // Prior to this fix, flushResponsesBeforeSubmit() only ran inside the
+  // `if (options.systemAutoSubmit)` branch, so a manual "Submit exam"
+  // click (no options, or the review-modal's submit) could reach
+  // POST /api/submissions/[id]/submit before a still-pending 600ms
+  // debounced autosave for the current question — regardless of whether
+  // that question was MULTIPLE_CHOICE, SHORT_ANSWER, or ESSAY, since all
+  // three funnel through the same handleChange -> saveAnswer -> `responses`
+  // state -> flushResponsesBeforeSubmit path (see the "covers every
+  // question type uniformly" test below).
+
+  it("flushResponsesBeforeSubmit() is awaited before the /submit fetch, and appears exactly once in handleSubmit's body (never duplicated for auto-submit)", () => {
+    const fn = extractFunctionBody("async function handleSubmit(options: { systemAutoSubmit?: boolean } = {}) {");
+    const flushCalls = [...fn.matchAll(/flushResponsesBeforeSubmit\(\)/g)];
+    expect(flushCalls.length).toBe(1);
+    const flushIdx = fn.indexOf("await flushResponsesBeforeSubmit();");
+    expect(flushIdx).toBeGreaterThan(-1);
+    // Atomic terminal-response persistence (Part 2) wraps this call in
+    // fetchWithTimeout(...) now (see that describe block below) — match
+    // on the submit URL itself so this assertion survives that wrapper.
+    const fetchIdx = fn.indexOf("/api/submissions/${id}/submit", flushIdx);
+    expect(fetchIdx).toBeGreaterThan(flushIdx);
+  });
+
+  it("the flush is NOT gated behind options.systemAutoSubmit — a manual submit (no options) still flushes", () => {
+    const fn = extractFunctionBody("async function handleSubmit(options: { systemAutoSubmit?: boolean } = {}) {");
+    const ifBlockStart = fn.indexOf("if (options.systemAutoSubmit) {");
+    expect(ifBlockStart).toBeGreaterThan(-1);
+    const ifBlockEnd = fn.indexOf("// Manual-submit answer flush fix", ifBlockStart);
+    expect(ifBlockEnd).toBeGreaterThan(ifBlockStart);
+    const ifBlockText = fn.slice(ifBlockStart, ifBlockEnd);
+    // The auto-submit-specific UI message is still preserved inside its
+    // own gated branch...
+    expect(ifBlockText).toContain('setSubmitMessage("Time is up. Submitting your exam automatically...");');
+    // ...but the flush itself lives OUTSIDE that branch, so it also runs
+    // for a plain handleSubmit() call.
+    expect(ifBlockText).not.toContain("flushResponsesBeforeSubmit");
+    const flushIdx = fn.indexOf("await flushResponsesBeforeSubmit();");
+    expect(flushIdx).toBeGreaterThan(ifBlockEnd);
+  });
+
+  it("both manual submit entry points (the primary Submit button and the review-modal Submit button) call the same no-arg handleSubmit() — no separate/duplicated submission path", () => {
+    const bareCalls = [...source.matchAll(/handleSubmit\(\);/g)];
+    expect(bareCalls.length).toBe(2); // submitExamButton's onClick + the review modal's Submit button
+    const autoSubmitCalls = [...source.matchAll(/handleSubmit\(\{ systemAutoSubmit: true \}\);/g)];
+    expect(autoSubmitCalls.length).toBe(2); // timer-expiry auto-submit + submitExamButton's own auto-submit guard
+  });
+
+  it("flushResponsesBeforeSubmit() itself is unchanged: still flushes every entry in `responses` uniformly, never filtered by question type", () => {
+    const fn = extractFunctionBody("async function flushResponsesBeforeSubmit() {");
+    // responses is keyed only by questionId (see handleChange, shared by
+    // MULTIPLE_CHOICE/SHORT_ANSWER/ESSAY renders alike) — there is no
+    // question.type branch here, so every answered question of every
+    // type is flushed identically.
+    expect(fn).toContain(
+      "Object.entries(responses).map(([questionId, response]) => resilientAutosave.save(questionId, response))",
+    );
+    expect(fn).not.toMatch(/question\.type/);
+    // All pending debounce timers are cleared first, so a save that
+    // hasn't fired yet is sent immediately rather than left to race the
+    // /submit request.
+    expect(fn).toContain("Object.values(saveTimers.current).forEach((timer) => clearTimeout(timer));");
+  });
+
+  it("handleChange (the shared save trigger for MCQ/SHORT_ANSWER/ESSAY inputs) is not gated by question type either, confirming flush-before-submit covers all three uniformly", () => {
+    const fn = extractFunctionBody("function handleChange(questionId: string, value: string) {");
+    expect(fn).toContain("setResponses((prev) => ({ ...prev, [questionId]: value }));");
+    expect(fn).toContain("saveAnswer(questionId, value);");
+    expect(fn).not.toMatch(/question\.type/);
+  });
+
+  it("a save that fails during the flush is retried and never silently drops the student's visible answer: Promise.allSettled (not Promise.all) is used, and the flush never clears `responses`", () => {
+    const fn = extractFunctionBody("async function flushResponsesBeforeSubmit() {");
+    // allSettled (not all/race) — one FAILED resilientAutosave.save() can
+    // never reject/abort the flush of the other questions' answers, and
+    // can never throw out of handleSubmit and block submission entirely.
+    expect(fn).toContain("await Promise.allSettled(");
+    expect(fn).not.toContain("Promise.all(");
+    // This function never touches local `responses` state — a failed
+    // save leaves the student's typed text exactly as it was; the
+    // existing resilientAutosave queue (IndexedDB + background retry) is
+    // solely responsible for eventually getting it to the server, exactly
+    // like every other autosave path (unchanged by this fix).
+    expect(fn).not.toContain("setResponses");
+  });
+
+  it("handleSubmit does not newly branch on the flush's own success/failure — resilientAutosave.save() already resolves to a boolean and never throws (see useResilientAutosave.test.ts), so submission proceeds exactly as it already did for system auto-submit; this fix only changes WHEN the flush runs, not the existing failure/retry policy", () => {
+    const fn = extractFunctionBody("async function handleSubmit(options: { systemAutoSubmit?: boolean } = {}) {");
+    const flushIdx = fn.indexOf("await flushResponsesBeforeSubmit();");
+    const nextLineIdx = fn.indexOf("\n", flushIdx + "await flushResponsesBeforeSubmit();".length);
+    const nextMeaningfulLine = fn.slice(nextLineIdx).split("\n").find((l) => l.trim().length > 0) ?? "";
+    // The very next non-blank line is unrelated bookkeeping (submissionRequestId), not an if(!flushed)/throw/catch — confirming no new blocking error policy was introduced here.
+    expect(nextMeaningfulLine).not.toMatch(/if\s*\(/);
+    expect(nextMeaningfulLine).not.toContain("throw");
+  });
+});
+
+describe("Manual-submit answer flush fix, Part 2 — atomic terminal-response persistence: finalResponses is sent with every /submit request, and the terminal submit's own success/failure (not the earlier flush) governs finalize/retry", () => {
+  // Server-side coverage (finalResponses actually reaching Answer.response
+  // inside the finalize transaction, question-ownership rejection,
+  // idempotency, auto-grading) lives in
+  // src/lib/submitFinalResponses.routes.test.ts (DB-backed). These are the
+  // client-side structural counterparts: proving the request this page
+  // sends, and its failure handling, actually matches that server
+  // contract.
+
+  it("finalResponses is a plain, unfiltered snapshot of `responses` (every question, every type, same map handleChange writes to) sent in the /submit body — not gated by oneQuestionAtATime, so it grants no write scope beyond what the existing autosave PATCH path already allows for this submission", () => {
+    const fn = extractFunctionBody("async function handleSubmit(options: { systemAutoSubmit?: boolean } = {}) {");
+    const finalResponsesIdx = fn.indexOf("const finalResponses = { ...responses };");
+    expect(finalResponsesIdx).toBeGreaterThan(-1);
+    expect(fn).toContain("body: JSON.stringify({ systemAutoSubmit: options.systemAutoSubmit === true, submissionRequestId, finalResponses })");
+  });
+
+  it("the /submit fetch is bounded (fetchWithTimeout + SUBMIT_FETCH_TIMEOUT_MS), never a bare unbounded fetch() — 'one bounded terminal submit attempt', for both manual and system auto-submit since both share this one function", () => {
+    const fn = extractFunctionBody("async function handleSubmit(options: { systemAutoSubmit?: boolean } = {}) {");
+    const fetchIdx = fn.indexOf("const res = await fetchWithTimeout(");
+    expect(fetchIdx).toBeGreaterThan(-1);
+    expect(fn.slice(fetchIdx, fetchIdx + 400)).toContain("SUBMIT_FETCH_TIMEOUT_MS");
+    expect(fn).not.toMatch(/await fetch\(`\/api\/submissions/); // no bare, unbounded fetch for this call
+    expect(source).toContain("const SUBMIT_FETCH_TIMEOUT_MS = 20_000;");
+  });
+
+  it("10 — a terminal submit that fails (network drop, or a non-2xx/non-409 response) never calls resilientAutosave.clearAll() and never calls setResponses — the local queue and the student's visible text both survive a failed submit for retry", () => {
+    const fn = extractFunctionBody("async function handleSubmit(options: { systemAutoSubmit?: boolean } = {}) {");
+    const notResIdx = fn.indexOf("if (!res) {");
+    const status409Idx = fn.indexOf("if (res.status === 409) {");
+    const notResOkIdx = fn.indexOf("if (!res.ok) {");
+    const resOkIdx = fn.indexOf("if (res.ok) {");
+    expect(notResIdx).toBeGreaterThan(-1);
+    expect(notResOkIdx).toBeGreaterThan(status409Idx);
+    expect(resOkIdx).toBeGreaterThan(notResOkIdx);
+
+    // The plain network-failure branch (!res): only the "already
+    // finalized after all" success path (checked via loadSubmission) may
+    // clear the queue; the branch immediately below it (genuinely
+    // unconfirmed) must not.
+    const networkFailureBlock = fn.slice(notResIdx, status409Idx);
+    const confirmedFinalizedSlice = networkFailureBlock.slice(0, networkFailureBlock.indexOf("if (options.systemAutoSubmit) setAutoSubmitLocked(false);"));
+    const genuinelyUnconfirmedSlice = networkFailureBlock.slice(networkFailureBlock.indexOf("if (options.systemAutoSubmit) setAutoSubmitLocked(false);"));
+    expect(confirmedFinalizedSlice).toContain("await resilientAutosave.clearAll();");
+    expect(genuinelyUnconfirmedSlice).not.toContain("clearAll");
+    expect(genuinelyUnconfirmedSlice).not.toContain("setResponses");
+
+    // The new !res.ok fallback branch (non-network-drop, non-409 failure):
+    // never clears the queue, never touches responses.
+    const notOkBlock = fn.slice(notResOkIdx, resOkIdx);
+    expect(notOkBlock).not.toContain("clearAll");
+    expect(notOkBlock).not.toContain("setResponses");
+    expect(notOkBlock).toContain("return;");
+  });
+
+  it("11 — resilientAutosave.clearAll() is only ever reached after a server-CONFIRMED finalization (the res.ok branch, or an authoritative loadSubmission() confirming ALREADY_FINALIZED/finalized status) — never speculatively, never before the terminal submit is known to have succeeded", () => {
+    const fn = extractFunctionBody("async function handleSubmit(options: { systemAutoSubmit?: boolean } = {}) {");
+    const clearAllCalls = [...fn.matchAll(/await resilientAutosave\.clearAll\(\);/g)];
+    // Exactly three sites: (1) network-drop but actually-already-finalized,
+    // (2) 409 but actually-already-finalized, (3) a genuine res.ok. Every
+    // one is preceded, in its own branch, by a finalized-status
+    // confirmation (isFinalizedSubmissionStatus(...) or res.ok itself).
+    expect(clearAllCalls.length).toBe(3);
+  });
+
+  it("both the network-drop message and the new non-ok fallback message use the exact requested copy for manual submit: \"Your latest answers could not be saved yet. Check your connection and try Submit again.\" — while systemAutoSubmit keeps its own distinct existing copy in both branches", () => {
+    const exactCopyMatches = [...source.matchAll(/"Your latest answers could not be saved yet\. Check your connection and try Submit again\."/g)];
+    expect(exactCopyMatches.length).toBeGreaterThanOrEqual(1); // declared once as MANUAL_SUBMIT_UNCONFIRMED_MESSAGE, reused by reference elsewhere
+    expect(source).toContain("const MANUAL_SUBMIT_UNCONFIRMED_MESSAGE =");
+    const fn = extractFunctionBody("async function handleSubmit(options: { systemAutoSubmit?: boolean } = {}) {");
+    const usages = [...fn.matchAll(/MANUAL_SUBMIT_UNCONFIRMED_MESSAGE/g)];
+    // One declaration + at least two usages (network-drop branch, !res.ok branch).
+    expect(usages.length).toBeGreaterThanOrEqual(3);
+    expect(fn).toContain('"Time is up. Automatic submission could not be confirmed. Contact your lecturer or exam support if this continues."');
+  });
+});

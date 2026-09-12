@@ -126,7 +126,7 @@ import {
 } from "@/lib/lockdownClient";
 import { resolveNativeLockdownConfirmation, shouldBlockExamContentRendering, type ContentGateState } from "@/lib/secureExamNativeLockdown";
 import { buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
-import { fetchWithTimeoutAndRetry } from "@/lib/fetchWithTimeout";
+import { fetchWithTimeout, fetchWithTimeoutAndRetry } from "@/lib/fetchWithTimeout";
 import { withTimeout, PromiseTimeoutError } from "@/lib/promiseTimeout";
 
 // Exam-load latency follow-up (physical acceptance review) — bounds how
@@ -150,6 +150,15 @@ const EXAM_LOAD_FETCH_TIMEOUT_MS = 12_000;
 // bypass), so retrying in place would only add latency before reaching
 // that same safe outcome.
 const NATIVE_BRIDGE_TIMEOUT_MS = 8_000;
+
+// Manual-submit answer flush fix, Part 2 — bounds the terminal
+// POST /api/submissions/[id]/submit call itself: "one bounded terminal
+// submit attempt", never an indefinite hang. Longer than
+// SAVE_ATTEMPT_TIMEOUT_MS (15s, useResilientAutosave.ts) since this one
+// request now also transactionally persists every question's final
+// response (finalResponses) before grading/finalizing — more server work
+// than a single-question autosave PATCH.
+const SUBMIT_FETCH_TIMEOUT_MS = 20_000;
 
 // Physical hang investigation follow-up — a top-level safety net,
 // independent of (and in addition to) the two bounded timeouts above:
@@ -2478,8 +2487,15 @@ export default function TakeExamPage({
     setSubmitMessage(null);
     if (options.systemAutoSubmit) {
       setSubmitMessage("Time is up. Submitting your exam automatically...");
-      await flushResponsesBeforeSubmit();
     }
+    // Manual-submit answer flush fix — flush any pending debounced answer
+    // saves before the final submission request, for every submit path
+    // (manual "Submit exam", the review-modal's submit, and system
+    // auto-submit all funnel through this one function). Previously this
+    // only ran for systemAutoSubmit, so a manual click within the 600ms
+    // debounce window could reach /submit before the latest keystroke's
+    // answer text did. One call site so the flush never runs twice.
+    await flushResponsesBeforeSubmit();
 
     // Final submission idempotency (Part 9) — a fresh id per attempt; the
     // server's own advisory-lock + conditional-status-update idempotency
@@ -2489,12 +2505,40 @@ export default function TakeExamPage({
     const submissionRequestId =
       typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 
-    const res = await fetch(`/api/submissions/${id}/submit`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ systemAutoSubmit: options.systemAutoSubmit === true, submissionRequestId }),
-    }).catch(() => null);
+    // Manual-submit answer flush fix, Part 2 — atomic terminal-response
+    // persistence. `responses` (the exact state every input on this page
+    // is bound to) is sent as-is alongside the submit request; the server
+    // writes each entry through the same idempotent save path normal
+    // autosave uses, INSIDE the same transaction that finalizes the
+    // submission, before grading reads Answer.response. This makes the
+    // terminal submit itself — not the separate flushResponsesBeforeSubmit
+    // call above — the actual guarantee against losing the student's last
+    // edit: even if every prior autosave PATCH for a question failed, this
+    // one successful /submit call is enough. flushResponsesBeforeSubmit
+    // above is kept as a best-effort early attempt (gets data to the
+    // server sooner, and via the ordinary autosave path other tooling
+    // already expects) but its success/failure no longer gates anything
+    // below — bounded-wait-required, MUST NOT wait indefinitely.
+    const finalResponses = { ...responses };
+
+    const res = await fetchWithTimeout(
+      `/api/submissions/${id}/submit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ systemAutoSubmit: options.systemAutoSubmit === true, submissionRequestId, finalResponses }),
+      },
+      SUBMIT_FETCH_TIMEOUT_MS,
+    ).catch(() => null);
     setSubmitting(false);
+
+    // Manual-submit answer flush fix, Part 2 — the exact copy requested
+    // for "the terminal save could not be confirmed": the student's text
+    // is never touched (setResponses is never called anywhere in this
+    // failure path) and the local resilientAutosave queue is never
+    // cleared (clearAll() only ever runs after a CONFIRMED finalization
+    // below) — so a retry click always has the same answers to resend.
+    const MANUAL_SUBMIT_UNCONFIRMED_MESSAGE = "Your latest answers could not be saved yet. Check your connection and try Submit again.";
 
     if (!res) {
       // Final submission idempotency (Part 9) — a network failure here
@@ -2525,7 +2569,7 @@ export default function TakeExamPage({
       setSubmitMessage(
         options.systemAutoSubmit
           ? "Time is up. Automatic submission could not be confirmed. Contact your lecturer or exam support if this continues."
-          : "Save could not yet be confirmed. Please try submitting again.",
+          : MANUAL_SUBMIT_UNCONFIRMED_MESSAGE,
       );
       return;
     }
@@ -2555,6 +2599,29 @@ export default function TakeExamPage({
       if (options.systemAutoSubmit) setAutoSubmitLocked(false);
       setSubmitMessage(
         typeof body.error === "string" ? body.error : "This exam can no longer be submitted.",
+      );
+      return;
+    }
+
+    // Manual-submit answer flush fix, Part 2 — the terminal submit itself
+    // returned a genuine failure that isn't a network drop (!res, handled
+    // above) or an already-finalized/deadline race (409, handled above):
+    // e.g. a validation error or an unexpected server error. Previously
+    // this fell through with no branch at all — submitting was already
+    // set false, submitMessage stayed empty, and the student saw no
+    // feedback whatsoever. The submission is still IN_PROGRESS (the
+    // server-side transaction never committed), responses/the local
+    // resilientAutosave queue are untouched, so the same MANUAL FAILURE
+    // POLICY applies: show a message, allow retry, never finalize.
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      if (options.systemAutoSubmit) setAutoSubmitLocked(false);
+      setSubmitMessage(
+        options.systemAutoSubmit
+          ? "Time is up. Automatic submission could not be confirmed. Contact your lecturer or exam support if this continues."
+          : typeof body.error === "string"
+            ? body.error
+            : MANUAL_SUBMIT_UNCONFIRMED_MESSAGE,
       );
       return;
     }

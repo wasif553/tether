@@ -14,6 +14,7 @@ import { isSourceDeclarationSatisfied, createFinalDevelopmentRecordsWithTx } fro
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { isSubmissionContentAccessible, EXAM_NOT_ACTIVATED_CODE, EXAM_NOT_ACTIVATED_MESSAGE } from "@/lib/secureClientActivation";
 import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import { saveAnswerWithIdempotency } from "@/lib/answerSaveRunner";
 import {
   checkTetherContentAccessLease,
   readContentAccessLeaseCookieFromRequest,
@@ -44,6 +45,44 @@ function studentSubmitResponse(submission: {
 
 /** Thrown inside the finalisation transaction when another request has already finalized the submission — never a real failure, just routes to the same ALREADY_FINALIZED response as the P2025 fallback below. */
 class AlreadyFinalizedError extends Error {}
+
+/**
+ * Manual-submit answer flush fix, Part 2 — atomic terminal-response
+ * persistence. See docs/tether-secure-resume-recovery-v1.md.
+ *
+ * The client's terminal submit request MAY optionally carry a snapshot of
+ * every question's current on-screen text (`finalResponses`), captured at
+ * the moment the student pressed Submit — the same client-side state every
+ * normal debounced autosave already sends, just guaranteed to reach the
+ * server as part of THIS request rather than depending on a separate,
+ * possibly-failed prior PATCH. Purely additive and backward-compatible: a
+ * caller that omits the field (or sends `undefined`) behaves exactly as
+ * before this change — finalization reads whatever `Answer.response` rows
+ * autosave already committed, same as always.
+ *
+ * Shape-validated here (cheap, no DB access); question-ownership is
+ * validated separately by the caller once `effectiveQuestionIdSet` is
+ * known (see submit route below) — that boundary is what actually
+ * prevents this payload from ever writing to a question outside the
+ * exact set this submission was given, exactly like the existing
+ * PATCH /answers route already enforces via saveAnswerWithIdempotency's
+ * own question-in-exam lookup.
+ */
+function parseFinalResponses(raw: unknown): { ok: true; value: Record<string, string> } | { ok: false } {
+  if (raw === undefined) return { ok: true, value: {} };
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { ok: false };
+  const entries = Object.entries(raw as Record<string, unknown>);
+  // Generous, defensive cap — no real exam has anywhere near this many
+  // questions; this only guards against a malformed/abusive payload, never
+  // a legitimate one.
+  if (entries.length > 500) return { ok: false };
+  const value: Record<string, string> = {};
+  for (const [questionId, response] of entries) {
+    if (typeof response !== "string") return { ok: false };
+    value[questionId] = response;
+  }
+  return { ok: true, value };
+}
 
 /**
  * Tether Secure Exam Recovery and Resilient Autosave v1 (Part 9) — final
@@ -101,6 +140,16 @@ export async function POST(
       typeof body?.submissionRequestId === "string" && body.submissionRequestId.length > 0 && body.submissionRequestId.length <= 200
         ? body.submissionRequestId
         : null;
+
+    // Manual-submit answer flush fix, Part 2 — see parseFinalResponses's
+    // own doc comment. Shape only, checked before any DB read; the
+    // question-ownership check runs further below once
+    // effectiveQuestionIdSet is known.
+    const finalResponsesParsed = parseFinalResponses(body?.finalResponses);
+    if (!finalResponsesParsed.ok) {
+      return NextResponse.json({ error: "Invalid finalResponses payload", code: "INVALID_FINAL_RESPONSES" }, { status: 400 });
+    }
+    const finalResponses = finalResponsesParsed.value;
 
     // --- Reads outside any transaction: submission + exam + questions.
     // Deadline/declaration gates and the effective question set are all
@@ -218,6 +267,24 @@ export async function POST(
     const effectiveQuestionIdSet = new Set(effectiveQuestionIds);
     const questionsToGrade = submission.exam.questions.filter((q) => effectiveQuestionIdSet.has(q.id));
 
+    // Manual-submit answer flush fix, Part 2 — reject the whole request
+    // (write nothing) if finalResponses names any question outside this
+    // submission's own effective set (the exact question set it was
+    // given — narrower than the full exam when Question Pools are
+    // active). This is the boundary that keeps this payload from ever
+    // being used to write an answer the student was never actually shown
+    // in this attempt; it is the same boundary saveAnswerWithIdempotency
+    // already enforces for the ordinary autosave PATCH route via its own
+    // question-belongs-to-exam lookup, just checked eagerly here so a bad
+    // payload can never partially apply before failing.
+    const invalidFinalResponseQuestionIds = Object.keys(finalResponses).filter((qid) => !effectiveQuestionIdSet.has(qid));
+    if (invalidFinalResponseQuestionIds.length > 0) {
+      return NextResponse.json(
+        { error: "finalResponses referenced a question outside this submission", code: "INVALID_FINAL_RESPONSE_QUESTION" },
+        { status: 400 },
+      );
+    }
+
     // --- Everything below (grading, submission-status update, and — when
     // provenance is enabled — the final answer-development checkpoints/
     // events) runs inside ONE transaction, guarded by the same
@@ -246,6 +313,45 @@ export async function POST(
         const fresh = await tx.submission.findUnique({ where: { id }, select: { status: true } });
         if (!fresh || fresh.status !== "IN_PROGRESS") {
           throw new AlreadyFinalizedError();
+        }
+
+        // Manual-submit answer flush fix, Part 2 — atomic terminal-
+        // response persistence. Writes the client's final on-screen
+        // snapshot for each question through the SAME idempotent write
+        // path (saveAnswerWithIdempotency) the ordinary autosave PATCH
+        // route already uses, INSIDE this same transaction, BEFORE the
+        // fresh-answers read just below — so grading always sees the
+        // truly latest response even when an earlier, separate autosave
+        // PATCH for that question never reached or committed on the
+        // server (the exact race that made a last-second answer
+        // recoverable). Every questionId here was already validated
+        // above (before the transaction even started) to belong to this
+        // submission's own effective question set. `clientRevision: null`
+        // deliberately skips the staleness guard — this snapshot was
+        // captured from the student's own live input state at the moment
+        // Submit was pressed, so nothing client-side can ever be fresher;
+        // it should always apply, never be treated as a stale/superseded
+        // write. A duplicate delivery of the exact same terminal request
+        // (e.g. a client-side retry after a dropped response) is still a
+        // safe no-op via the per-question clientRequestId idempotency
+        // check saveAnswerWithIdempotency already performs.
+        for (const [questionId, response] of Object.entries(finalResponses)) {
+          const finalSaveResult = await saveAnswerWithIdempotency(tx, {
+            submissionId: id,
+            examId: submission.examId,
+            questionId,
+            response,
+            clientRequestId: `${submissionRequestId ?? id}:${questionId}:final`,
+            clientRevision: null,
+          });
+          if (finalSaveResult.kind === "invalid_question") {
+            // Defensive only — every id was already validated against
+            // effectiveQuestionIdSet before this transaction started, so
+            // this should never actually trigger. If it somehow does,
+            // fail the whole transaction (rolling back grading/status
+            // too) rather than finalize with an unverified write.
+            throw new Error(`finalResponses referenced an invalid question: ${questionId}`);
+          }
         }
 
         // Fresh, transaction-time answers — the SAME data used for both
