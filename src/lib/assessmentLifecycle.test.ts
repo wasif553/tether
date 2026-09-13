@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   attemptsRemaining,
   canAcceptSubmit,
@@ -10,6 +10,7 @@ import {
   resolveSubmissionTimingPolicy,
   shouldAutoSubmit,
   shouldRunExamTimer,
+  shouldServerBackstopFinalize,
   submissionDeadline,
   isActiveSubmission,
   isVoidedSubmission,
@@ -133,6 +134,53 @@ describe("assessment lifecycle timer helpers", () => {
         systemAutoSubmit: false,
       }),
     ).toBe(true);
+  });
+});
+
+describe("Auto-submit server-backstop v1 — shouldServerBackstopFinalize", () => {
+  const deadline = new Date("2026-01-01T10:00:00.000Z");
+
+  it("A — uses now >= deadline, not now > deadline: eligible at the EXACT deadline instant, not only after it", () => {
+    expect(
+      shouldServerBackstopFinalize({ status: "IN_PROGRESS", now: new Date(deadline.getTime()), deadline, autoSubmitOnTimerEnd: true }),
+    ).toBe(true);
+    expect(
+      shouldServerBackstopFinalize({ status: "IN_PROGRESS", now: new Date(deadline.getTime() + 1), deadline, autoSubmitOnTimerEnd: true }),
+    ).toBe(true);
+    expect(
+      shouldServerBackstopFinalize({ status: "IN_PROGRESS", now: new Date(deadline.getTime() - 1), deadline, autoSubmitOnTimerEnd: true }),
+    ).toBe(false);
+  });
+
+  it("M — autoSubmitOnTimerEnd=false is never touched by the backstop, however overdue", () => {
+    expect(
+      shouldServerBackstopFinalize({
+        status: "IN_PROGRESS",
+        now: new Date(deadline.getTime() + 365 * 24 * 60 * 60 * 1000),
+        deadline,
+        autoSubmitOnTimerEnd: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("N — takes no allowLateSubmit parameter at all: allowLateSubmit=true (a human may submit late) can never, by itself, cause the server to auto-finalize on the caller's behalf — only autoSubmitOnTimerEnd governs that", () => {
+    // The predicate's own signature proves this structurally (no
+    // allowLateSubmit field exists to pass), but this test pins the
+    // intended real-world configuration explicitly: an exam that permits
+    // late manual submission without ever auto-closing it for the
+    // student must never be finalized by this predicate.
+    expect(
+      shouldServerBackstopFinalize({ status: "IN_PROGRESS", now: new Date(deadline.getTime() + 1), deadline, autoSubmitOnTimerEnd: false }),
+    ).toBe(false);
+  });
+
+  it("only ever applies to a still-IN_PROGRESS attempt", () => {
+    expect(
+      shouldServerBackstopFinalize({ status: "SUBMITTED", now: new Date(deadline.getTime() + 1), deadline, autoSubmitOnTimerEnd: true }),
+    ).toBe(false);
+    expect(
+      shouldServerBackstopFinalize({ status: "GRADED", now: new Date(deadline.getTime() + 1), deadline, autoSubmitOnTimerEnd: true }),
+    ).toBe(false);
   });
 });
 
@@ -331,5 +379,66 @@ describe("VOIDED-attempt lifecycle predicates", () => {
       ];
       expect(academicAttemptOrdinal({ attemptNumber: 3, allAttempts })).toBe(1);
     });
+  });
+});
+
+describe("Auto-submit server-backstop v1 — live-client timer fires exactly once at zero (fake timers)", () => {
+  // The exam-taking page's own timer effect (src/app/student/exams/[id]/page.tsx)
+  // is a giant, deeply-integrated component with no existing render-based
+  // test harness anywhere in this file (every existing test there is
+  // source-text/structural, by established convention — see e.g. "the
+  // submission handler's confirm/review-modal/autosubmit logic is
+  // byte-for-byte unchanged from before this pass"). Rather than
+  // introduce full component rendering (requiring extensive mocking of
+  // window.sesLockdown, camera/getUserMedia, screen share, etc. — a large
+  // undertaking disproportionate to what this test needs to prove), this
+  // exercises the REAL pure functions that effect's own tick() calls,
+  // under REAL fake timers advancing exactly the way setInterval(tick,
+  // 1000) does — proving the auto-submit decision fires at the correct
+  // instant and only once, which is what actually determines whether the
+  // live client auto-submits. page.test.ts's own structural tests
+  // separately pin that the component's effect calls exactly these
+  // functions in this exact shape.
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("mounted with time remaining: does not fire until the tick that first reads remainingSecs===0, then fires exactly once despite further ticks", () => {
+    const startedAt = new Date("2026-01-01T10:00:00.000Z");
+    vi.setSystemTime(startedAt);
+    const deadline = submissionDeadline(startedAt, 1); // 60-second exam
+
+    let autoSubmitCallCount = 0;
+    let alreadyTriggered = false;
+    const terminal = false;
+
+    const tick = () => {
+      const secs = remainingSeconds(deadline, new Date());
+      if (secs === 0 && shouldAutoSubmit({ status: "IN_PROGRESS", remainingSecs: secs, autoSubmitOnTimerEnd: true, alreadyTriggered, terminal })) {
+        alreadyTriggered = true;
+        autoSubmitCallCount += 1;
+      }
+    };
+
+    // Mirrors the effect's own `tick(); const interval = setInterval(tick, 1000);`.
+    tick();
+    const interval = setInterval(tick, 1000);
+
+    // 30 seconds in: still time remaining, never fires.
+    vi.advanceTimersByTime(30_000);
+    expect(autoSubmitCallCount).toBe(0);
+
+    // Crosses the exact deadline instant (60s after start).
+    vi.advanceTimersByTime(30_000);
+    expect(autoSubmitCallCount).toBe(1);
+
+    // Several more ticks past zero — never fires a second time.
+    vi.advanceTimersByTime(5_000);
+    expect(autoSubmitCallCount).toBe(1);
+
+    clearInterval(interval);
   });
 });

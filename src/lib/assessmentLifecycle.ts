@@ -100,6 +100,43 @@ export function shouldRunExamTimer(params: {
   return params.status === "IN_PROGRESS" && !params.terminal;
 }
 
+/**
+ * Auto-submit server-backstop v1 — the SERVER-side companion to
+ * shouldAutoSubmit, for a caller with no live client at all (POST
+ * /api/exams/[id]/start's existing-attempt resume path, and the scheduled
+ * overdue-submission sweep — see docs/auto-submit-server-backstop-v1.md
+ * and src/lib/submissionFinalization.ts).
+ * Uses `now >= deadline` (not `>`): a live client's own remainingSeconds()
+ * is a floored, non-negative difference that already reads 0 at the exact
+ * instant now===deadline, so the server must agree that instant is already
+ * eligible rather than waiting one tick behind the client.
+ *
+ * `deadline` must come from the SAME canonical
+ * submissionDeadline(startedAt, timingPolicy.durationMins) call every
+ * other reader of "is this attempt still within its deadline" already
+ * uses (see resolveSubmissionTimingPolicy above) — never a second,
+ * independently-derived deadline.
+ *
+ * Deliberately narrower than canAcceptSubmit: an exam with
+ * allowLateSubmit=true but autoSubmitOnTimerEnd=false intentionally lets a
+ * HUMAN submit late without the system ever doing it for them — reusing
+ * canAcceptSubmit's own (correctly broader, for ITS purpose) allowLateSubmit
+ * branch here would make the server wrongly auto-finalize that
+ * configuration. This checks autoSubmitOnTimerEnd directly instead.
+ */
+export function shouldServerBackstopFinalize(params: {
+  status: string;
+  now: Date;
+  deadline: Date;
+  autoSubmitOnTimerEnd: boolean;
+}): boolean {
+  return (
+    params.status === "IN_PROGRESS" &&
+    params.now.getTime() >= params.deadline.getTime() &&
+    params.autoSubmitOnTimerEnd
+  );
+}
+
 export function isFinalizedSubmissionStatus(status: string): boolean {
   return status !== "IN_PROGRESS";
 }
