@@ -55,8 +55,72 @@ import { recordSimpleActivityEvent } from "@/lib/answerActivityTelemetry";
 import { endExamAttemptSessionsForSubmission } from "@/lib/examAttemptSessionRunner";
 import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
 import { captureNetworkEvidence, getClientIpFromRequest } from "@/lib/networkEvidence";
+import { isSecurePolicyMismatchForResume, type DeliveryMode, type SecureClientPolicy } from "@/lib/secureClientPolicy";
+import { shouldServerBackstopFinalize } from "@/lib/assessmentLifecycle";
 
 export type FinalizationTrigger = "STUDENT_SUBMIT" | "SERVER_BACKSTOP";
+
+/**
+ * Precedence fix (pre-release audit follow-up) — the ONE shared decision
+ * every server-triggered finalization path (POST /api/exams/[id]/start's
+ * existing-attempt resume, and the scheduled sweep) must consult before
+ * ever calling finalizeSubmission with triggeredBy: "SERVER_BACKSTOP".
+ *
+ * A submission that is technically invalid for secure resume
+ * (isSecurePolicyMismatchForResume — the exact same canonical check
+ * POST /start's mismatch response and voidRecoveryEligible already use)
+ * must NEVER be auto-finalized by the deadline backstop, however overdue
+ * it is and regardless of autoSubmitOnTimerEnd. That class of row (the
+ * confirmed "Browser" incident: current exam now TETHER_CLIENT_REQUIRED,
+ * but this attempt's own frozen policy is STANDARD_WEB from the old
+ * silent secure-delivery-downgrade defect) is not a genuine academic
+ * attempt gone unattended — it is a platform/technical anomaly that must
+ * stay IN_PROGRESS, generate no score, and remain reachable ONLY through
+ * the existing lecturer VOIDED recovery workflow
+ * (POST /api/lecturer/submissions/[id]/void). Auto-submitting it would
+ * silently convert a technical defect into what looks like a genuine,
+ * scored academic outcome — and would consume the student's academic
+ * attempt in the process.
+ *
+ * Checked FIRST, before timing eligibility: a mismatch is dispositive
+ * regardless of how overdue the attempt is or what autoSubmitOnTimerEnd
+ * says. Only once mismatch is ruled out does ordinary deadline/timing
+ * eligibility (shouldServerBackstopFinalize) apply — this is exactly the
+ * STANDARD_WEB case (isSecurePolicyMismatchForResume is unconditionally
+ * false whenever currentExamDeliveryMode !== "TETHER_CLIENT_REQUIRED",
+ * so a STANDARD_WEB exam's overdue attempts flow straight through to
+ * ordinary timing eligibility, exactly as before this fix) and the
+ * healthy-Tether case (frozen policy genuinely still satisfies the
+ * exam's current requirement).
+ */
+export type ServerBackstopEligibility =
+  | { eligible: true }
+  | { eligible: false; reason: "SECURE_POLICY_MISMATCH" }
+  | { eligible: false; reason: "NOT_ELIGIBLE" };
+
+export function evaluateServerBackstopEligibility(params: {
+  status: string;
+  now: Date;
+  deadline: Date;
+  autoSubmitOnTimerEnd: boolean;
+  currentExamDeliveryMode: DeliveryMode;
+  frozenPolicy: SecureClientPolicy;
+}): ServerBackstopEligibility {
+  if (isSecurePolicyMismatchForResume({ currentExamDeliveryMode: params.currentExamDeliveryMode, frozenPolicy: params.frozenPolicy })) {
+    return { eligible: false, reason: "SECURE_POLICY_MISMATCH" };
+  }
+  if (
+    !shouldServerBackstopFinalize({
+      status: params.status,
+      now: params.now,
+      deadline: params.deadline,
+      autoSubmitOnTimerEnd: params.autoSubmitOnTimerEnd,
+    })
+  ) {
+    return { eligible: false, reason: "NOT_ELIGIBLE" };
+  }
+  return { eligible: true };
+}
 
 /** Thrown inside the transaction when another request already finalized this submission — never a real failure, just routes to the ALREADY_FINALIZED result below, exactly like the pre-extraction P2025/status-recheck handling in the submit route. */
 class AlreadyFinalizedError extends Error {}

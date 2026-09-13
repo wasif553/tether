@@ -16,9 +16,11 @@ vi.mock("@/auth", () => ({ auth: mockAuth }));
 
 const { prisma } = await import("./prisma");
 const { getOrCreateTestInstitution } = await import("./testInstitution");
-const { buildSecureClientPolicySnapshot } = await import("./secureClientPolicy");
+const { buildSecureClientPolicySnapshot, DEFAULT_SECURE_CLIENT_AVAILABILITY, SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE } = await import("./secureClientPolicy");
+const examRoute = await import("../app/api/exams/[id]/route");
 const startRoute = await import("../app/api/exams/[id]/start/route");
 const submitRoute = await import("../app/api/submissions/[id]/submit/route");
+const voidRoute = await import("../app/api/lecturer/submissions/[id]/void/route");
 const internalSweepRoute = await import("../app/api/internal/finalize-overdue-submissions/route");
 
 function sessionFor(userId: string, role: "LECTURER" | "STUDENT", institutionId: string) {
@@ -141,6 +143,75 @@ async function createInProgressSubmission(params: {
       activatedAt: startedAt,
       examPolicySnapshotJson: { timingPolicy: { durationMins: params.durationMins, allowLateSubmit: params.allowLateSubmit, autoSubmitOnTimerEnd: params.autoSubmitOnTimerEnd } },
       secureClientPolicySnapshotJson: secureClientPolicySnapshot as unknown as object,
+    },
+  });
+}
+
+/** Same PATCH-based convention voidedSubmissionRecovery.routes.test.ts uses to make an exam's LIVE deliveryMode genuinely TETHER_CLIENT_REQUIRED. */
+async function createTetherRequiredExam(durationMins: number) {
+  const exam = await prisma.exam.create({
+    data: { title: `Backstop Mismatch Exam ${stamp}-${Math.random()}`, durationMins, createdById: lecturer.id, institutionId: instId, published: false },
+  });
+  cleanup.exams.push(exam.id);
+  mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+  await examRoute.PATCH(
+    jsonRequest("PATCH", { secureSettings: { assessmentType: "QUIZ_OR_TEST", deliveryMode: "TETHER_CLIENT_REQUIRED" }, published: true }),
+    { params: Promise.resolve({ id: exam.id }) },
+  );
+  return exam;
+}
+
+/**
+ * The exact confirmed-incident shape ("Browser"): current exam
+ * TETHER_CLIENT_REQUIRED, but this attempt's own frozen policy is
+ * STANDARD_WEB (from the old silent secure-delivery-downgrade defect —
+ * DEFAULT_SECURE_CLIENT_AVAILABILITY has tetherClientRequiredAvailable:
+ * false, so buildSecureClientPolicySnapshot downgrades it exactly like
+ * that historical defect did). Overdue and autoSubmitOnTimerEnd=true —
+ * deliberately, to prove secure-policy mismatch takes precedence even
+ * when ordinary timing eligibility alone would otherwise finalize it.
+ */
+async function createMismatchedSubmission(examId: string, durationMins: number, overdueByMs: number) {
+  const staleSnapshot = buildSecureClientPolicySnapshot(
+    {
+      deliveryMode: "TETHER_CLIENT_REQUIRED",
+      allowedSebPlatforms: [],
+      allowedSebVersions: [],
+      requireSebBrowserExamKey: false,
+      requireSebConfigKey: false,
+      allowSebHeaderValidation: true,
+      allowSebJavascriptApiValidation: true,
+      secureLaunchTokenTtlSeconds: 300,
+      secureClientHeartbeatIntervalSeconds: 30,
+      secureClientHeartbeatGraceSeconds: 90,
+      requireDisplayCheck: false,
+      secureClientMaximumDisplays: 1,
+      displayPolicy: "UNRESTRICTED",
+      requireRemoteSessionCheck: false,
+      requireVirtualMachineCheck: false,
+      requireProcessCheck: false,
+      requireCaptureProtectionCheck: false,
+      blockCopyPaste: false,
+      secureClientAllowPrinting: true,
+      secureClientAllowExternalNavigation: true,
+      secureClientAllowApplicationSwitching: true,
+      secureClientAllowRecovery: true,
+      secureClientEventRetentionDays: 180,
+      secureClientLecturerOverrideAllowed: true,
+    },
+    DEFAULT_SECURE_CLIENT_AVAILABILITY, // tetherClientRequiredAvailable: false -> downgrades to STANDARD_WEB, exactly like the historical incident
+  );
+  expect(staleSnapshot.deliveryMode).toBe("STANDARD_WEB"); // sanity check on the fixture itself
+  const startedAt = new Date(Date.now() - durationMins * 60_000 - overdueByMs);
+  return prisma.submission.create({
+    data: {
+      examId,
+      studentId: student.id,
+      attemptNumber: 1,
+      startedAt,
+      activatedAt: startedAt,
+      examPolicySnapshotJson: { timingPolicy: { durationMins, allowLateSubmit: false, autoSubmitOnTimerEnd: true } },
+      secureClientPolicySnapshotJson: staleSnapshot as unknown as object,
     },
   });
 }
@@ -547,5 +618,146 @@ describe("POST /api/internal/finalize-overdue-submissions — scheduled sweep", 
     // The 205 ineligible rows must remain completely untouched.
     const stillInProgress = await prisma.submission.count({ where: { id: { in: ineligibleIds }, status: "IN_PROGRESS" } });
     expect(stillInProgress).toBe(205);
+  });
+});
+
+describe("Precedence fix — secure-policy mismatch takes priority over the expiry backstop (the confirmed 'Browser' incident)", () => {
+  it("A/B/C/D — /start returns SECURE_POLICY_MISMATCH_RESTART_REQUIRED for an overdue, technically-invalid attempt; it is NOT finalized, remains IN_PROGRESS, receives no score, and no server-backstop audit is created", async () => {
+    const exam = await createTetherRequiredExam(30);
+    const mismatched = await createMismatchedSubmission(exam.id, 30, 60_000);
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe(SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE);
+
+    const fresh = await prisma.submission.findUniqueOrThrow({ where: { id: mismatched.id } });
+    expect(fresh.status).toBe("IN_PROGRESS"); // B
+    expect(fresh.submittedAt).toBeNull();
+    expect(fresh.gradedAt).toBeNull();
+    expect(fresh.totalScore).toBeNull(); // C — no score generated
+
+    const auditRows = await prisma.platformAuditLog.findMany({ where: { targetId: mismatched.id, action: "SUBMISSION_SERVER_BACKSTOP_FINALIZED" } });
+    expect(auditRows).toHaveLength(0); // D
+  });
+
+  it("E — the mismatched attempt remains eligible for the real lecturer VOIDED recovery workflow after the (refused) /start call", async () => {
+    const exam = await createTetherRequiredExam(30);
+    const mismatched = await createMismatchedSubmission(exam.id, 30, 60_000);
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const voidRes = await voidRoute.POST(
+      jsonRequest("POST", { reason: "Technical recovery - legacy submission created by previous secure-delivery downgrade", confirm: true }),
+      { params: Promise.resolve({ id: mismatched.id }) },
+    );
+    expect(voidRes.status).toBe(200);
+    const voided = await prisma.submission.findUniqueOrThrow({ where: { id: mismatched.id } });
+    expect(voided.status).toBe("VOIDED");
+  });
+
+  it("F — the scheduled sweep encounters the same mismatched attempt, skips it, and leaves it completely unchanged", async () => {
+    const exam = await createTetherRequiredExam(30);
+    const mismatched = await createMismatchedSubmission(exam.id, 30, 60_000);
+    const before = await prisma.submission.findUniqueOrThrow({ where: { id: mismatched.id } });
+
+    const originalSecret = process.env.OVERDUE_FINALIZATION_SECRET;
+    process.env.OVERDUE_FINALIZATION_SECRET = "test-precedence-secret";
+    try {
+      const res = await internalSweepRoute.POST(
+        new Request("http://test.local/route", { method: "POST", headers: { Authorization: "Bearer test-precedence-secret" } }),
+      );
+      const body = await res.json();
+      expect(body.skippedTechnicalMismatch).toBeGreaterThanOrEqual(1);
+    } finally {
+      process.env.OVERDUE_FINALIZATION_SECRET = originalSecret;
+    }
+
+    const after = await prisma.submission.findUniqueOrThrow({ where: { id: mismatched.id } });
+    expect(after.status).toBe("IN_PROGRESS");
+    expect(after.secureClientPolicySnapshotJson).toEqual(before.secureClientPolicySnapshotJson);
+    expect(after.submittedAt).toBeNull();
+
+    const auditRows = await prisma.platformAuditLog.findMany({ where: { targetId: mismatched.id, action: "SUBMISSION_SERVER_BACKSTOP_FINALIZED" } });
+    expect(auditRows).toHaveLength(0);
+  });
+
+  it("G — a healthy (non-mismatched) overdue TETHER_CLIENT_REQUIRED submission still finalizes normally through /start", async () => {
+    const exam = await createTetherRequiredExam(30);
+    const submission = await createInProgressSubmission({
+      examId: exam.id,
+      durationMins: 30,
+      allowLateSubmit: false,
+      autoSubmitOnTimerEnd: true,
+      tether: true,
+      overdueByMs: 60_000,
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(["SUBMITTED", "GRADED"]).toContain(body.status);
+
+    const fresh = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(fresh.status).not.toBe("IN_PROGRESS");
+  });
+
+  it("H — a healthy overdue STANDARD_WEB submission still finalizes normally (isSecurePolicyMismatchForResume is unconditionally false whenever the current exam isn't TETHER_CLIENT_REQUIRED)", async () => {
+    const { exam } = await createExam({ durationMins: 30, tether: false });
+    const submission = await createInProgressSubmission({
+      examId: exam.id,
+      durationMins: 30,
+      allowLateSubmit: false,
+      autoSubmitOnTimerEnd: true,
+      tether: false,
+      overdueByMs: 60_000,
+    });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(["SUBMITTED", "GRADED"]).toContain(body.status);
+
+    const fresh = await prisma.submission.findUniqueOrThrow({ where: { id: submission.id } });
+    expect(fresh.status).not.toBe("IN_PROGRESS");
+  });
+
+  it("I — mismatch takes precedence however long overdue, regardless of autoSubmitOnTimerEnd=true", async () => {
+    const exam = await createTetherRequiredExam(5);
+    // Wildly overdue — months, not minutes — and autoSubmitOnTimerEnd is
+    // true in the fixture's own frozen timingPolicy (see
+    // createMismatchedSubmission). Must still refuse to finalize.
+    const mismatched = await createMismatchedSubmission(exam.id, 5, 90 * 24 * 60 * 60_000);
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe(SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE);
+
+    const fresh = await prisma.submission.findUniqueOrThrow({ where: { id: mismatched.id } });
+    expect(fresh.status).toBe("IN_PROGRESS");
+  });
+
+  it("J — concurrent /start calls against the same mismatched attempt can never convert it into a genuine academic submission", async () => {
+    const exam = await createTetherRequiredExam(30);
+    const mismatched = await createMismatchedSubmission(exam.id, 30, 60_000);
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) })),
+    );
+    expect(results.every((r) => r.status === 409)).toBe(true);
+
+    const fresh = await prisma.submission.findUniqueOrThrow({ where: { id: mismatched.id } });
+    expect(fresh.status).toBe("IN_PROGRESS");
+    expect(fresh.totalScore).toBeNull();
+    const auditRows = await prisma.platformAuditLog.findMany({ where: { targetId: mismatched.id, action: "SUBMISSION_SERVER_BACKSTOP_FINALIZED" } });
+    expect(auditRows).toHaveLength(0);
   });
 });

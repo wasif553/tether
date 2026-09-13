@@ -11,9 +11,8 @@ import {
   countsTowardAttemptLimit,
   resolveSubmissionTimingPolicy,
   submissionDeadline,
-  shouldServerBackstopFinalize,
 } from "@/lib/assessmentLifecycle";
-import { finalizeSubmission, runPostFinalizationEffects } from "@/lib/submissionFinalization";
+import { finalizeSubmission, runPostFinalizationEffects, evaluateServerBackstopEligibility } from "@/lib/submissionFinalization";
 import { parseSecureSettings, questionPoolsActive } from "@/lib/secureExam";
 import {
   buildOptionOrders,
@@ -231,18 +230,55 @@ export async function POST(
     orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
   });
   if (existingInProgress) {
+    // VOIDED-attempt recovery v1 — see
+    // docs/voided-submission-recovery-v1.md and
+    // isSecurePolicyMismatchForResume's own doc comment
+    // (secureClientPolicy.ts). Detects the exact "cannot securely
+    // resume" condition BEFORE ever computing a Tether-launch redirect
+    // — or, as of the auto-submit server backstop below, BEFORE ever
+    // considering deadline-based auto-finalization either. The exam's
+    // CURRENT configuration demands TETHER_CLIENT_REQUIRED, but THIS
+    // attempt's own frozen policy (captured once, at creation, and
+    // never rewritten) cannot satisfy that requirement — most commonly
+    // a legacy row created while a Tether-required exam had been
+    // silently (pre-fail-closed-fix) downgraded to STANDARD_WEB.
+    // Precedence fix (pre-release audit follow-up): this MUST run
+    // before the expiry backstop, not after — a technically-invalid
+    // attempt is a platform/technical anomaly, never a genuine academic
+    // outcome, however overdue it is or whatever autoSubmitOnTimerEnd
+    // says; auto-finalizing it would silently convert a technical
+    // defect into what looks like a real scored submission and consume
+    // the student's academic attempt. This check is read-only: it never
+    // mutates the snapshot, never voids the attempt automatically, and
+    // never issues a Tether launch against a STANDARD_WEB-flavoured
+    // snapshot. Recovery requires an explicit lecturer/admin action
+    // (POST /api/lecturer/submissions/[id]/void) — this response is
+    // exactly what makes that recovery path reachable.
+    const frozenPolicy = parseSecureClientPolicy(existingInProgress.secureClientPolicySnapshotJson);
+    if (isSecurePolicyMismatchForResume({ currentExamDeliveryMode: settings.deliveryMode, frozenPolicy })) {
+      return NextResponse.json(
+        {
+          error: SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE,
+          code: SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE,
+        },
+        { status: 409 },
+      );
+    }
+
     // Auto-submit server-backstop v1 — see
     // docs/auto-submit-server-backstop-v1.md and
-    // src/lib/submissionFinalization.ts. This is the PRIMARY
-    // fix for the diagnosed defect: a fresh Tether process resuming an
-    // already-overdue IN_PROGRESS attempt previously entered secure-client
-    // reactivation/launch BEFORE the exam-taking page's own client-side
-    // timer ever had a chance to run — so an attempt whose deadline had
-    // already passed could sit IN_PROGRESS indefinitely, with no client
-    // ever reaching the code that would auto-submit it. Checked FIRST,
-    // before the secure-policy-mismatch check and before any
-    // reactivation/launch decision is computed for this attempt, using
-    // ONLY the attempt's own frozen timing policy (never a second
+    // src/lib/submissionFinalization.ts. This is the PRIMARY fix for
+    // the diagnosed defect: a fresh Tether process resuming an
+    // already-overdue IN_PROGRESS attempt previously entered
+    // secure-client reactivation/launch BEFORE the exam-taking page's
+    // own client-side timer ever had a chance to run — so an attempt
+    // whose deadline had already passed could sit IN_PROGRESS
+    // indefinitely, with no client ever reaching the code that would
+    // auto-submit it. Only reached once the secure-policy-mismatch
+    // check above has already ruled out a technically-invalid attempt
+    // (evaluateServerBackstopEligibility re-checks this same condition
+    // internally too, as defense in depth — see its own doc comment),
+    // using ONLY the attempt's own frozen timing policy (never a second
     // deadline computation) — a healthy, unexpired attempt is completely
     // unaffected and proceeds exactly as before this check existed.
     const existingTimingPolicy = resolveSubmissionTimingPolicy({
@@ -251,14 +287,15 @@ export async function POST(
       currentSecureSettings: settings,
     });
     const existingDeadline = submissionDeadline(existingInProgress.startedAt, existingTimingPolicy.durationMins);
-    if (
-      shouldServerBackstopFinalize({
-        status: existingInProgress.status,
-        now: new Date(),
-        deadline: existingDeadline,
-        autoSubmitOnTimerEnd: existingTimingPolicy.autoSubmitOnTimerEnd,
-      })
-    ) {
+    const eligibility = evaluateServerBackstopEligibility({
+      status: existingInProgress.status,
+      now: new Date(),
+      deadline: existingDeadline,
+      autoSubmitOnTimerEnd: existingTimingPolicy.autoSubmitOnTimerEnd,
+      currentExamDeliveryMode: settings.deliveryMode,
+      frozenPolicy,
+    });
+    if (eligibility.eligible) {
       const result = await finalizeSubmission({
         submissionId: existingInProgress.id,
         finalResponses: {},
@@ -293,36 +330,6 @@ export async function POST(
       // here (finalResponses is always {} for a backstop call, and the
       // submission was just read moments ago) — fall through to the
       // existing behavior below only as a defensive, never-expected path.
-    }
-
-    // VOIDED-attempt recovery v1 — see
-    // docs/voided-submission-recovery-v1.md and
-    // isSecurePolicyMismatchForResume's own doc comment
-    // (secureClientPolicy.ts). Detects the exact "cannot securely
-    // resume" condition BEFORE ever computing a Tether-launch redirect
-    // for it: the exam's CURRENT configuration demands
-    // TETHER_CLIENT_REQUIRED, but THIS attempt's own frozen policy
-    // (captured once, at creation, and never rewritten) cannot satisfy
-    // that requirement — most commonly a legacy row created while a
-    // Tether-required exam had been silently (pre-fail-closed-fix)
-    // downgraded to STANDARD_WEB. Without this check, the student would
-    // be redirected to the Tether launch page every time (live settings
-    // say "go to Tether"), which would then reject the manifest every
-    // time (this attempt's own frozen policy says otherwise) — an
-    // infinite retry loop with no distinguishable failure state. This
-    // is read-only: it never mutates the snapshot, never voids the
-    // attempt automatically, and never issues a Tether launch against a
-    // STANDARD_WEB-flavoured snapshot. Recovery requires an explicit
-    // lecturer/admin action (POST /api/lecturer/submissions/[id]/void).
-    const frozenPolicy = parseSecureClientPolicy(existingInProgress.secureClientPolicySnapshotJson);
-    if (isSecurePolicyMismatchForResume({ currentExamDeliveryMode: settings.deliveryMode, frozenPolicy })) {
-      return NextResponse.json(
-        {
-          error: SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE,
-          code: SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE,
-        },
-        { status: 409 },
-      );
     }
 
     const secureClientLaunch = await resolveSecureClientLaunchField({

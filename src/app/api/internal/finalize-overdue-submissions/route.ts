@@ -38,14 +38,26 @@
  * cursor (a new, small piece of durable state), which was deliberately
  * NOT added here to avoid an unreviewed schema change; flagged instead
  * as a known, documented scale limit.
+ *
+ * Precedence fix (pre-release audit follow-up, the confirmed "Browser"
+ * incident) — a technically-invalid attempt (current exam now
+ * TETHER_CLIENT_REQUIRED, but this attempt's own frozen policy cannot
+ * satisfy that requirement — see isSecurePolicyMismatchForResume in
+ * secureClientPolicy.ts) must NEVER be auto-finalized here, however
+ * overdue it is. That class of row belongs to the lecturer VOIDED
+ * recovery workflow, not the deadline backstop. See
+ * evaluateServerBackstopEligibility in submissionFinalization.ts, the
+ * ONE shared decision this route and POST /api/exams/[id]/start's
+ * existing-attempt resume both consult — never duplicated independently.
  */
 import { NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma/client";
 import { parseSecureSettings } from "@/lib/secureExam";
-import { resolveSubmissionTimingPolicy, submissionDeadline, shouldServerBackstopFinalize } from "@/lib/assessmentLifecycle";
-import { finalizeSubmission, runPostFinalizationEffects } from "@/lib/submissionFinalization";
+import { resolveSubmissionTimingPolicy, submissionDeadline } from "@/lib/assessmentLifecycle";
+import { finalizeSubmission, runPostFinalizationEffects, evaluateServerBackstopEligibility } from "@/lib/submissionFinalization";
+import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
 
 const PAGE_SIZE = 200;
 /** Hard ceiling on rows EXAMINED per invocation — bounds work regardless of how large the ineligible prefix is. Comfortably covers this project's entire current/near-term IN_PROGRESS backlog in one call. */
@@ -85,6 +97,13 @@ export async function POST(req: Request) {
   let finalized = 0;
   let alreadyFinalized = 0;
   let failed = 0;
+  // Precedence fix (pre-release audit follow-up) — a technically-invalid
+  // attempt (isSecurePolicyMismatchForResume) must never be
+  // auto-finalized by this sweep; it belongs to the lecturer VOIDED
+  // recovery workflow instead. Counted separately (never touched, never
+  // scored, never audited as server-finalized) so this is observable in
+  // the response/logs without exposing which submission it was.
+  let skippedTechnicalMismatch = 0;
   const startedAtMs = Date.now();
 
   try {
@@ -120,6 +139,7 @@ export async function POST(req: Request) {
           studentId: true,
           startedAt: true,
           examPolicySnapshotJson: true,
+          secureClientPolicySnapshotJson: true,
           exam: { select: { durationMins: true, secureSettings: true } },
         },
       });
@@ -137,13 +157,19 @@ export async function POST(req: Request) {
             currentSecureSettings: settings,
           });
           const deadline = submissionDeadline(candidate.startedAt, timingPolicy.durationMins);
-          const isEligible = shouldServerBackstopFinalize({
+          const frozenPolicy = parseSecureClientPolicy(candidate.secureClientPolicySnapshotJson);
+          const eligibility = evaluateServerBackstopEligibility({
             status: "IN_PROGRESS",
             now: new Date(),
             deadline,
             autoSubmitOnTimerEnd: timingPolicy.autoSubmitOnTimerEnd,
+            currentExamDeliveryMode: settings.deliveryMode,
+            frozenPolicy,
           });
-          if (!isEligible) continue;
+          if (!eligibility.eligible) {
+            if (eligibility.reason === "SECURE_POLICY_MISMATCH") skippedTechnicalMismatch += 1;
+            continue;
+          }
           eligible += 1;
 
           const result = await finalizeSubmission({
@@ -179,10 +205,10 @@ export async function POST(req: Request) {
       if (page.length < PAGE_SIZE) break; // short page — no more rows beyond this one
     }
 
-    return NextResponse.json({ scanned, eligible, finalized, alreadyFinalized, failed });
+    return NextResponse.json({ scanned, eligible, finalized, alreadyFinalized, skippedTechnicalMismatch, failed });
   } catch (err) {
     console.error("[finalize-overdue-submissions] sweep failed", err);
-    return NextResponse.json({ error: "Sweep failed", scanned, eligible, finalized, alreadyFinalized, failed }, { status: 500 });
+    return NextResponse.json({ error: "Sweep failed", scanned, eligible, finalized, alreadyFinalized, skippedTechnicalMismatch, failed }, { status: 500 });
   }
 }
 
