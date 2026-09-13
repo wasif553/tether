@@ -14,16 +14,46 @@
  * Never logs student/exam identifiers on the ordinary/expected path —
  * only aggregate counts. A per-row failure is caught and counted, never
  * allowed to abort the rest of the batch.
+ *
+ * Pre-deployment audit finding: a single fixed
+ * `findMany({ orderBy: startedAt asc, take: N })` re-fetches the EXACT
+ * SAME oldest-N window on every invocation. If those N rows are all
+ * ineligible (autoSubmitOnTimerEnd=false, or still within their own
+ * deadline) and the (N+1)th row IS eligible, that row would never be
+ * reached by any future sweep — a real starvation bug, not merely a
+ * scale edge case. Fixed with bounded KEYSET pagination: this handler
+ * pages forward through IN_PROGRESS rows ordered by (startedAt, id) —
+ * `id` as a stable tie-break — continuing past an ineligible page into
+ * the next one, within ONE invocation, until either the true end of the
+ * IN_PROGRESS set is reached or a hard SCAN_ROW_CEILING/TIME_BUDGET_MS
+ * is hit. This is bounded work (never an unbounded full-table scan) that
+ * still guarantees every IN_PROGRESS row is eventually examined, not
+ * just a static prefix — at this project's actual and realistically
+ * foreseeable scale (a small pilot deployment), SCAN_ROW_CEILING
+ * comfortably covers the entire IN_PROGRESS backlog in a single
+ * invocation. If the total live IN_PROGRESS backlog ever exceeds
+ * SCAN_ROW_CEILING, this invocation alone no longer guarantees reaching
+ * every row (no cursor is persisted across invocations) — a genuinely
+ * unbounded-scale guarantee would need a persisted cross-invocation
+ * cursor (a new, small piece of durable state), which was deliberately
+ * NOT added here to avoid an unreviewed schema change; flagged instead
+ * as a known, documented scale limit.
  */
 import { NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@/generated/prisma/client";
 import { parseSecureSettings } from "@/lib/secureExam";
 import { resolveSubmissionTimingPolicy, submissionDeadline, shouldServerBackstopFinalize } from "@/lib/assessmentLifecycle";
 import { finalizeSubmission, runPostFinalizationEffects } from "@/lib/submissionFinalization";
 
-/** Bounded per-invocation batch — a coarse sweep, never a bulk migration; repeated invocations (the scheduled workflow runs every 5-15 minutes) converge on the full backlog without any single call doing unbounded work. */
-const BATCH_SIZE = 200;
+const PAGE_SIZE = 200;
+/** Hard ceiling on rows EXAMINED per invocation — bounds work regardless of how large the ineligible prefix is. Comfortably covers this project's entire current/near-term IN_PROGRESS backlog in one call. */
+const SCAN_ROW_CEILING = 2000;
+/** Hard ceiling on rows actually FINALIZED per invocation — a coarse sweep, never a bulk migration. */
+const FINALIZE_CEILING = 200;
+/** Wall-clock safety valve, comfortably under this route's own maxDuration below, so a slow run returns its partial counts instead of being killed mid-batch by the platform. */
+const TIME_BUDGET_MS = 20_000;
 
 function isAuthorized(req: Request): boolean {
   const expected = process.env.OVERDUE_FINALIZATION_SECRET;
@@ -55,74 +85,98 @@ export async function POST(req: Request) {
   let finalized = 0;
   let alreadyFinalized = 0;
   let failed = 0;
+  const startedAtMs = Date.now();
 
   try {
-    // Oldest startedAt first — a reasonable, simple proxy for "oldest
-    // deadlines first" (the exact per-attempt deadline depends on each
-    // row's own frozen timing policy, resolved below in application
-    // code, not queryable as a plain column). Candidates only —
-    // eligibility (deadline actually passed + autoSubmitOnTimerEnd) is
-    // re-decided per row via the exact same canonical functions every
-    // other caller uses, never a second deadline implementation.
-    const candidates = await prisma.submission.findMany({
-      where: { status: "IN_PROGRESS" },
-      orderBy: { startedAt: "asc" },
-      take: BATCH_SIZE,
-      select: {
-        id: true,
-        examId: true,
-        studentId: true,
-        startedAt: true,
-        examPolicySnapshotJson: true,
-        exam: { select: { durationMins: true, secureSettings: true } },
-      },
-    });
+    let cursor: { startedAt: Date; id: string } | null = null;
 
-    for (const candidate of candidates) {
-      scanned += 1;
-      try {
-        const settings = parseSecureSettings(candidate.exam.secureSettings);
-        const timingPolicy = resolveSubmissionTimingPolicy({
-          examPolicySnapshotJson: candidate.examPolicySnapshotJson,
-          currentExamDurationMins: candidate.exam.durationMins,
-          currentSecureSettings: settings,
-        });
-        const deadline = submissionDeadline(candidate.startedAt, timingPolicy.durationMins);
-        const isEligible = shouldServerBackstopFinalize({
-          status: "IN_PROGRESS",
-          now: new Date(),
-          deadline,
-          autoSubmitOnTimerEnd: timingPolicy.autoSubmitOnTimerEnd,
-        });
-        if (!isEligible) continue;
-        eligible += 1;
+    while (scanned < SCAN_ROW_CEILING && finalized < FINALIZE_CEILING && Date.now() - startedAtMs < TIME_BUDGET_MS) {
+      // Keyset pagination — strictly "after" the last row processed in
+      // cursor order, so this page can never re-examine a row already
+      // looked at earlier in this same invocation. Ordering by
+      // (startedAt, id) both ways keeps the cursor comparison and the
+      // ORDER BY consistent with each other. Built as its own
+      // explicitly-typed variable (rather than inline) — an inline
+      // conditional-spread `where` here otherwise defeats TypeScript's
+      // inference of `findMany`'s own result type.
+      const where: Prisma.SubmissionWhereInput = {
+        status: "IN_PROGRESS",
+        ...(cursor
+          ? {
+              OR: [
+                { startedAt: { gt: cursor.startedAt } },
+                { startedAt: cursor.startedAt, id: { gt: cursor.id } },
+              ],
+            }
+          : {}),
+      };
+      const page = await prisma.submission.findMany({
+        where,
+        orderBy: [{ startedAt: "asc" }, { id: "asc" }],
+        take: PAGE_SIZE,
+        select: {
+          id: true,
+          examId: true,
+          studentId: true,
+          startedAt: true,
+          examPolicySnapshotJson: true,
+          exam: { select: { durationMins: true, secureSettings: true } },
+        },
+      });
 
-        const result = await finalizeSubmission({
-          submissionId: candidate.id,
-          finalResponses: {},
-          submissionRequestId: null,
-          triggeredBy: "SERVER_BACKSTOP",
-          deadline,
-        });
+      if (page.length === 0) break; // reached the true end of the IN_PROGRESS set
 
-        if (result.kind === "FINALIZED") {
-          finalized += 1;
-          await runPostFinalizationEffects({
-            submissionId: candidate.id,
-            examId: candidate.examId,
-            studentId: candidate.studentId,
-            hasEssay: result.hasEssay,
+      for (const candidate of page) {
+        if (scanned >= SCAN_ROW_CEILING || finalized >= FINALIZE_CEILING || Date.now() - startedAtMs >= TIME_BUDGET_MS) break;
+        scanned += 1;
+        try {
+          const settings = parseSecureSettings(candidate.exam.secureSettings);
+          const timingPolicy = resolveSubmissionTimingPolicy({
+            examPolicySnapshotJson: candidate.examPolicySnapshotJson,
+            currentExamDurationMins: candidate.exam.durationMins,
+            currentSecureSettings: settings,
           });
-        } else if (result.kind === "ALREADY_FINALIZED") {
-          // A concurrent finalizer (a live client, or the /start
-          // backstop) already handled this row — correct, idempotent,
-          // not a failure.
-          alreadyFinalized += 1;
+          const deadline = submissionDeadline(candidate.startedAt, timingPolicy.durationMins);
+          const isEligible = shouldServerBackstopFinalize({
+            status: "IN_PROGRESS",
+            now: new Date(),
+            deadline,
+            autoSubmitOnTimerEnd: timingPolicy.autoSubmitOnTimerEnd,
+          });
+          if (!isEligible) continue;
+          eligible += 1;
+
+          const result = await finalizeSubmission({
+            submissionId: candidate.id,
+            finalResponses: {},
+            submissionRequestId: null,
+            triggeredBy: "SERVER_BACKSTOP",
+            deadline,
+          });
+
+          if (result.kind === "FINALIZED") {
+            finalized += 1;
+            await runPostFinalizationEffects({
+              submissionId: candidate.id,
+              examId: candidate.examId,
+              studentId: candidate.studentId,
+              hasEssay: result.hasEssay,
+            });
+          } else if (result.kind === "ALREADY_FINALIZED") {
+            // A concurrent finalizer (a live client, or the /start
+            // backstop) already handled this row — correct, idempotent,
+            // not a failure.
+            alreadyFinalized += 1;
+          }
+        } catch (err) {
+          failed += 1;
+          console.error("[finalize-overdue-submissions] row failed", { submissionId: candidate.id, error: err instanceof Error ? err.message : String(err) });
         }
-      } catch (err) {
-        failed += 1;
-        console.error("[finalize-overdue-submissions] row failed", { submissionId: candidate.id, error: err instanceof Error ? err.message : String(err) });
       }
+
+      const last = page[page.length - 1];
+      cursor = { startedAt: last.startedAt, id: last.id };
+      if (page.length < PAGE_SIZE) break; // short page — no more rows beyond this one
     }
 
     return NextResponse.json({ scanned, eligible, finalized, alreadyFinalized, failed });
@@ -133,3 +187,4 @@ export async function POST(req: Request) {
 }
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 30;

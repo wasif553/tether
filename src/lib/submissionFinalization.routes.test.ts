@@ -442,6 +442,28 @@ describe("POST /api/internal/finalize-overdue-submissions — scheduled sweep", 
     expect(wrongAuthRes.status).toBe(401);
   });
 
+  it("Q2 — fails closed when the SERVER's own OVERDUE_FINALIZATION_SECRET is unset, even if a caller supplies a plausible-looking bearer token", async () => {
+    delete process.env.OVERDUE_FINALIZATION_SECRET;
+    try {
+      const res = await internalSweepRoute.POST(
+        new Request("http://test.local/route", { method: "POST", headers: { Authorization: "Bearer some-token-someone-guessed-or-leaked" } }),
+      );
+      expect(res.status).toBe(401);
+    } finally {
+      process.env.OVERDUE_FINALIZATION_SECRET = secret;
+    }
+  });
+
+  it("Q3 — a wrong secret of a completely different length never throws (timingSafeEqual's own length-mismatch exception is guarded against) — still a clean 401", async () => {
+    const tooShort = await internalSweepRoute.POST(new Request("http://test.local/route", { method: "POST", headers: { Authorization: "Bearer x" } }));
+    expect(tooShort.status).toBe(401);
+
+    const tooLong = await internalSweepRoute.POST(
+      new Request("http://test.local/route", { method: "POST", headers: { Authorization: `Bearer ${secret}${"x".repeat(500)}` } }),
+    );
+    expect(tooLong.status).toBe(401);
+  });
+
   it("G/O — a scheduled sweep finalizes an overdue submission the same way the /start backstop would, and is idempotent across repeated invocations", async () => {
     const { exam } = await createExam({ durationMins: 30, tether: false });
     const submission = await createInProgressSubmission({
@@ -482,5 +504,48 @@ describe("POST /api/internal/finalize-overdue-submissions — scheduled sweep", 
     expect(typeof body.failed).toBe("number");
     expect(body.submissionId).toBeUndefined();
     expect(body.studentId).toBeUndefined();
+  });
+
+  it("starvation fix — an eligible row sitting BEHIND a block of 205 older, ineligible rows (autoSubmitOnTimerEnd=false) is still reached and finalized within a single sweep, past the old fixed 200-row window", async () => {
+    // Each row uses its own exam (same student) so the unique
+    // (examId, studentId, attemptNumber) constraint never collides —
+    // ordered strictly oldest-first via overdueByMs so the 206th row is
+    // genuinely the last one a naive `ORDER BY startedAt ASC LIMIT 200`
+    // would never reach.
+    const ineligibleIds: string[] = [];
+    for (let i = 0; i < 205; i++) {
+      const { exam } = await createExam({ durationMins: 5, tether: false });
+      const submission = await createInProgressSubmission({
+        examId: exam.id,
+        durationMins: 5,
+        allowLateSubmit: true,
+        autoSubmitOnTimerEnd: false, // ineligible forever, by design
+        tether: false,
+        overdueByMs: (300 - i) * 60_000, // strictly older than every row that follows
+      });
+      ineligibleIds.push(submission.id);
+    }
+    const { exam: targetExam } = await createExam({ durationMins: 5, tether: false });
+    const targetSubmission = await createInProgressSubmission({
+      examId: targetExam.id,
+      durationMins: 5,
+      allowLateSubmit: false,
+      autoSubmitOnTimerEnd: true, // eligible — this is the row that must be reached
+      tether: false,
+      overdueByMs: 60_000, // the MOST RECENT startedAt of the whole set — sorts last
+    });
+
+    const req = () => new Request("http://test.local/route", { method: "POST", headers: { Authorization: `Bearer ${secret}` } });
+    const res = await internalSweepRoute.POST(req());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.scanned).toBeGreaterThan(200); // proves it paged past the old fixed window
+
+    const fresh = await prisma.submission.findUniqueOrThrow({ where: { id: targetSubmission.id } });
+    expect(fresh.status).not.toBe("IN_PROGRESS");
+
+    // The 205 ineligible rows must remain completely untouched.
+    const stillInProgress = await prisma.submission.count({ where: { id: { in: ineligibleIds }, status: "IN_PROGRESS" } });
+    expect(stillInProgress).toBe(205);
   });
 });

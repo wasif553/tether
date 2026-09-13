@@ -290,12 +290,27 @@ export async function finalizeSubmission(params: {
 /**
  * Post-transaction side effects — called ONLY when the caller's own
  * finalizeSubmission() result has didFinalize===true (the transaction
- * that actually performed IN_PROGRESS -> SUBMITTED/GRADED), so a
- * concurrent loser (ALREADY_FINALIZED) never re-runs any of these.
- * Shared by every trigger so student-submit and server-backstop
- * finalization never diverge in what happens afterward — the one
- * deliberate difference is request/IP-attributed evidence, which only
- * ever runs for a genuine student HTTP request (see `req` below).
+ * that actually performed IN_PROGRESS -> SUBMITTED/GRADED, ALREADY
+ * COMMITTED by the time this runs), so a concurrent loser
+ * (ALREADY_FINALIZED) never re-runs any of these. Shared by every
+ * trigger so student-submit and server-backstop finalization never
+ * diverge in what happens afterward — the one deliberate difference is
+ * request/IP-attributed evidence, which only ever runs for a genuine
+ * student HTTP request (see `req` below).
+ *
+ * Pre-deployment audit finding: every step here is now individually
+ * isolated (try/catch, never a bare `await` on a promise that can
+ * reject) and this function itself NEVER throws. Before this, the
+ * network-evidence lookup below was a bare, unguarded `await` — if it
+ * (or anything else here) had thrown, the exception would propagate to
+ * the caller's own outer try/catch (POST /submit's), which returns a
+ * misleading 500 "Failed to submit exam" to the client EVEN THOUGH the
+ * finalization transaction had already committed IN_PROGRESS ->
+ * SUBMITTED/GRADED — the committed DB state is authoritative regardless
+ * of what happens here, and the HTTP response must never contradict it.
+ * A retry after such a false-500 is still safe: finalizeSubmission's own
+ * ALREADY_FINALIZED branch (never re-grades, never re-runs these
+ * effects) is exactly what makes it safe.
  */
 export async function runPostFinalizationEffects(params: {
   submissionId: string;
@@ -306,54 +321,81 @@ export async function runPostFinalizationEffects(params: {
   req?: Request;
 }): Promise<void> {
   const { submissionId, examId, studentId, hasEssay, req } = params;
+  const log = (step: string, err: unknown) =>
+    console.error(`[runPostFinalizationEffects] ${step} failed (non-critical — finalization already committed)`, { submissionId, error: err instanceof Error ? err.message : String(err) });
 
   if (!hasEssay) {
-    pushGradeToCanvas(submissionId).catch(console.error);
+    pushGradeToCanvas(submissionId).catch((err) => log("pushGradeToCanvas", err));
   }
 
-  recordSimpleActivityEvent({ submissionId, eventType: "ATTEMPT_SUBMITTED" }).catch(() => {});
+  recordSimpleActivityEvent({ submissionId, eventType: "ATTEMPT_SUBMITTED" }).catch((err) => log("recordSimpleActivityEvent", err));
+
   // Ensures an expired/finalized attempt cannot remain — or re-enter —
   // logically ACTIVE: the same teardown the student-submit path has
   // always run, now shared so a server-backstop finalization closes the
   // attempt's session binding identically. Awaited (unlike the
-  // fire-and-forget telemetry/passback calls around it) — "an expired
-  // attempt cannot remain ACTIVE" is a guarantee this function must
-  // actually keep before returning, not a best-effort side effect racing
-  // the caller's own response.
-  await endExamAttemptSessionsForSubmission(submissionId).catch(() => {});
+  // fire-and-forget telemetry/passback calls around it) so its outcome
+  // is actually observable here, not racing the caller's own response —
+  // but note the REAL security boundary is the already-committed
+  // `status` transition itself: every content-gated route
+  // (isSubmissionContentAccessible et al.) checks submission.status, so
+  // content access is blocked the instant the transaction above commits,
+  // unconditionally of whether this cleanup step also converges.
+  // endExamAttemptSessionsForSubmission already swallows its own errors
+  // internally (never rejects), so failure here would otherwise be
+  // silent — the explicit post-check below is what actually makes a
+  // non-convergence observable, satisfying "failure handling is
+  // explicit" without weakening or duplicating that function's own
+  // best-effort contract.
+  try {
+    await endExamAttemptSessionsForSubmission(submissionId);
+    const stillActive = await prisma.examAttemptSession.count({ where: { submissionId, status: { not: "ENDED" } } });
+    if (stillActive > 0) {
+      console.error("[runPostFinalizationEffects] session teardown did not converge — submission is finalized, but stale ExamAttemptSession row(s) remain non-ENDED", { submissionId, stillActive });
+    }
+  } catch (err) {
+    log("endExamAttemptSessionsForSubmission", err);
+  }
 
   if (req) {
-    const startEvidence = await prisma.networkEvidence.findFirst({
-      where: { submissionId, source: "EXAM_START" },
-      orderBy: { createdAt: "asc" },
-      select: { ipAddress: true, country: true, institutionId: true },
-    });
-    captureNetworkEvidence({
-      req,
-      submissionId,
-      examId,
-      studentId,
-      institutionId: startEvidence?.institutionId ?? "",
-      source: "EXAM_SUBMIT",
-      priorIp: startEvidence?.ipAddress ?? null,
-      priorCountry: startEvidence?.country ?? null,
-    }).catch(() => {});
+    try {
+      const startEvidence = await prisma.networkEvidence.findFirst({
+        where: { submissionId, source: "EXAM_START" },
+        orderBy: { createdAt: "asc" },
+        select: { ipAddress: true, country: true, institutionId: true },
+      });
+      captureNetworkEvidence({
+        req,
+        submissionId,
+        examId,
+        studentId,
+        institutionId: startEvidence?.institutionId ?? "",
+        source: "EXAM_SUBMIT",
+        priorIp: startEvidence?.ipAddress ?? null,
+        priorCountry: startEvidence?.country ?? null,
+      }).catch((err) => log("captureNetworkEvidence", err));
 
-    const submitIp = getClientIpFromRequest(req);
-    if (startEvidence?.country && submitIp && startEvidence.ipAddress !== submitIp) {
-      await prisma.integrityEvent
-        .create({
-          data: {
-            submissionId,
-            examId,
-            studentId,
-            eventType: "MANUAL_WARNING",
-            severity: "LOW",
-            message: "Network address changed between exam open and submission. Review network evidence for context.",
-            occurredAt: new Date(),
-          },
-        })
-        .catch(() => {});
+      const submitIp = getClientIpFromRequest(req);
+      if (startEvidence?.country && submitIp && startEvidence.ipAddress !== submitIp) {
+        await prisma.integrityEvent
+          .create({
+            data: {
+              submissionId,
+              examId,
+              studentId,
+              eventType: "MANUAL_WARNING",
+              severity: "LOW",
+              message: "Network address changed between exam open and submission. Review network evidence for context.",
+              occurredAt: new Date(),
+            },
+          })
+          .catch((err) => log("networkChangeIntegrityEvent", err));
+      }
+    } catch (err) {
+      // Guards the networkEvidence.findFirst lookup itself — the one
+      // previously-unguarded bare await that could otherwise propagate a
+      // rejection out of this whole function.
+      log("networkEvidenceLookup", err);
     }
   }
 }
