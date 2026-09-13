@@ -102,6 +102,17 @@ export async function GET(
     return NextResponse.json({ ok: false, reason: "closed" });
   }
 
+  // VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+  // The fallback query below must never resolve to a VOIDED row: VOIDED
+  // never counts toward maxAttempts (see countsTowardAttemptLimit in
+  // assessmentLifecycle.ts) and is never the "current" attempt for the
+  // student to resume — treating it as `existingSubmission` here would
+  // make the join page (which redirects to `existingSubmission.id`
+  // unconditionally) bounce the student to a read-only "this attempt was
+  // voided" page instead of letting them reach the normal acknowledgement/
+  // start screen for the fresh attempt they are actually entitled to.
+  // SUBMITTED/GRADED are deliberately left exactly as before — this fix
+  // only changes VOIDED semantics, nothing else.
   const existingSubmission =
     (await prisma.submission.findFirst({
       where: { examId: id, studentId: session.user.id, status: "IN_PROGRESS" },
@@ -109,7 +120,7 @@ export async function GET(
       select: { id: true, status: true, attemptNumber: true },
     })) ??
     (await prisma.submission.findFirst({
-      where: { examId: id, studentId: session.user.id },
+      where: { examId: id, studentId: session.user.id, status: { not: "VOIDED" } },
       orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
       select: { id: true, status: true, attemptNumber: true },
     }));
