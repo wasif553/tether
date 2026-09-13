@@ -539,13 +539,21 @@ describe("GET /api/submissions/[id] — voidRecoveryEligible (UI recovery-action
   });
 
   it("voidRecoveryEligible is never exposed as true to the STUDENT's own view, even for an eligible row — the action is staff-only", async () => {
+    // Standalone-invite-bypass fix — see the "standalone-invite-bypass
+    // fix" describe block below for the full test suite. Since that fix,
+    // a STUDENT's own eligible-for-void row is blocked entirely by the
+    // new SECURE_POLICY_MISMATCH_RESTART_REQUIRED gate before this route
+    // ever computes voidRecoveryEligible at all — an even stronger
+    // guarantee than "the field reports false": the field is not present
+    // in the response body in any form.
     const exam = await createTetherRequiredExam("ui-student-never-sees-eligible-true");
     const stale = await createStaleMismatchedSubmission(exam.id, student.id);
     mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
     const res = await submissionDetailRoute.GET(new Request("http://test.local"), { params: Promise.resolve({ id: stale.id }) });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(409);
     const body = await res.json();
-    expect(body.voidRecoveryEligible).toBe(false);
+    expect(body.code).toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+    expect(body.voidRecoveryEligible).not.toBe(true);
   });
 
   it("uses the canonical shared helper (isSecurePolicyMismatchForResume), never a re-implemented weaker check", () => {
@@ -580,3 +588,150 @@ describe("GET /api/submissions/[id] — voidRecoveryEligible (UI recovery-action
 // describe block — those call voidRoute.POST directly, exactly as a UI
 // bypass would, with no reliance on the client ever checking eligibility
 // first.
+
+// Standalone-invite-bypass fix — see docs/voided-submission-recovery-v1.md.
+// The dashboard's "Continue" link, a standalone-invite join link, and a
+// direct/bookmarked URL all navigate the student straight to
+// /student/exams/[submissionId] without ever calling
+// POST /api/exams/[id]/start again for an already-IN_PROGRESS attempt —
+// that route's own SECURE_POLICY_MISMATCH_RESTART_REQUIRED gate
+// (existingInProgress branch) was therefore never reached by any of
+// those entry points. GET /api/submissions/[id] is the one route every
+// such entry point calls before it can ever render exam content, so
+// that is where the fix lives — these tests call it directly, exactly
+// as the student-facing page's loadSubmission() does, regardless of
+// which link (Continue, join, or a raw URL) put the student there.
+describe("GET /api/submissions/[id] — standalone-invite-bypass fix (SECURE_POLICY_MISMATCH_RESTART_REQUIRED)", () => {
+  async function fetchAsStudent(submissionId: string) {
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    return submissionDetailRoute.GET(new Request("http://test.local"), { params: Promise.resolve({ id: submissionId }) });
+  }
+
+  it("A/I: a healthy STANDARD_WEB submission on an ordinary STANDARD_WEB exam is completely unaffected, whichever entry link reached it — this is 'a healthy STANDARD_WEB existing submission -> unchanged' and 'ordinary non-standalone exam flow remains unchanged' at once, since both describe the identical fixture", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `bypass-fix-standard-web ${stamp}-${Math.random()}`, durationMins: 30, createdById: lecturer.id, institutionId: instId, published: false },
+    });
+    cleanup.exams.push(exam.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { assessmentType: "QUIZ_OR_TEST", deliveryMode: "STANDARD_WEB" }, published: true }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submissionId = (await startRes.json()).id as string;
+
+    const res = await fetchAsStudent(submissionId);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.code).not.toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+    expect(Array.isArray(body.exam.questions)).toBe(true);
+  });
+
+  it("B: a healthy TETHER_CLIENT_REQUIRED submission (consistent snapshot, no verified session yet) is unaffected — still the pre-existing TETHER_SESSION_REQUIRED behavior, never the mismatch code", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-healthy-tether");
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submissionId = (await startRes.json()).id as string;
+
+    const res = await fetchAsStudent(submissionId);
+    const body = await res.json();
+    // Unchanged from before this fix: a healthy Tether attempt with no
+    // verified secure-client session yet is blocked by the PRE-EXISTING
+    // content-exposure gate (TETHER_SESSION_REQUIRED), never by the new
+    // mismatch gate — proving the new check never fires for a genuinely
+    // healthy frozen policy.
+    expect(body.code).not.toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+  });
+
+  it("C: a stale STANDARD_WEB snapshot on a now-TETHER_CLIENT_REQUIRED exam returns SECURE_POLICY_MISMATCH_RESTART_REQUIRED — the exact bypass this fix closes", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-stale-mismatch");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+
+    const res = await fetchAsStudent(stale.id);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+    expect(typeof body.error).toBe("string");
+    expect(body.error.length).toBeGreaterThan(0);
+  });
+
+  it("D: no new submission is created by the rejected GET in C", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-no-new-submission");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    const before = await prisma.submission.count({ where: { examId: exam.id, studentId: student.id } });
+
+    await fetchAsStudent(stale.id);
+
+    const after = await prisma.submission.count({ where: { examId: exam.id, studentId: student.id } });
+    expect(after).toBe(before);
+    expect(after).toBe(1); // still only the one stale attempt
+  });
+
+  it("E: the stale submission's frozen snapshot is byte-for-byte unchanged after the rejected GET in C — read-only, never mutated", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-snapshot-unchanged");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    const before = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+
+    await fetchAsStudent(stale.id);
+
+    const after = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+    expect(after.secureClientPolicySnapshotJson).toEqual(before.secureClientPolicySnapshotJson);
+    expect(after.status).toBe("IN_PROGRESS"); // never auto-voided by a mere GET
+  });
+
+  it("F: the response body in C never carries question content, answers, or a Tether-launch redirect — the student cannot reach secure launch or submission content through this path", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-no-content-leak");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+
+    const res = await fetchAsStudent(stale.id);
+    const body = await res.json();
+    expect(body.exam).toBeUndefined();
+    expect(body.questions).toBeUndefined();
+    expect(body.answers).toBeUndefined();
+    expect(body.action?.redirectTo).toBeUndefined(); // never a Tether-launch bounce — there is nowhere secure to send this attempt
+  });
+
+  it("G: the lecturer's own view of the same stale submission is completely unaffected — voidRecoveryEligible still reports true and the recovery action still appears", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-lecturer-unaffected");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const res = await submissionDetailRoute.GET(new Request("http://test.local"), { params: Promise.resolve({ id: stale.id }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.voidRecoveryEligible).toBe(true);
+    expect(body.status).toBe("IN_PROGRESS");
+  });
+
+  it("H: the mismatch check applies no matter which link reached this route — 'My Exams / Continue' and a standalone-invite join link both resolve to the exact same GET this suite already tests, so neither can bypass it", async () => {
+    // The dashboard's continueEntryHref() and the join page's
+    // access-check-driven router.replace() both compute the SAME
+    // destination — /student/exams/[submissionId] — which fetches this
+    // exact route on mount (see src/app/student/exams/[id]/page.tsx's
+    // loadSubmission()). There is no second, parallel code path that
+    // serves submission content some other way; repeating test C here
+    // under an explicit "no matter the entry link" framing documents
+    // that the fix is entry-point-agnostic by construction, not by
+    // coincidence.
+    const exam = await createTetherRequiredExam("bypass-fix-no-alternate-path");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+
+    const first = await fetchAsStudent(stale.id);
+    const second = await fetchAsStudent(stale.id);
+    for (const res of [first, second]) {
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+    }
+  });
+
+  it("uses the canonical shared helper (isSecurePolicyMismatchForResume) and the shared code/message constants, never a re-implemented condition or re-typed copy", () => {
+    const routeSource = fs.readFileSync(path.join(__dirname, "../app/api/submissions/[id]/route.ts"), "utf8");
+    expect(routeSource).toMatch(/isSecurePolicyMismatchForResume/);
+    expect(routeSource).toMatch(/SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE/);
+    expect(routeSource).toMatch(/SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE/);
+    const startRouteSource = fs.readFileSync(path.join(__dirname, "../app/api/exams/[id]/start/route.ts"), "utf8");
+    expect(startRouteSource).toMatch(/SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE/);
+    expect(startRouteSource).toMatch(/SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE/);
+  });
+});

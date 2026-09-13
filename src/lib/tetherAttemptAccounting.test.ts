@@ -345,7 +345,15 @@ describe("CHECK 4 — migration backfill semantics", () => {
       data: {
         examId: exam.id,
         studentId: student.id,
-        secureClientPolicySnapshotJson: { deliveryMode: "TETHER_CLIENT_REQUIRED" },
+        // Standalone-invite-bypass fix (see voidedSubmissionRecovery.routes.test.ts) —
+        // GET /api/submissions/[id] now also checks isSecurePolicyMismatchForResume,
+        // which requires a genuinely internally-consistent "Tether-secure" frozen
+        // policy (requireVerifiedClient/allowedClientTypes), not deliveryMode alone.
+        // This fixture represents a real pre-v1.7.4 HEALTHY Tether attempt (see the
+        // verified secureClientSession created below), so it must be a complete,
+        // consistent snapshot — a bare `{ deliveryMode }` would (correctly) now read
+        // as an unresumable mismatch, which is not what this test is about.
+        secureClientPolicySnapshotJson: { deliveryMode: "TETHER_CLIENT_REQUIRED", requireVerifiedClient: true, allowedClientTypes: ["TETHER_SECURE_CLIENT"] },
         activatedAt: null, // pre-migration state — this IS the row the migration's backfill exists to protect
         startedAt: legacyStartedAt,
         status: "IN_PROGRESS",

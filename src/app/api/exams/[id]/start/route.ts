@@ -25,6 +25,8 @@ import {
   isTetherRequiredDeliveryUnavailable,
   parseSecureClientPolicy,
   isSecurePolicyMismatchForResume,
+  SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE,
+  SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE,
   DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
   DEFAULT_HEARTBEAT_GRACE_SECONDS,
   type DeliveryMode,
@@ -244,9 +246,8 @@ export async function POST(
     if (isSecurePolicyMismatchForResume({ currentExamDeliveryMode: settings.deliveryMode, frozenPolicy })) {
       return NextResponse.json(
         {
-          error:
-            "This exam attempt cannot be securely resumed because its security settings no longer match this exam's current requirements. Your existing answers and activity are preserved and have not been lost. Please contact your lecturer or institution administrator to restart this attempt.",
-          code: "SECURE_POLICY_MISMATCH_RESTART_REQUIRED",
+          error: SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE,
+          code: SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE,
         },
         { status: 409 },
       );

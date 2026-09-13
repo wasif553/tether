@@ -368,6 +368,20 @@ export function isSecurePolicyMismatchForResume(params: { currentExamDeliveryMod
   return params.currentExamDeliveryMode === "TETHER_CLIENT_REQUIRED" && !isFrozenPolicyTetherSecure(params.frozenPolicy);
 }
 
+/**
+ * VOIDED-attempt recovery v1 — the single source of the typed code and
+ * student-facing copy for the isSecurePolicyMismatchForResume condition.
+ * Every server boundary that can reject a resume for this reason
+ * (POST /api/exams/[id]/start, GET /api/submissions/[id]) returns this
+ * exact pair — never a re-typed literal — so the client-side handling in
+ * both the exam-start page and the exam-taking page can key off one
+ * constant, and the wording shown to the student can never drift between
+ * the two entry points.
+ */
+export const SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE = "SECURE_POLICY_MISMATCH_RESTART_REQUIRED" as const;
+export const SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE =
+  "This exam attempt cannot be securely resumed because its security settings no longer match this exam's current requirements. Your existing answers and activity are preserved and have not been lost. Please contact your lecturer or institution administrator to restart this attempt.";
+
 function defaultAllowedClientTypesFor(mode: DeliveryMode): ClientType[] {
   if (mode === "SEB_OPTIONAL" || mode === "SEB_REQUIRED") return ["SAFE_EXAM_BROWSER"];
   if (mode === "TETHER_CLIENT_OPTIONAL" || mode === "TETHER_CLIENT_REQUIRED") return ["TETHER_SECURE_CLIENT"];
