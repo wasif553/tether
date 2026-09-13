@@ -22,6 +22,22 @@ internal static class NativeMethods
     public const int VK_RWIN = 0x5C;
     public const int VK_CONTROL = 0x11;
     public const int VK_ESCAPE = 0x1B;
+    public const int VK_TAB = 0x09;
+
+    /// <summary>
+    /// Windows Hardening v1.8.1, Phase C — bit 5 of KBDLLHOOKSTRUCT.flags:
+    /// "The ALT key is pressed" for THIS event's own context, sourced
+    /// directly from the same struct vkCode/flags are already read from
+    /// (see KeyboardHook.cs) — no extra Win32 call, no new mutable state.
+    /// Preferred over GetAsyncKeyState(VK_MENU) (the pattern ctrlHeld
+    /// already uses for Ctrl) because it is the exact per-event context
+    /// Windows itself attaches to the keystroke being classified, rather
+    /// than a separate, independently-timed poll of live global key state;
+    /// for the Tab/Escape-while-Alt-held cases this class only ever
+    /// classifies, Alt is necessarily already down by the time Tab/Escape
+    /// arrives, so this flag is always populated correctly for our use.
+    /// </summary>
+    public const uint LLKHF_ALTDOWN = 0x20;
 
     /// <summary>Custom thread messages posted from the pipe-handling thread to the message-loop thread — ARM/DISARM must only ever touch SetWindowsHookEx/UnhookWindowsHookEx from the thread that owns the hook and its message queue.</summary>
     public const uint WM_APP = 0x8000;

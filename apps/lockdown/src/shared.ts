@@ -285,7 +285,7 @@
 // detection, TeamViewer/screen-share detection, camera/phone/second-
 // person detection, the content-access lease, or the secure-activation
 // handshake.
-export const LOCKDOWN_VERSION = "1.8.0";
+export const LOCKDOWN_VERSION = "1.8.1";
 
 // Primary marker for new builds. Older packaged installs may still send
 // the legacy `SESLockdown/${version}` suffix — see

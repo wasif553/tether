@@ -33,7 +33,12 @@ public class ParentLivenessWatchStructureTests
         var dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
         var path = Path.GetFullPath(Path.Combine(dir, "..", "..", "..", "..", "Program.cs"));
         Assert.True(File.Exists(path), $"Could not locate Program.cs at {path}");
-        return File.ReadAllText(path);
+        // Normalize to LF before returning — this checkout has
+        // core.autocrlf=true, so the file on disk has CRLF line endings,
+        // but every literal "\n    }\n"-style marker search below only
+        // cares about the C# source's actual structure, never about which
+        // line-ending convention the working tree happens to use.
+        return File.ReadAllText(path).Replace("\r\n", "\n");
     }
 
     [Fact]

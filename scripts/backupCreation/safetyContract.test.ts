@@ -124,9 +124,9 @@ describe("[19] RPO/RTO remain uncommitted", () => {
 });
 
 describe("[20] product-name/release-metadata files are not modified by this task", () => {
-  it("apps/lockdown/src/shared.ts still identifies as v1.8.0, unchanged by this (Backup Creation v1) task", () => {
+  it("apps/lockdown/src/shared.ts still identifies as v1.8.1, unchanged by this (Backup Creation v1) task", () => {
     const shared = read("apps/lockdown/src/shared.ts");
-    expect(shared).toMatch(/LOCKDOWN_VERSION = "1\.8\.0"/);
+    expect(shared).toMatch(/LOCKDOWN_VERSION = "1\.8\.1"/);
   });
 
   it("src/lib/tetherReleaseMetadata.ts still identifies the release candidate as v1.7.4, unchanged", () => {

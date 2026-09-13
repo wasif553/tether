@@ -3,24 +3,33 @@ using static TetherKeyboardHelper.NativeMethods;
 namespace TetherKeyboardHelper;
 
 /// <summary>
-/// Tether Windows Hardening v1.8.0, Phase A+B — installs/removes exactly
-/// one WH_KEYBOARD_LL hook and decides, per keystroke, whether to swallow
-/// it (never call CallNextHookEx) or pass it through.
+/// Tether Windows Hardening v1.8.0/v1.8.1, Phase A+B+C — installs/removes
+/// exactly one WH_KEYBOARD_LL hook and decides, per keystroke, whether to
+/// swallow it (never call CallNextHookEx) or pass it through.
 ///
-/// Scope for THIS phase only, per the task's explicit instructions:
+/// Scope, per the task's explicit instructions across both phases:
 ///   - Left Windows key (VK_LWIN) and Right Windows key (VK_RWIN) — both
 ///     keydown AND keyup are swallowed together (see "no stuck modifier"
 ///     note below). This alone also prevents Win+Tab, Win+D, Win+M,
 ///     Win+R, Win+E, etc., since none of those combos can begin without
 ///     the Windows-key-down that starts them ever reaching the OS shell.
-///   - Ctrl+Esc — only the Esc key is swallowed, and only while Ctrl is
-///     currently down (GetAsyncKeyState); Ctrl's own key events are never
-///     touched, so Ctrl+C/Ctrl+V and every other ordinary Ctrl shortcut
-///     the exam page needs keeps working normally.
-/// Explicitly NOT handled here (deferred to a later phase, per the task):
-/// Alt+Tab, Alt+Esc, Win+Tab as a *distinct* rule (it is only ever
-/// suppressed as a side effect of swallowing the Windows key itself),
-/// virtual-desktop shortcuts beyond that same side effect.
+///   - Ctrl+Esc / Alt+Esc — only the Esc key is swallowed, and only on
+///     keydown, while Ctrl OR Alt is currently held; Ctrl's/Alt's own key
+///     events are never touched, so Ctrl+C/Ctrl+V and every other
+///     ordinary Ctrl/Alt shortcut the exam page needs keeps working
+///     normally.
+///   - Phase C (v1.8.1) — Tab while Alt is held, both keydown AND keyup
+///     swallowed together (same shape as the Windows-key rule). Alt
+///     itself is read from the event's own LLKHF_ALTDOWN context flag
+///     (see NativeMethods.cs), not swallowed or otherwise touched, so
+///     this uniformly covers Alt+Tab, Shift+Alt+Tab, and Ctrl+Alt+Tab
+///     without needing to special-case Shift or Ctrl at all.
+/// Explicitly NOT handled here: Win+Tab as a *distinct* rule (it is only
+/// ever suppressed as a side effect of swallowing the Windows key
+/// itself), virtual-desktop shortcuts beyond that same side effect, and
+/// any Alt combination other than Tab/Esc (e.g. Alt+F4 is governed
+/// entirely by the separate window-Close-protection mechanism, not this
+/// hook).
 ///
 /// Ctrl+Alt+Delete is never inspected or referenced anywhere in this
 /// file — the Secure Attention Sequence is intercepted by Windows session
@@ -29,13 +38,15 @@ namespace TetherKeyboardHelper;
 ///
 /// "Stuck modifier" safety: this hook only ever suppresses a key in
 /// BOTH-edges-together fashion (WM_(SYS)KEYDOWN and WM_(SYS)KEYUP for the
-/// exact same key), or (for Ctrl+Esc) suppresses a key that carries no
-/// down/up "is this modifier currently held" state of its own (Escape is
+/// exact same key — Windows key, and Phase C's Tab-while-Alt rule), or
+/// (for Ctrl+Esc/Alt+Esc) suppresses a key that carries no down/up "is
+/// this modifier currently held" state of its own (Escape, like Tab, is
 /// not a modifier key). Removing the hook (Unarm/process exit) at any
 /// point — including mid-press — can therefore never leave Windows
 /// believing Ctrl, Alt, Shift, or the Windows key itself is stuck down:
-/// the one key this hook ever partially observes asymmetrically (Escape)
-/// has no "held" state for a stray unpaired keyup to corrupt.
+/// the two keys this hook ever partially/asymmetrically observes
+/// (Escape; and Alt, which is only ever READ, never swallowed) have no
+/// swallowed "held" state for a stray unpaired keyup to corrupt.
 /// </summary>
 internal sealed class KeyboardHook
 {
@@ -92,6 +103,11 @@ internal sealed class KeyboardHook
             bool isKeyDown = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
             bool isKeyUp = message == WM_KEYUP || message == WM_SYSKEYUP;
             bool ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+            // Windows Hardening v1.8.1, Phase C — per-event Alt context
+            // from the struct itself (see NativeMethods.LLKHF_ALTDOWN's
+            // own doc comment for why this, rather than
+            // GetAsyncKeyState(VK_MENU), is used for Alt specifically).
+            bool altHeld = (data.flags & LLKHF_ALTDOWN) != 0;
 
             // Windows Hardening v1.8.0 physical-test diagnosis follow-up —
             // item "record whether VK_LWIN / VK_RWIN events are actually
@@ -100,18 +116,19 @@ internal sealed class KeyboardHook
             // regardless of what happens next — the single most direct
             // way to distinguish "hook never sees the key at all" (Case B)
             // from "hook sees it but a classification/return-value bug
-            // lets it through anyway".
-            if (data.vkCode == VK_LWIN || data.vkCode == VK_RWIN || data.vkCode == VK_ESCAPE)
+            // lets it through anyway". Extended in v1.8.1 to also cover
+            // VK_TAB (Phase C) and altHeld, for the same diagnostic reason.
+            if (data.vkCode == VK_LWIN || data.vkCode == VK_RWIN || data.vkCode == VK_ESCAPE || data.vkCode == VK_TAB)
             {
                 HelperDiagnosticLog.Log(
                     "key event observed",
-                    $"vkCode=0x{data.vkCode:X2} isKeyDown={isKeyDown} isKeyUp={isKeyUp} ctrlHeld={ctrlHeld}");
+                    $"vkCode=0x{data.vkCode:X2} isKeyDown={isKeyDown} isKeyUp={isKeyUp} ctrlHeld={ctrlHeld} altHeld={altHeld}");
             }
 
             // All classification logic lives in the pure, directly unit-
             // tested KeyClassifier — this callback only supplies the live
-            // Win32 facts (vkCode/edge/ctrlHeld) and acts on the verdict.
-            if (KeyClassifier.ShouldSwallow(data.vkCode, isKeyDown, isKeyUp, ctrlHeld))
+            // Win32 facts (vkCode/edge/ctrlHeld/altHeld) and acts on the verdict.
+            if (KeyClassifier.ShouldSwallow(data.vkCode, isKeyDown, isKeyUp, ctrlHeld, altHeld))
             {
                 HelperDiagnosticLog.Log("key event SWALLOWED", $"vkCode=0x{data.vkCode:X2}");
                 return 1;
