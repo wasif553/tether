@@ -5,7 +5,15 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 import { captureNetworkEvidence } from "@/lib/networkEvidence";
-import { canCreateAttempt, nextAttemptNumber, countsTowardAttemptLimit } from "@/lib/assessmentLifecycle";
+import {
+  canCreateAttempt,
+  nextAttemptNumber,
+  countsTowardAttemptLimit,
+  resolveSubmissionTimingPolicy,
+  submissionDeadline,
+  shouldServerBackstopFinalize,
+} from "@/lib/assessmentLifecycle";
+import { finalizeSubmission, runPostFinalizationEffects } from "@/lib/submissionFinalization";
 import { parseSecureSettings, questionPoolsActive } from "@/lib/secureExam";
 import {
   buildOptionOrders,
@@ -223,6 +231,70 @@ export async function POST(
     orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
   });
   if (existingInProgress) {
+    // Auto-submit server-backstop v1 — see
+    // docs/auto-submit-server-backstop-v1.md and
+    // src/lib/submissionFinalization.ts. This is the PRIMARY
+    // fix for the diagnosed defect: a fresh Tether process resuming an
+    // already-overdue IN_PROGRESS attempt previously entered secure-client
+    // reactivation/launch BEFORE the exam-taking page's own client-side
+    // timer ever had a chance to run — so an attempt whose deadline had
+    // already passed could sit IN_PROGRESS indefinitely, with no client
+    // ever reaching the code that would auto-submit it. Checked FIRST,
+    // before the secure-policy-mismatch check and before any
+    // reactivation/launch decision is computed for this attempt, using
+    // ONLY the attempt's own frozen timing policy (never a second
+    // deadline computation) — a healthy, unexpired attempt is completely
+    // unaffected and proceeds exactly as before this check existed.
+    const existingTimingPolicy = resolveSubmissionTimingPolicy({
+      examPolicySnapshotJson: existingInProgress.examPolicySnapshotJson,
+      currentExamDurationMins: exam.durationMins,
+      currentSecureSettings: settings,
+    });
+    const existingDeadline = submissionDeadline(existingInProgress.startedAt, existingTimingPolicy.durationMins);
+    if (
+      shouldServerBackstopFinalize({
+        status: existingInProgress.status,
+        now: new Date(),
+        deadline: existingDeadline,
+        autoSubmitOnTimerEnd: existingTimingPolicy.autoSubmitOnTimerEnd,
+      })
+    ) {
+      const result = await finalizeSubmission({
+        submissionId: existingInProgress.id,
+        finalResponses: {},
+        submissionRequestId: null,
+        triggeredBy: "SERVER_BACKSTOP",
+        deadline: existingDeadline,
+      });
+      if (result.kind === "FINALIZED") {
+        await runPostFinalizationEffects({
+          submissionId: existingInProgress.id,
+          examId: id,
+          studentId: session.user.id,
+          hasEssay: result.hasEssay,
+          // No `req` — this is a server-triggered finalization, not a
+          // genuine student request; request/IP-attributed evidence must
+          // never be fabricated for it (see runPostFinalizationEffects's
+          // own doc comment).
+        });
+        // Never issue/continue a secure-client launch for an attempt that
+        // no longer has any content to protect — the resume the student
+        // is asking for now yields their just-finalized result, not a
+        // reactivation handshake.
+        return NextResponse.json({ ...result.submission, secureClientLaunch: { required: false } });
+      }
+      if (result.kind === "ALREADY_FINALIZED") {
+        // A concurrent finalizer (a live client's own /submit, or the
+        // scheduled sweep) won the race — return ITS result, exactly the
+        // same idempotent shape, still never a secure launch.
+        return NextResponse.json({ ...result.submission, secureClientLaunch: { required: false } });
+      }
+      // NOT_FOUND/INVALID_FINAL_RESPONSE_QUESTION cannot actually occur
+      // here (finalResponses is always {} for a backstop call, and the
+      // submission was just read moments ago) — fall through to the
+      // existing behavior below only as a defensive, never-expected path.
+    }
+
     // VOIDED-attempt recovery v1 — see
     // docs/voided-submission-recovery-v1.md and
     // isSecurePolicyMismatchForResume's own doc comment

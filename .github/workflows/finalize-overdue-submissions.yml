@@ -1,0 +1,40 @@
+# Auto-submit server-backstop v1 — the scheduled, no-browser-required
+# safety net for POST /api/internal/finalize-overdue-submissions. See
+# src/lib/submissionFinalization.ts for what this actually finalizes.
+#
+# Vercel's Hobby-plan Cron Jobs are capped at once per day, which is not
+# frequent enough for a primary exam-expiry backstop — this workflow runs
+# independently of Vercel's plan tier instead. If the project later moves
+# to Vercel Pro, a `vercel.json` cron entry could replace or supplement
+# this; until then, this is the only scheduled trigger for this endpoint.
+#
+# Required repository secret (Settings > Secrets and variables > Actions):
+#   OVERDUE_FINALIZATION_SECRET — must match the SAME value as the
+#   Production Vercel environment variable of the same name. Never commit
+#   this value; it is referenced here only via ${{ secrets.* }}.
+name: Finalize overdue submissions
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub Actions schedules are best-effort (can
+    # slip under load) — acceptable for a coarse safety net whose primary
+    # correctness backstop is the immediate check in POST
+    # /api/exams/[id]/start, not this sweep.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  finalize-overdue-submissions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the protected internal endpoint
+        run: |
+          response=$(curl -sS -o /tmp/response.json -w "%{http_code}" \
+            -X POST "https://tether-murex.vercel.app/api/internal/finalize-overdue-submissions" \
+            -H "Authorization: Bearer ${{ secrets.OVERDUE_FINALIZATION_SECRET }}")
+          echo "HTTP status: $response"
+          cat /tmp/response.json
+          if [ "$response" -lt 200 ] || [ "$response" -ge 300 ]; then
+            echo "::error::finalize-overdue-submissions returned HTTP $response"
+            exit 1
+          fi
