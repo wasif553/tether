@@ -56,9 +56,14 @@ function submissionStatusFor(submittedAt: Date | null): string {
 // src/app/lecturer/exams/[id]/submissions/page.tsx and
 // src/app/lecturer/exams/[id]/analytics/page.tsx) — never a
 // differently-worded status for the same underlying fact.
-function gradingStatusFor(status: "IN_PROGRESS" | "SUBMITTED" | "GRADED"): string {
+function gradingStatusFor(status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" | "VOIDED"): string {
   if (status === "GRADED") return "Marked";
   if (status === "SUBMITTED") return "Not marked";
+  // VOIDED-attempt recovery v1 — never "Marked"/"Not marked" (no score
+  // exists and none ever will), and never "In progress" either (it is
+  // permanently terminal) — a distinct label so an export reader can
+  // never mistake this row for a real pending-or-graded attempt.
+  if (status === "VOIDED") return "Voided (attempt invalidated)";
   return "In progress";
 }
 

@@ -23,6 +23,19 @@ enum SubmissionStatus {
   IN_PROGRESS
   SUBMITTED
   GRADED
+  /// VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+  /// A technically/academically invalid attempt (e.g. one whose frozen
+  /// secure-client policy can no longer satisfy the exam's current
+  /// TETHER_CLIENT_REQUIRED requirement) that a lecturer/admin has
+  /// explicitly voided via POST /api/lecturer/submissions/[id]/void.
+  /// Permanently terminal: never resumable, never submittable, never
+  /// gradable, never AI-markable, never contributes a score, and never
+  /// counts toward maxAttempts. The row, its frozen policy snapshot, its
+  /// answers, and all evidence remain stored unchanged for audit — only
+  /// `status` differs from ordinary IN_PROGRESS. See
+  /// src/lib/assessmentLifecycle.ts's isVoidedSubmission/
+  /// countsTowardAttemptLimit/isAcademicAttempt for the exact semantics.
+  VOIDED
 }
 
 enum IntegrityEventType {

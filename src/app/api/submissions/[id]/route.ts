@@ -4,7 +4,12 @@ import { prisma } from "@/lib/prisma";
 import { parseSecureSettings, questionPoolsActive } from "@/lib/secureExam";
 import { canStudentViewMarks, resolveSubmissionTimingPolicy, submissionDeadline } from "@/lib/assessmentLifecycle";
 import { resolveEffectiveQuestionIds } from "@/lib/questionDelivery";
-import { parseSecureClientPolicy } from "@/lib/secureClientPolicy";
+import {
+  parseSecureClientPolicy,
+  isSecurePolicyMismatchForResume,
+  SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE,
+  SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE,
+} from "@/lib/secureClientPolicy";
 import { getCurrentSessionForSubmission, resolvePriorSessionTrust } from "@/lib/secureClientRunner";
 import { isTetherSecureClientBypassAllowed } from "@/lib/secureClientAvailability";
 import { resolveSecureClientStartGate, buildTetherLaunchPagePath } from "@/lib/secureClientStartGate";
@@ -65,6 +70,40 @@ export async function GET(
     session.user.role === "LECTURER" && submission.exam.createdById === session.user.id;
   if (!isOwner && !isExamOwner) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const settings = parseSecureSettings(submission.exam.secureSettings);
+
+  // VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+  // Standalone-invite-bypass fix: the join page, the dashboard's
+  // "Continue" link, and any direct/bookmarked URL all navigate straight
+  // to /student/exams/[submissionId] without ever calling
+  // POST /api/exams/[id]/start again — that route's own
+  // SECURE_POLICY_MISMATCH_RESTART_REQUIRED gate (existingInProgress
+  // branch) is therefore never reached by those entry points for an
+  // already-IN_PROGRESS attempt. GET /api/submissions/[id] is the one
+  // route EVERY such entry point calls before it can render exam content
+  // (see the content-exposure boundary doc comment immediately below), so
+  // this is the single centralized place that closes the bypass for all
+  // of them at once, using the exact same canonical helper /start and
+  // /void already use — never a re-implemented condition. Read-only:
+  // never mutates the snapshot, never voids or creates a submission.
+  // Checked before the Tether-required content gate below because a
+  // genuine mismatch means the frozen policy is, by definition, not
+  // Tether-secure — that gate would never fire for this case anyway, but
+  // this ordering keeps the more fundamental "cannot resume at all"
+  // rejection first.
+  if (isOwner && !isExamOwner && submission.status === "IN_PROGRESS") {
+    const frozenPolicy = parseSecureClientPolicy(submission.secureClientPolicySnapshotJson);
+    if (isSecurePolicyMismatchForResume({ currentExamDeliveryMode: settings.deliveryMode, frozenPolicy })) {
+      return NextResponse.json(
+        {
+          error: SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE,
+          code: SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE,
+        },
+        { status: 409 },
+      );
+    }
   }
 
   // Tether launch/install flow v1 — Requirement 9 ("Production start
@@ -191,7 +230,6 @@ export async function GET(
   }
   timing.record("tetherContentGateMs", performance.now() - tetherContentGateStartMs);
 
-  const settings = parseSecureSettings(submission.exam.secureSettings);
   // Freeze timing policy for active exam attempts — the deadline shown
   // to the student/lecturer always reflects THIS attempt's own frozen
   // timingPolicy snapshot (captured at start), never the exam's
@@ -305,10 +343,28 @@ export async function GET(
         }
       : null;
 
+  // VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+  // The lecturer submission-detail page's "Void technical attempt and
+  // allow restart" action must show/hide itself using this SAME canonical
+  // eligibility check /start and /void already use — never a weaker,
+  // re-implemented client-side interpretation of the frozen policy JSON.
+  // Computed and exposed ONLY for the exam owner/staff view; a student
+  // has no use for it and never sees it (always false in their own
+  // response), matching every other lecturer-only field already gated on
+  // isExamOwner in this route (correctAnswer, aiMarkingGuide, canvasPassback).
+  const voidRecoveryEligible =
+    isExamOwner &&
+    submission.status === "IN_PROGRESS" &&
+    isSecurePolicyMismatchForResume({
+      currentExamDeliveryMode: settings.deliveryMode,
+      frozenPolicy: parseSecureClientPolicy(submission.secureClientPolicySnapshotJson),
+    });
+
   const response = NextResponse.json({
     id: submission.id,
     status: submission.status,
     attemptNumber: submission.attemptNumber,
+    voidRecoveryEligible,
     startedAt: submission.startedAt,
     submittedAt: submission.submittedAt,
     totalScore: canViewMarks ? submission.totalScore : null,

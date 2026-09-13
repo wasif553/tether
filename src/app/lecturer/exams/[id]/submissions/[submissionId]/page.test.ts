@@ -185,3 +185,115 @@ describe("submission review page — AI Marking Assistance (per-question)", () =
     expect(routeSource).not.toMatch(/status: "GRADED"/);
   });
 });
+
+// VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+// Eligibility itself (test items A-F) is exercised precisely, end to end,
+// against a real database in voidedSubmissionRecovery.routes.test.ts via
+// GET /api/submissions/[id]'s own voidRecoveryEligible field — this page
+// never re-derives or second-guesses that computation, only reads it. The
+// tests below are source-level, matching this repo's established
+// no-jsdom convention, and cover exactly what this page itself controls:
+// wording, gating on the server-provided flag, required-reason
+// enforcement, and honest 409/success handling.
+describe("submission review page — 'Void technical attempt and allow restart' (VOIDED-attempt recovery v1)", () => {
+  it("names the action exactly 'Void technical attempt and allow restart' — never a generic reset/delete/void label", () => {
+    expect(pageSource).toMatch(/Void technical attempt and allow restart/);
+    expect(pageSource.toLowerCase()).not.toMatch(/>reset attempt<|>delete attempt<|>clear attempt</);
+  });
+
+  it("the trigger button is gated ONLY on the server-computed data.voidRecoveryEligible — never a client-side re-derivation of eligibility", () => {
+    const triggerBlockStart = pageSource.indexOf("{data.voidRecoveryEligible && (");
+    expect(triggerBlockStart).toBeGreaterThan(-1);
+    const triggerBlockEnd = pageSource.indexOf("{voidDialogOpen && (", triggerBlockStart);
+    const triggerBlock = pageSource.slice(triggerBlockStart, triggerBlockEnd);
+    expect(triggerBlock).toMatch(/Void technical attempt and allow restart/);
+    // Never a hand-rolled eligibility expression in the JSX itself —
+    // no direct reference to secureClientPolicySnapshotJson/deliveryMode
+    // fields, which would mean this page tried to re-implement the check.
+    expect(triggerBlock).not.toMatch(/secureClientPolicySnapshotJson/);
+    expect(triggerBlock).not.toMatch(/requireVerifiedClient/);
+  });
+
+  it("C/G: the confirmation dialog explains the required points and requires a non-empty reason before the primary action is enabled", () => {
+    const dialogStart = pageSource.indexOf("Void technical attempt and allow restart?");
+    const dialogEnd = pageSource.indexOf("{aiAssistanceSummary?.aiAssistanceEnabled", dialogStart);
+    expect(dialogStart).toBeGreaterThan(-1);
+    expect(dialogEnd).toBeGreaterThan(dialogStart);
+    const dialogBlock = pageSource.slice(dialogStart, dialogEnd);
+    expect(dialogBlock).toMatch(/cannot be securely resumed/i);
+    expect(dialogBlock).toMatch(/preserved/i);
+    expect(dialogBlock).toMatch(/marked Voided/i);
+    expect(dialogBlock).toMatch(/not generate a score/i);
+    expect(dialogBlock).toMatch(/not count against the student.{0,10}s permitted number of attempts/i);
+    expect(dialogBlock).toMatch(/start a fresh/i);
+    expect(dialogBlock).toMatch(/Reason \(required\)/);
+    expect(dialogBlock).toMatch(/disabled=\{voidSubmitting \|\| !voidReason\.trim\(\)\}/);
+  });
+
+  it("primary/secondary button wording matches exactly: 'Void attempt and allow restart' and 'Cancel'", () => {
+    expect(pageSource).toMatch(/Void attempt and allow restart/);
+    const dialogStart = pageSource.indexOf("Void technical attempt and allow restart?");
+    const dialogEnd = pageSource.indexOf("{aiAssistanceSummary?.aiAssistanceEnabled", dialogStart);
+    const dialogBlock = pageSource.slice(dialogStart, dialogEnd);
+    expect(dialogBlock).toMatch(/>\s*Cancel\s*</);
+  });
+
+  it("never implies student misconduct anywhere in the dialog or trigger copy", () => {
+    const start = pageSource.indexOf("Secure delivery mismatch detected");
+    const end = pageSource.indexOf("{aiAssistanceSummary?.aiAssistanceEnabled", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = pageSource.slice(start, end).toLowerCase();
+    expect(section).not.toMatch(/misconduct|cheat|dishonest|violation|suspicious/);
+  });
+
+  it("J: on a non-ok response the error is surfaced from the server's own body.error, the dialog is never closed, and the page state is refreshed rather than assumed", () => {
+    const fnStart = pageSource.indexOf("async function handleVoidAttempt(");
+    const fnEnd = pageSource.indexOf("async function handleFinalize(", fnStart);
+    const fnBlock = pageSource.slice(fnStart, fnEnd);
+    const notOkBlockStart = fnBlock.indexOf("if (!res.ok) {");
+    const notOkBlockEnd = fnBlock.indexOf("return;", notOkBlockStart);
+    const notOkBlock = fnBlock.slice(notOkBlockStart, notOkBlockEnd);
+    expect(notOkBlock).toMatch(/body\?\.error/);
+    expect(notOkBlock).toMatch(/setVoidError/);
+    expect(notOkBlock).not.toMatch(/setVoidDialogOpen\(false\)/);
+    expect(notOkBlock).toMatch(/loadSubmission\(\)/);
+  });
+
+  it("H/L: on success the dialog closes, a preservation-confirming message is shown, and the submission is re-fetched — voidRecoveryEligible naturally becomes false server-side, so the trigger disappears without any separate client-side hiding logic", () => {
+    const fnStart = pageSource.indexOf("async function handleVoidAttempt(");
+    const fnEnd = pageSource.indexOf("async function handleFinalize(", fnStart);
+    const fnBlock = pageSource.slice(fnStart, fnEnd);
+    const successBlockStart = fnBlock.indexOf("setVoidDialogOpen(false);");
+    expect(successBlockStart).toBeGreaterThan(-1);
+    const successBlock = fnBlock.slice(successBlockStart);
+    expect(successBlock).toMatch(/setVoidSuccessMessage\(/);
+    expect(successBlock).toMatch(/preserved/i);
+    expect(successBlock).toMatch(/fresh attempt/i);
+    expect(successBlock).toMatch(/loadSubmission\(\)/);
+    // The trigger itself is unconditionally gated on data.voidRecoveryEligible
+    // (checked above) — once loadSubmission() refetches a VOIDED row, the
+    // server reports voidRecoveryEligible: false and the button vanishes
+    // with no extra logic needed here.
+  });
+
+  it("the request body sent to POST /void carries only reason and confirm — never the snapshot, never any submission field the server should be computing fresh", () => {
+    const fnStart = pageSource.indexOf("async function handleVoidAttempt(");
+    const fnEnd = pageSource.indexOf("async function handleFinalize(", fnStart);
+    const fnBlock = pageSource.slice(fnStart, fnEnd);
+    expect(fnBlock).toMatch(/JSON\.stringify\(\{ reason: voidReason\.trim\(\), confirm: true \}\)/);
+  });
+
+  it("Voided renders as a clean, neutral status label — never as Submitted/Graded/Pending grading", () => {
+    expect(pageSource).toMatch(/VOIDED:\s*"Voided"/);
+    expect(pageSource).toMatch(/SUBMISSION_STATUS_LABELS\[data\.status\]/);
+  });
+
+  it("a VOIDED submission never shows the 'Finalize grade' action — it is hidden, not left to fail on click", () => {
+    const guardIdx = pageSource.indexOf('{data.status !== "VOIDED" && (');
+    const financeIdx = pageSource.indexOf("Finalize grade", guardIdx);
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(financeIdx).toBeGreaterThan(guardIdx);
+    expect(financeIdx - guardIdx).toBeLessThan(600); // the guard directly wraps the Finalize button, not some unrelated later block
+  });
+});

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
-import { attemptsRemaining } from "@/lib/assessmentLifecycle";
+import { attemptsRemaining, countsTowardAttemptLimit, academicAttemptOrdinal } from "@/lib/assessmentLifecycle";
 import { parseSecureSettings } from "@/lib/secureExam";
 import { isStudentHistoryItem } from "@/lib/studentDashboardGrouping";
 
@@ -213,7 +213,11 @@ function computeStudentExamView(exams: StudentExamRow[], now: Date) {
       const settings = parseSecureSettings(exam.secureSettings);
       const inProgressSubmission = exam.submissions.find((submission) => submission.status === "IN_PROGRESS");
       const latestSubmission = exam.submissions[0] ?? null;
-      const finalizedAttemptCount = exam.submissions.filter((submission) => submission.status !== "IN_PROGRESS").length;
+      // VOIDED-attempt recovery v1 — countsTowardAttemptLimit (SUBMITTED
+      // or GRADED only) replaces the old `status !== "IN_PROGRESS"`
+      // check: a VOIDED attempt must never consume a maxAttempts slot.
+      // See assessmentLifecycle.ts's own doc comment.
+      const finalizedAttemptCount = exam.submissions.filter((submission) => countsTowardAttemptLimit(submission.status)).length;
       const remainingAttempts = attemptsRemaining({
         finalizedAttemptCount,
         maxAttempts: settings.maxAttempts,
@@ -251,6 +255,13 @@ function computeStudentExamView(exams: StudentExamRow[], now: Date) {
               id: activeSubmission.id,
               status: activeSubmission.status,
               attemptNumber: activeSubmission.attemptNumber,
+              // VOIDED-attempt recovery v1 — the student-facing ordinal
+              // (count of non-voided attempts up to and including this
+              // one), never the raw attemptNumber — see
+              // academicAttemptOrdinal's own doc comment
+              // (assessmentLifecycle.ts) for why: attemptNumber alone can
+              // exceed maxAttempts once an earlier attempt was voided.
+              attemptOrdinal: academicAttemptOrdinal({ attemptNumber: activeSubmission.attemptNumber, allAttempts: exam.submissions }),
               submittedAt: activeSubmission.submittedAt,
               totalScore: marksReleased ? activeSubmission.totalScore : null,
             }

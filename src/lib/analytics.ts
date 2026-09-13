@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { computeRiskScore, riskLevelForScore } from "@/lib/integrityRisk";
+import { isAcademicAttempt } from "@/lib/assessmentLifecycle";
 
 export const PASS_THRESHOLD_PCT = 50;
 export const REVIEW_THRESHOLD_PCT = 40;
@@ -173,8 +174,21 @@ export async function calculateExamAnalytics(examId: string): Promise<ExamAnalyt
 
   const maxScore = exam.questions.reduce((sum, q) => sum + q.points, 0);
 
+  // VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+  // totalStudentsStarted deliberately keeps its literal, operational
+  // meaning ("how many attempt rows exist for this exam") and is NOT
+  // filtered here: a VOIDED attempt genuinely did start (a student began
+  // it, hit a platform/technical defect, and had it voided) — that is a
+  // real operational fact worth preserving, not something to erase from
+  // "how many times has this exam been started". finalizedSubmissions,
+  // by contrast, feeds totalSubmitted/completionRatePct and the
+  // per-question answer aggregation below — all of which are about
+  // GENUINE academic completion, so isAcademicAttempt (SUBMITTED/GRADED
+  // only) is the correct predicate: a voided attempt's answers (if any)
+  // must never be counted as a real completed attempt or skew
+  // per-question statistics.
   const totalStudentsStarted = exam.submissions.length;
-  const finalizedSubmissions = exam.submissions.filter((s) => s.status !== "IN_PROGRESS");
+  const finalizedSubmissions = exam.submissions.filter((s) => isAcademicAttempt(s.status));
   const totalSubmitted = finalizedSubmissions.length;
   const gradedSubmissions = exam.submissions.filter((s) => s.status === "GRADED");
   const totalGraded = gradedSubmissions.length;

@@ -5,7 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 import { captureNetworkEvidence } from "@/lib/networkEvidence";
-import { canCreateAttempt, nextAttemptNumber } from "@/lib/assessmentLifecycle";
+import { canCreateAttempt, nextAttemptNumber, countsTowardAttemptLimit } from "@/lib/assessmentLifecycle";
 import { parseSecureSettings, questionPoolsActive } from "@/lib/secureExam";
 import {
   buildOptionOrders,
@@ -22,6 +22,11 @@ import { buildAnswerProvenancePolicySnapshot } from "@/lib/answerProvenancePolic
 import {
   buildSecureClientPolicySnapshot,
   resolveEffectiveDeliveryMode,
+  isTetherRequiredDeliveryUnavailable,
+  parseSecureClientPolicy,
+  isSecurePolicyMismatchForResume,
+  SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE,
+  SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE,
   DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
   DEFAULT_HEARTBEAT_GRACE_SECONDS,
   type DeliveryMode,
@@ -218,6 +223,36 @@ export async function POST(
     orderBy: [{ attemptNumber: "desc" }, { startedAt: "desc" }],
   });
   if (existingInProgress) {
+    // VOIDED-attempt recovery v1 — see
+    // docs/voided-submission-recovery-v1.md and
+    // isSecurePolicyMismatchForResume's own doc comment
+    // (secureClientPolicy.ts). Detects the exact "cannot securely
+    // resume" condition BEFORE ever computing a Tether-launch redirect
+    // for it: the exam's CURRENT configuration demands
+    // TETHER_CLIENT_REQUIRED, but THIS attempt's own frozen policy
+    // (captured once, at creation, and never rewritten) cannot satisfy
+    // that requirement — most commonly a legacy row created while a
+    // Tether-required exam had been silently (pre-fail-closed-fix)
+    // downgraded to STANDARD_WEB. Without this check, the student would
+    // be redirected to the Tether launch page every time (live settings
+    // say "go to Tether"), which would then reject the manifest every
+    // time (this attempt's own frozen policy says otherwise) — an
+    // infinite retry loop with no distinguishable failure state. This
+    // is read-only: it never mutates the snapshot, never voids the
+    // attempt automatically, and never issues a Tether launch against a
+    // STANDARD_WEB-flavoured snapshot. Recovery requires an explicit
+    // lecturer/admin action (POST /api/lecturer/submissions/[id]/void).
+    const frozenPolicy = parseSecureClientPolicy(existingInProgress.secureClientPolicySnapshotJson);
+    if (isSecurePolicyMismatchForResume({ currentExamDeliveryMode: settings.deliveryMode, frozenPolicy })) {
+      return NextResponse.json(
+        {
+          error: SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE,
+          code: SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE,
+        },
+        { status: 409 },
+      );
+    }
+
     const secureClientLaunch = await resolveSecureClientLaunchField({
       deliveryMode: settings.deliveryMode,
       availability: secureClientAvailabilityForExam,
@@ -227,12 +262,18 @@ export async function POST(
     });
     return NextResponse.json({ ...existingInProgress, secureClientLaunch });
   }
+
   const attempts = await prisma.submission.findMany({
     where: { examId: id, studentId: session.user.id },
     select: { attemptNumber: true, status: true },
     orderBy: { attemptNumber: "desc" },
   });
-  const finalizedAttemptCount = attempts.filter((attempt) => attempt.status !== "IN_PROGRESS").length;
+  // VOIDED-attempt recovery v1 — countsTowardAttemptLimit (SUBMITTED or
+  // GRADED only) replaces the old `status !== "IN_PROGRESS"` check here:
+  // a VOIDED attempt must never consume one of the student's maxAttempts
+  // slots. See assessmentLifecycle.ts's own doc comment on why this was
+  // previously conflated with isFinalizedSubmissionStatus.
+  const finalizedAttemptCount = attempts.filter((attempt) => countsTowardAttemptLimit(attempt.status)).length;
   if (!canCreateAttempt({ finalizedAttemptCount, maxAttempts: settings.maxAttempts })) {
     return NextResponse.json({ error: "No attempts remaining for this exam." }, { status: 409 });
   }
@@ -534,6 +575,39 @@ export async function POST(
       {
         error: "This final examination requires Tether Secure Browser, which is not currently available. Contact your lecturer or institution administrator.",
         code: "FINAL_EXAMINATION_TETHER_UNAVAILABLE",
+      },
+      { status: 409 },
+    );
+  }
+
+  // Tether-required fail-closed security fix — see
+  // isTetherRequiredDeliveryUnavailable's own doc comment
+  // (secureClientPolicy.ts) for the full incident this closes. The gate
+  // above only ever fires for assessmentType === FINAL_EXAMINATION (and,
+  // for that case, effectiveDeliveryMode has already been downgraded away
+  // from TETHER_CLIENT_REQUIRED by the time it's checked here, so it
+  // fires FIRST and keeps its own existing, unchanged error code for that
+  // case — no compatibility break for anything already asserting
+  // FINAL_EXAMINATION_TETHER_UNAVAILABLE). This second gate closes the
+  // remaining, previously-uncovered gap: ANY exam where a lecturer
+  // directly configured deliveryMode === TETHER_CLIENT_REQUIRED
+  // (regardless of assessmentType — a quiz, practice test, or manually
+  // Tether-configured exam that was never classified as a final
+  // examination) must fail exactly the same way when unavailable, never
+  // silently proceed as an ordinary STANDARD_WEB attempt. Checked against
+  // the RAW, lecturer-configured settings.deliveryMode (never the
+  // already-resolved effectiveDeliveryMode), still well before
+  // buildSecureClientPolicySnapshot/submission creation — no content,
+  // activation, or SecureClientEvent/session can exist for a request this
+  // returns from. Stateless and synchronous: recomputed fresh on every
+  // request, so repeated retries while unavailable fail closed
+  // identically every time.
+  if (isTetherRequiredDeliveryUnavailable(settings.deliveryMode, secureClientAvailabilityForExam)) {
+    return NextResponse.json(
+      {
+        error:
+          "This examination requires Tether Secure Browser, but secure delivery is temporarily unavailable. Your examination has not started.",
+        code: "TETHER_REQUIRED_UNAVAILABLE",
       },
       { status: 409 },
     );

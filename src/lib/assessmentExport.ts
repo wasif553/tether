@@ -16,6 +16,7 @@ import { prisma } from "@/lib/prisma";
 import { scorePercentage } from "@/lib/analytics";
 import { computeRiskScore, riskLevelForScore, type RiskLevel } from "@/lib/integrityRisk";
 import { parseSecureSettings } from "@/lib/secureExam";
+import { isAcademicAttempt } from "@/lib/assessmentLifecycle";
 
 export class ExamNotFoundError extends Error {}
 
@@ -155,7 +156,13 @@ export async function buildMarksReport(examId: string): Promise<MarksReport> {
       scheduleFrom: (exam.availableFrom ?? exam.startsAt)?.toISOString() ?? null,
       scheduleUntil: (exam.availableUntil ?? exam.endsAt)?.toISOString() ?? null,
       totalAssignedOrEnrolled,
-      submissionsReceived: rows.length,
+      // VOIDED-attempt recovery v1 — "received" reads as a genuine
+      // academic submission count (this is a marks/results export, not
+      // an operational dashboard), so a VOIDED technical attempt is
+      // excluded here — see analytics.ts's own totalStudentsStarted for
+      // the contrasting case where "started" IS preserved including
+      // VOIDED rows.
+      submissionsReceived: rows.filter((r) => isAcademicAttempt(r.status)).length,
       pendingSubmissions: rows.filter((r) => r.status === "SUBMITTED").length,
       averageScorePct,
     },

@@ -169,7 +169,14 @@ export async function POST(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  if (submission.status === "GRADED") {
+  // VOIDED-attempt recovery v1 — a voided attempt is exactly as closed
+  // to new evidence as a GRADED one (both permanently terminal); a
+  // student cannot reach this in the ordinary flow (every upstream route
+  // that would let them back into a voided exam is already blocked), but
+  // this stays a defensive, explicit exclusion rather than relying on
+  // that alone. SUBMITTED is deliberately still allowed, unchanged —
+  // exactly as before.
+  if (submission.status === "GRADED" || submission.status === "VOIDED") {
     return NextResponse.json(
       { error: "This submission is no longer active" },
       { status: 409 },

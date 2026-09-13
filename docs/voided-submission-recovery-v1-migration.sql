@@ -1,0 +1,62 @@
+-- VOIDED-attempt recovery v1 (additive) — see
+-- docs/voided-submission-recovery-v1.md.
+--
+-- Generated via:
+--   npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script
+-- then hand-extracted to just the new/changed statement this feature
+-- adds, per the existing production-DDL pattern (docs/ai-brainstorming-
+-- assistance-migration.sql, docs/answer-similarity-migration.sql).
+-- Additive only — no existing table, column, constraint, or enum value
+-- is changed or removed. No backfill: every existing Submission row
+-- keeps its current status untouched.
+--
+-- Changes:
+--   1. One new SubmissionStatus enum value: VOIDED. Nothing else in the
+--      schema changes — audit metadata for a void action is recorded in
+--      the EXISTING PlatformAuditLog table (action "SUBMISSION_VOIDED",
+--      metadata JSON), never a new column on Submission.
+--
+-- IMPORTANT — shared database: Preview and Production currently point at
+-- the SAME Supabase database (see docs/migration-ledger.md). This
+-- migration must be applied ONCE, not once per environment. Run the
+-- pre-check query below first; if it already shows the change applied,
+-- do not re-run this file.
+--
+-- Apply via the Supabase SQL Editor (or `psql`) against production.
+-- Do NOT run `prisma db push` against production.
+--
+-- Idempotency: the ALTER TYPE ... ADD VALUE IF NOT EXISTS statement
+-- below is safe to re-run. Per Postgres's own restriction, a newly added
+-- enum value cannot be referenced by any statement in the SAME
+-- transaction that added it — this migration is exactly one statement,
+-- so that restriction does not affect applying it, but do not combine it
+-- into a larger transaction with anything that USES 'VOIDED'.
+
+-- ============================================================================
+-- Pre-check — confirm this has not already been applied. If this query
+-- returns a row, STOP: do not run the ALTER TYPE statement below again.
+-- ============================================================================
+-- SELECT 1 FROM pg_enum e
+-- JOIN pg_type t ON e.enumtypid = t.oid
+-- WHERE t.typname = 'SubmissionStatus' AND e.enumlabel = 'VOIDED';
+
+-- ============================================================================
+-- 1. AlterEnum: SubmissionStatus — one new value.
+-- ============================================================================
+ALTER TYPE "SubmissionStatus" ADD VALUE IF NOT EXISTS 'VOIDED';
+
+-- ============================================================================
+-- Post-check — confirm the value now exists, and that no existing row's
+-- status changed (row count identical, zero rows currently VOIDED).
+-- ============================================================================
+-- SELECT enumlabel FROM pg_enum e
+-- JOIN pg_type t ON e.enumtypid = t.oid
+-- WHERE t.typname = 'SubmissionStatus'
+-- ORDER BY e.enumsortorder;
+--
+-- SELECT count(*) FILTER (WHERE status = 'VOIDED') AS voided_count,
+--        count(*) AS total_submissions
+-- FROM "Submission";
+-- Expect voided_count = 0 immediately after this migration — VOIDED is
+-- only ever applied later, one row at a time, exclusively through
+-- POST /api/lecturer/submissions/[id]/void.

@@ -51,7 +51,10 @@ export async function POST(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  if (submission.status === "GRADED") {
+  // VOIDED-attempt recovery v1 — see the matching guard in
+  // integrity-events/route.ts for the full rationale (SUBMITTED
+  // deliberately still allowed, unchanged).
+  if (submission.status === "GRADED" || submission.status === "VOIDED") {
     return NextResponse.json({ error: "This submission is no longer active" }, { status: 409 });
   }
 

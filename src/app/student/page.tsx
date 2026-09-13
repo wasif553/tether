@@ -25,8 +25,14 @@ type AvailableExam = {
   totalPoints: number;
   submission: {
     id: string;
-    status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
+    status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" | "VOIDED";
     attemptNumber: number;
+    // VOIDED-attempt recovery v1 — the student-facing attempt ordinal
+    // (see academicAttemptOrdinal in assessmentLifecycle.ts): a count of
+    // non-voided attempts only, never the raw database attemptNumber.
+    // Always use this for "Attempt X of Y" display — attemptNumber alone
+    // can exceed maxAttempts once an earlier attempt has been voided.
+    attemptOrdinal: number;
     submittedAt: string | null;
     totalScore: number | null;
   } | null;
@@ -362,7 +368,13 @@ function ExamCard({
       {exam.course && <p className="mt-1 text-xs text-gray-500">{exam.course.code} · {exam.course.name}</p>}
       {!secondary && exam.description && <p className="mt-1 text-sm text-gray-600">{exam.description}</p>}
       {!secondary && exam.submission && exam.submission.status === "IN_PROGRESS" && (
-        <p className="mt-1 text-xs text-gray-500">Attempt {exam.submission.attemptNumber} of {exam.maxAttempts}</p>
+        // VOIDED-attempt recovery v1 — attemptOrdinal (a count of
+        // non-voided attempts only), never the raw attemptNumber, which
+        // can exceed maxAttempts once an earlier attempt has been voided
+        // (e.g. attemptNumber 2 after attempt 1 was voided, with
+        // maxAttempts still 1) — see assessmentLifecycle.ts's
+        // academicAttemptOrdinal for the exact computation.
+        <p className="mt-1 text-xs text-gray-500">Attempt {exam.submission.attemptOrdinal} of {exam.maxAttempts}</p>
       )}
       <div className="mt-2">{children}</div>
     </div>

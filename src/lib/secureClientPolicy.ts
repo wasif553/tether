@@ -277,6 +277,111 @@ export function resolveEffectiveDeliveryMode(mode: DeliveryMode, availability: S
   return mode;
 }
 
+/**
+ * Fail-closed check for the ONE case where resolveEffectiveDeliveryMode's
+ * STANDARD_WEB downgrade is a security defect rather than an accepted
+ * graceful degrade.
+ *
+ * SEB_OPTIONAL/SEB_REQUIRED/TETHER_CLIENT_OPTIONAL falling back to
+ * STANDARD_WEB when unavailable is intentional and remains completely
+ * unchanged by this function — those modes are, by design, either
+ * genuinely optional (a student may always take the exam over an
+ * ordinary browser) or not-yet-available features that were never
+ * offered as a lecturer-visible choice in Production in the first place
+ * (see secureClientAvailability.ts). TETHER_CLIENT_REQUIRED is different:
+ * a lecturer explicitly chose it, the platform's ENTIRE promise for that
+ * exam is "this only ever runs inside Tether Secure Browser", and
+ * resolveEffectiveDeliveryMode returning STANDARD_WEB for it is
+ * indistinguishable, to any caller not specifically checking for this,
+ * from an exam that was always ordinary-web — silently releasing exam
+ * content with zero of the lecturer's configured protections.
+ *
+ * Confirmed root cause of a real incident: a physically-tested exam
+ * configured TETHER_CLIENT_REQUIRED resolved to STANDARD_WEB (because
+ * TETHER_CLIENT_REQUIRED_DISABLED was set in Production), and
+ * buildSecureClientPolicySnapshot then happily froze a fully-disabled,
+ * ordinary-web policy snapshot onto the student's submission — no
+ * SecureClientEvent/session was ever created, and exam content was
+ * reachable over a plain browser tab. The kill switch worked as an
+ * "emergency rollback of the requirement" when it must instead work as
+ * an "emergency block on affected exams" (task requirement 10).
+ *
+ * The caller (POST /api/exams/[id]/start, the only place a NEW
+ * TETHER_CLIENT_REQUIRED submission's policy snapshot is ever built) must
+ * check this BEFORE calling buildSecureClientPolicySnapshot/creating a
+ * submission at all, and fail closed with a typed, student-facing error
+ * instead — never create a Submission row, never expose questions, never
+ * stamp activatedAt. Deliberately takes the RAW, lecturer-configured mode
+ * (never resolveEffectiveDeliveryMode's own output) so it can be checked
+ * independently of, and prior to, any other use of that resolved value.
+ */
+export function isTetherRequiredDeliveryUnavailable(mode: DeliveryMode, availability: SecureClientAvailability): boolean {
+  return mode === "TETHER_CLIENT_REQUIRED" && !availability.tetherClientRequiredAvailable;
+}
+
+/**
+ * VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+ *
+ * True only when a FROZEN policy (parsed via parseSecureClientPolicy —
+ * always call that first; this function never touches raw JSON itself)
+ * genuinely, consistently represents Tether-required secure delivery.
+ * Deliberately checks all three fields buildSecureClientPolicySnapshot
+ * derives together for a real TETHER_CLIENT_REQUIRED attempt — never just
+ * requireVerifiedClient alone, which on its own cannot distinguish a
+ * correctly-built policy from a malformed/tampered/partially-legacy one
+ * that happens to have that one field set but not the others (e.g. an
+ * allowedClientTypes that doesn't actually include the Tether client, so
+ * no genuine secure-client launch could ever be accepted for it anyway).
+ *
+ * This is the ONE shared eligibility check for both:
+ *   - POST /api/exams/[id]/start's existingInProgress branch (detects the
+ *     "cannot securely resume" condition and returns
+ *     SECURE_POLICY_MISMATCH_RESTART_REQUIRED instead of redirecting to a
+ *     Tether launch that can only fail).
+ *   - POST /api/lecturer/submissions/[id]/void's own eligibility gate
+ *     (the exact inverse: a submission may only be voided under this
+ *     narrow, proven, technical-mismatch condition, never as a generic
+ *     "void any in-progress attempt" capability).
+ * Never mutates the policy it's given.
+ */
+export function isFrozenPolicyTetherSecure(policy: Pick<SecureClientPolicy, "deliveryMode" | "requireVerifiedClient" | "allowedClientTypes">): boolean {
+  return (
+    policy.deliveryMode === "TETHER_CLIENT_REQUIRED" &&
+    policy.requireVerifiedClient === true &&
+    policy.allowedClientTypes.includes("TETHER_SECURE_CLIENT")
+  );
+}
+
+/**
+ * The exact "cannot securely resume" condition this whole feature exists
+ * to detect: the exam's CURRENT, live, lecturer-configured setting demands
+ * TETHER_CLIENT_REQUIRED, but this attempt's own FROZEN policy (captured
+ * once, at attempt creation, and never rewritten — see
+ * buildSecureClientPolicySnapshot's own immutable-snapshot doc comment)
+ * cannot satisfy that requirement. Takes the RAW current exam deliveryMode
+ * (never resolveEffectiveDeliveryMode's availability-resolved output) —
+ * this is about a genuine data-consistency defect between the exam's own
+ * configuration and one specific attempt's frozen policy, orthogonal to
+ * whether Tether happens to be available right now.
+ */
+export function isSecurePolicyMismatchForResume(params: { currentExamDeliveryMode: DeliveryMode; frozenPolicy: SecureClientPolicy }): boolean {
+  return params.currentExamDeliveryMode === "TETHER_CLIENT_REQUIRED" && !isFrozenPolicyTetherSecure(params.frozenPolicy);
+}
+
+/**
+ * VOIDED-attempt recovery v1 — the single source of the typed code and
+ * student-facing copy for the isSecurePolicyMismatchForResume condition.
+ * Every server boundary that can reject a resume for this reason
+ * (POST /api/exams/[id]/start, GET /api/submissions/[id]) returns this
+ * exact pair — never a re-typed literal — so the client-side handling in
+ * both the exam-start page and the exam-taking page can key off one
+ * constant, and the wording shown to the student can never drift between
+ * the two entry points.
+ */
+export const SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE = "SECURE_POLICY_MISMATCH_RESTART_REQUIRED" as const;
+export const SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE =
+  "This exam attempt cannot be securely resumed because its security settings no longer match this exam's current requirements. Your existing answers and activity are preserved and have not been lost. Please contact your lecturer or institution administrator to restart this attempt.";
+
 function defaultAllowedClientTypesFor(mode: DeliveryMode): ClientType[] {
   if (mode === "SEB_OPTIONAL" || mode === "SEB_REQUIRED") return ["SAFE_EXAM_BROWSER"];
   if (mode === "TETHER_CLIENT_OPTIONAL" || mode === "TETHER_CLIENT_REQUIRED") return ["TETHER_SECURE_CLIENT"];

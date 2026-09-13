@@ -117,6 +117,8 @@ import { useAnswerDevelopmentCapture } from "@/hooks/useAnswerDevelopmentCapture
 import { useResilientAutosave } from "@/hooks/useResilientAutosave";
 import { RecoveryStatusBanner } from "@/components/RecoveryStatusBanner";
 import { ManualReviewNotice } from "@/components/ManualReviewNotice";
+import { SecurePolicyMismatchNotice } from "@/components/SecurePolicyMismatchNotice";
+import { SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE } from "@/lib/secureClientPolicy";
 import {
   ensureLockdownBridgeInitialized,
   reportLockdownCapabilityTransition,
@@ -385,7 +387,7 @@ type SecureSettings = {
 
 type SubmissionData = {
   id: string;
-  status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
+  status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" | "VOIDED";
   attemptNumber: number;
   deadline: string;
   totalScore: number | null;
@@ -792,6 +794,14 @@ export default function TakeExamPage({
   // early-return render branch further down) instead of either the
   // TETHER_SESSION_REQUIRED redirect loop or any stale exam content.
   const [manualReviewRequired, setManualReviewRequired] = useState(false);
+  // VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+  // Standalone-invite-bypass fix: true once GET /api/submissions/[id]
+  // rejects with SECURE_POLICY_MISMATCH_RESTART_REQUIRED — takes over the
+  // entire page render (see the early-return render branch further down),
+  // exactly like manualReviewRequired above, so a student who reached
+  // this page via a direct link to an unresumable attempt sees the
+  // recovery notice instead of stale/absent exam content.
+  const [mismatchBlocked, setMismatchBlocked] = useState(false);
   const [responses, setResponses] = useState<Record<string, string>>({});
   const [remainingSecs, setRemainingSecs] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -1171,6 +1181,15 @@ export default function TakeExamPage({
             return null;
           }
           router.replace(body.action.redirectTo);
+          return null;
+        }
+        // VOIDED-attempt recovery v1 — standalone-invite-bypass fix. This
+        // attempt's frozen policy no longer satisfies the exam's current
+        // TETHER_CLIENT_REQUIRED configuration — never a redirect (there
+        // is nowhere secure to send this attempt), just the recovery
+        // notice in place of exam content.
+        if (res.status === 409 && body?.code === SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE) {
+          setMismatchBlocked(true);
           return null;
         }
         setLoadError(
@@ -4316,6 +4335,14 @@ export default function TakeExamPage({
   // redirect loop must never re-enter from here either.
   if (manualReviewRequired) {
     return <ManualReviewNotice pendingCount={resilientAutosave.pendingCount} />;
+  }
+
+  // VOIDED-attempt recovery v1 — standalone-invite-bypass fix. Same
+  // precedence reasoning as manualReviewRequired above: takes priority
+  // over every other render branch, including stale `data` from before
+  // this was set.
+  if (mismatchBlocked) {
+    return <SecurePolicyMismatchNotice />;
   }
 
   // v1.7.5 P0 / release-blocking follow-up review — checked BEFORE the

@@ -12,7 +12,7 @@ type CanvasStatus = "NOT_READY" | "PENDING" | "SENT" | "FAILED" | "SKIPPED" | nu
 
 type SubmissionRow = {
   id: string;
-  status: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
+  status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" | "VOIDED";
   totalScore: number | null;
   attemptNumber: number;
   startedAt: string;
@@ -174,6 +174,9 @@ const MARKING_LABELS: Record<SubmissionRow["status"], string> = {
   IN_PROGRESS: "In progress",
   SUBMITTED: "Not marked",
   GRADED: "Marked",
+  // VOIDED-attempt recovery v1 — never "Marked"/"Not marked" (no score
+  // exists and none ever will).
+  VOIDED: "Voided",
 };
 
 // A genuine, already-stored "needs review" signal — never inferred or
@@ -255,7 +258,7 @@ function SubmissionListRow({ examId, submission: s }: { examId: string; submissi
             href={`/lecturer/exams/${examId}/submissions/${s.id}`}
             className="rounded text-sm font-semibold text-lecturer-accent hover:text-lecturer-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-lecturer-accent"
           >
-            {s.status === "GRADED" ? "Review →" : "Grade →"}
+            {s.status === "GRADED" || s.status === "VOIDED" ? "Review →" : "Grade →"}
           </Link>
         )}
       </div>

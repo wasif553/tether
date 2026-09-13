@@ -1,0 +1,879 @@
+/**
+ * VOIDED-attempt recovery v1 — DB-backed route tests. See
+ * docs/voided-submission-recovery-v1.md.
+ *
+ * Same DB-backed pattern as finalExaminationPolicy.routes.test.ts /
+ * tetherRequiredFailClosed.routes.test.ts / concurrency.routes.test.ts —
+ * run ONLY via `npm run release:validate` (a disposable, local-only
+ * Postgres container). src/lib/prisma.ts's test-time safety guard refuses
+ * to run against the shared Preview/Production Supabase project.
+ */
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import bcrypt from "bcryptjs";
+import fs from "node:fs";
+import path from "node:path";
+
+const { mockAuth } = vi.hoisted(() => ({ mockAuth: vi.fn() }));
+vi.mock("@/auth", () => ({ auth: mockAuth }));
+
+const { prisma } = await import("./prisma");
+const { getOrCreateTestInstitution } = await import("./testInstitution");
+const { buildSecureClientPolicySnapshot, DEFAULT_SECURE_CLIENT_AVAILABILITY } = await import("./secureClientPolicy");
+const { calculateExamAnalytics } = await import("./analytics");
+const { buildMarksReport } = await import("./assessmentExport");
+const examRoute = await import("../app/api/exams/[id]/route");
+const startRoute = await import("../app/api/exams/[id]/start/route");
+const submitRoute = await import("../app/api/submissions/[id]/submit/route");
+const voidRoute = await import("../app/api/lecturer/submissions/[id]/void/route");
+const submissionDetailRoute = await import("../app/api/submissions/[id]/route");
+const accessCheckRoute = await import("../app/api/exams/[id]/access-check/route");
+const examsAvailableRoute = await import("../app/api/exams/available/route");
+
+function sessionFor(userId: string, role: "LECTURER" | "STUDENT", institutionId: string) {
+  return {
+    user: { id: userId, email: `${userId}@test.local`, name: userId, role, institutionId },
+    expires: new Date(Date.now() + 86400_000).toISOString(),
+  };
+}
+
+function jsonRequest(method: string, body?: unknown) {
+  return new Request("http://test.local/route", {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+}
+
+const stamp = Date.now();
+const cleanup = { users: [] as string[], exams: [] as string[], institutions: [] as string[] };
+
+let instId: string;
+let otherInstId: string;
+let lecturer: { id: string };
+let otherLecturer: { id: string };
+let student: { id: string };
+
+beforeAll(async () => {
+  const inst = await getOrCreateTestInstitution(`voided-recovery-${stamp}`);
+  instId = inst.id;
+  const otherInst = await getOrCreateTestInstitution(`voided-recovery-other-${stamp}`);
+  otherInstId = otherInst.id;
+  const passwordHash = await bcrypt.hash("test-password", 4);
+  lecturer = await prisma.user.create({
+    data: { name: "Voided Recovery Lecturer", email: `vr-lect-${stamp}@test.local`, passwordHash, role: "LECTURER", institutionId: instId },
+  });
+  otherLecturer = await prisma.user.create({
+    data: { name: "Voided Recovery Other Lecturer", email: `vr-other-lect-${stamp}@test.local`, passwordHash, role: "LECTURER", institutionId: otherInstId },
+  });
+  student = await prisma.user.create({
+    data: { name: "Voided Recovery Student", email: `vr-stud-${stamp}@test.local`, passwordHash, role: "STUDENT", institutionId: instId },
+  });
+  cleanup.users.push(lecturer.id, otherLecturer.id, student.id);
+});
+
+afterAll(async () => {
+  await prisma.platformAuditLog.deleteMany({ where: { actorId: { in: cleanup.users } } });
+  await prisma.secureClientSession.deleteMany({ where: { examId: { in: cleanup.exams } } });
+  await prisma.submission.deleteMany({ where: { examId: { in: cleanup.exams } } });
+  await prisma.exam.deleteMany({ where: { id: { in: cleanup.exams } } });
+  await prisma.user.deleteMany({ where: { id: { in: cleanup.users } } });
+});
+
+async function createTetherRequiredExam(title: string) {
+  const exam = await prisma.exam.create({
+    data: { title: `${title} ${stamp}-${Math.random()}`, durationMins: 30, createdById: lecturer.id, institutionId: instId, published: false },
+  });
+  cleanup.exams.push(exam.id);
+  mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+  await examRoute.PATCH(
+    jsonRequest("PATCH", { secureSettings: { assessmentType: "QUIZ_OR_TEST", deliveryMode: "TETHER_CLIENT_REQUIRED" }, published: true }),
+    { params: Promise.resolve({ id: exam.id }) },
+  );
+  return exam;
+}
+
+/** The exact confirmed-incident shape: an IN_PROGRESS submission whose frozen snapshot was built while Tether was unavailable (STANDARD_WEB-downgraded), on an exam that NOW requires TETHER_CLIENT_REQUIRED. */
+async function createStaleMismatchedSubmission(examId: string, studentId: string, attemptNumber = 1) {
+  const staleSnapshot = buildSecureClientPolicySnapshot(
+    {
+      deliveryMode: "TETHER_CLIENT_REQUIRED",
+      allowedSebPlatforms: [],
+      allowedSebVersions: [],
+      requireSebBrowserExamKey: false,
+      requireSebConfigKey: false,
+      allowSebHeaderValidation: true,
+      allowSebJavascriptApiValidation: true,
+      secureLaunchTokenTtlSeconds: 300,
+      secureClientHeartbeatIntervalSeconds: 30,
+      secureClientHeartbeatGraceSeconds: 90,
+      requireDisplayCheck: false,
+      secureClientMaximumDisplays: 1,
+      displayPolicy: "UNRESTRICTED",
+      requireRemoteSessionCheck: false,
+      requireVirtualMachineCheck: false,
+      requireProcessCheck: false,
+      requireCaptureProtectionCheck: false,
+      blockCopyPaste: false,
+      secureClientAllowPrinting: true,
+      secureClientAllowExternalNavigation: true,
+      secureClientAllowApplicationSwitching: true,
+      secureClientAllowRecovery: true,
+      secureClientEventRetentionDays: 180,
+      secureClientLecturerOverrideAllowed: true,
+    },
+    DEFAULT_SECURE_CLIENT_AVAILABILITY, // tetherClientRequiredAvailable: false -> downgrades to STANDARD_WEB
+  );
+  expect(staleSnapshot.deliveryMode).toBe("STANDARD_WEB"); // sanity check on the fixture itself
+  return prisma.submission.create({
+    data: {
+      examId,
+      studentId,
+      attemptNumber,
+      status: "IN_PROGRESS",
+      secureClientPolicySnapshotJson: staleSnapshot as unknown as object,
+    },
+  });
+}
+
+describe("POST /api/exams/[id]/start — SECURE_POLICY_MISMATCH_RESTART_REQUIRED (test item 12)", () => {
+  it("returns the typed mismatch response for the exact confirmed-incident shape, never mutating the snapshot or issuing a Tether-launch redirect", async () => {
+    const exam = await createTetherRequiredExam("mismatch-restart-required");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    const before = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const res = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+    expect(typeof body.error).toBe("string");
+    expect(body.error.length).toBeGreaterThan(0);
+
+    const after = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+    expect(after.secureClientPolicySnapshotJson).toEqual(before.secureClientPolicySnapshotJson);
+    expect(after.status).toBe("IN_PROGRESS"); // never auto-voided
+  });
+
+  it("a genuinely healthy in-progress Tether attempt is unaffected and still redirects to Tether launch normally", async () => {
+    const exam = await createTetherRequiredExam("healthy-resume-unaffected");
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const firstRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(firstRes.status).toBe(201);
+
+    const resumeRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(resumeRes.status).toBe(200);
+    const resumeBody = await resumeRes.json();
+    expect(resumeBody.secureClientLaunch).toMatchObject({ required: true, kind: "REDIRECT_TO_TETHER_LAUNCH" });
+  });
+});
+
+describe("POST /api/lecturer/submissions/[id]/void — eligibility, authorization, idempotency (test items A/B/13/14/15)", () => {
+  it("A: rejects an ordinary healthy IN_PROGRESS submission (no technical mismatch present)", async () => {
+    const exam = await createTetherRequiredExam("void-rejects-healthy");
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submissionId = (await startRes.json()).id as string;
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const res = await voidRoute.POST(jsonRequest("POST", { reason: "testing", confirm: true }), { params: Promise.resolve({ id: submissionId }) });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("SUBMISSION_NOT_VOIDABLE");
+
+    const stored = await prisma.submission.findUniqueOrThrow({ where: { id: submissionId } });
+    expect(stored.status).toBe("IN_PROGRESS");
+  });
+
+  it("B: accepts the proven secure-policy mismatch case, transitions to VOIDED, and does not touch the frozen snapshot/answers/evidence", async () => {
+    const exam = await createTetherRequiredExam("void-accepts-mismatch");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    const snapshotBefore = stale.secureClientPolicySnapshotJson;
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const res = await voidRoute.POST(jsonRequest("POST", { reason: "Legacy STANDARD_WEB snapshot mismatch", confirm: true }), {
+      params: Promise.resolve({ id: stale.id }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("VOIDED");
+
+    const stored = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+    expect(stored.status).toBe("VOIDED");
+    expect(stored.secureClientPolicySnapshotJson).toEqual(snapshotBefore);
+    expect(stored.totalScore).toBeNull();
+    expect(stored.gradedAt).toBeNull();
+  });
+
+  it("rejects when reason is missing or confirm is not explicitly true", async () => {
+    const exam = await createTetherRequiredExam("void-requires-reason-and-confirm");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+
+    const noReason = await voidRoute.POST(jsonRequest("POST", { confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(noReason.status).toBe(400);
+
+    const noConfirm = await voidRoute.POST(jsonRequest("POST", { reason: "x" }), { params: Promise.resolve({ id: stale.id }) });
+    expect(noConfirm.status).toBe(400);
+
+    const stored = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+    expect(stored.status).toBe("IN_PROGRESS");
+  });
+
+  it("14: a STUDENT cannot void an attempt (401)", async () => {
+    const exam = await createTetherRequiredExam("void-student-unauthorized");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const res = await voidRoute.POST(jsonRequest("POST", { reason: "x", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(res.status).toBe(401);
+    const stored = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+    expect(stored.status).toBe("IN_PROGRESS");
+  });
+
+  it("14: a lecturer who does not own the exam (different institution) cannot void it — existence-hiding 404", async () => {
+    const exam = await createTetherRequiredExam("void-non-owner-unauthorized");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(otherLecturer.id, "LECTURER", otherInstId));
+    const res = await voidRoute.POST(jsonRequest("POST", { reason: "x", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(res.status).toBe(404);
+    const stored = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+    expect(stored.status).toBe("IN_PROGRESS");
+  });
+
+  it("15: a repeated void request on the same (already-voided) row is safely rejected, not double-processed", async () => {
+    const exam = await createTetherRequiredExam("void-repeated-safe");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+
+    const first = await voidRoute.POST(jsonRequest("POST", { reason: "first", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(first.status).toBe(200);
+
+    const second = await voidRoute.POST(jsonRequest("POST", { reason: "second", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(second.status).toBe(409);
+    const secondBody = await second.json();
+    expect(secondBody.code).toBe("SUBMISSION_NOT_VOIDABLE");
+
+    const auditCount = await prisma.platformAuditLog.count({
+      where: { action: "SUBMISSION_VOIDED", targetType: "Submission", targetId: stale.id },
+    });
+    expect(auditCount).toBe(1); // never double-audited
+  });
+
+  it("13: voids only the intended row — a sibling in-progress submission on the same exam is unaffected", async () => {
+    const exam = await createTetherRequiredExam("void-only-intended-row");
+    const staleForStudent = await createStaleMismatchedSubmission(exam.id, student.id);
+
+    const studentB = await prisma.user.create({
+      data: { name: "Voided Recovery Student B", email: `vr-stud-b-${stamp}@test.local`, passwordHash: await bcrypt.hash("test-password", 4), role: "STUDENT", institutionId: instId },
+    });
+    cleanup.users.push(studentB.id);
+    const staleForStudentB = await createStaleMismatchedSubmission(exam.id, studentB.id);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const res = await voidRoute.POST(jsonRequest("POST", { reason: "only this one", confirm: true }), {
+      params: Promise.resolve({ id: staleForStudent.id }),
+    });
+    expect(res.status).toBe(200);
+
+    const voided = await prisma.submission.findUniqueOrThrow({ where: { id: staleForStudent.id } });
+    const untouched = await prisma.submission.findUniqueOrThrow({ where: { id: staleForStudentB.id } });
+    expect(voided.status).toBe("VOIDED");
+    expect(untouched.status).toBe("IN_PROGRESS");
+  });
+});
+
+describe("Audit atomicity (test item E)", () => {
+  it("a successful void writes exactly one PlatformAuditLog SUBMISSION_VOIDED row with full metadata, atomically with the status change", async () => {
+    const exam = await createTetherRequiredExam("void-audit-atomic");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const res = await voidRoute.POST(jsonRequest("POST", { reason: "audit atomicity check", confirm: true }), {
+      params: Promise.resolve({ id: stale.id }),
+    });
+    expect(res.status).toBe(200);
+
+    const logs = await prisma.platformAuditLog.findMany({
+      where: { action: "SUBMISSION_VOIDED", targetType: "Submission", targetId: stale.id },
+    });
+    expect(logs).toHaveLength(1);
+    const metadata = logs[0].metadata as Record<string, unknown>;
+    expect(logs[0].actorId).toBe(lecturer.id);
+    expect(logs[0].institutionId).toBe(instId);
+    expect(metadata.submissionId).toBe(stale.id);
+    expect(metadata.examId).toBe(exam.id);
+    expect(metadata.studentId).toBe(student.id);
+    expect(metadata.previousStatus).toBe("IN_PROGRESS");
+    expect(metadata.reason).toBe("audit atomicity check");
+    expect(metadata.technicalRecoveryReason).toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+  });
+
+  it("a REJECTED void (ineligible submission) writes NO audit log row at all", async () => {
+    const exam = await createTetherRequiredExam("void-rejected-no-audit");
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submissionId = (await startRes.json()).id as string;
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const res = await voidRoute.POST(jsonRequest("POST", { reason: "should be rejected", confirm: true }), { params: Promise.resolve({ id: submissionId }) });
+    expect(res.status).toBe(409);
+
+    const auditCount = await prisma.platformAuditLog.count({ where: { action: "SUBMISSION_VOIDED", targetType: "Submission", targetId: submissionId } });
+    expect(auditCount).toBe(0);
+  });
+});
+
+describe("Attempt number / display (test items F/G) and fresh-attempt snapshot (test items 16/17/18)", () => {
+  it("F/16/17/18: after voiding attemptNumber 1, a fresh attempt is attemptNumber 2, never renumbered, and gets the CURRENT TETHER_CLIENT_REQUIRED snapshot with requireVerifiedClient=true and a working secure launch", async () => {
+    const exam = await createTetherRequiredExam("fresh-attempt-after-void");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    expect(stale.attemptNumber).toBe(1);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const voidRes = await voidRoute.POST(jsonRequest("POST", { reason: "F/16/17/18", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(voidRes.status).toBe(200);
+
+    const stillVoided = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+    expect(stillVoided.attemptNumber).toBe(1); // never renumbered
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const freshRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(freshRes.status).toBe(201);
+    const freshBody = await freshRes.json();
+    expect(freshBody.attemptNumber).toBe(2); // F: raw attemptNumber is permanent/monotonic, never reused
+
+    // 17/18: the fresh attempt's frozen snapshot reflects the CURRENT
+    // (correct) exam configuration, and secure launch is reachable.
+    const freshStored = await prisma.submission.findUniqueOrThrow({ where: { id: freshBody.id } });
+    const freshSnapshot = freshStored.secureClientPolicySnapshotJson as { deliveryMode: string; requireVerifiedClient: boolean; allowedClientTypes: string[] };
+    expect(freshSnapshot.deliveryMode).toBe("TETHER_CLIENT_REQUIRED");
+    expect(freshSnapshot.requireVerifiedClient).toBe(true);
+    expect(freshSnapshot.allowedClientTypes).toEqual(["TETHER_SECURE_CLIENT"]);
+    expect(freshStored.activatedAt).toBeNull(); // PREPARING, exactly as designed
+    expect(freshBody.secureClientLaunch).toMatchObject({ required: true, kind: "REDIRECT_TO_TETHER_LAUNCH" });
+
+    // G: GET /api/exams/available's own attemptOrdinal computation — the
+    // exact field the student dashboard renders instead of raw
+    // attemptNumber — must read 1, never 2, for this fresh attempt.
+    const { academicAttemptOrdinal } = await import("./assessmentLifecycle");
+    const allAttempts = await prisma.submission.findMany({ where: { examId: exam.id, studentId: student.id }, select: { attemptNumber: true, status: true } });
+    const ordinal = academicAttemptOrdinal({ attemptNumber: freshBody.attemptNumber, allAttempts });
+    expect(ordinal).toBe(1);
+    expect(`Attempt ${ordinal} of 1`).toBe("Attempt 1 of 1");
+  });
+});
+
+describe("Concurrency safety: VOIDED vs SUBMITTED cannot race (test item D)", () => {
+  it("simultaneous void and submit requests on the same row never both succeed — exactly one wins, the row ends in a single coherent terminal state", async () => {
+    const exam = await createTetherRequiredExam("concurrency-void-vs-submit");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+
+    // Both routes call auth() synchronously as the first thing they do,
+    // before their first real await — mockResolvedValueOnce queues FIFO,
+    // and constructing this array literal invokes both .POST(...) calls
+    // (and therefore both synchronous auth() calls) left-to-right before
+    // Promise.all ever awaits either, so this deterministically gives the
+    // void call the lecturer session and the submit call the student
+    // session despite running concurrently.
+    mockAuth.mockResolvedValueOnce(sessionFor(lecturer.id, "LECTURER", instId)).mockResolvedValueOnce(sessionFor(student.id, "STUDENT", instId));
+
+    const [voidRes, submitRes] = await Promise.all([
+      voidRoute.POST(jsonRequest("POST", { reason: "race test", confirm: true }), { params: Promise.resolve({ id: stale.id }) }),
+      submitRoute.POST(jsonRequest("POST"), { params: Promise.resolve({ id: stale.id }) }),
+    ]);
+    const voidBody = await voidRes.json();
+    const submitBody = await submitRes.json();
+
+    // NOTE: submit/route.ts's own, pre-existing "already finalized" bounce
+    // (a DIFFERENT request already finalized this row) deliberately
+    // returns HTTP 200 with code "ALREADY_FINALIZED" — an idempotent
+    // no-op response, not proof that THIS request itself performed the
+    // finalization. Raw HTTP status therefore cannot distinguish "this
+    // request won the race" from "this request lost but got a
+    // successful-looking bounce" — the authoritative signal is the
+    // final DB row plus each response body's own content.
+    const voidActuallyWon = voidRes.status === 200 && voidBody.status === "VOIDED";
+    const submitActuallyWon = submitBody.code !== "ALREADY_FINALIZED" && (submitBody.status === "SUBMITTED" || submitBody.status === "GRADED") && submitRes.status === 200;
+
+    // Exactly one side genuinely performed the transition — never both,
+    // never neither.
+    expect(voidActuallyWon !== submitActuallyWon).toBe(true);
+
+    const final = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+    // A single, coherent terminal state — never IN_PROGRESS (someone
+    // acted), and never anything but exactly what the winning side wrote.
+    expect(["VOIDED", "SUBMITTED", "GRADED"]).toContain(final.status);
+    if (voidActuallyWon) {
+      expect(final.status).toBe("VOIDED");
+      expect(final.totalScore).toBeNull();
+      // The loser gets a clean, unambiguous rejection — void's own
+      // in-lock re-check never returns an ambiguous 200.
+      expect(submitRes.status === 200 && submitBody.code === "ALREADY_FINALIZED").toBe(true);
+    } else {
+      expect(final.status === "SUBMITTED" || final.status === "GRADED").toBe(true);
+      // The loser (void) always gets an unambiguous 409 — never a false 200.
+      expect(voidRes.status).toBe(409);
+      expect(voidBody.code).toBe("SUBMISSION_NOT_VOIDABLE");
+    }
+
+    // Audit log count matches whichever side actually won — never
+    // written for the losing side.
+    const auditCount = await prisma.platformAuditLog.count({ where: { action: "SUBMISSION_VOIDED", targetType: "Submission", targetId: stale.id } });
+    expect(auditCount).toBe(voidActuallyWon ? 1 : 0);
+  });
+});
+
+describe("Analytics/export metric semantics (test items 9/H) — technical start vs genuine academic completion", () => {
+  it("H: a VOIDED attempt is excluded from academic completion/scoring metrics but STILL counted as an operational 'started' attempt in analytics.ts", async () => {
+    const exam = await createTetherRequiredExam("analytics-voided-semantics");
+    await prisma.question.create({ data: { examId: exam.id, type: "SHORT_ANSWER", text: "Q1", points: 10, order: 0, correctAnswer: "x" } });
+
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const voidRes = await voidRoute.POST(jsonRequest("POST", { reason: "analytics semantics", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(voidRes.status).toBe(200);
+
+    // A second, genuine SUBMITTED attempt from a different student, so
+    // this exam has both a voided technical attempt and a real one.
+    const studentC = await prisma.user.create({
+      data: { name: "Analytics Student C", email: `vr-stud-c-${stamp}@test.local`, passwordHash: await bcrypt.hash("test-password", 4), role: "STUDENT", institutionId: instId },
+    });
+    cleanup.users.push(studentC.id);
+    await prisma.submission.create({
+      data: { examId: exam.id, studentId: studentC.id, status: "SUBMITTED", submittedAt: new Date(), attemptNumber: 1 },
+    });
+
+    const analytics = await calculateExamAnalytics(exam.id);
+    // Operational "started" count deliberately STILL includes the voided
+    // attempt — see analytics.ts's own doc comment: totalStudentsStarted
+    // is a raw row count, not an academic-completion metric.
+    expect(analytics.summary.totalStudentsStarted).toBe(2);
+    // But totalSubmitted (genuine academic completion) excludes it —
+    // only the real SUBMITTED student counts.
+    expect(analytics.summary.totalSubmitted).toBe(1);
+    // The voided row's studentResults entry is still present (visible to
+    // staff for audit) but contributes no score.
+    const voidedRow = analytics.studentResults.find((r) => r.submissionId === stale.id);
+    expect(voidedRow).toBeDefined();
+    expect(voidedRow?.status).toBe("VOIDED");
+    expect(voidedRow?.totalScore).toBeNull();
+  });
+
+  it("9: buildMarksReport (assessmentExport.ts) excludes a VOIDED row from submissionsReceived but still lists it in the raw per-row export with a distinct label", async () => {
+    const exam = await createTetherRequiredExam("marks-export-voided-semantics");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await voidRoute.POST(jsonRequest("POST", { reason: "export semantics", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+
+    const report = await buildMarksReport(exam.id);
+    expect(report.meta.submissionsReceived).toBe(0); // the sole submission is VOIDED, not a genuine receipt
+    const voidedRow = report.rows.find((r) => r.submissionId === stale.id);
+    expect(voidedRow).toBeDefined();
+    expect(voidedRow?.status).toBe("VOIDED");
+    expect(voidedRow?.totalScore).toBeNull();
+  });
+});
+
+describe("GET /api/submissions/[id] — voidRecoveryEligible (UI recovery-action test items A-F, I, K)", () => {
+  async function fetchAsLecturer(submissionId: string) {
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const res = await submissionDetailRoute.GET(new Request("http://test.local"), { params: Promise.resolve({ id: submissionId }) });
+    expect(res.status).toBe(200);
+    return res.json();
+  }
+
+  it("A: an eligible stale Tether-mismatch IN_PROGRESS attempt reports voidRecoveryEligible: true", async () => {
+    const exam = await createTetherRequiredExam("ui-eligible-stale-mismatch");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    const body = await fetchAsLecturer(stale.id);
+    expect(body.voidRecoveryEligible).toBe(true);
+  });
+
+  it("B: a healthy Tether IN_PROGRESS attempt (consistent snapshot) reports voidRecoveryEligible: false", async () => {
+    const exam = await createTetherRequiredExam("ui-healthy-tether-not-eligible");
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submissionId = (await startRes.json()).id as string;
+    const body = await fetchAsLecturer(submissionId);
+    expect(body.voidRecoveryEligible).toBe(false);
+  });
+
+  it("C: a STANDARD_WEB IN_PROGRESS attempt (on a STANDARD_WEB exam) reports voidRecoveryEligible: false — never eligible when the exam itself isn't Tether-required", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `ui-standard-web-not-eligible ${stamp}-${Math.random()}`, durationMins: 30, createdById: lecturer.id, institutionId: instId, published: false },
+    });
+    cleanup.exams.push(exam.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { assessmentType: "QUIZ_OR_TEST", deliveryMode: "STANDARD_WEB" }, published: true }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submissionId = (await startRes.json()).id as string;
+    const body = await fetchAsLecturer(submissionId);
+    expect(body.voidRecoveryEligible).toBe(false);
+  });
+
+  it("D: a SUBMITTED attempt reports voidRecoveryEligible: false — status alone excludes it regardless of snapshot shape", async () => {
+    const exam = await createTetherRequiredExam("ui-submitted-not-eligible");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    await prisma.submission.update({ where: { id: stale.id }, data: { status: "SUBMITTED", submittedAt: new Date() } });
+    const body = await fetchAsLecturer(stale.id);
+    expect(body.voidRecoveryEligible).toBe(false);
+  });
+
+  it("E: a GRADED attempt reports voidRecoveryEligible: false", async () => {
+    const exam = await createTetherRequiredExam("ui-graded-not-eligible");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    await prisma.submission.update({ where: { id: stale.id }, data: { status: "GRADED", submittedAt: new Date(), gradedAt: new Date(), totalScore: 0 } });
+    const body = await fetchAsLecturer(stale.id);
+    expect(body.voidRecoveryEligible).toBe(false);
+  });
+
+  it("F: an already-VOIDED attempt reports voidRecoveryEligible: false — the action never re-offers itself on an already-voided row", async () => {
+    const exam = await createTetherRequiredExam("ui-voided-not-eligible");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const voidRes = await voidRoute.POST(jsonRequest("POST", { reason: "F", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(voidRes.status).toBe(200);
+    const body = await fetchAsLecturer(stale.id);
+    expect(body.status).toBe("VOIDED");
+    expect(body.voidRecoveryEligible).toBe(false);
+  });
+
+  it("voidRecoveryEligible is never exposed as true to the STUDENT's own view, even for an eligible row — the action is staff-only", async () => {
+    // Standalone-invite-bypass fix — see the "standalone-invite-bypass
+    // fix" describe block below for the full test suite. Since that fix,
+    // a STUDENT's own eligible-for-void row is blocked entirely by the
+    // new SECURE_POLICY_MISMATCH_RESTART_REQUIRED gate before this route
+    // ever computes voidRecoveryEligible at all — an even stronger
+    // guarantee than "the field reports false": the field is not present
+    // in the response body in any form.
+    const exam = await createTetherRequiredExam("ui-student-never-sees-eligible-true");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const res = await submissionDetailRoute.GET(new Request("http://test.local"), { params: Promise.resolve({ id: stale.id }) });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+    expect(body.voidRecoveryEligible).not.toBe(true);
+  });
+
+  it("uses the canonical shared helper (isSecurePolicyMismatchForResume), never a re-implemented weaker check", () => {
+    const routeSource = fs.readFileSync(path.join(__dirname, "../app/api/submissions/[id]/route.ts"), "utf8");
+    expect(routeSource).toMatch(/isSecurePolicyMismatchForResume/);
+  });
+
+  it("I: after a successful void, Answer and IntegrityEvent row counts for the submission are unchanged (evidence untouched)", async () => {
+    const exam = await createTetherRequiredExam("ui-evidence-unchanged");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    await prisma.integrityEvent.create({
+      data: { submissionId: stale.id, examId: exam.id, studentId: student.id, eventType: "WINDOW_BLUR", severity: "LOW", message: "test evidence", occurredAt: new Date() },
+    });
+    const beforeAnswers = await prisma.answer.count({ where: { submissionId: stale.id } });
+    const beforeEvents = await prisma.integrityEvent.count({ where: { submissionId: stale.id } });
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const voidRes = await voidRoute.POST(jsonRequest("POST", { reason: "I", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(voidRes.status).toBe(200);
+
+    const afterAnswers = await prisma.answer.count({ where: { submissionId: stale.id } });
+    const afterEvents = await prisma.integrityEvent.count({ where: { submissionId: stale.id } });
+    expect(afterAnswers).toBe(beforeAnswers);
+    expect(afterEvents).toBe(beforeEvents);
+    expect(afterEvents).toBeGreaterThan(0); // sanity: the evidence genuinely existed and genuinely survived
+  });
+});
+
+// K: "unauthorized lecturer cannot use the endpoint even if UI is bypassed"
+// is already fully covered above by the "STUDENT cannot void" and
+// "non-owning lecturer cannot void" tests in the eligibility/authorization
+// describe block — those call voidRoute.POST directly, exactly as a UI
+// bypass would, with no reliance on the client ever checking eligibility
+// first.
+
+// Standalone-invite-bypass fix — see docs/voided-submission-recovery-v1.md.
+// The dashboard's "Continue" link, a standalone-invite join link, and a
+// direct/bookmarked URL all navigate the student straight to
+// /student/exams/[submissionId] without ever calling
+// POST /api/exams/[id]/start again for an already-IN_PROGRESS attempt —
+// that route's own SECURE_POLICY_MISMATCH_RESTART_REQUIRED gate
+// (existingInProgress branch) was therefore never reached by any of
+// those entry points. GET /api/submissions/[id] is the one route every
+// such entry point calls before it can ever render exam content, so
+// that is where the fix lives — these tests call it directly, exactly
+// as the student-facing page's loadSubmission() does, regardless of
+// which link (Continue, join, or a raw URL) put the student there.
+describe("GET /api/submissions/[id] — standalone-invite-bypass fix (SECURE_POLICY_MISMATCH_RESTART_REQUIRED)", () => {
+  async function fetchAsStudent(submissionId: string) {
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    return submissionDetailRoute.GET(new Request("http://test.local"), { params: Promise.resolve({ id: submissionId }) });
+  }
+
+  it("A/I: a healthy STANDARD_WEB submission on an ordinary STANDARD_WEB exam is completely unaffected, whichever entry link reached it — this is 'a healthy STANDARD_WEB existing submission -> unchanged' and 'ordinary non-standalone exam flow remains unchanged' at once, since both describe the identical fixture", async () => {
+    const exam = await prisma.exam.create({
+      data: { title: `bypass-fix-standard-web ${stamp}-${Math.random()}`, durationMins: 30, createdById: lecturer.id, institutionId: instId, published: false },
+    });
+    cleanup.exams.push(exam.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await examRoute.PATCH(jsonRequest("PATCH", { secureSettings: { assessmentType: "QUIZ_OR_TEST", deliveryMode: "STANDARD_WEB" }, published: true }), {
+      params: Promise.resolve({ id: exam.id }),
+    });
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submissionId = (await startRes.json()).id as string;
+
+    const res = await fetchAsStudent(submissionId);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.code).not.toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+    expect(Array.isArray(body.exam.questions)).toBe(true);
+  });
+
+  it("B: a healthy TETHER_CLIENT_REQUIRED submission (consistent snapshot, no verified session yet) is unaffected — still the pre-existing TETHER_SESSION_REQUIRED behavior, never the mismatch code", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-healthy-tether");
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submissionId = (await startRes.json()).id as string;
+
+    const res = await fetchAsStudent(submissionId);
+    const body = await res.json();
+    // Unchanged from before this fix: a healthy Tether attempt with no
+    // verified secure-client session yet is blocked by the PRE-EXISTING
+    // content-exposure gate (TETHER_SESSION_REQUIRED), never by the new
+    // mismatch gate — proving the new check never fires for a genuinely
+    // healthy frozen policy.
+    expect(body.code).not.toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+  });
+
+  it("C: a stale STANDARD_WEB snapshot on a now-TETHER_CLIENT_REQUIRED exam returns SECURE_POLICY_MISMATCH_RESTART_REQUIRED — the exact bypass this fix closes", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-stale-mismatch");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+
+    const res = await fetchAsStudent(stale.id);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+    expect(typeof body.error).toBe("string");
+    expect(body.error.length).toBeGreaterThan(0);
+  });
+
+  it("D: no new submission is created by the rejected GET in C", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-no-new-submission");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    const before = await prisma.submission.count({ where: { examId: exam.id, studentId: student.id } });
+
+    await fetchAsStudent(stale.id);
+
+    const after = await prisma.submission.count({ where: { examId: exam.id, studentId: student.id } });
+    expect(after).toBe(before);
+    expect(after).toBe(1); // still only the one stale attempt
+  });
+
+  it("E: the stale submission's frozen snapshot is byte-for-byte unchanged after the rejected GET in C — read-only, never mutated", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-snapshot-unchanged");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    const before = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+
+    await fetchAsStudent(stale.id);
+
+    const after = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+    expect(after.secureClientPolicySnapshotJson).toEqual(before.secureClientPolicySnapshotJson);
+    expect(after.status).toBe("IN_PROGRESS"); // never auto-voided by a mere GET
+  });
+
+  it("F: the response body in C never carries question content, answers, or a Tether-launch redirect — the student cannot reach secure launch or submission content through this path", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-no-content-leak");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+
+    const res = await fetchAsStudent(stale.id);
+    const body = await res.json();
+    expect(body.exam).toBeUndefined();
+    expect(body.questions).toBeUndefined();
+    expect(body.answers).toBeUndefined();
+    expect(body.action?.redirectTo).toBeUndefined(); // never a Tether-launch bounce — there is nowhere secure to send this attempt
+  });
+
+  it("G: the lecturer's own view of the same stale submission is completely unaffected — voidRecoveryEligible still reports true and the recovery action still appears", async () => {
+    const exam = await createTetherRequiredExam("bypass-fix-lecturer-unaffected");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const res = await submissionDetailRoute.GET(new Request("http://test.local"), { params: Promise.resolve({ id: stale.id }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.voidRecoveryEligible).toBe(true);
+    expect(body.status).toBe("IN_PROGRESS");
+  });
+
+  it("H: the mismatch check applies no matter which link reached this route — 'My Exams / Continue' and a standalone-invite join link both resolve to the exact same GET this suite already tests, so neither can bypass it", async () => {
+    // The dashboard's continueEntryHref() and the join page's
+    // access-check-driven router.replace() both compute the SAME
+    // destination — /student/exams/[submissionId] — which fetches this
+    // exact route on mount (see src/app/student/exams/[id]/page.tsx's
+    // loadSubmission()). There is no second, parallel code path that
+    // serves submission content some other way; repeating test C here
+    // under an explicit "no matter the entry link" framing documents
+    // that the fix is entry-point-agnostic by construction, not by
+    // coincidence.
+    const exam = await createTetherRequiredExam("bypass-fix-no-alternate-path");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+
+    const first = await fetchAsStudent(stale.id);
+    const second = await fetchAsStudent(stale.id);
+    for (const res of [first, second]) {
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe("SECURE_POLICY_MISMATCH_RESTART_REQUIRED");
+    }
+  });
+
+  it("uses the canonical shared helper (isSecurePolicyMismatchForResume) and the shared code/message constants, never a re-implemented condition or re-typed copy", () => {
+    const routeSource = fs.readFileSync(path.join(__dirname, "../app/api/submissions/[id]/route.ts"), "utf8");
+    expect(routeSource).toMatch(/isSecurePolicyMismatchForResume/);
+    expect(routeSource).toMatch(/SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE/);
+    expect(routeSource).toMatch(/SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE/);
+    const startRouteSource = fs.readFileSync(path.join(__dirname, "../app/api/exams/[id]/start/route.ts"), "utf8");
+    expect(startRouteSource).toMatch(/SECURE_POLICY_MISMATCH_RESTART_REQUIRED_CODE/);
+    expect(startRouteSource).toMatch(/SECURE_POLICY_MISMATCH_RESTART_REQUIRED_MESSAGE/);
+  });
+});
+
+// GET /api/exams/[id]/access-check — VOIDED-fallback fix. See
+// docs/voided-submission-recovery-v1.md. The join page
+// (src/app/student/exams/join/[examId]/page.tsx) redirects to
+// `existingSubmission.id` UNCONDITIONALLY whenever access-check returns
+// one — it never checks status itself. Before this fix, access-check's
+// own fallback query (when no IN_PROGRESS submission exists) picked the
+// most recent submission of ANY status, including VOIDED — bouncing a
+// student who should be starting a fresh attempt into the old VOIDED
+// row's read-only page instead of the normal acknowledgement/start
+// screen. The fix excludes VOIDED from that fallback only — SUBMITTED/
+// GRADED continue to be returned exactly as before.
+describe("GET /api/exams/[id]/access-check — VOIDED is never the resolved existingSubmission", () => {
+  async function accessCheckAsStudent(examId: string) {
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    return accessCheckRoute.GET(new Request("http://test.local"), { params: Promise.resolve({ id: examId }) });
+  }
+
+  it("A: a genuinely IN_PROGRESS submission is still returned as existingSubmission — healthy resume is completely unaffected", async () => {
+    const exam = await createTetherRequiredExam("access-check-in-progress-unaffected");
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    const submissionId = (await startRes.json()).id as string;
+
+    const res = await accessCheckAsStudent(exam.id);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.existingSubmission).toMatchObject({ id: submissionId, status: "IN_PROGRESS" });
+  });
+
+  it("B: when the only submission is VOIDED, access-check reports existingSubmission: null — no bounce to the old row", async () => {
+    const exam = await createTetherRequiredExam("access-check-voided-not-returned");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    const voidRes = await voidRoute.POST(jsonRequest("POST", { reason: "B", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    expect(voidRes.status).toBe(200);
+
+    const res = await accessCheckAsStudent(exam.id);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.existingSubmission).toBeNull();
+  });
+
+  it("C: after that, a fresh attempt remains permitted — POST /start succeeds despite maxAttempts=1, since VOIDED never counted", async () => {
+    const exam = await createTetherRequiredExam("access-check-voided-fresh-attempt-permitted");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await voidRoute.POST(jsonRequest("POST", { reason: "C", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(startRes.status).toBe(201);
+  });
+
+  it("D: access-check itself never creates a submission — the Submission row count for this exam/student is unchanged before and after the call", async () => {
+    const exam = await createTetherRequiredExam("access-check-does-not-create-submission");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await voidRoute.POST(jsonRequest("POST", { reason: "D", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+
+    const before = await prisma.submission.count({ where: { examId: exam.id, studentId: student.id } });
+    await accessCheckAsStudent(exam.id);
+    const after = await prisma.submission.count({ where: { examId: exam.id, studentId: student.id } });
+    expect(after).toBe(before);
+    expect(after).toBe(1); // still only the one VOIDED row
+  });
+
+  it("E: the VOIDED row itself is byte-for-byte unchanged by the access-check call — read-only, never mutated, never renumbered", async () => {
+    const exam = await createTetherRequiredExam("access-check-voided-row-unchanged");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await voidRoute.POST(jsonRequest("POST", { reason: "E", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+    const before = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+
+    await accessCheckAsStudent(exam.id);
+
+    const after = await prisma.submission.findUniqueOrThrow({ where: { id: stale.id } });
+    expect(after.status).toBe("VOIDED");
+    expect(after.attemptNumber).toBe(before.attemptNumber);
+    expect(after.secureClientPolicySnapshotJson).toEqual(before.secureClientPolicySnapshotJson);
+  });
+
+  it("F: the lecturer can still view the VOIDED row directly for audit — access-check's fallback change is student-facing only", async () => {
+    const exam = await createTetherRequiredExam("access-check-lecturer-audit-unaffected");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await voidRoute.POST(jsonRequest("POST", { reason: "F", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+
+    const res = await submissionDetailRoute.GET(new Request("http://test.local"), { params: Promise.resolve({ id: stale.id }) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("VOIDED");
+  });
+
+  it("G: the fresh attempt started after a void has raw attemptNumber 2, never renumbered or reusing attemptNumber 1", async () => {
+    const exam = await createTetherRequiredExam("access-check-fresh-attempt-number-2");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await voidRoute.POST(jsonRequest("POST", { reason: "G", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    const startRes = await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+    expect(startRes.status).toBe(201);
+    const body = await startRes.json();
+    expect(body.attemptNumber).toBe(2);
+  });
+
+  it("H: the student-facing academic ordinal for that fresh attempt is still 'Attempt 1 of 1', never '2 of 1' — VOIDED never counted toward it", async () => {
+    const exam = await createTetherRequiredExam("access-check-student-ordinal-1-of-1");
+    const stale = await createStaleMismatchedSubmission(exam.id, student.id);
+    mockAuth.mockResolvedValue(sessionFor(lecturer.id, "LECTURER", instId));
+    await voidRoute.POST(jsonRequest("POST", { reason: "H", confirm: true }), { params: Promise.resolve({ id: stale.id }) });
+
+    mockAuth.mockResolvedValue(sessionFor(student.id, "STUDENT", instId));
+    await startRoute.POST(jsonRequest("POST", { policyAcknowledged: true }), { params: Promise.resolve({ id: exam.id }) });
+
+    const availableRes = await examsAvailableRoute.GET();
+    expect(availableRes.status).toBe(200);
+    const exams: Array<{ id: string; submission?: { attemptNumber: number; attemptOrdinal: number } }> = await availableRes.json();
+    const entry = exams.find((e) => e.id === exam.id);
+    expect(entry?.submission?.attemptNumber).toBe(2);
+    expect(entry?.submission?.attemptOrdinal).toBe(1);
+  });
+
+  it("I: SUBMITTED and GRADED existing submissions are still returned exactly as before — only VOIDED semantics changed", async () => {
+    const exam = await createTetherRequiredExam("access-check-submitted-graded-unchanged");
+    const submittedSub = await createStaleMismatchedSubmission(exam.id, student.id);
+    await prisma.submission.update({ where: { id: submittedSub.id }, data: { status: "SUBMITTED", submittedAt: new Date() } });
+    const submittedRes = await accessCheckAsStudent(exam.id);
+    const submittedBody = await submittedRes.json();
+    expect(submittedBody.existingSubmission).toMatchObject({ id: submittedSub.id, status: "SUBMITTED" });
+
+    const examB = await createTetherRequiredExam("access-check-submitted-graded-unchanged-graded");
+    const gradedSub = await createStaleMismatchedSubmission(examB.id, student.id);
+    await prisma.submission.update({ where: { id: gradedSub.id }, data: { status: "GRADED", submittedAt: new Date(), gradedAt: new Date(), totalScore: 5 } });
+    const gradedRes = await accessCheckAsStudent(examB.id);
+    const gradedBody = await gradedRes.json();
+    expect(gradedBody.existingSubmission).toMatchObject({ id: gradedSub.id, status: "GRADED" });
+  });
+});

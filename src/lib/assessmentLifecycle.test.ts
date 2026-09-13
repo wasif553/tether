@@ -11,6 +11,13 @@ import {
   shouldAutoSubmit,
   shouldRunExamTimer,
   submissionDeadline,
+  isActiveSubmission,
+  isVoidedSubmission,
+  isSubmittedSubmission,
+  countsTowardAttemptLimit,
+  isAcademicAttempt,
+  isGradableSubmission,
+  academicAttemptOrdinal,
 } from "./assessmentLifecycle";
 
 describe("assessment lifecycle timer helpers", () => {
@@ -205,5 +212,124 @@ describe("assessment lifecycle marks release helper", () => {
         marksReleasedAt: "2026-01-01T10:00:00.000Z",
       }),
     ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+//
+// Semantic choice documented here (test item H): isFinalizedSubmissionStatus
+// keeps meaning EXACTLY "not currently active" (still correct for
+// shouldRunExamTimer/shouldAutoSubmit above — a VOIDED attempt has no live
+// clock either, same as SUBMITTED/GRADED). The NEW predicates below answer
+// two DIFFERENT questions that used to be conflated with that one:
+//   - "does this consume a maxAttempts slot" (countsTowardAttemptLimit) —
+//     false for VOIDED, even though isFinalizedSubmissionStatus is true.
+//   - "is this a genuine academic result" (isAcademicAttempt) — likewise
+//     false for VOIDED.
+// A VOIDED attempt genuinely DID start (an operational fact some metrics,
+// like analytics.ts's totalStudentsStarted, deliberately still count) but
+// is never SUBMITTED/GRADED and never counts toward the limit — these
+// tests are what prove VOIDED never silently inherits either behaviour
+// merely because "it is not IN_PROGRESS".
+// ---------------------------------------------------------------------------
+describe("VOIDED-attempt lifecycle predicates", () => {
+  it("isActiveSubmission is true only for IN_PROGRESS", () => {
+    expect(isActiveSubmission("IN_PROGRESS")).toBe(true);
+    expect(isActiveSubmission("SUBMITTED")).toBe(false);
+    expect(isActiveSubmission("GRADED")).toBe(false);
+    expect(isActiveSubmission("VOIDED")).toBe(false);
+  });
+
+  it("isVoidedSubmission is true only for VOIDED", () => {
+    expect(isVoidedSubmission("VOIDED")).toBe(true);
+    expect(isVoidedSubmission("IN_PROGRESS")).toBe(false);
+    expect(isVoidedSubmission("SUBMITTED")).toBe(false);
+    expect(isVoidedSubmission("GRADED")).toBe(false);
+  });
+
+  it("isSubmittedSubmission is true for SUBMITTED and GRADED, never IN_PROGRESS or VOIDED", () => {
+    expect(isSubmittedSubmission("SUBMITTED")).toBe(true);
+    expect(isSubmittedSubmission("GRADED")).toBe(true);
+    expect(isSubmittedSubmission("IN_PROGRESS")).toBe(false);
+    expect(isSubmittedSubmission("VOIDED")).toBe(false);
+  });
+
+  it("countsTowardAttemptLimit excludes VOIDED — the exact fix for the maxAttempts=1 + one voided row scenario", () => {
+    expect(countsTowardAttemptLimit("SUBMITTED")).toBe(true);
+    expect(countsTowardAttemptLimit("GRADED")).toBe(true);
+    expect(countsTowardAttemptLimit("IN_PROGRESS")).toBe(false);
+    expect(countsTowardAttemptLimit("VOIDED")).toBe(false);
+    // Test item 5: maxAttempts=1 + one VOIDED row still permits a fresh attempt.
+    const finalizedAttemptCount = [{ status: "VOIDED" }].filter((s) => countsTowardAttemptLimit(s.status)).length;
+    expect(finalizedAttemptCount).toBe(0);
+    expect(canCreateAttempt({ finalizedAttemptCount, maxAttempts: 1 })).toBe(true);
+  });
+
+  it("isAcademicAttempt excludes VOIDED — the genuine-completion denominator for analytics/exports", () => {
+    expect(isAcademicAttempt("SUBMITTED")).toBe(true);
+    expect(isAcademicAttempt("GRADED")).toBe(true);
+    expect(isAcademicAttempt("VOIDED")).toBe(false);
+    expect(isAcademicAttempt("IN_PROGRESS")).toBe(false);
+  });
+
+  it("isGradableSubmission is true only for SUBMITTED (not yet graded) — never GRADED-again, IN_PROGRESS, or VOIDED", () => {
+    expect(isGradableSubmission("SUBMITTED")).toBe(true);
+    expect(isGradableSubmission("GRADED")).toBe(false);
+    expect(isGradableSubmission("IN_PROGRESS")).toBe(false);
+    expect(isGradableSubmission("VOIDED")).toBe(false);
+  });
+
+  it("isFinalizedSubmissionStatus (kept for its timer-only callers) is still true for VOIDED — it answers 'is this still active', not 'does this count'", () => {
+    expect(isFinalizedSubmissionStatus("VOIDED")).toBe(true);
+    expect(shouldRunExamTimer({ status: "VOIDED", terminal: false })).toBe(false);
+  });
+
+  describe("academicAttemptOrdinal — the display fix for 'Attempt X of Y' (test items F/G)", () => {
+    it("F: raw attemptNumber remains 2 after voiding attempt 1 (never renumbered)", () => {
+      const allAttempts = [
+        { attemptNumber: 1, status: "VOIDED" },
+        { attemptNumber: 2, status: "IN_PROGRESS" },
+      ];
+      expect(allAttempts[1].attemptNumber).toBe(2); // never renumbered/reused
+    });
+
+    it("G: the fresh attempt's ordinal is 1, not 2 — this is what the student UI must render instead of raw attemptNumber, so it never shows 'Attempt 2 of 1'", () => {
+      const allAttempts = [
+        { attemptNumber: 1, status: "VOIDED" },
+        { attemptNumber: 2, status: "IN_PROGRESS" },
+      ];
+      const ordinal = academicAttemptOrdinal({ attemptNumber: 2, allAttempts });
+      expect(ordinal).toBe(1);
+      // Exactly the scenario the task named: maxAttempts=1, ordinal 1 of 1 — never "2 of 1".
+      expect(`Attempt ${ordinal} of 1`).toBe("Attempt 1 of 1");
+      expect(`Attempt ${ordinal} of 1`).not.toBe("Attempt 2 of 1");
+    });
+
+    it("the voided attempt itself has ordinal 0 (excluded from its own count)", () => {
+      const allAttempts = [
+        { attemptNumber: 1, status: "VOIDED" },
+        { attemptNumber: 2, status: "IN_PROGRESS" },
+      ];
+      expect(academicAttemptOrdinal({ attemptNumber: 1, allAttempts })).toBe(0);
+    });
+
+    it("with no voided attempts, ordinal equals attemptNumber exactly (no behaviour change for the ordinary case)", () => {
+      const allAttempts = [
+        { attemptNumber: 1, status: "GRADED" },
+        { attemptNumber: 2, status: "IN_PROGRESS" },
+      ];
+      expect(academicAttemptOrdinal({ attemptNumber: 1, allAttempts })).toBe(1);
+      expect(academicAttemptOrdinal({ attemptNumber: 2, allAttempts })).toBe(2);
+    });
+
+    it("multiple voided attempts before a fresh one still yield ordinal 1", () => {
+      const allAttempts = [
+        { attemptNumber: 1, status: "VOIDED" },
+        { attemptNumber: 2, status: "VOIDED" },
+        { attemptNumber: 3, status: "IN_PROGRESS" },
+      ];
+      expect(academicAttemptOrdinal({ attemptNumber: 3, allAttempts })).toBe(1);
+    });
   });
 });

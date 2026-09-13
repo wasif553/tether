@@ -18,11 +18,23 @@
 export type StudentDashboardExamLike = {
   availability: "open" | "upcoming" | "closed";
   canStartAttempt: boolean;
-  submission: { status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" } | null;
+  submission: { status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" | "VOIDED" } | null;
 };
 
 export type StudentDashboardGroup = "actionRequired" | "availableNow" | "upcoming" | "completed";
 
+/**
+ * VOIDED-attempt recovery v1 — see docs/voided-submission-recovery-v1.md.
+ * A VOIDED submission is never "actionRequired" (it is permanently
+ * terminal — there is nothing left to resume on that specific attempt)
+ * and must never fall into "completed" as if it were a genuine
+ * SUBMITTED/GRADED outcome. It deliberately falls through to the exact
+ * same open/canStartAttempt check every not-yet-attempted exam already
+ * uses: since a VOIDED attempt never consumes a maxAttempts slot,
+ * canStartAttempt is true whenever a fresh attempt remains, correctly
+ * grouping the exam as "availableNow" — identical treatment to an exam
+ * the student never attempted at all.
+ */
 export function studentDashboardGroup(exam: StudentDashboardExamLike): StudentDashboardGroup {
   if (exam.submission?.status === "IN_PROGRESS") return "actionRequired";
   if (exam.availability === "open" && exam.canStartAttempt) return "availableNow";

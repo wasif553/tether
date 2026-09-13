@@ -124,7 +124,7 @@ type AccessCheckResult =
         // src/lib/assessmentType.ts.
         assessmentType?: "PRACTICE_OR_FORMATIVE" | "QUIZ_OR_TEST" | "MID_SEMESTER_EXAMINATION" | "FINAL_EXAMINATION";
       };
-      existingSubmission: { id: string; status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" } | null;
+      existingSubmission: { id: string; status: "IN_PROGRESS" | "SUBMITTED" | "GRADED" | "VOIDED" } | null;
       examPolicySummary: ExamPolicySummary;
       securePreflight: SecurePreflightSummary;
     }

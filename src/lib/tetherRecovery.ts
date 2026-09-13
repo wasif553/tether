@@ -225,7 +225,7 @@ export type RecoverySessionInput = {
 export type ResolveRecoveryStateInput = {
   /** false only when the caller could not establish who is asking (e.g. an expired/absent auth session) — see Part 1, RESUME_REQUIRES_REAUTHENTICATION. Every real route already 401s before this is ever called with false in practice; kept here so the state is independently testable and documented. */
   authenticated: boolean;
-  submissionStatus: "IN_PROGRESS" | "SUBMITTED" | "GRADED";
+  submissionStatus: "IN_PROGRESS" | "SUBMITTED" | "GRADED" | "VOIDED";
   nowMs: number;
   /** submissionDeadline(startedAt, frozen timingPolicy.durationMins) — server-computed, never renderer-supplied. */
   deadlineMs: number;
@@ -276,7 +276,16 @@ export type RecoveryStateResult = {
 export function resolveRecoveryState(input: ResolveRecoveryStateInput): RecoveryStateResult {
   if (!input.authenticated) return { state: "RESUME_REQUIRES_REAUTHENTICATION" };
 
-  if (input.submissionStatus === "SUBMITTED" || input.submissionStatus === "GRADED") {
+  // VOIDED-attempt recovery v1 — a voided submission is exactly as
+  // terminal as a genuinely SUBMITTED/GRADED one from a recovery
+  // standpoint (there is nothing left to reconnect/resume into), so it
+  // reuses the same existing "SUBMITTED" recovery state rather than
+  // inventing a new one this module's few consumers would all need to
+  // learn about — the DISTINCTION between "genuinely submitted" and
+  // "voided" is a student-facing/academic concern owned by
+  // studentSubmissionState.ts (VOIDED_RESTART_AVAILABLE), never by this
+  // lower-level Tether-session-recovery module.
+  if (input.submissionStatus === "SUBMITTED" || input.submissionStatus === "GRADED" || input.submissionStatus === "VOIDED") {
     return { state: "SUBMITTED" };
   }
 

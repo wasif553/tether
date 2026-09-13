@@ -4,6 +4,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { pushGradeToCanvas } from "@/lib/lti/gradePassback";
 import { isPlatformAdmin, assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
+import { isSubmittedSubmission } from "@/lib/assessmentLifecycle";
 
 const gradeSchema = z.object({
   answers: z.array(
@@ -47,6 +48,14 @@ export async function PATCH(
 
   if (submission.status === "IN_PROGRESS") {
     return NextResponse.json({ error: "Student has not submitted yet" }, { status: 409 });
+  }
+  // VOIDED-attempt recovery v1 — a voided attempt never contributes a
+  // score and must never become GRADED. isSubmittedSubmission is an
+  // allowlist (SUBMITTED or GRADED only), so this also correctly
+  // excludes VOIDED without weakening the existing "GRADED may still be
+  // revised through this route" behaviour above.
+  if (!isSubmittedSubmission(submission.status)) {
+    return NextResponse.json({ error: "This submission cannot be graded.", code: "SUBMISSION_NOT_GRADABLE" }, { status: 409 });
   }
 
   const body = await req.json();
