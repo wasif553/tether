@@ -578,6 +578,7 @@ describe("POST /api/internal/finalize-overdue-submissions — scheduled sweep", 
   });
 
   it("starvation fix — an eligible row sitting BEHIND a block of 205 older, ineligible rows (autoSubmitOnTimerEnd=false) is still reached and finalized within a single sweep, past the old fixed 200-row window", async () => {
+    // DB-backed regression intentionally seeds >200 rows; allow CI timing headroom.
     // Each row uses its own exam (same student) so the unique
     // (examId, studentId, attemptNumber) constraint never collides —
     // ordered strictly oldest-first via overdueByMs so the 206th row is
@@ -618,7 +619,7 @@ describe("POST /api/internal/finalize-overdue-submissions — scheduled sweep", 
     // The 205 ineligible rows must remain completely untouched.
     const stillInProgress = await prisma.submission.count({ where: { id: { in: ineligibleIds }, status: "IN_PROGRESS" } });
     expect(stillInProgress).toBe(205);
-  });
+  }, 15_000);
 });
 
 describe("Precedence fix — secure-policy mismatch takes priority over the expiry backstop (the confirmed 'Browser' incident)", () => {
