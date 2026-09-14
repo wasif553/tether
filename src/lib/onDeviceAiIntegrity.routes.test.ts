@@ -288,6 +288,92 @@ describe("AI event types accepted, media metadata rejected", () => {
   });
 });
 
+describe("camera/AI integrity events are not created after the academic attempt is terminal", () => {
+  it("GRADED: a camera AI event is rejected with 409 and no row is created", async () => {
+    const exam = await createExam();
+    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: studentA.id, status: "GRADED" } });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await integrityEventsRoute.POST(
+      jsonRequest("POST", {
+        eventType: "POSSIBLE_PHONE_VISIBLE",
+        severity: "MEDIUM",
+        message: "Possible mobile phone visible in camera view. Lecturer review required.",
+        occurredAt: new Date().toISOString(),
+      }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(409);
+    const count = await prisma.integrityEvent.count({ where: { submissionId: submission.id } });
+    expect(count).toBe(0);
+  });
+
+  it("VOIDED: a camera AI event is rejected with 409 and no row is created", async () => {
+    const exam = await createExam();
+    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: studentA.id, status: "VOIDED" } });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await integrityEventsRoute.POST(
+      jsonRequest("POST", {
+        eventType: "NO_PERSON_VISIBLE",
+        severity: "MEDIUM",
+        message: "No person was visible for a sustained period.",
+        occurredAt: new Date().toISOString(),
+      }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(409);
+    const count = await prisma.integrityEvent.count({ where: { submissionId: submission.id } });
+    expect(count).toBe(0);
+  });
+
+  it("SUBMITTED: a camera AI event is still accepted (deliberately not terminal for evidence purposes)", async () => {
+    const exam = await createExam();
+    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: studentA.id, status: "SUBMITTED" } });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+    const res = await integrityEventsRoute.POST(
+      jsonRequest("POST", {
+        eventType: "CAMERA_VIEW_BLOCKED",
+        severity: "MEDIUM",
+        message: "Camera view appears blocked.",
+        occurredAt: new Date().toISOString(),
+      }),
+      { params: Promise.resolve({ id: submission.id }) },
+    );
+    expect(res.status).toBe(201);
+  });
+});
+
+describe("camera/AI event debounce (the same advisory-lock dedup path proven generically for WINDOW_BLUR in concurrency.routes.test.ts, exercised here for an actual camera event type and its real 45s window)", () => {
+  it("two rapid POSSIBLE_PHONE_VISIBLE posts within the 45s window return the same row; only one is persisted", async () => {
+    const exam = await createExam();
+    const submission = await prisma.submission.create({ data: { examId: exam.id, studentId: studentA.id } });
+    mockAuth.mockResolvedValue(sessionFor(studentA.id, "STUDENT", instA));
+
+    const firePhone = () =>
+      integrityEventsRoute.POST(
+        jsonRequest("POST", {
+          eventType: "POSSIBLE_PHONE_VISIBLE",
+          severity: "MEDIUM",
+          message: "Possible mobile phone visible in camera view. Lecturer review required.",
+          metadata: { source: "on_device_camera_ai", confidence: 0.7, confidenceBand: "medium" },
+          occurredAt: new Date().toISOString(),
+        }),
+        { params: Promise.resolve({ id: submission.id }) },
+      );
+
+    const first = await firePhone();
+    expect(first.status).toBe(201);
+    const firstBody = await first.json();
+
+    const second = await firePhone();
+    expect(second.status).toBe(200);
+    const secondBody = await second.json();
+    expect(secondBody.id).toBe(firstBody.id);
+
+    const count = await prisma.integrityEvent.count({ where: { submissionId: submission.id, eventType: "POSSIBLE_PHONE_VISIBLE" } });
+    expect(count).toBe(1);
+  });
+});
+
 describe("evidence report: neutral wording, AI summary, risk scoring", () => {
   async function createGradedSubmissionWithEvents(events: Array<{ eventType: string; severity: string; metadata?: object }>) {
     const exam = await createExam();
