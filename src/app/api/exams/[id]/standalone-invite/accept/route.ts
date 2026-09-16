@@ -40,6 +40,7 @@ import { prisma } from "@/lib/prisma";
 import { verifyStandaloneInviteToken } from "@/lib/standaloneInvite";
 import { resolveTrustedRequestSource } from "@/lib/security/clientSource";
 import { reserveStandaloneInviteSlot, releaseStandaloneInviteSlot } from "@/lib/security/standaloneInviteRateLimit";
+import { isExistingCandidateForInstitution, evaluateInstitutionEntitlementForAction } from "@/lib/institutionEntitlement";
 
 const acceptSchema = z.object({
   token: z.string().min(1),
@@ -98,6 +99,7 @@ export async function POST(
       assignmentMode: true,
       standaloneInviteEnabled: true,
       standaloneInviteTokenHash: true,
+      institutionId: true,
     },
   });
 
@@ -120,6 +122,30 @@ export async function POST(
   }
 
   await releaseStandaloneInviteSlot(sourceIp, studentId, reservation.windowStartMs);
+
+  // Institution Entitlement & Access Control v1 (hardening pass, section
+  // 6) — this is a real path capable of adding a new distinct candidate
+  // (see getInstitutionCandidateUsage's own doc comment: a standalone
+  // student never gets User.institutionId set, so without this check
+  // candidateLimit could be bypassed entirely via standalone links).
+  // Only checked when this student does NOT already count as a
+  // candidate for this institution — a returning candidate accepting a
+  // SECOND standalone invite from the same institution adds no new
+  // usage and must never be blocked by a limit they're already
+  // (rightfully) counted against. Mapped into this route's own
+  // established opaque-denial response shape (never the standard
+  // entitlement {error, code} shape) — this endpoint deliberately never
+  // reveals WHY an invite failed, to avoid an information oracle (see
+  // this file's own module doc comment).
+  if (exam.institutionId) {
+    const alreadyCounted = await isExistingCandidateForInstitution(studentId, exam.institutionId);
+    if (!alreadyCounted) {
+      const decision = await evaluateInstitutionEntitlementForAction({ institutionId: exam.institutionId, action: "ADD_CANDIDATE" });
+      if (!decision.allowed) {
+        return NextResponse.json({ ok: false, reason: "unavailable" }, { status: 403 });
+      }
+    }
+  }
 
   // The userId is always the authenticated caller — never client-
   // supplied. Idempotent via the existing @@unique([examId, studentId])

@@ -27,6 +27,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { markEssay, buildDefaultRubric, buildLecturerGuideRubric, EssayMarkingError, type AiMarkingRecord } from "@/lib/ai/essayMarker";
 import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
+import { requireInstitutionEntitlementAndFeature } from "@/lib/institutionEntitlement";
 
 export async function POST(
   _req: Request,
@@ -50,6 +51,15 @@ export async function POST(
   }
   if (!exam) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  // Institution Entitlement & Access Control v1 (hardening pass, section
+  // 3) — regenerating overwrites every eligible essay's AI draft with a
+  // FRESH one, which is new licensed activity exactly like the "missing
+  // only" bulk route.
+  if (exam.institutionId) {
+    const entitlementDenied = await requireInstitutionEntitlementAndFeature({ institutionId: exam.institutionId, feature: "AI_MARKING" });
+    if (entitlementDenied) return entitlementDenied;
   }
 
   if (!process.env.ANTHROPIC_API_KEY) {

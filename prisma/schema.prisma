@@ -187,6 +187,15 @@ enum ExamAssignmentMode {
 }
 
 // Multi-Tenant Architecture v1 — see docs/multi-tenant-migration.md.
+// Institution Entitlement & Access Control v1 — see
+// docs/institution-entitlement-v1.md. `plan`/`active` above are the
+// legacy fields this feature supersedes for actual access decisions;
+// they are deliberately NOT removed (still shown in the platform-admin
+// institution list, still validated/updatable via the existing routes)
+// until an exhaustive audit proves nothing else depends on them. Every
+// entitlement decision goes through InstitutionEntitlement +
+// src/lib/institutionEntitlement.ts instead — never `active`/`plan`
+// directly.
 model Institution {
   id           String        @id @default(cuid())
   name         String
@@ -200,6 +209,77 @@ model Institution {
   exams        Exam[]
   ltiPlatforms LtiPlatform[]
   courses      Course[]
+  entitlement  InstitutionEntitlement?
+}
+
+enum InstitutionAccessType {
+  INTERNAL
+  TRIAL
+  FREE
+  PAID
+}
+
+enum InstitutionEntitlementStatus {
+  ACTIVE
+  SUSPENDED
+  EXPIRED
+  GRACE
+}
+
+// Institution Entitlement & Access Control v1 — see
+// docs/institution-entitlement-v1.md and
+// src/lib/institutionEntitlement.ts (the ONE place effective
+// access/status is derived — never re-derive endsAt/status logic at a
+// call site). One row per institution (1:1 — @unique institutionId).
+// `null` on candidateLimit/attemptLimit/endsAt/graceEndsAt/startsAt
+// always means "no limit"/"not restricted" — never a magic sentinel
+// like -1. Billing remains entirely external/manual in v1: this table
+// records the RESULT of a commercial decision Platform Admin already
+// made, never a payment method, invoice, or provider reference.
+model InstitutionEntitlement {
+  id            String @id @default(cuid())
+  institutionId String @unique
+
+  accessType InstitutionAccessType
+  status     InstitutionEntitlementStatus
+
+  // Effective status is derived at request time from these three dates
+  // plus `status` — see evaluateInstitutionEntitlement(). A stale
+  // `status: ACTIVE` with a past `endsAt` is still effectively EXPIRED;
+  // there is no cron job this correctness depends on.
+  startsAt    DateTime?
+  endsAt      DateTime?
+  graceEndsAt DateTime?
+
+  // null = unlimited. See getInstitutionUsage() for the exact usage
+  // definitions these are compared against.
+  candidateLimit Int?
+  attemptLimit   Int?
+
+  // Licensed capabilities — independent of accessType/status. The
+  // underlying feature implementations are unchanged by this table; it
+  // only answers whether the institution is currently authorised to use
+  // them. Defaults true so migrating an existing (pre-entitlement)
+  // institution, or creating a fresh TRIAL one, never silently disables
+  // a capability that already worked.
+  secureBrowserEnabled     Boolean @default(true)
+  aiBrainstormingEnabled   Boolean @default(true)
+  aiMarkingEnabled         Boolean @default(true)
+  analyticsEnabled         Boolean @default(true)
+  advancedReportingEnabled Boolean @default(true)
+
+  // Platform-Admin-only. Never returned to institution users
+  // (lecturers/students) by any API route — see
+  // src/lib/institutionEntitlement.ts's response sanitizers.
+  internalNotes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  institution Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  @@index([accessType])
+  @@index([status])
 }
 
 // Platform Admin Onboarding v2 — minimal audit trail for platform-admin

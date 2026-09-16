@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import { seedCanvasPlatform } from "../src/lib/lti/seedPlatform";
 import { DEFAULT_INSTITUTION_SLUG } from "../src/lib/institutionScope";
+import { upsertInstitutionEntitlement, mapLegacyInstitutionToEntitlementInput } from "../src/lib/institutionEntitlement";
 import { prisma } from "../src/lib/prisma";
 
 async function main() {
@@ -39,6 +40,35 @@ async function main() {
     where: { institutionId: null },
     data: { institutionId: defaultInstitution.id },
   });
+
+  // --- Institution Entitlement & Access Control v1: backfill ---
+  // See docs/institution-entitlement-v1.md, "Migration & backfill".
+  // Hardening pass correction: this is a LOCAL/DEV convenience only —
+  // it is NOT how Preview/Production ever gets backfilled, since
+  // prisma/seed.ts is never automatically run against those databases
+  // (unlike the disposable release-validate database, which does run
+  // it). The real production backfill is the INSERT ... SELECT block
+  // inside docs/institution-entitlement-v1-migration.sql, applied
+  // manually alongside the schema change itself — see that file's own
+  // header for the exact procedure. Kept here anyway because it's
+  // genuinely useful for any fresh local/dev database seeded from
+  // scratch, and running it is always safe even after the SQL backfill
+  // has already run elsewhere: idempotent — only ever creates a row for
+  // an institution that doesn't already have one; never overwrites an
+  // entitlement Platform Admin has already saved (via
+  // PUT /api/platform/institutions/[id]/entitlement or a previous run of
+  // either backfill mechanism). Every legacy institution maps
+  // conservatively from its own plan/active fields — see
+  // mapLegacyInstitutionToEntitlementInput's own doc comment for exactly
+  // why this can never lock out an existing customer.
+  const institutionsMissingEntitlement = await prisma.institution.findMany({
+    where: { entitlement: null },
+    select: { id: true, plan: true, active: true },
+  });
+  for (const inst of institutionsMissingEntitlement) {
+    await upsertInstitutionEntitlement(inst.id, mapLegacyInstitutionToEntitlementInput(inst));
+  }
+  console.log(`Institution entitlement backfill: created ${institutionsMissingEntitlement.length} row(s) for previously-unmigrated institutions.`);
 
   // --- Platform admin account ---
   // Requires both PLATFORM_ADMIN_EMAIL and PLATFORM_ADMIN_PASSWORD to be

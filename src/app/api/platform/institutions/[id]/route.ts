@@ -4,6 +4,19 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { requirePlatformAdmin, createPlatformAuditLog } from "@/lib/platformAdmin";
 
+// Institution Entitlement & Access Control v1 (hardening pass, section
+// 4) — plan/active are LEGACY fields, retained here only for backward
+// compatibility (data correction, support tooling) and audit-log
+// continuity. Neither has ANY effect on access any more — every
+// enforcement point goes through InstitutionEntitlement
+// (src/lib/institutionEntitlement.ts) instead. The Platform Admin UI no
+// longer offers an independent Activate/Deactivate control for exactly
+// this reason (see src/app/platform/institutions/page.tsx) — the
+// authoritative status is InstitutionEntitlement.status, edited only via
+// PUT /api/platform/institutions/[id]/entitlement. This route
+// deliberately still accepts `active`/`plan` (so existing callers/tests
+// keep working and a genuinely legacy-data fix remains possible), it
+// just no longer means what it used to.
 const updateInstitutionSchema = z.object({
   name: z.string().min(1).optional(),
   domain: z.string().min(1).nullable().optional(),

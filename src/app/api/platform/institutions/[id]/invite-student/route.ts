@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { requirePlatformAdmin, createPlatformAuditLog, validateInviteStudentPayload } from "@/lib/platformAdmin";
+import { requireInstitutionEntitlement } from "@/lib/institutionEntitlement";
 
 /**
  * Creates a STUDENT user directly inside a target institution. Same
@@ -23,15 +24,24 @@ export async function POST(
   if (!institution) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  if (!institution.active) {
-    return NextResponse.json({ error: "Institution is not active" }, { status: 400 });
-  }
-
   const body = await req.json();
   const parsed = validateInviteStudentPayload(body);
   if ("error" in parsed) {
     return NextResponse.json({ error: parsed.error }, { status: 400 });
   }
+
+  // Institution Entitlement & Access Control v1 — a new STUDENT user is
+  // the actual point a "candidate" is added, so this is the one place
+  // candidateLimit is enforced. Supersedes the old raw `institution.active`
+  // check: every real institution gets an explicit InstitutionEntitlement
+  // row via the migration backfill, so the general status/date gate below
+  // covers the same "institution deactivated" case plus expiry/suspension/
+  // grace, which the old boolean never could.
+  const entitlementDenied = await requireInstitutionEntitlement({
+    institutionId: institution.id,
+    action: "ADD_CANDIDATE",
+  });
+  if (entitlementDenied) return entitlementDenied;
 
   const existing = await prisma.user.findUnique({ where: { email: parsed.email } });
   if (existing) {

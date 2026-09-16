@@ -22,6 +22,7 @@ import { assertSameInstitution, institutionErrorResponse, isPlatformAdmin } from
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { SIMILARITY_REVIEW_STATUS_LABELS, type SimilarityReviewStatus } from "@/lib/answerSimilarity";
 import { runSimilarityAnalysisForExam, SimilarityCohortTooLargeError } from "@/lib/similarityAnalysisRunner";
+import { requireInstitutionEntitlementAndFeature } from "@/lib/institutionEntitlement";
 
 type SimilarityPermission =
   | { response: NextResponse }
@@ -54,6 +55,19 @@ export async function POST(
   const { examId } = await params;
   const permission = await requireSimilarityPermission(examId);
   if ("response" in permission) return permission.response;
+
+  // Institution Entitlement & Access Control v1 (hardening pass, section
+  // 3/8) — advanced-reporting licensed capability, gated only on running
+  // a NEW analysis (BOTH status ACTIVE and the feature enabled), never
+  // on viewing an already-computed one (GET, above, is ungated — an
+  // existing result stays a preserved historical record). This is one of
+  // the two routes that together define the V1 advanced-reporting
+  // boundary — see docs/institution-entitlement-v1.md, "Advanced
+  // reporting boundary".
+  if (permission.exam.institutionId) {
+    const entitlementDenied = await requireInstitutionEntitlementAndFeature({ institutionId: permission.exam.institutionId, feature: "ADVANCED_REPORTING" });
+    if (entitlementDenied) return entitlementDenied;
+  }
 
   createPlatformAuditLog({
     actorId: permission.session.user.id,

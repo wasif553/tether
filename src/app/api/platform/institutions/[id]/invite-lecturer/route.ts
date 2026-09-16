@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { requirePlatformAdmin, createPlatformAuditLog, validateInviteLecturerPayload } from "@/lib/platformAdmin";
+import { requireInstitutionEntitlement } from "@/lib/institutionEntitlement";
 
 /**
  * Creates a LECTURER user directly inside a target institution. There is
@@ -23,15 +24,21 @@ export async function POST(
   if (!institution) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  if (!institution.active) {
-    return NextResponse.json({ error: "Institution is not active" }, { status: 400 });
-  }
-
   const body = await req.json();
   const parsed = validateInviteLecturerPayload(body);
   if ("error" in parsed) {
     return NextResponse.json({ error: parsed.error }, { status: 400 });
   }
+
+  // Institution Entitlement & Access Control v1 — general status/date
+  // gate only (lecturers are never counted against candidateLimit).
+  // Supersedes the old raw `institution.active` check — see
+  // invite-student's matching comment.
+  const entitlementDenied = await requireInstitutionEntitlement({
+    institutionId: institution.id,
+    action: "INVITE_LECTURER",
+  });
+  if (entitlementDenied) return entitlementDenied;
 
   const existing = await prisma.user.findUnique({ where: { email: parsed.email } });
   if (existing) {

@@ -9,6 +9,7 @@ import { isDisplayPolicyCombinationValid, resolveEffectiveDeliveryMode } from "@
 import { applyMandatoryFinalExaminationPolicy, isFinalExaminationPolicyEstablished } from "@/lib/assessmentType";
 import type { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionWhere, institutionErrorResponse, requireInstitutionId } from "@/lib/institutionScope";
+import { requireInstitutionEntitlement, requireInstitutionFeature } from "@/lib/institutionEntitlement";
 import { assertCanAssignExamToCourse, assertStudentsInCourse, CourseAssignmentError } from "@/lib/courseAssignment";
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { checkExamDeleteEligibility } from "@/lib/examDeleteEligibility";
@@ -283,10 +284,15 @@ export async function PATCH(
     // flips published:true, leaving a previously-classified final exam's
     // settings untouched, is still gated here).
     const effectivePublished = rest.published !== undefined ? rest.published : exam.published;
-    if (effectivePublished) {
-      const effectiveSettingsForGate = mergedSecureSettings ?? parseSecureSettings(exam.secureSettings);
-      const availabilityForGate = secureClientAvailabilityForInstitution(exam.institution?.slug ?? null);
-      const effectiveDeliveryModeForGate = resolveEffectiveDeliveryMode(effectiveSettingsForGate.deliveryMode, availabilityForGate);
+    // Hoisted out of the FINAL_EXAMINATION_TETHER_UNAVAILABLE check below
+    // so the entitlement block further down can reuse the exact same
+    // effective delivery mode rather than recomputing it — both blocks
+    // only ever run when effectivePublished is true.
+    const effectiveSettingsForGate = effectivePublished ? (mergedSecureSettings ?? parseSecureSettings(exam.secureSettings)) : null;
+    const effectiveDeliveryModeForGate = effectiveSettingsForGate
+      ? resolveEffectiveDeliveryMode(effectiveSettingsForGate.deliveryMode, secureClientAvailabilityForInstitution(exam.institution?.slug ?? null))
+      : null;
+    if (effectivePublished && effectiveSettingsForGate && effectiveDeliveryModeForGate) {
       if (!isFinalExaminationPolicyEstablished(effectiveSettingsForGate.assessmentType, effectiveDeliveryModeForGate)) {
         return NextResponse.json(
           {
@@ -296,6 +302,45 @@ export async function PATCH(
           },
           { status: 400 },
         );
+      }
+    }
+
+    // Institution Entitlement & Access Control v1 — only the DRAFT →
+    // PUBLISHED transition is new commercial "go live" activity; a PATCH
+    // to an already-published exam (rescheduling dates, editing content,
+    // even unpublishing) is never re-gated here — see
+    // docs/institution-entitlement-v1.md, "Where access is enforced".
+    if (effectivePublished && !exam.published && exam.institutionId) {
+      const entitlementDenied = await requireInstitutionEntitlement({
+        institutionId: exam.institutionId,
+        action: "PUBLISH_EXAM",
+      });
+      if (entitlementDenied) return entitlementDenied;
+
+      // Controlled AI Brainstorming remains the existing, unmodified
+      // governed feature — this only checks whether the institution is
+      // licensed to use it, never touches generation/verifier behaviour.
+      const effectiveAiMode = mergedSecureSettings?.aiAssistanceMode ?? parseSecureSettings(exam.secureSettings).aiAssistanceMode;
+      if (effectiveAiMode === "BRAINSTORM_ONLY") {
+        const featureDenied = await requireInstitutionFeature({
+          institutionId: exam.institutionId,
+          feature: "AI_BRAINSTORMING",
+        });
+        if (featureDenied) return featureDenied;
+      }
+
+      // Hardening pass, section 1 — publishing/configuring an exam that
+      // REQUIRES Tether Secure Browser is new secure-browser delivery.
+      // Reuses effectiveDeliveryModeForGate computed above (never a
+      // second delivery-mode resolution). Scoped to TETHER_CLIENT_REQUIRED
+      // specifically (not OPTIONAL/SEB modes) per the hardening spec's
+      // own "at minimum" list — see docs/institution-entitlement-v1.md.
+      if (effectiveDeliveryModeForGate === "TETHER_CLIENT_REQUIRED") {
+        const secureBrowserDenied = await requireInstitutionFeature({
+          institutionId: exam.institutionId,
+          feature: "SECURE_BROWSER",
+        });
+        if (secureBrowserDenied) return secureBrowserDenied;
       }
     }
 

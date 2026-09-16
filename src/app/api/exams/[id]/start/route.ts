@@ -4,6 +4,13 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
 import { assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
+import {
+  requireInstitutionEntitlement,
+  requireInstitutionFeature,
+  getInstitutionEntitlement,
+  reserveInstitutionAttemptAllowance,
+  InstitutionAttemptLimitReachedError,
+} from "@/lib/institutionEntitlement";
 import { captureNetworkEvidence } from "@/lib/networkEvidence";
 import {
   canCreateAttempt,
@@ -340,6 +347,74 @@ export async function POST(
       institutionSlug: exam.institution?.slug ?? null,
     });
     return NextResponse.json({ ...existingInProgress, secureClientLaunch });
+  }
+
+  // Institution Entitlement & Access Control v1 — see
+  // docs/institution-entitlement-v1.md. Gates ONLY a genuinely NEW
+  // attempt: this line is unreachable for the existing-IN_PROGRESS
+  // resume branch above (it returns unconditionally), so an institution
+  // whose entitlement lapses mid-exam can never interrupt a student
+  // already sitting it — autosave, submission, evidence capture, and
+  // secure-client recovery for an already-started attempt are completely
+  // unaffected (section 8, "in-progress exams"). Checked against the
+  // EXAM's own institution (never the requesting student's session
+  // institution, which is null for a STANDALONE assignment). A legacy
+  // exam with no institutionId at all has nothing to gate against —
+  // fails open exactly like captureNetworkEvidence below does for the
+  // same field, never a new blocker for pre-multi-tenant data.
+  // Hardening pass, section 7 — the institution's current attemptLimit,
+  // fetched once here (alongside the entitlement gates above, which
+  // already read the same row internally) and reused at the actual
+  // Submission-creation transaction further below, rather than a second
+  // ad hoc fetch there. null when unlimited or when there's no
+  // institution to gate against at all — reserveInstitutionAttemptAllowance
+  // is skipped entirely in that case (no locking overhead for the
+  // overwhelming majority of institutions).
+  let attemptLimitForReservation: number | null = null;
+  if (exam.institutionId) {
+    const entitlementDenied = await requireInstitutionEntitlement({
+      institutionId: exam.institutionId,
+      action: "START_ATTEMPT",
+      audience: "STUDENT",
+    });
+    if (entitlementDenied) return entitlementDenied;
+    attemptLimitForReservation = (await getInstitutionEntitlement(exam.institutionId))?.attemptLimit ?? null;
+
+    // Hardening pass, section 2 — read the exam's CURRENT/live
+    // aiAssistanceMode here (never a frozen per-attempt snapshot: none
+    // exists yet, this attempt hasn't been created), so an institution
+    // that had AI Brainstorming enabled when this exam was PUBLISHED but
+    // has since had it disabled by Platform Admin correctly denies THIS
+    // new attempt — publish-time gating alone (PATCH /api/exams/[id])
+    // only ever proves the exam COULD go live with brainstorming at that
+    // moment, not that every future attempt remains licensed. The
+    // general START_ATTEMPT check above already guarantees status is
+    // ACTIVE by this point, so this is a feature-only check (status was
+    // already verified for this exact request).
+    if (settings.aiAssistanceMode === "BRAINSTORM_ONLY") {
+      const aiDenied = await requireInstitutionFeature({
+        institutionId: exam.institutionId,
+        feature: "AI_BRAINSTORMING",
+        audience: "STUDENT",
+      });
+      if (aiDenied) return aiDenied;
+    }
+
+    // Hardening pass, section 1 — same reasoning as the AI Brainstorming
+    // check above, for Secure Browser: computed from the exam's CURRENT
+    // settings + live availability, not any frozen snapshot (none exists
+    // yet). If this resolves to TETHER_CLIENT_REQUIRED, the student is
+    // about to be handed a real secure-client launch for this attempt —
+    // that must be licensed at the moment the attempt starts, not only
+    // at whatever moment the exam was published.
+    if (resolveEffectiveDeliveryMode(settings.deliveryMode, secureClientAvailabilityForExam) === "TETHER_CLIENT_REQUIRED") {
+      const secureBrowserDenied = await requireInstitutionFeature({
+        institutionId: exam.institutionId,
+        feature: "SECURE_BROWSER",
+        audience: "STUDENT",
+      });
+      if (secureBrowserDenied) return secureBrowserDenied;
+    }
   }
 
   const attempts = await prisma.submission.findMany({
@@ -783,19 +858,32 @@ export async function POST(
     // is the ONLY thing that may ever set it for those, once native
     // lockdown is confirmed ACTIVE.
     const requiresActivation = submissionRequiresActivation(secureClientPolicySnapshot);
-    const submission = await prisma.submission.create({
-      data: {
-        examId: id,
-        studentId: session.user.id,
-        attemptNumber,
-        questionOrderJson: questionOrderJson ?? Prisma.DbNull,
-        examPolicySnapshotJson: policySnapshot as unknown as Prisma.InputJsonValue,
-        aiAssistancePolicySnapshotJson: aiAssistancePolicySnapshot as unknown as Prisma.InputJsonValue,
-        screenSharePolicySnapshotJson: screenSharePolicySnapshot as unknown as Prisma.InputJsonValue,
-        answerProvenancePolicySnapshotJson: answerProvenancePolicySnapshot as unknown as Prisma.InputJsonValue,
-        secureClientPolicySnapshotJson: secureClientPolicySnapshot as unknown as Prisma.InputJsonValue,
-        activatedAt: requiresActivation ? null : new Date(),
-      },
+    // Hardening pass, section 7 — when this institution has an
+    // attemptLimit configured, the usage count-and-create happens
+    // together inside one transaction, behind a Postgres advisory lock
+    // keyed on the institution id (reserveInstitutionAttemptAllowance),
+    // so concurrent new-attempt requests for the SAME institution can
+    // never both pass a stale count check and jointly oversubscribe the
+    // limit. Skipped entirely when unlimited (the common case) — a bare
+    // create with no lock, identical to before this hardening pass.
+    const submission = await prisma.$transaction(async (tx) => {
+      if (exam.institutionId && attemptLimitForReservation != null) {
+        await reserveInstitutionAttemptAllowance(tx, exam.institutionId, attemptLimitForReservation);
+      }
+      return tx.submission.create({
+        data: {
+          examId: id,
+          studentId: session.user.id,
+          attemptNumber,
+          questionOrderJson: questionOrderJson ?? Prisma.DbNull,
+          examPolicySnapshotJson: policySnapshot as unknown as Prisma.InputJsonValue,
+          aiAssistancePolicySnapshotJson: aiAssistancePolicySnapshot as unknown as Prisma.InputJsonValue,
+          screenSharePolicySnapshotJson: screenSharePolicySnapshot as unknown as Prisma.InputJsonValue,
+          answerProvenancePolicySnapshotJson: answerProvenancePolicySnapshot as unknown as Prisma.InputJsonValue,
+          secureClientPolicySnapshotJson: secureClientPolicySnapshot as unknown as Prisma.InputJsonValue,
+          activatedAt: requiresActivation ? null : new Date(),
+        },
+      });
     });
 
     // Academic Integrity Network Evidence v1 — captured fire-and-forget
@@ -889,6 +977,19 @@ export async function POST(
     });
     return NextResponse.json({ ...submission, secureClientLaunch }, { status: 201 });
   } catch (err) {
+    // Hardening pass, section 7 — thrown INSIDE the reservation
+    // transaction above (rolled back automatically); the request never
+    // reached prisma.submission.create at all when this fires, so there
+    // is nothing to recover/clean up beyond returning the same
+    // ATTEMPT_LIMIT_REACHED shape requireInstitutionEntitlement's own
+    // synchronous check would have returned had the race not been
+    // possible.
+    if (err instanceof InstitutionAttemptLimitReachedError) {
+      return NextResponse.json(
+        { error: "Your institution has reached its assessment-attempt limit for Tether. Contact Tether support to increase it.", code: "ATTEMPT_LIMIT_REACHED" },
+        { status: 409 },
+      );
+    }
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       const winner = await prisma.submission.findFirst({
         where: { examId: id, studentId: session.user.id, status: "IN_PROGRESS" },

@@ -200,6 +200,16 @@ export function isAcademicAttempt(status: string): boolean {
   return isSubmittedSubmission(status);
 }
 
+/**
+ * The concrete SubmissionStatus set isAcademicAttempt/countsTowardAttemptLimit
+ * currently recognize, as a literal array — for callers (institution
+ * commercial attempt-limit usage counting, in institutionEntitlement.ts)
+ * that need a Prisma `status: { in: [...] }` filter and must not
+ * duplicate this definition inline. A unit test asserts this stays in
+ * sync with isAcademicAttempt for every SubmissionStatus value.
+ */
+export const ACADEMIC_ATTEMPT_STATUSES = ["SUBMITTED", "GRADED"] as const;
+
 /** Whether this attempt may still be manually graded or AI-marked. Only a SUBMITTED (not yet graded) row — never IN_PROGRESS, GRADED-again, or VOIDED. */
 export function isGradableSubmission(status: string): boolean {
   return status === "SUBMITTED";

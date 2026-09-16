@@ -3,6 +3,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { institutionWhere, requireInstitutionId, institutionErrorResponse } from "@/lib/institutionScope";
+import { requireInstitutionEntitlement } from "@/lib/institutionEntitlement";
 import { assertCanAssignExamToCourse, assertStudentsInCourse, CourseAssignmentError } from "@/lib/courseAssignment";
 import { isLecturerClosedHistoryItem } from "@/lib/lecturerDashboardGrouping";
 import { NEW_EXAM_SECURE_SETTINGS_DEFAULTS } from "@/lib/secureExam";
@@ -273,6 +274,16 @@ export async function POST(req: Request) {
     if (assignmentMode === "SELECTED_STUDENTS" && selectedStudentIds?.length) {
       await assertStudentsInCourse(courseId, selectedStudentIds);
     }
+
+    // Institution Entitlement & Access Control v1 — new exam creation is
+    // new commercial activity; gated for every lecturer regardless of
+    // PLATFORM_ADMIN status (this route requires role === LECTURER
+    // above, so there is no platform-admin bypass to preserve here).
+    const entitlementDenied = await requireInstitutionEntitlement({
+      institutionId: requireInstitutionId(session),
+      action: "CREATE_EXAM",
+    });
+    if (entitlementDenied) return entitlementDenied;
 
     const exam = await prisma.exam.create({
       data: {

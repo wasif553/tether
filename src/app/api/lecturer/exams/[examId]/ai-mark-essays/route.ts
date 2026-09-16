@@ -22,6 +22,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { markEssay, buildDefaultRubric, buildLecturerGuideRubric, type AiMarkingRecord } from "@/lib/ai/essayMarker";
 import { institutionWhere, institutionErrorResponse } from "@/lib/institutionScope";
+import { requireInstitutionEntitlementAndFeature } from "@/lib/institutionEntitlement";
 
 export async function POST(
   _req: Request,
@@ -45,6 +46,21 @@ export async function POST(
   }
   if (!exam) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  // Institution Entitlement & Access Control v1 (hardening pass, section
+  // 3) — this route GENERATES new AI marking suggestions for previously
+  // un-drafted answers, which is new licensed activity: it requires BOTH
+  // the institution's general entitlement status to be ACTIVE and the
+  // AI_MARKING feature to be enabled — a SUSPENDED/EXPIRED/GRACE
+  // institution can no longer run new marking passes just because the
+  // feature flag itself is still on. This never touches AI-assisted
+  // marking's own logic, and never blocks READING an already-generated
+  // draft (that happens elsewhere, ungated — see the design doc's
+  // "READ EXISTING DATA vs GENERATE NEW LICENSED ACTIVITY" distinction).
+  if (exam.institutionId) {
+    const entitlementDenied = await requireInstitutionEntitlementAndFeature({ institutionId: exam.institutionId, feature: "AI_MARKING" });
+    if (entitlementDenied) return entitlementDenied;
   }
 
   if (!process.env.ANTHROPIC_API_KEY) {

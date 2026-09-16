@@ -28,6 +28,7 @@ import { assertSameInstitution, institutionErrorResponse, isPlatformAdmin } from
 import { createPlatformAuditLog } from "@/lib/platformAdmin";
 import { CONCERN_LEVEL_LABELS, CLUSTER_REVIEW_STATUS_LABELS, type ConcernLevel, type ClusterReviewStatus } from "@/lib/cohortCollusionAnalysis";
 import { runCohortCollusionAnalysisForExam, CohortCollusionCohortTooLargeError } from "@/lib/cohortCollusionAnalysisRunner";
+import { requireInstitutionEntitlementAndFeature } from "@/lib/institutionEntitlement";
 
 type CollusionPermission = { response: NextResponse } | { session: Session; exam: Exam };
 
@@ -55,6 +56,16 @@ export async function POST(_req: Request, { params }: { params: Promise<{ examId
   const { examId: id } = await params;
   const permission = await requireCollusionPermission(id);
   if ("response" in permission) return permission.response;
+
+  // Institution Entitlement & Access Control v1 (hardening pass, section
+  // 3/8) — the second of the two routes that together define the V1
+  // advanced-reporting boundary; see similarity-analysis's matching gate
+  // and docs/institution-entitlement-v1.md, "Advanced reporting
+  // boundary". GET (viewing an already-computed analysis) stays ungated.
+  if (permission.exam.institutionId) {
+    const entitlementDenied = await requireInstitutionEntitlementAndFeature({ institutionId: permission.exam.institutionId, feature: "ADVANCED_REPORTING" });
+    if (entitlementDenied) return entitlementDenied;
+  }
 
   createPlatformAuditLog({
     actorId: permission.session.user.id,

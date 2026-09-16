@@ -57,6 +57,22 @@ recorded anywhere in this ledger or elsewhere in the repository:
   confirmed present in shared Preview/Production database on 2026-09-11;
   original application date unknown; do not re-apply.
 
+**NOT yet applied — pending deployment.** The following migration file
+has been generated (via the exact process this ledger documents below)
+and validated against a disposable local database, but has NOT been run
+against the shared Preview/Production Supabase database. Do not assume
+it has been applied; run the pre-check query in its own header before
+applying, exactly like every other file in this ledger:
+
+- `docs/institution-entitlement-v1-migration.sql` — generated
+  2026-09-16. Purely additive (two new enums, one new table — see the
+  file's own header). Requires a follow-up backfill step (idempotent
+  application code in `prisma/seed.ts`, not a second SQL file) after
+  applying — see the file's own header and
+  docs/institution-entitlement-v1.md, "Migration & backfill", for the
+  exact procedure and why applying the `CREATE TABLE` alone, ahead of
+  the backfill, changes no institution's actual access.
+
 ## Migration convention
 
 - **Base schema** (initial launch): applied with `npx prisma db push`, a

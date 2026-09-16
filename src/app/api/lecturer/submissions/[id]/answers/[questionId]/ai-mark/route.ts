@@ -36,6 +36,7 @@ import {
 } from "@/lib/ai/essayMarker";
 import { isPlatformAdmin, assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
 import { isSubmittedSubmission } from "@/lib/assessmentLifecycle";
+import { requireInstitutionEntitlementAndFeature } from "@/lib/institutionEntitlement";
 
 export async function POST(
   _req: Request,
@@ -64,6 +65,16 @@ export async function POST(
     const res = institutionErrorResponse(err);
     if (res) return res;
     throw err;
+  }
+
+  // Institution Entitlement & Access Control v1 (hardening pass, section
+  // 3) — the single-answer counterpart to the same gate in
+  // POST /api/lecturer/exams/[examId]/ai-mark-essays; generating a new
+  // AI marking draft here needs the same BOTH-status-and-feature check
+  // as the bulk route, for the same reason.
+  if (submission.exam.institutionId) {
+    const entitlementDenied = await requireInstitutionEntitlementAndFeature({ institutionId: submission.exam.institutionId, feature: "AI_MARKING" });
+    if (entitlementDenied) return entitlementDenied;
   }
 
   // A moving target: the student may still be actively editing this

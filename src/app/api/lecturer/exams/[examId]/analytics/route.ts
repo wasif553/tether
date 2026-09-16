@@ -3,6 +3,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { calculateExamAnalytics, ExamNotFoundError } from "@/lib/analytics";
 import { isPlatformAdmin, assertSameInstitution, institutionErrorResponse } from "@/lib/institutionScope";
+import { requireInstitutionEntitlementAndFeature } from "@/lib/institutionEntitlement";
 
 export async function GET(
   _req: Request,
@@ -28,6 +29,21 @@ export async function GET(
     const res = institutionErrorResponse(err);
     if (res) return res;
     throw err;
+  }
+
+  // Institution Entitlement & Access Control v1 (hardening pass, section
+  // 3) — this route computes/generates analytics fresh on every call, so
+  // it requires BOTH the institution's general entitlement status to be
+  // ACTIVE and the ANALYTICS feature to be enabled — a SUSPENDED/EXPIRED/
+  // GRACE institution can no longer generate new analytics just because
+  // the feature flag itself is still on. Basic per-submission
+  // results/marks/evidence are a DIFFERENT, ungated surface (see
+  // docs/institution-entitlement-v1.md's "READ EXISTING DATA vs GENERATE
+  // NEW LICENSED ACTIVITY" distinction) — this route is the computed,
+  // licensed ANALYTICS capability specifically.
+  if (exam.institutionId) {
+    const entitlementDenied = await requireInstitutionEntitlementAndFeature({ institutionId: exam.institutionId, feature: "ANALYTICS" });
+    if (entitlementDenied) return entitlementDenied;
   }
 
   try {
